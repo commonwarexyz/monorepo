@@ -7,17 +7,20 @@ use commonware_runtime::{
     Blob as _, ReadOptions, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
     buffer::paged::CacheRef,
     deterministic,
-    mocks::{DelayedSyncContext, PendingSyncs, RecordingContext},
+    mocks::{
+        DeferredOpenContext, DeferredOpens, DelayedSyncContext, PendingSyncs, RecordingContext,
+        drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
+    },
     reschedule,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize};
+use commonware_utils::{NZU16, NZU64, NZUsize, probability};
 use futures::{FutureExt as _, Stream, StreamExt, future::BoxFuture, stream};
 use std::{
     fmt::Debug,
     future::Future,
     num::NonZeroUsize,
     ops::Range,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 /// Replay `range` of `journal` and flatten the batches into one `(position, item)` entry per item,
@@ -2227,4 +2230,860 @@ fn test_fresh_sync_avoids_reset_writes() {
             ordinary_io.snapshot().writes.len()
         );
     });
+}
+
+/// The context the rollover tests open journals through. Blob creations park while their
+/// partition is deferred, and started syncs park until released.
+type RollContext = DeferredOpenContext<DelayedSyncContext<deterministic::Context>>;
+
+/// Items per blob in the rollover tests.
+const ROLL: u64 = 3;
+
+/// A journal kind the rollover tests run against, with the operations they need beyond
+/// [Mutable].
+trait Roll: Mutable<Item = u64> + 'static {
+    /// An owned snapshot of the journal.
+    type Snapshot: Contiguous<Item = u64>;
+
+    /// The partitions holding the blobs of a journal configured with `partition`.
+    fn blob_partitions(partition: &str) -> Vec<String>;
+
+    /// The partition prefix under which a journal configured with `partition` keeps its
+    /// recovery watermark.
+    fn watermark_partition(partition: &str) -> String;
+
+    /// Open the journal configured with `partition` and `items_per_blob`.
+    fn open(
+        context: RollContext,
+        partition: &str,
+        items_per_blob: u64,
+    ) -> impl Future<Output = Result<Self, Error>> + Send;
+
+    /// Capture an owned snapshot.
+    fn capture(self) -> impl Future<Output = Result<(Self, Self::Snapshot), Error>> + Send;
+
+    /// Discard every item and restart the journal at `size`.
+    fn clear(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
+}
+
+impl Roll for fixed::Journal<RollContext, u64> {
+    type Snapshot = fixed::Reader<'static, RollContext, u64>;
+
+    fn blob_partitions(partition: &str) -> Vec<String> {
+        vec![format!("{partition}-blobs")]
+    }
+
+    fn watermark_partition(partition: &str) -> String {
+        partition.into()
+    }
+
+    async fn open(
+        context: RollContext,
+        partition: &str,
+        items_per_blob: u64,
+    ) -> Result<Self, Error> {
+        let cfg = fixed::Config {
+            partition: partition.into(),
+            items_per_blob: NZU64!(items_per_blob),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+        };
+        Self::init(context, cfg).await
+    }
+
+    async fn capture(self) -> Result<(Self, Self::Snapshot), Error> {
+        self.snapshot().await
+    }
+
+    async fn clear(self, size: u64) -> Result<Self, Error> {
+        self.clear_to_size(size).await
+    }
+}
+
+impl Roll for variable::Journal<RollContext, u64> {
+    type Snapshot = variable::Reader<'static, RollContext, u64>;
+
+    fn blob_partitions(partition: &str) -> Vec<String> {
+        vec![
+            format!("{partition}_data"),
+            format!("{partition}_offsets-blobs"),
+        ]
+    }
+
+    fn watermark_partition(partition: &str) -> String {
+        format!("{partition}_offsets")
+    }
+
+    async fn open(
+        context: RollContext,
+        partition: &str,
+        items_per_blob: u64,
+    ) -> Result<Self, Error> {
+        let cfg = variable::Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(items_per_blob),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+        };
+        Self::init(context, cfg).await
+    }
+
+    async fn capture(self) -> Result<(Self, Self::Snapshot), Error> {
+        self.snapshot().await
+    }
+
+    async fn clear(self, size: u64) -> Result<Self, Error> {
+        self.clear_to_size(size).await
+    }
+}
+
+/// The storage controls of one rollover test run.
+struct Rig {
+    /// The runtime's own context. It reaches storage behind the wrappers.
+    context: deterministic::Context,
+    opens: DeferredOpens,
+    syncs: PendingSyncs,
+}
+
+impl Rig {
+    fn new(context: deterministic::Context) -> Self {
+        Self {
+            context,
+            opens: DeferredOpens::default(),
+            syncs: PendingSyncs::default(),
+        }
+    }
+
+    /// A context for one open of a journal. `label` keeps its metrics unique.
+    fn journal(&self, label: &'static str) -> RollContext {
+        DeferredOpenContext {
+            inner: DelayedSyncContext {
+                inner: self.context.child(label),
+                pending: self.syncs.clone(),
+            },
+            opens: self.opens.clone(),
+        }
+    }
+
+    /// The sorted indices of the blobs in `partition`.
+    async fn blobs(&self, partition: &str) -> Vec<u64> {
+        let mut blobs: Vec<u64> = match self.context.scan(partition).await {
+            Ok(names) => names
+                .into_iter()
+                .map(|name| u64::from_be_bytes(name.try_into().unwrap()))
+                .collect(),
+            Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
+            Err(err) => panic!("scan of {partition} must succeed: {err}"),
+        };
+        blobs.sort_unstable();
+        blobs
+    }
+
+    /// Open a journal and fill its first blob while every blob creation parks, leaving each of
+    /// its partitions with a sealed blob 0 and a successor whose creation has not started.
+    async fn roll<J: Roll>(&self, partition: &str) -> J {
+        let mut journal = J::open(self.journal("rolled"), partition, ROLL)
+            .await
+            .unwrap();
+        let partitions = J::blob_partitions(partition);
+        for partition in &partitions {
+            self.opens.defer(partition);
+        }
+        for i in 0..ROLL {
+            (journal, _) = journal
+                .append(&i)
+                .now_or_never()
+                .expect("an append must not create the successor")
+                .unwrap();
+        }
+        for partition in &partitions {
+            assert_eq!(self.opens.parked(partition), 0);
+            assert_eq!(self.blobs(partition).await, [0]);
+        }
+        journal
+    }
+
+    /// Drive `future` to completion, releasing the creations parked in `partitions` each time
+    /// it stalls. Returns its output and the number of stalls.
+    fn release_until_done<T>(
+        &self,
+        partitions: &[String],
+        future: impl Future<Output = T>,
+    ) -> (T, usize) {
+        let mut future = std::pin::pin!(future);
+        let mut stalls = 0;
+        loop {
+            if let Some(output) = future.as_mut().now_or_never() {
+                return (output, stalls);
+            }
+            stalls += 1;
+            let parked: usize = partitions
+                .iter()
+                .map(|partition| self.opens.parked(partition))
+                .sum();
+            assert!(parked > 0, "a stall must wait for a creation");
+            for partition in partitions {
+                self.opens.release(partition);
+            }
+        }
+    }
+
+    /// Poll `future` until it completes or stalls on something other than a parked sync or a
+    /// creation parked in `failing`. Each stall releases the parked syncs and fails those
+    /// creations. Returns the output if `future` completed.
+    fn drive_syncs<T>(&self, failing: &[String], future: impl Future<Output = T>) -> Option<T> {
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Some(output) = future.as_mut().now_or_never() {
+                return Some(output);
+            }
+            let failed: usize = failing
+                .iter()
+                .map(|partition| self.opens.parked(partition))
+                .sum();
+            if failed == 0 && self.syncs.lock().is_empty() {
+                return None;
+            }
+            release_pending_syncs(&self.syncs);
+            for partition in failing {
+                self.opens.fail(partition);
+            }
+        }
+    }
+
+    /// Let the parked creations in `partitions` finish and stop parking later ones.
+    fn release(&self, partitions: &[String]) {
+        for partition in partitions {
+            self.opens.resume(partition);
+            self.opens.release(partition);
+        }
+    }
+}
+
+/// Instantiate each rollover test for the fixed and the variable journal.
+macro_rules! roll_tests {
+    ($($test:ident => $fixed:ident, $variable:ident;)*) => {$(
+        #[test]
+        fn $fixed() {
+            $test::<fixed::Journal<RollContext, u64>>(stringify!($fixed));
+        }
+
+        #[test]
+        fn $variable() {
+            $test::<variable::Journal<RollContext, u64>>(stringify!($variable));
+        }
+    )*};
+}
+
+roll_tests! {
+    test_rollover_leaves_successor_pending =>
+        test_fixed_rollover_leaves_successor_pending,
+        test_variable_rollover_leaves_successor_pending;
+    test_crash_before_successor_exists =>
+        test_fixed_crash_before_successor_exists,
+        test_variable_crash_before_successor_exists;
+    test_failed_successor_creation_surfaces =>
+        test_fixed_failed_successor_creation_surfaces,
+        test_variable_failed_successor_creation_surfaces;
+    test_removal_waits_for_successor =>
+        test_fixed_removal_waits_for_successor,
+        test_variable_removal_waits_for_successor;
+    test_failed_seal_sync_surfaces_before_successor =>
+        test_fixed_failed_seal_sync_surfaces_before_successor,
+        test_variable_failed_seal_sync_surfaces_before_successor;
+    test_consecutive_rollovers =>
+        test_fixed_consecutive_rollovers,
+        test_variable_consecutive_rollovers;
+    test_sync_handle_outlives_journal =>
+        test_fixed_sync_handle_outlives_journal,
+        test_variable_sync_handle_outlives_journal;
+    test_commit_and_sync_create_successor =>
+        test_fixed_commit_and_sync_create_successor,
+        test_variable_commit_and_sync_create_successor;
+    test_dropped_sync_handle_leaves_creation =>
+        test_fixed_dropped_sync_handle_leaves_creation,
+        test_variable_dropped_sync_handle_leaves_creation;
+}
+
+/// The append that fills a blob does not create the successor, and neither does the call that
+/// starts the next sync. Polling the handle that call returns starts the creation, and the handle
+/// completes once the creation has finished. Until then the journal serves reads and snapshots,
+/// and an append after the handle completes does not wait.
+fn test_rollover_leaves_successor_pending<J: Roll>(partition: &'static str) {
+    deterministic::Runner::default().start(|context| async move {
+        let rig = Rig::new(context);
+        rig.syncs.unblock();
+        let partitions = J::blob_partitions(partition);
+        let mut journal = rig.roll::<J>(partition).await;
+
+        // Every item is readable through each read path.
+        let items: Vec<u64> = (0..ROLL).collect();
+        assert_eq!(journal.bounds(), 0..ROLL);
+        for &i in &items {
+            assert_eq!(journal.read(i).await.unwrap(), i);
+        }
+        assert_eq!(journal.read_many(&items).await.unwrap(), items);
+        let replayed: Vec<_> =
+            replay_items(&journal, 0..ROLL, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap()
+                .map(|item| item.unwrap())
+                .collect()
+                .await;
+        assert_eq!(replayed, items.iter().map(|&i| (i, i)).collect::<Vec<_>>());
+
+        // A snapshot needs no successor, and starting a sync leaves its creation unstarted.
+        let snapshot;
+        (journal, snapshot) = journal.capture().await.unwrap();
+        let mut handle;
+        (journal, handle) = journal.start_sync().await.unwrap();
+        for partition in &partitions {
+            assert_eq!(rig.opens.parked(partition), 0);
+        }
+
+        // Polling the handle starts every creation, and the handle waits for them while the
+        // journal keeps serving reads.
+        assert!((&mut handle).now_or_never().is_none());
+        for partition in &partitions {
+            assert_eq!(rig.opens.parked(partition), 1);
+            assert_eq!(rig.blobs(partition).await, [0]);
+        }
+        assert_eq!(journal.read_many(&items).await.unwrap(), items);
+        rig.release(&partitions);
+        handle.await.unwrap();
+        for partition in &partitions {
+            assert_eq!(rig.blobs(partition).await, [0, 1]);
+        }
+
+        // With the successor created, the next append does not wait.
+        let position;
+        (journal, position) = journal
+            .append(&ROLL)
+            .now_or_never()
+            .expect("an append after a completed sync handle must not wait")
+            .unwrap();
+        assert_eq!(position, ROLL);
+        journal = journal.commit().await.unwrap();
+        journal = journal.sync().await.unwrap();
+
+        // The snapshot keeps the bounds it captured, and the journal reads the new tail.
+        assert_eq!(snapshot.bounds(), 0..ROLL);
+        assert_eq!(snapshot.read_many(&items).await.unwrap(), items);
+        assert_eq!(journal.read(ROLL).await.unwrap(), ROLL);
+        drop(snapshot);
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// How much of the sealed blob a crash keeps.
+#[derive(Clone, Copy, Debug)]
+enum Sealed {
+    /// A `start_sync` handle made the sealed blob durable and still waits for the successor.
+    Synced,
+    /// The successor's creation failed, and `sync` recorded the blob's end as the recovery
+    /// watermark.
+    Acknowledged,
+    /// The sealed blob's sync never ran, and its unsynced page survives the crash.
+    Retained,
+    /// The sealed blob's sync never ran, and its unsynced page is lost in the crash.
+    Lost,
+}
+
+/// A crash can leave a sealed blob with no successor, since a rollover seals the full blob before
+/// the successor is created. Recovery reopens every such image at the size its data supports,
+/// whichever of the journal's partitions already hold their successor.
+fn test_crash_before_successor_exists<J: Roll>(partition: &'static str) {
+    let partitions = J::blob_partitions(partition);
+    for sealed in [
+        Sealed::Synced,
+        Sealed::Acknowledged,
+        Sealed::Retained,
+        Sealed::Lost,
+    ] {
+        for created in 0..1usize << partitions.len() {
+            let partitions = partitions.clone();
+            let ((), checkpoint) =
+                deterministic::Runner::default().start_and_recover(|context| async move {
+                    let rig = Rig::new(context);
+                    let mut journal = J::open(rig.journal("first"), partition, ROLL)
+                        .await
+                        .unwrap();
+
+                    // Make all but the blob's last item durable.
+                    let prefix: Vec<u64> = (0..ROLL - 1).collect();
+                    (journal, _) = journal.append_many(Many::Flat(&prefix)).await.unwrap();
+                    journal = drive_pending_syncs(&rig.syncs, journal.sync())
+                        .await
+                        .unwrap();
+
+                    // Fill the blob while its successor's creation parks. The sealed blob's sync
+                    // parks too, so its last page is durable only once a sync is driven.
+                    if matches!(sealed, Sealed::Retained) {
+                        *rig.context.storage_fault_config().write() = deterministic::FaultConfig {
+                            write_rate: Some(deterministic::WriteConfig {
+                                failure_rate: probability!(0.0),
+                                retention_rate: probability!(1.0),
+                                mode: deterministic::PartialWriteMode::Prefix,
+                            }),
+                            ..Default::default()
+                        };
+                    }
+                    for partition in &partitions {
+                        rig.opens.defer(partition);
+                    }
+                    (journal, _) = journal.append(&(ROLL - 1)).await.unwrap();
+                    match sealed {
+                        Sealed::Synced => {
+                            let handle;
+                            (journal, handle) = journal.start_sync().await.unwrap();
+                            assert!(rig.drive_syncs(&[], handle).is_none());
+                        }
+                        Sealed::Acknowledged => {
+                            journal = rig
+                                .drive_syncs(&partitions, journal.sync())
+                                .expect("a sync must complete once the creation has failed")
+                                .unwrap();
+                        }
+                        Sealed::Retained | Sealed::Lost => {}
+                    }
+
+                    // The creations selected by `created` finish before the crash.
+                    for (index, partition) in partitions.iter().enumerate() {
+                        let exists = created & (1 << index) != 0;
+                        if exists {
+                            let name = 1u64.to_be_bytes();
+                            drop(rig.context.open(partition, &name).await.unwrap());
+                        }
+                        let expected: &[u64] = if exists { &[0, 1] } else { &[0] };
+                        assert_eq!(rig.blobs(partition).await, expected);
+                    }
+                    drop(journal);
+
+                    // The acknowledged image has its watermark at the end of the sealed blob.
+                    if matches!(sealed, Sealed::Acknowledged) {
+                        let watermark = fixed::Journal::<_, u64>::persisted_watermark(
+                            rig.context.child("watermark"),
+                            &J::watermark_partition(partition),
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(watermark, Some(ROLL));
+                    }
+                });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let rig = Rig::new(context);
+                rig.syncs.unblock();
+                let mut journal = J::open(rig.journal("recovered"), partition, ROLL)
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("recovery must succeed for {sealed:?} {created:#b}: {err}")
+                    });
+                let size = if matches!(sealed, Sealed::Lost) {
+                    ROLL - 1
+                } else {
+                    ROLL
+                };
+                assert_eq!(journal.bounds(), 0..size, "{sealed:?} {created:#b}");
+                for i in 0..size {
+                    assert_eq!(journal.read(i).await.unwrap(), i);
+                }
+
+                // The recovered journal appends at its end and stays durable.
+                let position;
+                (journal, position) = journal.append(&size).await.unwrap();
+                assert_eq!(position, size);
+                journal = journal.sync().await.unwrap();
+                assert_eq!(journal.read(size).await.unwrap(), size);
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+}
+
+/// An operation that needs the tail or removes blobs.
+#[derive(Clone, Copy, Debug)]
+enum TailUse {
+    Append,
+    Prune,
+    Clear,
+    Destroy,
+}
+
+impl TailUse {
+    /// Run the operation, returning the journal if it survives.
+    fn run<J: Roll>(self, journal: J) -> BoxFuture<'static, Result<Option<J>, Error>> {
+        match self {
+            Self::Append => async move {
+                let batch: Vec<u64> = (ROLL..2 * ROLL).collect();
+                let (journal, _) = journal.append_many(Many::Flat(&batch)).await?;
+                Ok(Some(journal))
+            }
+            .boxed(),
+            Self::Prune => journal
+                .prune(ROLL)
+                .map(|result| result.map(|(journal, _)| Some(journal)))
+                .boxed(),
+            Self::Clear => journal.clear(ROLL).map(|result| result.map(Some)).boxed(),
+            Self::Destroy => journal
+                .destroy()
+                .map(|result| result.map(|()| None))
+                .boxed(),
+        }
+    }
+}
+
+/// A successor creation that fails surfaces from the next operation that needs the tail, not
+/// from the sync handle that started it, and that operation creates and removes nothing.
+fn test_failed_successor_creation_surfaces<J: Roll>(partition: &'static str) {
+    for tail_use in [
+        TailUse::Append,
+        TailUse::Prune,
+        TailUse::Clear,
+        TailUse::Destroy,
+    ] {
+        deterministic::Runner::default().start(|context| async move {
+            let rig = Rig::new(context);
+            rig.syncs.unblock();
+            let partitions = J::blob_partitions(partition);
+            let (journal, mut handle) = rig.roll::<J>(partition).await.start_sync().await.unwrap();
+
+            // The handle starts every creation and completes once they have failed, without
+            // reporting the failure.
+            assert!((&mut handle).now_or_never().is_none());
+            for partition in &partitions {
+                rig.opens.resume(partition);
+                rig.opens.fail(partition);
+            }
+            handle.await.unwrap();
+            let result = tail_use.run(journal).await;
+            assert!(matches!(result, Err(Error::Runtime(_))), "{tail_use:?}");
+            for partition in &partitions {
+                assert_eq!(rig.blobs(partition).await, [0], "{tail_use:?}");
+            }
+
+            // A reset stages its intent before it reaches the blobs, so a reopen completes it.
+            // Every other operation leaves the journal as it was.
+            let journal = J::open(rig.journal("reopened"), partition, ROLL)
+                .await
+                .unwrap();
+            let expected = if matches!(tail_use, TailUse::Clear) {
+                ROLL..ROLL
+            } else {
+                0..ROLL
+            };
+            assert_eq!(journal.bounds(), expected, "{tail_use:?}");
+            journal.destroy().await.unwrap();
+        });
+    }
+}
+
+/// An operation that removes blobs waits for the successor's creation before it removes
+/// anything, so the tail exists once a prune or a reset has left it as the only blob.
+fn test_removal_waits_for_successor<J: Roll>(partition: &'static str) {
+    for tail_use in [TailUse::Prune, TailUse::Clear, TailUse::Destroy] {
+        deterministic::Runner::default().start(|context| async move {
+            let rig = Rig::new(context);
+            rig.syncs.unblock();
+            let partitions = J::blob_partitions(partition);
+            let journal = rig.roll::<J>(partition).await;
+
+            // The removal starts the creation and waits for it with every blob in place.
+            let mut removal = tail_use.run(journal);
+            assert!(removal.as_mut().now_or_never().is_none(), "{tail_use:?}");
+            for partition in &partitions {
+                assert_eq!(rig.blobs(partition).await, [0], "{tail_use:?}");
+            }
+
+            // Once the creations finish, a destroy removes everything and the other removals
+            // leave an empty journal anchored by its tail.
+            let (removed, _) = rig.release_until_done(&partitions, removal);
+            for partition in &partitions {
+                rig.opens.resume(partition);
+            }
+            let Some(journal) = removed.unwrap() else {
+                for partition in &partitions {
+                    assert!(rig.blobs(partition).await.is_empty());
+                }
+                return;
+            };
+            assert_eq!(journal.bounds(), ROLL..ROLL, "{tail_use:?}");
+            for partition in &partitions {
+                assert_eq!(rig.blobs(partition).await, [1], "{tail_use:?}");
+            }
+            drop(journal);
+            let journal = J::open(rig.journal("reopened"), partition, ROLL)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), ROLL..ROLL, "{tail_use:?}");
+            let (journal, position) = journal.append(&ROLL).await.unwrap();
+            assert_eq!(position, ROLL);
+            journal.destroy().await.unwrap();
+        });
+    }
+}
+
+/// A failed sync of the sealed blob surfaces from a prune, a reset, or a destroy before that
+/// operation creates the successor or removes a blob. An append creates the successor whether or
+/// not that sync succeeded, and the rollover that follows observes the failure before it seals
+/// another blob.
+fn test_failed_seal_sync_surfaces_before_successor<J: Roll>(partition: &'static str) {
+    for tail_use in [
+        TailUse::Append,
+        TailUse::Prune,
+        TailUse::Clear,
+        TailUse::Destroy,
+    ] {
+        deterministic::Runner::default().start(|context| async move {
+            let rig = Rig::new(context);
+            let partitions = J::blob_partitions(partition);
+            let journal = rig.roll::<J>(partition).await;
+            fail_pending_syncs(&rig.syncs);
+
+            // An append fills the successor before the next rollover observes the failure. Every
+            // other operation observes it before it starts the creation.
+            let appends = matches!(tail_use, TailUse::Append);
+            if appends {
+                rig.release(&partitions);
+            }
+            let result = tail_use
+                .run(journal)
+                .now_or_never()
+                .expect("the failed sync must surface without waiting for the successor");
+            assert!(matches!(result, Err(Error::Runtime(_))), "{tail_use:?}");
+            let expected: &[u64] = if appends { &[0, 1] } else { &[0] };
+            for partition in &partitions {
+                assert_eq!(rig.opens.parked(partition), 0, "{tail_use:?}");
+                assert_eq!(rig.blobs(partition).await, expected, "{tail_use:?}");
+            }
+        });
+    }
+}
+
+/// Rollovers that follow one another, from single-item blobs or one batch spanning several
+/// blobs, each wait for the previous successor and leave contiguous blobs. Sync handles taken
+/// across them complete in any order.
+fn test_consecutive_rollovers<J: Roll>(partition: &'static str) {
+    deterministic::Runner::default().start(|context| async move {
+        let rig = Rig::new(context);
+        rig.syncs.unblock();
+        let partitions = J::blob_partitions(partition);
+
+        // With one item per blob, every append after the first creates the successor of the blob
+        // the previous append sealed, in each of the journal's partitions.
+        let mut journal = J::open(rig.journal("single"), partition, 1).await.unwrap();
+        for partition in &partitions {
+            rig.opens.defer(partition);
+        }
+        let mut handles = Vec::new();
+        for i in 0..4u64 {
+            let (appended, stalls) = rig.release_until_done(&partitions, journal.append(&i));
+            assert_eq!(stalls, if i == 0 { 0 } else { partitions.len() });
+            let position;
+            (journal, position) = appended.unwrap();
+            assert_eq!(position, i);
+            let handle;
+            (journal, handle) = journal.start_sync().await.unwrap();
+            handles.push(handle);
+        }
+        assert_eq!(journal.bounds(), 0..4);
+        for partition in &partitions {
+            assert_eq!(rig.blobs(partition).await, [0, 1, 2, 3]);
+        }
+
+        // The last handle creates the successor of the last sealed blob.
+        rig.release(&partitions);
+        for handle in handles.into_iter().rev() {
+            handle.await.unwrap();
+        }
+        for partition in &partitions {
+            assert_eq!(rig.blobs(partition).await, [0, 1, 2, 3, 4]);
+        }
+        journal.destroy().await.unwrap();
+
+        // A batch that spans three blobs creates a successor in each partition at each boundary
+        // it crosses.
+        let batch_partition = format!("{partition}-batch");
+        let partitions = J::blob_partitions(&batch_partition);
+        let journal = J::open(rig.journal("batch"), &batch_partition, ROLL)
+            .await
+            .unwrap();
+        for partition in &partitions {
+            rig.opens.defer(partition);
+        }
+        let items: Vec<u64> = (0..3 * ROLL - 1).collect();
+        let (appended, stalls) =
+            rig.release_until_done(&partitions, journal.append_many(Many::Flat(&items)));
+        let (journal, last) = appended.unwrap();
+        assert_eq!(stalls, 2 * partitions.len());
+        assert_eq!(last, 3 * ROLL - 2);
+        assert_eq!(journal.read_many(&items).await.unwrap(), items);
+        for partition in &partitions {
+            assert_eq!(rig.blobs(partition).await, [0, 1, 2]);
+        }
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// Records whether it was woken.
+struct Woken(AtomicBool);
+
+impl std::task::Wake for Woken {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The journal owns the successor's creation. Dropping the journal drops a creation that a
+/// retained sync handle has started and wakes that handle. The handle then completes without
+/// creating anything, and the journal reopens with what the handle made durable.
+fn test_sync_handle_outlives_journal<J: Roll>(partition: &'static str) {
+    for started in [false, true] {
+        deterministic::Runner::default().start(|context| async move {
+            let rig = Rig::new(context);
+            rig.syncs.unblock();
+            let partitions = J::blob_partitions(partition);
+            let (journal, mut handle) = rig.roll::<J>(partition).await.start_sync().await.unwrap();
+            let woken = std::sync::Arc::new(Woken(AtomicBool::new(false)));
+            if started {
+                let waker = woken.clone().into();
+                let mut cx = std::task::Context::from_waker(&waker);
+                assert!(handle.poll_unpin(&mut cx).is_pending());
+                for partition in &partitions {
+                    assert_eq!(rig.opens.parked(partition), 1);
+                }
+            }
+
+            // Only the journal's drop may account for a wake observed after it.
+            woken.0.store(false, Ordering::Relaxed);
+            drop(journal);
+            assert_eq!(woken.0.load(Ordering::Relaxed), started);
+            for partition in &partitions {
+                assert_eq!(rig.opens.parked(partition), 0, "started={started}");
+            }
+            handle.await.unwrap();
+            for partition in &partitions {
+                assert_eq!(rig.opens.parked(partition), 0, "started={started}");
+                assert_eq!(rig.blobs(partition).await, [0], "started={started}");
+            }
+
+            rig.release(&partitions);
+            let journal = J::open(rig.journal("reopened"), partition, ROLL)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..ROLL);
+            journal.destroy().await.unwrap();
+        });
+    }
+}
+
+/// `commit` and `sync` start the successor's creation after a rollover and return only once it
+/// has finished in each of the journal's partitions.
+fn test_commit_and_sync_create_successor<J: Roll>(partition: &'static str) {
+    for sync in [false, true] {
+        deterministic::Runner::default().start(|context| async move {
+            let rig = Rig::new(context);
+            rig.syncs.unblock();
+            let partitions = J::blob_partitions(partition);
+            let journal = rig.roll::<J>(partition).await;
+            let durable = if sync {
+                journal.sync().boxed()
+            } else {
+                journal.commit().boxed()
+            };
+            let (journal, stalls) = rig.release_until_done(&partitions, durable);
+            assert!(stalls > 0, "sync={sync}");
+            for partition in &partitions {
+                assert_eq!(rig.blobs(partition).await, [0, 1], "sync={sync}");
+            }
+            rig.release(&partitions);
+            journal.unwrap().destroy().await.unwrap();
+        });
+    }
+}
+
+/// A sync handle dropped after it started the successor's creation leaves the creation with the
+/// journal, and the next append finishes it.
+fn test_dropped_sync_handle_leaves_creation<J: Roll>(partition: &'static str) {
+    deterministic::Runner::default().start(|context| async move {
+        let rig = Rig::new(context);
+        rig.syncs.unblock();
+        let partitions = J::blob_partitions(partition);
+        let (journal, mut handle) = rig.roll::<J>(partition).await.start_sync().await.unwrap();
+        assert!((&mut handle).now_or_never().is_none());
+        drop(handle);
+        for partition in &partitions {
+            assert_eq!(rig.opens.parked(partition), 1);
+        }
+        let (appended, stalls) = rig.release_until_done(&partitions, journal.append(&ROLL));
+        let (journal, position) = appended.unwrap();
+        assert_eq!((position, stalls), (ROLL, 1));
+        for partition in &partitions {
+            assert_eq!(rig.blobs(partition).await, [0, 1]);
+        }
+        rig.release(&partitions);
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// On the tokio runtime, a sync handle awaited after a rollover creates the successor without the
+/// journal being polled again. A runtime whose root polls a sync handle once after a rollover,
+/// drops the journal, and returns the handle shuts down and leaves storage that reopens.
+#[test]
+fn test_sync_handle_starts_successor_creation() {
+    use commonware_runtime::tokio;
+
+    let directory = std::env::temp_dir().join(format!(
+        "commonware-rollover-starts-successor-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let cfg = || fixed::Config {
+        partition: "rollover-starts-successor".into(),
+        items_per_blob: NZU64!(ROLL),
+        page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
+        write_buffer: NZUsize!(2048),
+        replay_buffer: NZUsize!(2048),
+    };
+    let runner = tokio::Runner::new(tokio::Config::new().with_storage_directory(&directory));
+    let returned = runner.start(|context| async move {
+        let mut journal = fixed::Journal::<_, u64>::init(context.child("first"), cfg())
+            .await
+            .unwrap();
+        for i in 0..ROLL {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        let handle;
+        (journal, handle) = journal.start_sync().await.unwrap();
+        handle.await.unwrap();
+        let mut blobs = context
+            .scan("rollover-starts-successor-blobs")
+            .await
+            .unwrap();
+        blobs.sort();
+        assert_eq!(blobs, [0u64.to_be_bytes(), 1u64.to_be_bytes()]);
+
+        // Seal another blob, poll its sync handle once, and return the handle without the journal.
+        for i in ROLL..2 * ROLL {
+            (journal, _) = journal.append(&i).await.unwrap();
+        }
+        let (journal, mut handle) = journal.start_sync().await.unwrap();
+        let polled = (&mut handle).now_or_never();
+        drop(journal);
+        (polled, handle)
+    });
+    drop(returned);
+    let runner = tokio::Runner::new(tokio::Config::new().with_storage_directory(&directory));
+    runner.start(|context| async move {
+        let journal = fixed::Journal::<_, u64>::init(context.child("second"), cfg())
+            .await
+            .unwrap();
+        assert_eq!(journal.bounds(), 0..2 * ROLL);
+        journal.destroy().await.unwrap();
+    });
+    std::fs::remove_dir_all(&directory).unwrap();
 }

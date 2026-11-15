@@ -1104,6 +1104,141 @@ impl<E: crate::Storage> crate::Storage for DeferredRemoveContext<E> {
     }
 }
 
+/// Opens parked by a [DeferredOpenContext] until a test releases or fails them.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Default)]
+pub struct DeferredOpens {
+    state: Arc<Mutex<DeferredOpensState>>,
+}
+
+/// State shared by all clones of a [DeferredOpens].
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Default)]
+struct DeferredOpensState {
+    /// Partitions whose later opens park.
+    deferred: Vec<String>,
+    /// The partition of each parked open and the sender resuming it, oldest first.
+    parked: Vec<(String, oneshot::Sender<Result<(), Error>>)>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl DeferredOpens {
+    /// Park every later open in `partition` before it reaches the wrapped context.
+    pub fn defer(&self, partition: &str) {
+        self.state.lock().deferred.push(partition.into());
+    }
+
+    /// Send later opens in `partition` straight to the wrapped context. Opens already parked
+    /// stay parked.
+    pub fn resume(&self, partition: &str) {
+        self.state.lock().deferred.retain(|name| name != partition);
+    }
+
+    /// Return the number of opens parked in `partition` whose futures are still alive.
+    pub fn parked(&self, partition: &str) -> usize {
+        let state = self.state.lock();
+        state
+            .parked
+            .iter()
+            .filter(|(name, resume)| name == partition && !resume.is_closed())
+            .count()
+    }
+
+    /// Let every open parked in `partition` continue to the wrapped context. Each continues the
+    /// next time it is polled.
+    pub fn release(&self, partition: &str) {
+        self.complete(partition, || Ok(()));
+    }
+
+    /// Fail every open parked in `partition` with an injected I/O error, without reaching the
+    /// wrapped context.
+    pub fn fail(&self, partition: &str) {
+        self.complete(partition, || {
+            Err(Error::Io(
+                std::io::Error::other("injected open failure").into(),
+            ))
+        });
+    }
+
+    /// Resolve every open parked in `partition` with `result`.
+    fn complete(&self, partition: &str, result: impl Fn() -> Result<(), Error>) {
+        let mut state = self.state.lock();
+        for (_, resume) in state.parked.extract_if(.., |(name, _)| name == partition) {
+            resume.send_lossy(result());
+        }
+    }
+
+    /// Wait until this open may reach the wrapped context.
+    async fn admit(&self, partition: &str) -> Result<(), Error> {
+        let parked = {
+            let mut state = self.state.lock();
+            if !state.deferred.iter().any(|name| name == partition) {
+                return Ok(());
+            }
+            let (sender, receiver) = oneshot::channel();
+            state.parked.push((partition.into(), sender));
+            receiver
+        };
+        parked.await.map_err(|_| Error::Closed)?
+    }
+}
+
+/// Context wrapper that parks opens in the partitions its [DeferredOpens] defers, simulating a
+/// blob creation still in flight. A parked open has not reached the wrapped context, so its blob
+/// does not exist until the open is released and polled again.
+///
+/// Removal batches use the default [crate::Storage::start_remove_many], which removes each blob
+/// inline through the wrapped context.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct DeferredOpenContext<E> {
+    /// Wrapped context.
+    pub inner: E,
+    /// Parked opens shared by this context and its children.
+    pub opens: DeferredOpens,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E> DeferredOpenContext<E> {
+    /// Wrap `inner` and return both the context and its parked opens.
+    pub fn new(inner: E) -> (Self, DeferredOpens) {
+        let opens = DeferredOpens::default();
+        (
+            Self {
+                inner,
+                opens: opens.clone(),
+            },
+            opens,
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+forward_context!(DeferredOpenContext, opens);
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E: crate::Storage> crate::Storage for DeferredOpenContext<E> {
+    type Blob = E::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        self.opens.admit(partition).await?;
+        self.inner.open_versioned(partition, name, versions).await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
+
 /// Blob wrapper that parks each started sync and supports one-shot blocking sync tracking.
 ///
 /// A started sync keeps the wrapped blob, and with it the logical open, alive until its handle

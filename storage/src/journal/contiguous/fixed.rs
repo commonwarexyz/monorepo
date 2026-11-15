@@ -33,8 +33,9 @@
 //!   and byte offset.
 //!
 //! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail. When the
-//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync,
-//!   and its tail writer tracks any started sync of the new tail.
+//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync
+//!   and the creation of the next tail, and its tail writer tracks any started sync of the new
+//!   tail.
 //!
 //! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, recovery
 //!   watermark, staged clear target) consulted before trusting blob state on startup.
@@ -61,13 +62,22 @@
 //!   and truncates newer blobs.
 //! - The newest blob may be short, since it is the normal append frontier. Recovery includes
 //!   its items.
+//! - The newest blob may be full, since a rollover creates the next blob after it seals the full
+//!   one. Recovery creates the empty tail that follows it.
 //!
 //! # Durability invariant
 //!
 //! When an append fills the tail blob, the journal rolls over: it seals the full blob, starts an
-//! fsync of it, and opens the next blob as the new tail. Each rollover first waits for the
-//! previous rollover's fsync, so only the tail and its predecessor (the blob sealed by the last
-//! rollover) can ever hold non-durable data. Every older blob is fully durable.
+//! fsync of it, and leaves the next blob, the new tail, to be created later. Each rollover first
+//! waits for the previous rollover's fsync, so only the tail and its predecessor (the blob sealed
+//! by the last rollover) can ever hold non-durable data. Every older blob is fully durable.
+//!
+//! Creating a blob durably syncs its directory, so the append that fills a blob does not create
+//! the next one, and reads, snapshots, and starting a sync do not need it. The creation starts
+//! when a caller waits for durability, through `sync`, `commit`, or the handle from
+//! `start_sync`, and that wait ends only once the blob exists or its creation has failed. The
+//! next operation that needs the blob (an append, a prune that releases blobs, a reset, or a
+//! destroy) creates it if nothing has yet, waits for it, and returns a failure to create it.
 //!
 //! A crash while one of those fsyncs is in flight can persist the blob's pages out of order, so
 //! an earlier page may be lost while later pages, including a valid last page, survive. Sizing a
@@ -153,7 +163,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _, Viewing};
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions, Removal,
+    Blob as RBlob, Buf, Error as RError, Handle, IoBuf, ReadOptions, Removal,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
 use commonware_utils::{Cached, Widen, futures::try_join_all};
@@ -1252,6 +1262,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Ok((self, handle))
     }
 
+    /// Return a handle that completes with `sync` once the creation of a tail that a rollover
+    /// left pending has also finished. See [Writable::drive_tail].
+    pub(super) fn drive_tail(
+        &self,
+        sync: impl Future<Output = Result<(), RError>> + Send + 'static,
+    ) -> Handle<()> {
+        self.blobs.drive_tail(sync)
+    }
+
     /// See [Journal::start_sync].
     pub(crate) async fn start_sync(self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
@@ -1261,8 +1280,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let size = journal.barrier.boundary();
         let (journal, watermark) = journal.start_watermark_sync(size).await?;
 
-        // Completion requires both the data and the selected watermark to be durable.
-        let handle = Handle::from_future(async move {
+        // Completion requires both the data and the selected watermark to be durable. Only this
+        // handle drives a pending tail creation, so the barrier's own polls of the data sync
+        // cannot start it inside this call.
+        let handle = journal.drive_tail(async move {
             data.await?;
             watermark.await
         });
@@ -1276,7 +1297,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let size = self.retained.end;
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
-        handle.await?;
+        self.drive_tail(handle).await?;
         self.barrier.mark_durable(size);
         Ok(self)
     }
@@ -1290,7 +1311,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let size = self.retained.end;
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
-        handle.await?;
+        self.drive_tail(handle).await?;
         self.barrier.mark_durable(size);
 
         // Publish the durable prefix as the recovery watermark. A mid-blob boundary hint locates
@@ -1515,8 +1536,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ) -> Result<(Box<Self>, Vec<(String, Vec<u8>)>), Error> {
         self.blobs.check_removals()?;
 
-        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
-        // guaranteed to exist by our invariant).
+        // Calculate the blob that would contain min_item_pos, capped to the tail. The tail exists
+        // before any blob below it is released.
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
         let tail_blob = super::position_to_blob(self.retained.end, self.items_per_blob.get());
         let min_blob = std::cmp::min(target_blob, tail_blob);
@@ -1591,8 +1612,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         );
     }
 
-    /// Wait for every started sync of the data and the checkpoint to complete, surfacing a
-    /// failure without changing storage.
+    /// Wait for every started sync of the data and the checkpoint and for the tail's creation,
+    /// surfacing a failure before anything else changes storage.
     pub(super) async fn wait_for_sync(mut self) -> Result<Self, Error> {
         self.blobs = self.blobs.wait_for_sync().await?;
         self.checkpoint.wait_for_sync().await?;
@@ -1790,6 +1811,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Does not advance the recovery watermark, so reopen may replay entries above it. Use
     /// `sync()` to advance the watermark and to ensure that a crash after this call doesn't
     /// require any recovery.
+    ///
+    /// After an append fills a blob, this also waits for the next blob's creation and does not
+    /// report its failure. The next operation that needs that blob, such as an append, returns it.
     pub async fn commit(mut self) -> Result<Self, Error> {
         self.0 = self.0.commit().await?;
         Ok(self)
@@ -1807,6 +1831,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// this call returns. Reads proceed while the returned handle is pending, and appends proceed
     /// while they fit in the write buffer.
     ///
+    /// After an append fills a blob, polling the returned handle also creates the next blob, so
+    /// that a later append does not. The handle completes once that creation has finished and
+    /// does not report its failure. A caller that never polls the handle, or drops it before it
+    /// completes, leaves the creation to the next operation that needs that blob.
+    ///
     /// Flush errors are returned directly. Dropping the handle does not cancel the sync or lose its
     /// failure: a later operation reports it, no later than the next [Self::sync].
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
@@ -1819,6 +1848,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// event of a crash following this call.
     ///
     /// Advances the recovery watermark to the current size.
+    ///
+    /// After an append fills a blob, this also waits for the next blob's creation and does not
+    /// report its failure. The next operation that needs that blob, such as an append, returns it.
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0 = self.0.sync().await?;
         Ok(self)
@@ -2397,7 +2429,7 @@ impl<E: crate::Context, A: CodecFixedShared> Inner<E, A> {
         Some(self.blobs.oldest_blob_index())
     }
 
-    /// Test helper: Get the newest blob from the blob store.
+    /// Test helper: Get the index of the tail blob. A rollover may not have created that blob yet.
     pub(crate) fn test_newest_blob(&self) -> Option<u64> {
         Some(self.blobs.tail_blob_index())
     }
@@ -3452,7 +3484,8 @@ mod tests {
         Predecessor,
     }
 
-    /// A failed sync nobody observed prevents data blob creation and removal.
+    /// A failed sync nobody observed surfaces before the journal seals or removes a data blob. The
+    /// successor of a sealed blob is created whether or not that blob's own sync succeeded.
     #[rstest::rstest]
     #[test_traced]
     fn test_fixed_dropped_failed_start_sync_blocks_blob_changes(
@@ -3477,26 +3510,29 @@ mod tests {
 
             // Fail a sync without observing it: either the tail's started sync, whose handle is
             // dropped, or the sync started by the rollover that seals the first blob.
-            let blobs = match failed {
+            match failed {
                 FailedSync::Tail => {
                     (journal, _) = journal.append(&0).await.unwrap();
                     fail_syncs(probability!(1.0));
                     let handle;
                     (journal, handle) = journal.start_sync().await.unwrap();
                     drop(handle);
-                    1
                 }
                 FailedSync::Predecessor => {
                     (journal, _) = journal.append_many(Many::Flat(&[0, 1])).await.unwrap();
                     fail_syncs(probability!(1.0));
                     (journal, _) = journal.append(&2).await.unwrap();
-                    2
                 }
-            };
+            }
             fail_syncs(probability!(0.0));
 
-            // The failure must surface before the operation changes the data blob namespace.
-            // Clearing may persist its checkpoint intent before reaching this boundary.
+            // The failure must surface before the operation seals or removes a data blob.
+            // Clearing may persist its checkpoint intent before reaching this boundary. An append
+            // after a rollover first creates the sealed blob's successor.
+            let blobs = match (&failed, &boundary) {
+                (FailedSync::Predecessor, Boundary::Rollover) => 2,
+                _ => 1,
+            };
             let size = journal.size();
             let result = match boundary {
                 Boundary::Rollover => journal

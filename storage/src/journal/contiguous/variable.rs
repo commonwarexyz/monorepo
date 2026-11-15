@@ -1812,7 +1812,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             self.bounds.end += batch_count as u64;
             written += batch_count;
 
-            // Seal the just-filled tail, start syncing it, and open the next blob as the new tail.
+            // Seal the just-filled tail, start syncing it, and prepare the creation of the next
+            // blob as the new tail.
             if self.bounds.end.is_multiple_of(items_per_blob) {
                 self.blobs = self.blobs.seal_tail().await?;
             }
@@ -1877,8 +1878,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.offsets.check_removals()?;
         let items_per_blob = self.items_per_blob.get();
 
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
+        // Calculate the blob that would contain min_position, capped to the tail. The tail exists
+        // before any blob below it is released.
         let target_blob = position_to_blob(min_position, items_per_blob);
         let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
         let min_blob = target_blob.min(tail_blob);
@@ -1982,11 +1983,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.barrier
             .record(self.bounds.end, journal_completion.clone());
 
-        // The caller observes both the new durability barrier and watermark publication.
-        let handle = Handle::from_future(async move {
+        // The caller observes both the new durability barrier and watermark publication. Only
+        // this handle drives a pending data or offsets tail creation, so the barriers' own polls
+        // of the syncs cannot start one inside this call.
+        let sync = self.offsets.drive_tail(async move {
             journal_completion.await?;
             watermark_handle.await
         });
+        let handle = self.blobs.drive_tail(sync);
         Ok((self, handle))
     }
 
@@ -1996,7 +2000,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.commit_calls.inc();
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
-        handle.await?;
+        let sync = self.offsets.drive_tail(handle);
+        self.blobs.drive_tail(sync).await?;
         Ok(self)
     }
 
@@ -2009,7 +2014,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let size = self.bounds.end;
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
-        handle.await?;
+        self.blobs.drive_tail(handle).await?;
         self.offsets = self.offsets.sync().await?;
         self.barrier.mark_durable(size);
         Ok(self)
@@ -2581,6 +2586,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Persist data blobs so committed data survives a crash.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it.
+    ///
+    /// After an append fills a blob, this also waits for the next data and offsets blobs'
+    /// creation and does not report its failure. The next operation that needs those blobs, such
+    /// as an append, returns it.
     pub async fn commit(mut self) -> Result<Self, Error> {
         self.0 = self.0.commit().await?;
         Ok(self)
@@ -2598,6 +2607,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// this call returns. Reads proceed while the returned handle is pending, and appends proceed
     /// while they fit in the write buffer.
     ///
+    /// After an append fills a blob, polling the returned handle also creates the next blob, so
+    /// that a later append does not. The handle completes once that creation has finished and
+    /// does not report its failure. A caller that never polls the handle, or drops it before it
+    /// completes, leaves the creation to the next operation that needs that blob.
+    ///
     /// Flush errors are returned directly. Dropping the handle does not cancel the sync or lose its
     /// failure: a later operation reports it, no later than the next [Self::sync].
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
@@ -2607,6 +2621,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Persist data blobs and all metadata for both the data and offsets journals.
+    ///
+    /// After an append fills a blob, this also waits for the next data and offsets blobs'
+    /// creation and does not report its failure. The next operation that needs those blobs, such
+    /// as an append, returns it.
     pub async fn sync(mut self) -> Result<Self, Error> {
         self.0 = self.0.sync().await?;
         Ok(self)
@@ -7518,17 +7536,14 @@ mod tests {
             drop(journal);
 
             let data_partition = cfg.data_partition();
-            let mut data_blobs = context.scan(&data_partition).await.unwrap();
-            data_blobs.sort();
-            assert_eq!(data_blobs.len(), 4);
-            for name in &data_blobs[..3] {
+            let data_blobs = context.scan(&data_partition).await.unwrap();
+            assert_eq!(data_blobs.len(), 3);
+            for name in &data_blobs {
                 let (_, size) = context.open(&data_partition, name).await.unwrap();
                 assert!(size > 0);
             }
-            let (_, size) = context.open(&data_partition, &data_blobs[3]).await.unwrap();
-            assert_eq!(size, 0);
 
-            // Recovery should preserve the filled predecessors plus the empty tail.
+            // Recovery should preserve the filled predecessors.
             let cfg = Config {
                 page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 ..cfg
@@ -7546,9 +7561,9 @@ mod tests {
             assert_eq!(journal.read(3).await.unwrap(), 42);
             drop(journal);
 
-            // Recovery should preserve the filled predecessors plus the fresh empty tail.
+            // The recovered journal keeps the filled predecessors and the blob it appended to.
             let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
-            assert_eq!(data_blobs.len(), 5);
+            assert_eq!(data_blobs.len(), 4);
 
             let journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
                 .await
@@ -7585,15 +7600,12 @@ mod tests {
             drop(journal);
 
             let data_partition = cfg.data_partition();
-            let mut data_blobs = context.scan(&data_partition).await.unwrap();
-            data_blobs.sort();
-            assert_eq!(data_blobs.len(), 3);
-            for name in &data_blobs[..2] {
+            let data_blobs = context.scan(&data_partition).await.unwrap();
+            assert_eq!(data_blobs.len(), 2);
+            for name in &data_blobs {
                 let (_, size) = context.open(&data_partition, name).await.unwrap();
                 assert!(size > 0);
             }
-            let (_, size) = context.open(&data_partition, &data_blobs[2]).await.unwrap();
-            assert_eq!(size, 0);
 
             let cfg = Config {
                 page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -8088,11 +8100,10 @@ mod tests {
             blob.sync().await.unwrap();
             drop(blob);
 
-            // Durable state: blob 0 (10 items), blob 1 (empty, lost), blob 2 (10
-            // items), blob 3 (the empty tail).
+            // Durable state: blob 0 (10 items), blob 1 (empty, lost), blob 2 (10 items).
             let mut names = context.scan(&data_partition).await.unwrap();
             names.sort();
-            assert_eq!(names.len(), 4);
+            assert_eq!(names.len(), 3);
             let sizes = {
                 let mut sizes = Vec::new();
                 for name in &names {
@@ -8104,7 +8115,6 @@ mod tests {
             assert!(sizes[0] > 0, "blob 0 should be durable");
             assert_eq!(sizes[1], 0, "blob 1 should be the gap");
             assert!(sizes[2] > 0, "blob 2 should be incidentally durable");
-            assert_eq!(sizes[3], 0, "blob 3 should be the empty tail");
 
             // Recovery rolls back to the watermark boundary: only the synced prefix survives and the
             // gapped blob 2 is truncated away.
@@ -11570,8 +11580,8 @@ mod tests {
         });
     }
 
-    /// A journal written before eager tail creation can end with a full newest blob and no
-    /// successor file; recovery opens the missing tail.
+    /// A journal can end with a full newest blob and no successor file. Recovery opens the
+    /// missing tail.
     #[test_traced]
     fn test_variable_recovery_full_newest_blob_without_successor() {
         let executor = deterministic::Runner::default();
@@ -11595,8 +11605,7 @@ mod tests {
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // Remove the empty tail blob, leaving only the full blob 0 (the layout written
-            // before eager tail creation).
+            // Remove the empty tail blob, leaving only the full blob 0.
             let data_partition = cfg.data_partition();
             context
                 .remove(&data_partition, Some(&1u64.to_be_bytes()))
