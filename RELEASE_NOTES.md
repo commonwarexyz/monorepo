@@ -64,6 +64,17 @@ its place in every partition it names when it is submitted and keeps those
 places until its last removal is durable. An open, scan, or remove queues only
 behind batches that name its partition and waits for each of them as a whole.
 
+A blob removal on the tokio storage completes once the blob's name is durably
+gone, without waiting for the file system to free the blob's blocks. The
+storage holds the blob open across the unlink and closes it after the removal
+has released its place, so an open in the same partition does not wait for a
+large blob to be freed. Free space therefore trails a completed `remove`,
+`Removal`, or prune. Shutdown and a later storage instance on the same
+directory wait for those closes, and after a crash the file system reclaims a
+blob that was unlinked and never closed. Removing a whole partition frees its
+blobs before it returns. The `Storage::remove` docs state that a successful
+removal does not mean the space is available again.
+
 [#5395]: https://github.com/commonwarexyz/monorepo/pull/5395
 [#5478]: https://github.com/commonwarexyz/monorepo/pull/5478
 

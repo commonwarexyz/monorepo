@@ -781,20 +781,27 @@ stability_scope!(BETA {
         ///
         /// If no `name` is provided, the entire partition is removed.
         ///
-        /// An Ok result indicates the blob is durably removed.
+        /// An Ok result indicates the blob is durably removed. It does not indicate that the
+        /// blob's physical resources have been reclaimed (see Reclamation below).
         ///
         /// # Read-after-remove
         ///
         /// Removal unlinks the blob's name but does not invalidate previously opened handles:
         /// they remain fully readable until dropped, whether the blob was removed by name or by
-        /// removing its entire partition. This includes bytes written but never synced. Physical
-        /// resources are reclaimed once the last handle is dropped.
+        /// removing its entire partition. This includes bytes written but never synced.
         ///
         /// Re-opening a removed blob's name creates a new, independent blob; handles opened
         /// before the removal continue to observe the removed blob's contents.
         ///
         /// Mutating a removed blob (e.g. via [`Blob::write_at`], [`Blob::resize`], or
         /// [`Blob::sync`]) is unspecified: implementations may succeed or return an error.
+        ///
+        /// # Reclamation
+        ///
+        /// A removed blob keeps its physical resources at least until its last handle is
+        /// dropped. An implementation may finish reclaiming them after the removal has
+        /// returned, so a successful removal does not mean the blob's space is available
+        /// again.
         fn remove(
             &self,
             partition: &str,
@@ -815,6 +822,9 @@ stability_scope!(BETA {
         /// synced. Journals rely on this to decide when a pruned boundary may be recorded, so an
         /// implementation must not complete it on unlink alone. The removals run whether or not
         /// the [Removal] is polled, and dropping it does not cancel them.
+        ///
+        /// As with [Self::remove], the [Removal] may complete before the blobs' physical
+        /// resources are reclaimed.
         ///
         /// Names in a batch must be distinct. A repeated name fails the batch with
         /// [Error::BlobMissing] at its second removal. An empty batch names no partition and

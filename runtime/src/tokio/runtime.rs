@@ -500,7 +500,9 @@ impl crate::Runner for Runner {
 
         // Finish cleanup if the root or a task panic unwound first. Removal batches run outside
         // the task tracker, so take one turn of the storage queue to let every batch submitted
-        // before the tasks finished complete.
+        // before the tasks finished complete. A completed batch may still be closing the blobs
+        // it unlinked on the blocking pool. Dropping the runtime when this function returns
+        // joins that pool.
         executor.tasks.close();
         tree.abort();
         runtime.block_on(async {
@@ -1070,6 +1072,42 @@ mod tests {
                 assert!(context.scan(partition).await.unwrap().is_empty());
             }
         });
+        std::fs::remove_dir_all(storage_directory).unwrap();
+    }
+
+    /// A removal that completed before the root returned still holds the blob it unlinked.
+    /// Shutdown finishes only once that blob is closed.
+    #[test]
+    fn test_shutdown_waits_for_removed_blob_close() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (runner_done_tx, runner_done_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            Runner::new(cfg).start(|context| async move {
+                drop(context.open("partition", b"blob").await.unwrap());
+
+                // Complete a removal and hold it ahead of its close.
+                let (entering, release) = context.storage.inner().pause_close();
+                context.remove("partition", Some(b"blob")).await.unwrap();
+                entering.await.unwrap();
+                release_tx.send(release).unwrap();
+            });
+            runner_done_tx.send(()).unwrap();
+        });
+
+        let release = release_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the removal must complete ahead of its close");
+        match runner_done_rx.recv_timeout(Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("Runner::start must not return before the blob closes: {other:?}"),
+        }
+        release.send(()).unwrap();
+        runner_done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start must return after the blob closes");
+        runner.join().unwrap();
         std::fs::remove_dir_all(storage_directory).unwrap();
     }
 
