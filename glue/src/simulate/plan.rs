@@ -1601,9 +1601,9 @@ mod tests {
         );
 
         // After every validator starts, the slow one restarts alone, once the fast ones have
-        // processed 20 heights or more. The last three restarts then record the same heights,
-        // so no validator ran while another was stopped. The slow validator stopped as it
-        // entered the window and the fast ones already inside it.
+        // processed 20 heights or more. The last three restarts then record the same heights, so no
+        // validator ran while another was stopped. The slow validator stopped as it entered the
+        // window, when the fast ones were already inside it.
         let starts = starts.lock();
         let [_, _, _, alone, together @ ..] = starts.as_slice() else {
             panic!("validators must start at least four times: {starts:?}");

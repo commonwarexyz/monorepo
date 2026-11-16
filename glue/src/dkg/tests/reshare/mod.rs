@@ -490,12 +490,12 @@ fn reshare_e2e_multiple_epochs_with_total_shutdown(
         downtime: Duration::from_secs(1),
     };
 
-    // Every validator stops at the same moment, twice. The first shutdown comes in the second
-    // half of the dealing window of epoch 1 and the second in the second half of the inclusion
-    // window of epoch 2. Each crash window ends at the last processed height from which a
-    // restarted validator resumes inside the same DKG window. Processed heights trigger the
-    // shutdowns, so neither depends on how fast blocks finalize, and the second cannot begin
-    // until every validator has recovered from the first.
+    // Every validator stops at the same moment, twice, first in the second half of epoch 1's
+    // dealing window and then in the second half of epoch 2's inclusion window. Each range of
+    // processed heights ends one block before the last block of its window, so a restarted
+    // validator still resumes inside that window. Because processed heights trigger the shutdowns,
+    // neither depends on how fast blocks finalize, and the second cannot begin until every
+    // validator has recovered from the first.
     let dealing = midpoint(1) - quarter..=midpoint(1) - 2;
     let inclusion = midpoint(2) + quarter..=final_height(2).get() - 1;
     let result = crash_storm_plan(engine, 3, shutdown(dealing))
