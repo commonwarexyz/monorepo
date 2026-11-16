@@ -17,10 +17,7 @@ use crate::stateful::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Floor, Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
     simplex::types::Finalization,
 };
 use commonware_parallel::Strategy;
@@ -166,7 +163,6 @@ where
     A::Databases: StateSyncSet<E, R>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
     /// Creates a [`Stateful`] actor and its [`Mailbox`].
@@ -301,13 +297,14 @@ mod tests {
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb, digested},
+            mocks::{TestApp, TestBlock, TestDb, digested, digested_shared},
         },
     };
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Handoff, Reporter as _,
-        marshal::{Update, ancestry},
+        marshal::{Update, blocks::Ancestry},
         simplex::mocks::scheme as scheme_mocks,
+        types::Height,
     };
     use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
@@ -435,7 +432,7 @@ mod tests {
     #[test]
     fn mailbox_prepare_declines_on_wait() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let genesis = TestBlock::new(0, 0);
+            let genesis = Arc::new(TestBlock::new(0, 0));
             let child = TestBlock::child(&genesis, 1);
             let (mut mailbox, handle, _guards) =
                 stateful_with(&context, TestApp::default().with_proposal(child.clone())).await;
@@ -443,7 +440,7 @@ mod tests {
                 mailbox
                     .prepare(
                         (context.child("wait"), child.context()),
-                        ancestry::from_iter([digested(genesis)]),
+                        fixtures::ancestry(&genesis),
                         (),
                     )
                     .await
@@ -461,14 +458,14 @@ mod tests {
     fn mailbox_prepare_attaches_decision() {
         for decision in [Handoff::Vote(()), Handoff::Stage(())] {
             deterministic::Runner::timed(Duration::from_secs(5)).start(move |context| async move {
-                let genesis = TestBlock::new(0, 0);
+                let genesis = Arc::new(TestBlock::new(0, 0));
                 let child = TestBlock::child(&genesis, 1);
                 let application = TestApp::with_handoff(decision).with_proposal(child.clone());
                 let (mut mailbox, handle, _guards) = stateful_with(&context, application).await;
                 let prepared = mailbox
                     .prepare(
                         (context.child("build"), child.context()),
-                        ancestry::from_iter([digested(genesis)]),
+                        fixtures::ancestry(&genesis),
                         (),
                     )
                     .await;
@@ -525,7 +522,10 @@ mod tests {
             select! {
                 result = mailbox.propose(
                     (context.child("proposal"), TestBlock::new(1, 1).context()),
-                    ancestry::from_iter([]),
+                    Ancestry {
+                        parent: digested(TestBlock::new(0, 0)),
+                        blocks: fixtures::pending_blocks(Height::zero()),
+                    },
                     (),
                 ) => {
                     assert!(result.is_none());
@@ -583,35 +583,44 @@ mod tests {
                 .await
                 .expect("startup should reach resolver attachment before processing");
 
-            // Fill the single ready slot and reliable overflow with independently owned ancestries.
+            // Fill the single ready slot and reliable overflow with independently owned blocks.
+            let parents = [
+                Arc::new(TestBlock::new(1, 11)),
+                Arc::new(TestBlock::new(2, 12)),
+                Arc::new(TestBlock::new(3, 13)),
+            ];
             let owners = [
-                digested(TestBlock::new(2, 2)),
-                digested(TestBlock::new(3, 3)),
-                digested(TestBlock::new(4, 4)),
+                Arc::new(TestBlock::child(&parents[0], 2)),
+                Arc::new(TestBlock::child(&parents[1], 3)),
+                Arc::new(TestBlock::child(&parents[2], 4)),
             ];
             let weak_owners = owners
                 .iter()
-                .map(|owner| Arc::downgrade(&owner.inner_shared()))
+                .chain(&parents)
+                .map(Arc::downgrade)
                 .collect::<Vec<_>>();
 
             let mut first_mailbox = mailbox.clone();
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("verify_first"), owners[0].context()),
-                ancestry::from_iter([owners[0].clone()]),
+                digested_shared(&owners[0]),
+                fixtures::ancestry(&parents[0]),
             ));
             assert!(poll!(&mut first).is_pending());
 
             let mut second_mailbox = mailbox.clone();
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("verify_second"), owners[1].context()),
-                ancestry::from_iter([owners[1].clone()]),
+                digested_shared(&owners[1]),
+                fixtures::ancestry(&parents[1]),
             ));
             assert!(poll!(&mut second).is_pending());
 
             let mut third_mailbox = mailbox.clone();
             let mut third = Box::pin(third_mailbox.verify(
                 (context.child("verify_third"), owners[2].context()),
-                ancestry::from_iter([owners[2].clone()]),
+                digested_shared(&owners[2]),
+                fixtures::ancestry(&parents[2]),
             ));
             assert!(poll!(&mut third).is_pending());
 
@@ -623,14 +632,15 @@ mod tests {
             drop(second);
             drop(third);
             drop(owners);
+            drop(parents);
             context.sleep(Duration::from_millis(10)).await;
 
-            // Startup remains blocked while cancellation releases every ancestry block.
+            // Startup remains blocked while cancellation releases every candidate and parent.
             assert!(poll!(&mut acknowledgement_waiter).is_pending());
             for (index, owner) in weak_owners.iter().enumerate() {
                 assert!(
                     owner.upgrade().is_none(),
-                    "cancelled startup verification {index} retained its ancestry owner",
+                    "cancelled startup verifications must release block {index}",
                 );
             }
 

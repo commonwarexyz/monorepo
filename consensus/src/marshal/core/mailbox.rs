@@ -1,10 +1,7 @@
 use super::{Processed, Variant, durability::Durable as _};
 use crate::{
     Reporter,
-    marshal::{
-        Identifier,
-        ancestry::{AncestorStream, Ancestry, BlockProvider},
-    },
+    marshal::Identifier,
     simplex::types::{Activity, Finalization, Notarization},
     types::{Height, Round},
 };
@@ -12,12 +9,9 @@ use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
-use commonware_runtime::{
-    Clock, Handle,
-    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
-};
+use commonware_runtime::{Handle, telemetry::traces::TracedExt as _};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
@@ -624,28 +618,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// acknowledgements advance its processed floor.
     pub const fn max_pending_acks(&self) -> usize {
         self.max_pending_acks
-    }
-
-    /// Create an ancestor stream that fetches missing parents by commitment.
-    ///
-    /// This stream is always a fetching stream. Callers must already have a block
-    /// that is safe to verify, certify, build on, or repair from. The stream derives
-    /// each missing parent's height and digest from its child and terminates if a
-    /// fetched block does not match that relationship.
-    ///
-    /// Do not use this to wait for pending candidate proposal data.
-    pub fn ancestor_stream<I, C>(
-        &self,
-        clock: Arc<C>,
-        initial: I,
-        fetch_duration: Timed,
-    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
-    where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
-        I: IntoIterator<Item = Digested<V::ApplicationBlock>>,
-        C: Clock,
-    {
-        AncestorStream::new(clock, self.clone(), initial, fetch_duration)
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.

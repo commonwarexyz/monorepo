@@ -108,13 +108,16 @@
 //!   payload differs. [`Application`] rejects a mismatched payload and leaves
 //!   verification unresolved on [`EpochInfoResponse::Unavailable`].
 //!
-//! The final-block call receives the blocks between the last finalized block the
-//! actor has applied and the block under construction or verification. Dealer
-//! logs in those blocks count toward the derived
+//! The final-block call receives the selected branch ending at the block's parent
+//! as a [`Blocks`](commonware_consensus::marshal::blocks::Blocks) source. The
+//! actor scans the blocks of that branch above its finalized tip, starting no
+//! lower than the midpoint. Dealer logs in them count toward the derived
 //! [`EpochInfo`](crate::dkg::types::EpochInfo), but they become durable only
-//! when their blocks finalize. A participating actor answers once it has applied
-//! every block before the midpoint, so a call from a node still replaying the
-//! dealing window waits for that point.
+//! when their blocks finalize.
+//!
+//! A participating actor answers once it has applied every block before the
+//! midpoint, so a call from a node still replaying the dealing window waits for
+//! that point.
 //!
 //! Marshal must report finalized blocks to [`Mailbox`], which implements
 //! [`Reporter`](commonware_consensus::Reporter). The actor acknowledges a

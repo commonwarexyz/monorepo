@@ -28,7 +28,7 @@ use commonware_consensus::{
     Application as _, CertifiableAutomaton as _, History, Reporter,
     marshal::{
         self,
-        ancestry::{self, Ancestry},
+        blocks::{Ancestry, Blocks},
         core::Actor as MarshalActor,
         resolver::handler,
         standard::{Deferred, Standard},
@@ -72,16 +72,7 @@ use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
-use std::{
-    collections::VecDeque,
-    convert::Infallible,
-    future::Future,
-    marker::PhantomData,
-    pin::Pin,
-    sync::Arc,
-    task::{self, Poll},
-    time::Duration,
-};
+use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 mod common;
 pub(crate) mod fixtures;
@@ -385,14 +376,11 @@ where
     let validator = engine.participants()[0].clone();
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Schedule(
-            Schedule::new()
-                .at(
-                    Duration::from_millis(2500),
-                    Action::Crash(validator.clone()),
-                )
-                .at(Duration::from_millis(5000), Action::Restart(validator)),
-        ))
+        .crash(Crash::ProcessedHeight {
+            participant: validator,
+            heights: 10..=49,
+            downtime: Duration::from_millis(2500),
+        })
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
         .run()
@@ -978,7 +966,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -1004,7 +992,8 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn process(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
@@ -1016,7 +1005,8 @@ impl Application<deterministic::Context> for GatedMultiApp {
         <MultiApp as Application<deterministic::Context>>::process(
             &mut self.inner,
             context,
-            ancestry,
+            block,
+            blocks,
             batches,
             finality,
         )
@@ -1066,25 +1056,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
         block: &Self::Block,
     ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
         <MultiApp as Application<deterministic::Context>>::sync_targets(block)
-    }
-}
-
-/// An ancestry whose parent never arrives, so a proposal built on it stays active until the
-/// proposal is dropped.
-#[derive(Clone)]
-struct PendingAncestry<B>(PhantomData<fn() -> B>);
-
-impl<B: commonware_consensus::Block> futures::Stream for PendingAncestry<B> {
-    type Item = Digested<B>;
-
-    fn poll_next(self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Pending
-    }
-}
-
-impl<B: commonware_consensus::Block> Ancestry<B> for PendingAncestry<B> {
-    fn peek(&self) -> Option<&Digested<B>> {
-        None
     }
 }
 
@@ -1441,7 +1412,10 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[5].context.clone()),
-            PendingAncestry(PhantomData),
+            Ancestry {
+                parent: digested(blocks[4].clone()),
+                blocks: fixtures::pending_blocks(blocks[4].height),
+            },
             (),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
@@ -2080,7 +2054,10 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[3].context.clone()),
-            ancestry::from_iter([digested(blocks[2].clone())]),
+            Ancestry {
+                parent: digested(blocks[2].clone()),
+                blocks: fixtures::pending_blocks(blocks[2].height),
+            },
             (),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
@@ -2301,8 +2278,8 @@ fn pruning_joins_verification_on_real_qmdbs() {
             FixedEpocher::new(EPOCH_LENGTH),
         );
 
-        // Keep the first four batches available so the verification of block 5 executes
-        // only block 5.
+        // Keep the first four batches available so block 5 reaches application
+        // verification without owning ancestor replay.
         for (index, block) in blocks[..4].iter().enumerate() {
             let certification = deferred.certify(
                 block.context.round,

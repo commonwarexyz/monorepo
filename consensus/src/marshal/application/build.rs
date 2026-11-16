@@ -8,8 +8,8 @@
 //! [`Handoff::Wait`], and a propose answers the digest and declines by closing the receiver.
 
 use crate::{
-    Application, Handoff,
-    marshal::{ancestry::Ancestry, application::gates::Gates},
+    Application, Block, Handoff,
+    marshal::{application::gates::Gates, blocks::Ancestry},
     simplex::types::Context,
 };
 use commonware_cryptography::{Digest, Digested, PublicKey};
@@ -20,7 +20,7 @@ use std::future::Future;
 use tracing::{Instrument as _, Span, debug};
 
 /// The outcome of the marshal's proposal checks for a parent.
-pub(crate) enum Resolved<D, S, A, M = ()> {
+pub(crate) enum Resolved<D, S, B: Block, M = ()> {
     /// The marshal re-proposes the epoch boundary block, whose digest is the first field.
     Reuse(D, S),
     /// The marshal cannot build on this parent.
@@ -29,7 +29,7 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
     /// measures the application's build from this point. The metadata (the coding
     /// configuration, or unit for standard blocks) is passed to the sealing callback with
     /// the built block.
-    Build(A, Timer, M),
+    Build(Ancestry<B>, Timer, M),
 }
 
 /// Answers a prepare request for `consensus_context` from a task spawned from `context` and
@@ -43,7 +43,7 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 /// application's decision. The block is staged before its digest is sent. Dropping the receiver
 /// cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
+pub(crate) fn prepare<E, A, D, P, S, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -59,9 +59,8 @@ where
     D: Digest,
     P: PublicKey,
     S: Clone + Send + Sync + 'static,
-    N: Ancestry<A::Block>,
     M: Send + 'static,
-    Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
+    Fut: Future<Output = Resolved<D, S, A::Block, M>> + Send + 'static,
     Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
@@ -162,7 +161,7 @@ where
 /// form and digest. The block is staged before its digest is sent. Dropping the receiver cancels
 /// the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
+pub(crate) fn propose<E, A, D, P, S, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -178,9 +177,8 @@ where
     D: Digest,
     P: PublicKey,
     S: Clone + Send + Sync + 'static,
-    N: Ancestry<A::Block>,
     M: Send + 'static,
-    Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
+    Fut: Future<Output = Resolved<D, S, A::Block, M>> + Send + 'static,
     Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
@@ -198,7 +196,7 @@ where
                 },
                 resolved = checks => resolved,
             };
-            let (ancestor_stream, build_timer, metadata) = match resolved {
+            let (ancestry, build_timer, metadata) = match resolved {
                 // The boundary block is re-proposed as is. Staging it under this round lets the
                 // relay broadcast and certification find it here.
                 Resolved::Reuse(digest, block) => {
@@ -217,8 +215,8 @@ where
                 }
                 // Closing the receiver skips the view, which the voter nullifies by timeout.
                 Resolved::Skip => return,
-                Resolved::Build(ancestor_stream, build_timer, metadata) => {
-                    (ancestor_stream, build_timer, metadata)
+                Resolved::Build(ancestry, build_timer, metadata) => {
+                    (ancestry, build_timer, metadata)
                 }
             };
 
@@ -226,7 +224,7 @@ where
             let build_request = application
                 .propose(
                     (runtime_context.child("app_propose"), consensus_context),
-                    ancestor_stream,
+                    ancestry,
                     (),
                 )
                 .instrument(build_span());

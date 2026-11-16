@@ -80,7 +80,7 @@ mod tests {
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, History,
         Relay, Reporter,
         marshal::{
-            ancestry::{Ancestry, BlockProvider},
+            blocks::Ancestry,
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
@@ -152,12 +152,6 @@ mod tests {
         extra_shards: NZU16!(1),
     };
 
-    #[test]
-    fn mailbox_provides_application_blocks() {
-        fn assert_provider<P: BlockProvider<Block = CodingB>>() {}
-        assert_provider::<core::Mailbox<S, TestCodingVariant>>();
-    }
-
     /// A coding buffer that serves inserted blocks and records subscriptions without resolving
     /// them.
     #[derive(Clone, Default)]
@@ -221,7 +215,8 @@ mod tests {
         }
     }
 
-    /// Records the ancestry consumed by verification, accepting only after reaching genesis.
+    /// Records the selected branch in forward order through the candidate, and accepts only when
+    /// the walk ends at the candidate's parent.
     #[derive(Clone, Default)]
     struct WalkingVerifyingApp {
         blocks: Arc<Mutex<Vec<D>>>,
@@ -236,7 +231,7 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, CodingCtx),
-            _ancestry: impl Ancestry<CodingB>,
+            _ancestry: Ancestry<CodingB>,
             _input: (),
         ) -> Option<Digested<CodingB>> {
             None
@@ -245,15 +240,20 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, CodingCtx),
-            mut ancestry: impl Ancestry<CodingB>,
+            candidate: Digested<CodingB>,
+            Ancestry { parent, blocks }: Ancestry<CodingB>,
         ) -> bool {
-            while let Some(block) = ancestry.next().await {
+            let mut range = blocks.range(Height::zero()..=parent.height());
+            let mut last = None;
+            while let Some(block) = range.next().await {
+                let Ok(block) = block else {
+                    return false;
+                };
                 self.blocks.lock().push(block.digest());
-                if block.height() == Height::zero() {
-                    return true;
-                }
+                last = Some(block.digest());
             }
-            false
+            self.blocks.lock().push(candidate.digest());
+            last == Some(parent.digest()) && candidate.parent() == parent.digest()
         }
     }
 
@@ -727,45 +727,6 @@ mod tests {
             assert!(marshal.get_block(&delivered.digest()).await.is_none());
             assert!(marshal.get_block(height).await.is_none());
             assert!(marshal.get_finalization(height).await.is_none());
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_coding_block_provider_parent_fetches_by_commitment() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let buffer = RecordingCodingBuffer::default();
-            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
-                "coding-provider-parent-commitment",
-                provider,
-                buffer.clone(),
-            )
-            .await;
-
-            let (parent_ctx, parent) = missing_candidate(participants[0].clone());
-            let child_ctx = CodingCtx {
-                round: Round::new(Epoch::zero(), View::new(2)),
-                leader: participants[0].clone(),
-                parent: (parent_ctx.round.view(), parent.commitment()),
-            };
-            let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
-            let child = Digested::precomputed(child.clone(), child.digest());
-            let subscription = marshal.subscribe_parent(&child);
-
-            context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(
-                buffer.commitment_subscription_count(),
-                1,
-                "parent walkback should use the coding parent commitment"
-            );
-            drop(subscription);
         });
     }
 
@@ -4948,7 +4909,7 @@ mod tests {
             );
 
             // Neither the certified fork nor a cached untrusted child authenticates these fetches
-            for (index, ancestor) in [&chain[1], &chain[0]].into_iter().enumerate() {
+            for (index, ancestor) in [&chain[0], &chain[1]].into_iter().enumerate() {
                 while resolver.fetches().len() < index + 2 {
                     reschedule().await;
                 }
@@ -4958,7 +4919,7 @@ mod tests {
                 let mut subscription = mailbox.acquire(ancestor.commitment());
                 let _ = mailbox.get_processed().await;
 
-                if index == 0 {
+                if index == 1 {
                     assert!(
                         !resolver
                             .deliver(fetch.clone(), certified_ancestor.encode())
@@ -4978,6 +4939,8 @@ mod tests {
                 );
             }
 
+            // Certification completes, and the verifier walked the selected branch forward from
+            // genesis through the candidate.
             assert!(
                 marshaled
                     .certify(
@@ -4988,11 +4951,8 @@ mod tests {
                     .await
                     .unwrap()
             );
-            let expected: Vec<_> = chain
-                .iter()
-                .rev()
-                .map(Digestible::digest)
-                .chain(std::iter::once(genesis_block().digest()))
+            let expected: Vec<_> = std::iter::once(genesis_block().digest())
+                .chain(chain.iter().map(Digestible::digest))
                 .collect();
             assert_eq!(*application.blocks.lock(), expected);
 

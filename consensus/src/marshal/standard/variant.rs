@@ -4,20 +4,17 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    Block, Heightable,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Buffer, ExpectedCommitment, Mailbox, Variant},
-    },
+    Block,
+    marshal::core::{Buffer, ExpectedCommitment, Variant},
     types::Round,
 };
 use commonware_broadcast::{Broadcaster as _, buffered};
 use commonware_codec::{Codec, Error as CodecError, Input, Read};
-use commonware_cryptography::{Digested, Digestible, PublicKey, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -135,25 +132,6 @@ where
 
     fn send(&self, _round: Round, block: Digested<B>, recipients: Recipients<K>) {
         self.broadcast(recipients, block);
-    }
-}
-
-impl<S, B> BlockProvider for Mailbox<S, Standard<B>>
-where
-    S: Scheme,
-    B: Block + Codec,
-{
-    type Block = B;
-
-    fn subscribe_parent(
-        &self,
-        block: &Digested<Self::Block>,
-    ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
-        let receiver = block
-            .height()
-            .previous()
-            .map(|_| self.acquire(block.parent()));
-        async move { receiver?.await.ok() }
     }
 }
 

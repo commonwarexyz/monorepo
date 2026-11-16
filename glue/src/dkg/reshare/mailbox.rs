@@ -9,10 +9,7 @@ use commonware_actor::{
 };
 use commonware_consensus::{
     Heightable as _, Reporter,
-    marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    marshal::{Update, blocks::Blocks},
     types::Height,
 };
 use commonware_cryptography::{
@@ -140,7 +137,7 @@ where
     /// [`Mailbox::epoch_info`]).
     EpochInfo {
         span: Span,
-        ancestry: BoxedAncestry<B>,
+        blocks: Blocks<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     },
 
@@ -247,28 +244,24 @@ where
 
     /// Requests the payload for an epoch's final block.
     ///
-    /// `ancestry` starts at the final block (verification) or at its parent
-    /// (proposal) and must build on the last finalized block the actor has
-    /// applied. A participating actor answers once it has applied every block
-    /// before the midpoint, and a request made earlier waits until then. Dealer
-    /// logs from the midpoint on come from `ancestry` and the blocks the actor
-    /// has applied.
+    /// `blocks` selects the branch through the final block's parent and must
+    /// extend the actor's finalized tip. The actor reads the inclusion range
+    /// lazily, so queued requests retain no block bodies. A participating actor
+    /// answers once it has applied every block before the midpoint, and a
+    /// request made earlier waits until then.
     ///
-    /// Returns [`EpochInfoResponse::Unavailable`] when `ancestry` is cut short
-    /// or does not build on that block, when the actor follows the chain
-    /// without participating, when the request is still queued as the actor
-    /// applies the epoch's final block, or when the actor has stopped.
-    pub async fn epoch_info(
-        &mut self,
-        ancestry: impl Ancestry<B>,
-    ) -> EpochInfoResponse<V, C, B::Directory> {
+    /// Returns [`EpochInfoResponse::Unavailable`] if the range does not extend
+    /// the finalized tip or cannot be acquired, when the actor follows without
+    /// participating, when the request is still queued as the final block is
+    /// applied, or when the actor has stopped.
+    pub async fn epoch_info(&mut self, blocks: Blocks<B>) -> EpochInfoResponse<V, C, B::Directory> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.epoch_info");
         if !self
             .sender
             .enqueue(Message::EpochInfo {
                 span,
-                ancestry: BoxedAncestry::new(ancestry),
+                blocks,
                 response: response_tx,
             })
             .accepted()
@@ -320,37 +313,10 @@ mod tests {
     use commonware_actor::mailbox;
     use commonware_cryptography::ed25519::PrivateKey;
     use commonware_runtime::{Runner, deterministic};
-    use commonware_utils::{NZUsize, channel::oneshot};
-    use futures::{FutureExt as _, StreamExt as _};
-    use std::{
-        pin::Pin,
-        task::{Context, Poll},
-    };
+    use commonware_utils::NZUsize;
+    use futures::FutureExt as _;
 
     type TestMessage = Message<TestBlock, TestBlsVariant, PrivateKey>;
-
-    #[derive(Clone)]
-    struct DelayedAncestry {
-        parent: Option<Digested<TestBlock>>,
-        gate: futures::future::Shared<oneshot::Receiver<()>>,
-    }
-
-    impl futures::Stream for DelayedAncestry {
-        type Item = Digested<TestBlock>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if self.gate.poll_unpin(cx).is_pending() {
-                return Poll::Pending;
-            }
-            Poll::Ready(self.parent.take())
-        }
-    }
-
-    impl Ancestry<TestBlock> for DelayedAncestry {
-        fn peek(&self) -> Option<&Digested<TestBlock>> {
-            None
-        }
-    }
 
     #[test]
     fn next_log_returns_none_when_actor_gone() {
@@ -365,78 +331,68 @@ mod tests {
         });
     }
 
+    /// Returns a source through `parent` that names its digest and never yields a body.
+    fn pending_blocks(parent: &Digested<TestBlock>) -> Blocks<TestBlock> {
+        let (tip, digest) = (parent.height(), parent.digest());
+        Blocks::new(
+            tip,
+            NZUsize!(1),
+            move |height| (height == tip).then_some(digest),
+            |_| futures::future::pending(),
+        )
+    }
+
     #[test]
     fn epoch_info_forwards_delayed_parent_without_polling() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The request's branch names its parent, and no body ever arrives.
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
-            let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
-            let (release, gate) = oneshot::channel();
-            let ancestry = DelayedAncestry {
-                parent: Some(parent.clone()),
-                gate: gate.shared(),
-            };
-            let mut request = Box::pin(mailbox.epoch_info(ancestry));
+            let parent = mocks::ready(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let mut request = Box::pin(mailbox.epoch_info(pending_blocks(&parent)));
 
+            // The request reaches the actor with its branch before any body is acquired.
             assert!(request.as_mut().now_or_never().is_none());
             let message = receiver
                 .try_recv()
-                .expect("request should reach the actor without polling ancestry");
+                .expect("request must reach the actor without acquiring blocks");
             let Message::EpochInfo {
-                mut ancestry,
-                response,
-                ..
+                blocks, response, ..
             } = message
             else {
                 panic!("expected epoch info request");
             };
-            assert!(ancestry.next().now_or_never().is_none());
+            assert_eq!(blocks.digest(parent.height()), Some(parent.digest()));
 
-            release.send(()).expect("ancestry should still be waiting");
-            assert_eq!(
-                ancestry
-                    .next()
-                    .await
-                    .expect("parent should remain in ancestry")
-                    .digest(),
-                parent.digest()
-            );
+            // The actor's answer completes the request.
             assert!(response.send(EpochInfoResponse::Available(None)).is_ok());
             assert!(matches!(request.await, EpochInfoResponse::Available(None)));
         });
     }
 
     #[test]
-    fn canceled_epoch_info_closes_forwarded_response_without_polling_ancestry() {
+    fn canceled_epoch_info_closes_forwarded_response_without_acquiring_blocks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The request's branch names its parent, and no body ever arrives.
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
-            let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
-            let (release, gate) = oneshot::channel();
-            let ancestry = DelayedAncestry {
-                parent: Some(parent),
-                gate: gate.shared(),
-            };
-            let mut request = Box::pin(mailbox.epoch_info(ancestry));
+            let parent = mocks::ready(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let mut request = Box::pin(mailbox.epoch_info(pending_blocks(&parent)));
 
+            // The request reaches the actor before any body is acquired.
             assert!(request.as_mut().now_or_never().is_none());
-            let Message::EpochInfo {
-                ancestry, response, ..
-            } = receiver
+            let Message::EpochInfo { response, .. } = receiver
                 .try_recv()
-                .expect("request should reach the actor without polling ancestry")
+                .expect("request must reach the actor without acquiring blocks")
             else {
                 panic!("expected epoch info request");
             };
-            drop(request);
 
+            // Cancelling the request closes the response the actor holds.
+            drop(request);
             assert!(response.is_closed());
-            assert!(release.send(()).is_ok());
-            drop(ancestry);
         });
     }
 }

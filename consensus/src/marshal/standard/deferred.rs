@@ -89,13 +89,13 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, History, Relay, Reporter,
     marshal::{
-        ancestry::Ancestry,
         application::{
             build::{self, Resolved},
             gates::{self, GateOutcome, Gates},
             relay,
             validation::{Stage, is_inferred_reproposal_at_certify},
         },
+        blocks::Ancestry,
         core::Mailbox,
         standard::{
             Standard,
@@ -176,7 +176,6 @@ where
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
-    ancestor_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
@@ -195,7 +194,6 @@ where
             gates: self.gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
-            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
         }
     }
 }
@@ -228,12 +226,6 @@ where
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
-        let ancestor_fetch_histogram = context.histogram(
-            "ancestor_fetch_duration",
-            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::LOCAL,
-        );
-        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
             context: Arc::new(context),
@@ -244,7 +236,6 @@ where
 
             build_duration,
             proposal_parent_fetch_duration,
-            ancestor_fetch_duration,
         }
     }
 
@@ -272,7 +263,6 @@ where
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let runtime_context = self
             .context
             .child("deferred_verify")
@@ -314,7 +304,6 @@ where
                         &mut application,
                         &marshal,
                         &mut tx,
-                        ancestor_fetch_duration,
                         history,
                     )
                     .await
@@ -475,14 +464,12 @@ where
     fn checks(
         &self,
         consensus_context: Context<B::Digest, S::PublicKey>,
-        _history: History<B::Digest>,
-    ) -> impl Future<Output = Resolved<B::Digest, Digested<B>, impl Ancestry<B>>> + Send + 'static
-    {
+        history: History<B::Digest>,
+    ) -> impl Future<Output = Resolved<B::Digest, Digested<B>, B>> + Send + 'static {
         let context = self.context.clone();
         let marshal = self.marshal.clone();
         let epocher = self.epocher.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let build_duration = self.build_duration.clone();
         async move {
             // The parent for any consensus context is in the same epoch: the
@@ -509,10 +496,6 @@ where
             // view zero is the epoch's genesis block, which needs no link check. The first
             // epoch's genesis has no context parent to match, and a later epoch's genesis
             // is the previous epoch's finalized boundary block.
-            //
-            // The coding variant needs no such check: it fetches each parent by the
-            // commitment in its child's consensus context, and its ancestry stream ends
-            // at a fetched parent that does not match the child's link.
             if parent_view != View::zero() && parent.parent() != parent.context().parent.1 {
                 debug!(
                     ?parent_commitment,
@@ -532,9 +515,12 @@ where
                 return Resolved::Reuse(parent.digest(), parent);
             }
 
-            let ancestor_stream =
-                marshal.ancestor_stream(context.clone(), [parent], ancestor_fetch_duration);
-            Resolved::Build(ancestor_stream, build_duration.timer(&*context), ())
+            let blocks = marshal.blocks_with_parent(parent.height(), parent_commitment, history);
+            Resolved::Build(
+                Ancestry { parent, blocks },
+                build_duration.timer(&*context),
+                (),
+            )
         }
     }
 }

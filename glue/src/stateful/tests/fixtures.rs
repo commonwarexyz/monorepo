@@ -1,11 +1,12 @@
 //! Shared marshal fixtures for stateful actor tests.
 
-use super::mocks::{TestBlock, TestScheme, TestVariant, digested};
+use super::mocks::{TestBlock, TestScheme, TestVariant, digested, digested_shared};
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Heightable as _, Reporter,
+    Block, Heightable as _, Reporter,
     marshal::{
         self, Update,
+        blocks::{Ancestry, Blocks},
         core::{Actor as MarshalActor, Floor, Mailbox as MarshalMailbox},
         resolver::handler,
     },
@@ -33,6 +34,19 @@ use commonware_utils::{
     vec::NonEmptyVec,
 };
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
+
+/// Pairs `parent` with a source through its height whose acquisitions never complete.
+pub(crate) fn ancestry<B: Block>(parent: &Arc<B>) -> Ancestry<B> {
+    Ancestry {
+        parent: digested_shared(parent),
+        blocks: pending_blocks(parent.height()),
+    }
+}
+
+/// Builds a source through `tip` whose acquisitions never complete.
+pub(crate) fn pending_blocks<B: Block>(tip: Height) -> Blocks<B> {
+    Blocks::new(tip, NZUsize!(1), |_| None, |_| futures::future::pending())
+}
 
 /// Acknowledges reports immediately or retains their receipts for ordered release.
 #[derive(Clone)]

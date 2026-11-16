@@ -23,7 +23,7 @@ use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
-        ancestry::Ancestry,
+        blocks::{Ancestry, Blocks},
         core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -38,7 +38,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
@@ -58,7 +58,6 @@ use commonware_storage::{
 use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
-use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
@@ -238,12 +237,11 @@ impl<E: Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
+        let parent = ancestry.parent;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
@@ -260,12 +258,12 @@ impl<E: Spawner + StorageContext> Application<E> for App {
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let height = ancestry.peek()?.height();
-        Some(Self::execute(height, batches).await)
+        Some(Self::execute(block.height(), batches).await)
     }
 
     async fn capture(

@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
+use crate::{CertifiableBlock, Epochable, Handoff, marshal::blocks::Ancestry};
 use commonware_cryptography::{Digested, Digestible};
 use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
@@ -109,7 +109,7 @@ where
     async fn prepare(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        ancestry: Ancestry<Self::Block>,
         input: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
         if self.handoff.is_wait() {
@@ -124,7 +124,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         let gate = self.proposal_gate.lock().take();
@@ -143,11 +143,10 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
     ) -> bool {
-        if let (Some(reject), Some(block)) = (self.reject, ancestry.peek())
-            && reject(block.inner())
-        {
+        if self.reject.is_some_and(|reject| reject(block.inner())) {
             return false;
         }
         self.verify_result
@@ -196,7 +195,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         None
@@ -205,7 +204,8 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _block: Digested<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
     ) -> bool {
         if let Some(started) = self.started.lock().take() {
             started.send_lossy(());
@@ -286,7 +286,7 @@ where
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         None
@@ -295,13 +295,11 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        _ancestry: Ancestry<Self::Block>,
     ) -> bool {
-        // Record that verification of the block at the head of the ancestry has started.
-        let digest = ancestry
-            .peek()
-            .expect("ancestry must start at the block under verification")
-            .digest();
+        // Record that verification of the block has started.
+        let digest = block.digest();
         self.observed.lock().push(Verification::Started(digest));
 
         // Never resolve. The guard records the cancellation of this digest when it is dropped,

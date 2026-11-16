@@ -177,6 +177,19 @@
 //! recommended for applications that support state sync and do not require full block history to
 //! participate in consensus._
 //!
+//! ## Application History
+//!
+//! Simplex supplies the commitments it holds on the selected parent branch separately from its
+//! encoded context. Calls that build or verify a block receive a [`blocks::Ancestry`] holding the
+//! parent block and a [`blocks::Blocks`] over the selected branch ending at it. Verification also
+//! receives the candidate. Applications select the history they need from the [`blocks::Blocks`],
+//! and selected ranges yield bodies in increasing height order.
+//!
+//! Below the supplied commitments, ranges read canonical finalized history when the commitments
+//! are anchored. Otherwise they discover older commitments by following parent links through
+//! block bodies. Range handles share commitment metadata. Active ranges bound body retention and
+//! release unused demand when dropped, and discovery retains at most one range window of bodies.
+//!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
@@ -197,7 +210,6 @@ pub use config::{Config, Start};
 mod limits;
 pub use limits::max_payload_size;
 
-pub mod ancestry;
 pub mod blocks;
 pub mod core;
 pub mod resolver;
