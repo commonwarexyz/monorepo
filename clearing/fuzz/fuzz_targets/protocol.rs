@@ -4,12 +4,22 @@
 //!
 //! A plan drives the five roles of `commonware_clearing::bajillion` through whole epochs. Users
 //! deposit and queue forced withdrawals on the ledger, pay each other through the operator with
-//! requests, acknowledgements and receipts, and ask for soft withdrawals. The operator assembles
-//! each close, a validator checks it, settles it on its balances database and payout log and
-//! applies it once posted, a committee certifies its summary, and the ledger posts it. Receivers
-//! audit every post and challenge omissions, accounts withdraw posted payouts, and after a halt
-//! they claim. Each action is honest or adversarial: forged, replayed, reordered, stale-epoch,
-//! wrong-signer, tampered-amount, over-limit, mutated or arbitrary.
+//! requests, acknowledgements and receipts, and ask for soft withdrawals. Senders and the operator
+//! keep separate records, and an acknowledgement can be lost, arrive late, or arrive after a post
+//! resolved its request. The operator cuts each epoch, releasing its close and opening the next
+//! epoch, and keeps admitting while the close awaits its post. A validator later checks the close
+//! against the ledger's queues as they then stand, settles it on its balances database and payout
+//! log and applies it once posted, possibly crashing mid-apply and recovering from what it
+//! persisted. A committee certifies the summary and the ledger posts it. Receivers audit every
+//! post and challenge omissions, senders resolve their requests against it, accounts withdraw
+//! posted payouts, and after a halt they claim. Each action is honest or adversarial: forged,
+//! replayed, reordered, stale-epoch, wrong-signer, tampered-amount, over-limit, mutated or
+//! arbitrary.
+//!
+//! The ledger is a model of the chain contract that runs the crate's checks for L1 to L3, L5 to L9
+//! and L11. Authenticating the caller of a forced withdrawal (L4) and fixing the destination of a
+//! transfer (L10) belong to the contract alone, since the crate supplies no check for either, so
+//! this target does not cover them.
 //!
 //! After every action the harness checks these invariants against a model that sums balances,
 //! payouts and custody with exact arithmetic:
@@ -18,15 +28,19 @@
 //!   the posted balances not yet claimed, the deposits queued or claimable, and the posted payouts
 //!   not yet withdrawn.
 //! - I2 agreement: the validator's balances database, the operator's balances and the model hold
-//!   the same balance for every account, and both databases sit at the roots of the last post.
+//!   the same balance for every account, both databases sit at the roots of the last post, and a
+//!   sender with nothing in flight records what the operator recorded for it.
 //! - I3 settlement: a close settles as the model's per-account sums say, each payout the lesser of
 //!   the requests and the settled balance, and is refused with the model's `FlowError` when a
-//!   balance would leave the amount range.
+//!   balance would leave the amount range. A settled proposal, applied, holds the model's balances
+//!   and appends the model's payouts and commit to the payout log, and a close cut before its post
+//!   leaves every balance at or above what the next epoch admitted against it.
 //! - I4 no double spend: a payout index, a balance claim and a claimable deposit pay out at most
 //!   once, and a replay is refused as already paid.
-//! - I5 admission: `Request::verify` and `Verified::admit` admit, retry or refuse each request as
-//!   the model's record of its sender predicts, a retry pays nothing twice, and acknowledgements
-//!   and receipts verify exactly for countersigned states.
+//! - I5 admission: `Request::verify` and `Verified::admit` admit, retry or refuse each request, as
+//!   sent or mutated, in each epoch it can name, as the operator's records predict. A retry pays
+//!   nothing twice, receipts are issued for exactly the receivers of a countersigned batch, and
+//!   acknowledgements and receipts verify exactly for countersigned states.
 //! - I6 checking: `Close::check` accepts exactly the closes the model accepts and refuses the
 //!   others with the first `CheckError` in the documented order.
 //! - I7 posting: every certified honest summary verifies and chains to the last post with the
@@ -35,12 +49,16 @@
 //! - I8 monotonicity: posted epochs advance by one per post and never after a halt, the payout log
 //!   and the paid indices only grow, and a halt is permanent.
 //! - I9 receipts and challenges: an honest post credits every receiver at least its largest
-//!   receipt, a post that omits a countersigned payment is challenged and halts the ledger, and
-//!   tampered or stale challenges are refused with the documented `ChallengeError`.
-//! - I10 atomicity: a refused action leaves the ledger, the operator, the model and both database
-//!   roots unchanged.
+//!   receipt and settles exactly the map each sender recorded or had pending, a post that omits a
+//!   countersigned payment is challenged and halts the ledger, and tampered or stale challenges
+//!   are refused with the documented `ChallengeError`.
+//! - I10 atomicity: a refused action leaves the ledger, the operator, the senders, the model and
+//!   both database roots unchanged.
 //! - I11 checkpoints: settling and applying refuse databases off the parent's roots and proposals
-//!   that did not post, and a restarted validator reopens at the last post.
+//!   that did not post, and a validator that restarts or crashes mid-apply recovers the last post
+//!   from its databases and the summaries, closes and queue prefixes it persisted (V4) alone. The
+//!   crate leaves how those records are stored to the deployment, so the harness holds them as
+//!   durable outside the runtime, and crashes reach only the two databases.
 //! - I12 wire: every honest message round-trips at its stated size under the deployment's limits,
 //!   malformed encodings are refused, and arbitrary or mutated messages verify only as what the
 //!   model holds.
@@ -61,7 +79,11 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic::{self, FaultConfig},
+};
 use commonware_storage::{
     bmt::Proof,
     index::unordered::Index,
@@ -70,12 +92,15 @@ use commonware_storage::{
     qmdb::{self, current::unordered::fixed, keyless},
     translator::EightCap,
 };
-use commonware_utils::{Entropy, FuzzRng, NZU16, NZU64, NZUsize, iter::NonEmpty, sequence::U64};
+use commonware_utils::{
+    Entropy, FuzzRng, NZU16, NZU64, NZUsize, Probability, iter::NonEmpty, sequence::U64,
+};
 use libfuzzer_sys::fuzz_target;
 use rand_core::Rng as _;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Debug,
+    num::NonZeroU64,
 };
 
 /// Mock certificates over summaries from at least `2f + 1` of `3f + 1` validators. Signatures and
@@ -116,6 +141,10 @@ type TestBalances = Balances<
 >;
 type TestLog = Payouts<deterministic::Context, PublicKey, Sha256, Sequential, u64>;
 type Validator = scheme::Scheme<PublicKey>;
+
+/// The model's settlement of a close: each user's balance after it, the payouts in account order,
+/// and the users it touches in account order.
+type Effects = (Vec<u64>, Vec<(usize, u64)>, Vec<usize>);
 
 /// The deployment namespace every signature is made in.
 const NAMESPACE: &[u8] = b"_COMMONWARE_CLEARING_BAJILLION_FUZZ";
@@ -160,7 +189,7 @@ const MAX_PROOFS: usize = 8;
 const DEPOSIT_BASE: u64 = 1_000;
 
 /// Bytes of the stream a plan is sampled from, several times the largest plan (under a kilobyte),
-/// of the input's head that seeds the stream, and of the stream's tail that seeds the runtime.
+/// of each of the two seeds the input's head holds, and of the runtime's entropy.
 const STREAM_BYTES: usize = 1 << 12;
 const SEED_BYTES: usize = 8;
 const ENTROPY_BYTES: usize = 32;
@@ -233,6 +262,10 @@ enum PayAttack {
     External,
     /// The sender signs its states on a root other than its posted row.
     WrongPrevious,
+    /// The operator's acknowledgement of a request, sent or sent again, is lost on the way, so the
+    /// sender keeps the request pending. The acknowledgement reaches the sender at its next
+    /// payment unless it restarts first, possibly after a post resolved the request.
+    LoseAck,
 }
 
 /// A soft withdrawal the operator may receive.
@@ -287,6 +320,9 @@ enum CloseAttack {
     Omit(u8),
     /// Validators decode the close under limits below its size.
     Limits(u8),
+    /// The validator crashes while applying the post: its payout log cannot be made durable, it
+    /// stops before the balances commit, or the balances cannot commit.
+    Crash(u8),
 }
 
 /// A withdrawal of a posted payout that deviates from the proof a validator serves.
@@ -431,13 +467,27 @@ enum Op {
         tag: u8,
         attack: Option<WithdrawAttack>,
     },
-    /// The operator closes the epoch, a validator checks and settles it, the committee certifies
-    /// it, the ledger posts it, the validator applies it, and receivers audit it.
+    /// The operator cuts the epoch the ledger expects: it fixes the epoch's rows, its soft
+    /// withdrawals and how many queued requests the close processes, releases the close, and opens
+    /// the next epoch, which it admits in against what the close may take. A faulty operator omits
+    /// a countersigned row or settles an earlier map of it.
+    Cut {
+        deposits: u8,
+        forced: u8,
+        omit: Option<u8>,
+    },
+    /// The operator cuts the epoch unless it has, then a validator checks the released close
+    /// against the queues as they stand and settles it, the committee certifies it, the ledger
+    /// posts it, the operator applies its flows, and the validator applies it. Receivers then
+    /// audit and senders resolve every post not yet audited, unless `defer` leaves them for later.
     Close {
         deposits: u8,
         forced: u8,
         attack: Option<CloseAttack>,
+        defer: bool,
     },
+    /// Receivers audit, and senders resolve, the oldest post not yet audited.
+    Audit,
     /// An account withdraws a posted payout with a validator's proof.
     Payout {
         pick: u8,
@@ -452,7 +502,8 @@ enum Op {
         user: u8,
         attack: Option<ClaimAttack>,
     },
-    /// The validator restarts and reopens its databases.
+    /// The validator restarts and recovers its databases from what it persisted, and senders
+    /// restart, losing the acknowledgements in flight to them.
     Restart,
     /// An arbitrary value reaches the role that consumes its type.
     Garbage { kind: Garbage },
@@ -486,39 +537,51 @@ impl<'a> Arbitrary<'a> for Op {
                 user: u.arbitrary()?,
                 amount: u.arbitrary()?,
             },
-            20..=41 => Self::Pay {
+            20..=39 => Self::Pay {
                 sender: u.arbitrary()?,
                 batch: (0..u.int_in_range(1..=MAX_BATCH)?)
                     .map(|_| Ok((u.arbitrary()?, u.arbitrary()?)))
                     .collect::<arbitrary::Result<_>>()?,
                 attack: attack(u)?,
             },
-            42..=47 => Self::Withdraw {
+            40..=45 => Self::Withdraw {
                 user: u.arbitrary()?,
                 amount: u.arbitrary()?,
                 tag: u.arbitrary()?,
                 attack: attack(u)?,
             },
-            48..=67 => Self::Close {
+            // An omission halts the ledger at the post, so it is drawn rarely.
+            46..=51 => Self::Cut {
+                deposits: u.arbitrary()?,
+                forced: u.arbitrary()?,
+                omit: if u.ratio(1u8, 16)? {
+                    Some(u.arbitrary()?)
+                } else {
+                    None
+                },
+            },
+            52..=67 => Self::Close {
                 deposits: u.arbitrary()?,
                 forced: u.arbitrary()?,
                 attack: attack(u)?,
+                defer: u.ratio(1u8, 4)?,
             },
-            68..=75 => Self::Payout {
+            68..=69 => Self::Audit,
+            70..=76 => Self::Payout {
                 pick: u.arbitrary()?,
                 attack: attack(u)?,
             },
-            76..=79 => Self::Challenge {
+            77..=80 => Self::Challenge {
                 pick: u.arbitrary()?,
                 attack: u.arbitrary()?,
             },
-            80 => Self::Halt,
-            81..=85 => Self::Claim {
+            81 => Self::Halt,
+            82..=86 => Self::Claim {
                 user: u.arbitrary()?,
                 attack: attack(u)?,
             },
-            86..=87 => Self::Restart,
-            88..=93 => Self::Garbage {
+            87..=88 => Self::Restart,
+            89..=93 => Self::Garbage {
                 kind: u.arbitrary()?,
             },
             _ => Self::Mutate {
@@ -546,20 +609,27 @@ impl<'a> Arbitrary<'a> for Plan {
         // therefore seeds a fixed-size stream of [`FuzzRng`] output that the rest of the input
         // overwrites from its start, so every input, even an empty one, samples a whole plan, and
         // a byte mutated past the head changes only what is sampled from it.
-        let seed = u.bytes(u.len().min(SEED_BYTES))?.to_vec();
+        //
+        // The head's even bytes seed the plan's stream and its odd bytes seed the runtime's
+        // entropy, which orders accounts and draws keys, shuffles and signers. A mutated byte of
+        // even the shortest input therefore changes the actions or their schedule, never both.
+        let head = u.bytes(u.len().min(2 * SEED_BYTES))?;
+        let seed: Vec<_> = head.iter().step_by(2).copied().collect();
+        let schedule: Vec<_> = head.iter().skip(1).step_by(2).copied().collect();
         let mut stream = vec![0; STREAM_BYTES.max(u.len())];
         FuzzRng::new(seed).fill_bytes(&mut stream);
         let literal = u.bytes(u.len())?;
         stream[..literal.len()].copy_from_slice(literal);
-        let (plan, entropy) = stream.split_at(stream.len() - ENTROPY_BYTES);
-        let u = &mut Unstructured::new(plan);
+        let mut entropy = [0; ENTROPY_BYTES];
+        FuzzRng::new(schedule).fill_bytes(&mut entropy);
+        let u = &mut Unstructured::new(&stream);
 
         Ok(Self {
             users: u.int_in_range(MIN_USERS..=MAX_USERS)?,
             ops: (0..u.int_in_range(1..=MAX_OPS)?)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?,
-            entropy: Unstructured::new(entropy).arbitrary()?,
+            entropy: Unstructured::new(&entropy).arbitrary()?,
         })
     }
 }
@@ -625,6 +695,16 @@ fn close_bytes(
     UInt(forced).write(&mut bytes);
     signature.write(&mut bytes);
     bytes
+}
+
+/// Returns whether the close of `epoch` posted while the ledger expects the close of `expected`.
+const fn named_posted(epoch: Epoch, expected: Epoch) -> bool {
+    epoch != 0 && epoch < expected
+}
+
+/// Returns the exact total of a payment map.
+fn total(map: &Map) -> u128 {
+    map.values().map(|amount| u128::from(*amount)).sum()
 }
 
 /// Returns the empty payment map's root.
@@ -746,30 +826,116 @@ struct Store {
 impl Store {
     /// Opens both databases, the payout log at `size` operations if given (V2).
     async fn open(context: &deterministic::Context, size: Option<Location<mmr::Family>>) -> Self {
-        let (merkle, log) = journals("balances");
+        Self {
+            balances: Self::open_balances(context, "balances").await,
+            log: Self::open_log(context, "payouts", size).await,
+        }
+    }
+
+    /// Opens the balances database in partitions named after `name` at its last commit.
+    async fn open_balances(context: &deterministic::Context, name: &'static str) -> TestBalances {
+        let (merkle, log) = journals(name);
         let config = fixed::Config {
             merkle,
             log,
-            grafted_metadata_partition: "balances-grafted".into(),
+            grafted_metadata_partition: format!("{name}-grafted"),
             translator: EightCap,
             init_cache: None,
             init_buffer: NZUsize!(1024),
             init_concurrency: (),
         };
-        let balances = TestBalances::init(context.child("balances"), config, None)
+        TestBalances::init(context.child(name), config, None)
             .await
-            .expect("the balances database must open");
-        let (merkle, log) = journals("payouts");
+            .expect("the balances database must open")
+    }
+
+    /// Opens the payout log in partitions named after `name`, rewound to `size` operations if
+    /// given (V2).
+    async fn open_log(
+        context: &deterministic::Context,
+        name: &'static str,
+        size: Option<Location<mmr::Family>>,
+    ) -> TestLog {
+        let (merkle, log) = journals(name);
         let config = keyless::fixed::Config { merkle, log };
-        let log = TestLog::init(context.child("payouts"), config, size)
+        TestLog::init(context.child(name), config, size)
             .await
-            .expect("the payout log must open");
-        Self { balances, log }
+            .expect("the payout log must open")
     }
 
     /// Returns the roots of the balances database and the payout log.
     fn roots(&self) -> (Digest, Digest) {
         (self.balances.root(), self.log.root())
+    }
+}
+
+/// The model's own balances database and payout log. They receive, for each posted close, exactly
+/// the writes the documented settlement makes from the model's balances and payouts: a put of
+/// each balance that changes, a delete of each that becomes zero, and a commit with metadata zero,
+/// and the payouts in account order with a commit keeping the inactivity floor at zero. Nothing
+/// the crate computes reaches them, so their roots check a proposal's roots independently.
+struct Shadow {
+    store: Option<Store>,
+}
+
+impl Shadow {
+    async fn open(context: &deterministic::Context) -> Self {
+        Self {
+            store: Some(Store {
+                balances: Store::open_balances(context, "shadow_balances").await,
+                log: Store::open_log(context, "shadow_payouts", None).await,
+            }),
+        }
+    }
+
+    /// Returns the roots of the shadow's databases.
+    fn roots(&self) -> (Digest, Digest) {
+        self.store.as_ref().expect("open").roots()
+    }
+
+    /// Returns the roots the shadow reaches with the batches of a close that moves the balances
+    /// from `before` to `after` and pays `payouts`, applying them durably if `apply`.
+    async fn settle(
+        &mut self,
+        accounts: &[PublicKey],
+        before: &[u64],
+        after: &[u64],
+        payouts: &[(usize, u64)],
+        apply: bool,
+    ) -> (Digest, Digest) {
+        let Store { balances, log } = self.store.as_ref().expect("open");
+        let mut batch = balances.new_batch().with_metadata(0u64);
+        for (account, (old, new)) in accounts.iter().zip(before.iter().zip(after)) {
+            if old != new {
+                batch = batch.write(account.clone(), (*new != 0).then_some(*new));
+            }
+        }
+        let batch = batch
+            .merkleize(balances)
+            .await
+            .expect("the shadow balances merkleize");
+        let mut appends = log.new_batch().with_inactivity_floor(Location::new(0));
+        for (user, amount) in payouts {
+            appends = appends.append(Payout {
+                account: accounts[*user].clone(),
+                amount: *amount,
+            });
+        }
+        let appends = appends
+            .merkleize(log)
+            .await
+            .expect("the shadow log merkleizes");
+        let roots = (batch.root(), appends.root());
+        if apply {
+            let Store { balances, log } = self.store.take().expect("open");
+            let balances = balances.apply_batch(batch).await.expect("applies");
+            let balances = balances.commit().await.expect("commits");
+            let log = log.apply_batch(appends).await.expect("applies");
+            let log = log.commit().await.expect("commits");
+            self.store = Some(Store { balances, log });
+            assert_eq!(self.roots(), roots);
+        }
+        roots
     }
 }
 
@@ -795,8 +961,10 @@ enum Refusal {
     Challenge(ChallengeError),
 }
 
-/// A ledger following L1 to L11 with the crate's checks. It tracks paid payouts as a set of log
-/// indices covering every commit and every payout paid.
+/// A ledger following L1 to L3, L5 to L9 and L11 with the crate's checks. It tracks paid payouts
+/// as a set of log indices covering every commit and every payout paid. It trusts every caller,
+/// since authenticating forced withdrawals (L4) and fixing transfer destinations (L10) are the
+/// chain contract's own checks.
 #[derive(Clone, Debug, PartialEq)]
 struct Ledger {
     /// Digest of the last posted summary.
@@ -876,7 +1044,8 @@ impl Ledger {
         Ok(())
     }
 
-    /// Queues a forced withdrawal its account requested (L2, L4).
+    /// Queues a forced withdrawal (L2). Authenticating the account that asks for it (L4) is the
+    /// chain contract's check, so every caller is trusted.
     fn force(&mut self, account: PublicKey, amount: u64) -> Result<(), Refusal> {
         if self.halt.is_some() {
             return Err(Refusal::Halted);
@@ -1033,7 +1202,7 @@ struct Model {
     forced_hash: Digest,
 }
 
-/// A sender's latest countersigned state in the epoch, as the operator and the sender record it.
+/// A sender's latest countersigned state in an epoch, as the operator records it (O7).
 #[derive(Clone, Debug, PartialEq)]
 struct Admitted {
     state: TestState,
@@ -1051,31 +1220,111 @@ struct Admitted {
 /// The operator's records (O7).
 #[derive(Clone, Debug, PartialEq)]
 struct Desk {
+    /// The epoch the operator admits in, the one the ledger expects a close of or the one after
+    /// it once that close is cut.
+    epoch: Epoch,
     /// Balance of each user as of the last close the operator applied.
     balances: Vec<u64>,
-    /// Root of each user's row in the last posted close.
+    /// Root of each user's row in the close of the epoch before `epoch` (O4).
     previous: Vec<Option<Digest>>,
-    /// Each sender's latest admission in the epoch.
+    /// Each sender's latest admission in `epoch`.
     admitted: BTreeMap<usize, Admitted>,
-    /// Honored soft withdrawals of the epoch, by user, amount and tag.
+    /// Honored soft withdrawals of `epoch`, by user, amount and tag.
     withdrawals: BTreeMap<(usize, u64, u64), TestWithdrawal>,
-    /// Senders a faulty operator admitted beyond their balance.
+    /// Senders a faulty operator admitted beyond their balance in `epoch`.
     overdrawn: BTreeSet<usize>,
+    /// The close of the epoch before `epoch`, released and not yet posted.
+    closing: Option<Closing>,
 }
 
-/// A request signed but not yet delivered, with the states its sender signed.
+/// A close the operator cut and released, with the records it was cut from (O7).
+#[derive(Clone, Debug, PartialEq)]
+struct Closing {
+    /// The queues as the ledger held them at the cut, and how many requests the close processes.
+    queue: TestQueue,
+    deposits: u64,
+    forced: u64,
+    /// Root of each user's row in the close of the epoch before.
+    previous: Vec<Option<Digest>>,
+    /// The epoch's admissions, honored soft withdrawals and overdrawn senders.
+    admitted: BTreeMap<usize, Admitted>,
+    withdrawals: BTreeMap<(usize, u64, u64), TestWithdrawal>,
+    overdrawn: BTreeSet<usize>,
+    /// The released close, the flows assembly returned, and the map it settles for each sender.
+    close: TestClose,
+    flows: TestFlows,
+    rows: BTreeMap<usize, Map>,
+    /// Senders whose countersigned state the close does not settle.
+    omitted: BTreeSet<usize>,
+    /// What the close may take from each user: its payments, and the soft and forced withdrawals
+    /// it processes (O3).
+    take: Vec<u128>,
+}
+
+/// A state a sender recorded as countersigned (S2, S3).
+#[derive(Clone, Debug, PartialEq)]
+struct Record {
+    state: TestState,
+    payments: TestAmounts,
+    signature: Signature,
+    acknowledgement: Signature,
+    /// The model of `payments`.
+    map: Map,
+}
+
+/// A sender's records (S1 to S5).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Book {
+    /// The latest countersigned state of each epoch whose post the sender has not resolved.
+    records: BTreeMap<Epoch, Record>,
+    /// The last epoch whose post the sender resolved, and the root of its row there.
+    resolved: Epoch,
+    row: Option<Digest>,
+    /// The request persisted and sent, or held back, but neither acknowledged nor resolved.
+    pending: Option<Pending>,
+    /// An acknowledgement the operator released that has not reached the sender. Nothing
+    /// persists it, so a restart loses it.
+    late: Option<(TestState, Signature)>,
+}
+
+/// A request its sender persisted with its states before sending it (S3).
 #[derive(Clone, Debug, PartialEq)]
 struct Pending {
     request: TestRequest,
     signed: Signed,
+    /// The map the state of the request's epoch commits to.
+    payments: TestAmounts,
+    /// How many times the request was delivered (S4).
+    sent: usize,
 }
 
-/// The states whose signatures a request carries, and whether its sender made them.
+/// The states a request asks for and the sender's own signatures over them.
 #[derive(Clone, Debug, PartialEq)]
 struct Signed {
     current: TestState,
     next: TestState,
-    by_sender: bool,
+    signatures: Signatures<PublicKey>,
+}
+
+impl Signed {
+    /// Returns the states `request` names, with its signatures as the sender's.
+    fn of(request: &TestRequest) -> Self {
+        Self {
+            current: State {
+                epoch: request.epoch,
+                account: request.account.clone(),
+                payments: request.payments,
+                previous: request.previous,
+            },
+            next: State {
+                epoch: request.epoch + 1,
+                account: request.account.clone(),
+                payments: request.batch.root::<Sha256>(),
+                previous: request.latest,
+            },
+            signatures: request.signatures.clone(),
+        }
+    }
 }
 
 /// What the model expects the operator to do with a request.
@@ -1095,10 +1344,17 @@ struct Posted {
     certificate: U64,
     close: TestClose,
     queue: TestQueue,
+    /// The queue prefix the close processes, with each required count its length (V4).
+    prefix: TestQueue,
     parent: TestCheckpoint,
     checkpoint: TestCheckpoint,
     /// The payment map of each sender with a row.
     rows: BTreeMap<usize, Map>,
+    /// Senders whose countersigned state the close does not settle.
+    omitted: BTreeSet<usize>,
+    /// The latest state the operator countersigned in the epoch for each omitted sender whose
+    /// row does not settle its map.
+    unsettled: BTreeMap<usize, TestState>,
 }
 
 /// Everything a refused action must leave unchanged.
@@ -1107,7 +1363,7 @@ struct Snapshot {
     ledger: Ledger,
     model: Model,
     desk: Desk,
-    pending: Vec<Option<Pending>>,
+    books: Vec<Book>,
     receipts: usize,
     roots: (Digest, Digest),
     parent: TestSummary,
@@ -1121,8 +1377,29 @@ struct Rows {
     omitted: BTreeSet<usize>,
 }
 
+/// What outlives a crash of the process: the harness without its runtime and database handles,
+/// the actions left, and the state the action that crashed is checked against.
+struct Crashed {
+    harness: Harness,
+    ops: VecDeque<Op>,
+    before: Before,
+}
+
+/// What an action's I8 checks compare against.
+struct Before {
+    epoch: Epoch,
+    log: usize,
+    paid: BTreeSet<u64>,
+    halt: Option<Halt>,
+}
+
 struct Harness {
-    context: deterministic::Context,
+    /// The runtime's context, gone while the process is down after a crash.
+    context: Option<deterministic::Context>,
+    /// Whether the process crashed during the last action.
+    crashed: bool,
+    /// How many payout log entries were checked against the model.
+    verified: usize,
     namespace: Namespace,
     keys: Vec<PrivateKey>,
     accounts: Vec<PublicKey>,
@@ -1133,12 +1410,13 @@ struct Harness {
     schemes: Vec<Validator>,
     verifier: Validator,
     store: Option<Store>,
+    shadow: Option<Shadow>,
     /// Checkpoint of the last post, which the validator checks the next close against (V2).
     parent: TestCheckpoint,
     ledger: Ledger,
     model: Model,
     desk: Desk,
-    pending: Vec<Option<Pending>>,
+    books: Vec<Book>,
     /// The largest receipt each receiver holds per epoch and sender (R2).
     receipts: BTreeMap<(Epoch, usize, usize), TestReceipt>,
     history: Vec<Posted>,
@@ -1146,6 +1424,9 @@ struct Harness {
     stale: Option<TestChecked>,
     /// Payout proofs served earlier, with the epoch whose root they are under.
     proofs: VecDeque<(Epoch, TestPayoutProof)>,
+    /// Posts receivers have not audited and senders have not resolved, oldest first, as indices
+    /// into `history`.
+    unaudited: VecDeque<usize>,
 }
 
 impl Harness {
@@ -1160,11 +1441,13 @@ impl Harness {
         let rogue = PrivateKey::from_seed(context.next_u64());
         let fixture = scheme::fixture(&mut context, NAMESPACE, VALIDATORS);
         let store = Store::open(&context, None).await;
+        let shadow = Shadow::open(&context).await;
 
         // The genesis summary commits to the empty databases (L1, V2).
         let genesis = TestSummary::genesis::<PublicKey, u64>(store.balances.root());
         assert_eq!(genesis.payouts.root, store.log.root());
         assert_eq!(genesis.payouts.size, store.log.bounds().end);
+        assert_eq!(shadow.roots(), store.roots());
         assert_eq!(
             genesis.matrix,
             Matrix::<PublicKey, Sha256, u64>::empty().root()
@@ -1187,18 +1470,24 @@ impl Harness {
                 forced_hash: Digest::EMPTY,
             },
             desk: Desk {
+                epoch: 1,
                 balances: vec![0; users],
                 previous: vec![None; users],
                 admitted: BTreeMap::new(),
                 withdrawals: BTreeMap::new(),
                 overdrawn: BTreeSet::new(),
+                closing: None,
             },
-            pending: vec![None; users],
+            books: vec![Book::default(); users],
             receipts: BTreeMap::new(),
             history: Vec::new(),
             stale: None,
             proofs: VecDeque::new(),
-            context,
+            unaudited: VecDeque::new(),
+            context: Some(context),
+            crashed: false,
+            verified: 0,
+            shadow: Some(shadow),
             keys,
             accounts,
             order,
@@ -1213,6 +1502,16 @@ impl Harness {
 
     fn users(&self) -> usize {
         self.accounts.len()
+    }
+
+    /// Returns the runtime's context.
+    fn runtime(&self) -> &deterministic::Context {
+        self.context.as_ref().expect("the process is up")
+    }
+
+    /// Returns the runtime's randomness.
+    fn rng(&mut self) -> &mut deterministic::Context {
+        self.context.as_mut().expect("the process is up")
     }
 
     fn user(&self, choice: u8) -> usize {
@@ -1261,19 +1560,70 @@ impl Harness {
             .collect()
     }
 
-    /// Returns what `user` can still pay in the epoch: its balance less its countersigned map,
-    /// which a faulty operator may have let exceed it.
-    fn live(&self, user: usize) -> u64 {
-        let paid: u128 = self.desk.admitted.get(&user).map_or(0, |latest| {
-            latest.map.values().map(|amount| u128::from(*amount)).sum()
-        });
-        u64::try_from(u128::from(self.desk.balances[user]).saturating_sub(paid))
-            .expect("at most the balance")
+    /// Returns what `user` paid in the open epoch, its countersigned map's total.
+    fn paid(&self, user: usize) -> u128 {
+        self.desk
+            .admitted
+            .get(&user)
+            .map_or(0, |latest| total(&latest.map))
     }
 
-    /// Returns the root `user`'s next state builds on: its row in the last post, or the empty map.
+    /// Returns what `user` can still pay in the open epoch: its balance as of the last close
+    /// applied, less what a released close may take from it and what it paid (O3). A faulty
+    /// operator may have let the payments exceed it.
+    fn live(&self, user: usize) -> u64 {
+        let taken = self
+            .desk
+            .closing
+            .as_ref()
+            .map_or(0, |closing| closing.take[user]);
+        let floor = u128::from(self.desk.balances[user]).saturating_sub(taken);
+        u64::try_from(floor.saturating_sub(self.paid(user))).expect("at most the balance")
+    }
+
+    /// Returns the root the operator admits `user`'s states of the open epoch on: its row in the
+    /// close of the epoch before, or the empty map (O4).
     fn previous(&self, user: usize) -> Digest {
         self.desk.previous[user].unwrap_or_else(empty_root)
+    }
+
+    /// Returns the operator's record of `user` and the root it admits on for `epoch`, while the
+    /// operator can still admit or check states of it. A request names its own epoch or the next,
+    /// and a state of the epoch after the open one builds on the row the honest close of the open
+    /// one will hold.
+    fn records(&self, user: usize, epoch: Epoch) -> Option<(Option<&Admitted>, Digest)> {
+        let desk = &self.desk;
+        if epoch == desk.epoch {
+            return Some((desk.admitted.get(&user), self.previous(user)));
+        }
+        if epoch == desk.epoch + 1 {
+            let root = desk
+                .admitted
+                .get(&user)
+                .map_or_else(empty_root, |latest| latest.state.payments);
+            return Some((None, root));
+        }
+        let closing = desk.closing.as_ref()?;
+        (epoch + 1 == desk.epoch).then(|| {
+            let previous = closing.previous[user].unwrap_or_else(empty_root);
+            (closing.admitted.get(&user), previous)
+        })
+    }
+
+    /// Returns the root `user` builds its states of `epoch` on (S1): that of its latest
+    /// countersigned state of the epoch, else the row the post of the epoch before proved, else
+    /// the root of its latest countersigned map of the epoch before, else the empty map's.
+    fn builds_on(&self, user: usize, epoch: Epoch) -> Digest {
+        let book = &self.books[user];
+        if let Some(record) = book.records.get(&epoch) {
+            return record.state.previous;
+        }
+        if book.resolved + 1 == epoch {
+            return book.row.unwrap_or_else(empty_root);
+        }
+        book.records
+            .get(&(epoch - 1))
+            .map_or_else(empty_root, |record| record.state.payments)
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -1281,7 +1631,7 @@ impl Harness {
             ledger: self.ledger.clone(),
             model: self.model.clone(),
             desk: self.desk.clone(),
-            pending: self.pending.clone(),
+            books: self.books.clone(),
             receipts: self.receipts.len(),
             roots: self.store().roots(),
             parent: self.parent.summary,
@@ -1293,15 +1643,31 @@ impl Harness {
         (user + 1) % self.users()
     }
 
-    async fn run(mut self, ops: Vec<Op>) {
-        self.check().await;
-        for op in ops {
-            let (epoch, log, paid, halt) = (
-                self.ledger.epoch(),
-                self.model.log.len(),
-                self.ledger.paid.clone(),
-                self.ledger.halt,
-            );
+    /// Comes back up after a crash with a new runtime, reopens the shadow and recovers the
+    /// validator from what it persisted (V2), finishes checking the action that crashed, and runs
+    /// the rest of the plan.
+    async fn resume(context: deterministic::Context, crashed: Crashed) -> Option<Crashed> {
+        let Crashed {
+            mut harness,
+            ops,
+            before,
+        } = crashed;
+        harness.shadow = Some(Shadow::open(&context).await);
+        harness.context = Some(context);
+        harness.recover().await;
+        harness.after(before).await;
+        harness.run(ops).await
+    }
+
+    /// Runs `ops`, and returns what outlives the process if one of them crashes it.
+    async fn run(mut self, mut ops: VecDeque<Op>) -> Option<Crashed> {
+        while let Some(op) = ops.pop_front() {
+            let before = Before {
+                epoch: self.ledger.epoch(),
+                log: self.model.log.len(),
+                paid: self.ledger.paid.clone(),
+                halt: self.ledger.halt,
+            };
             match op {
                 Op::Deposit { user, amount } => self.deposit(user, amount),
                 Op::Force { user, amount } => self.force(user, amount),
@@ -1316,11 +1682,27 @@ impl Harness {
                     tag,
                     attack,
                 } => self.withdraw(user, amount, tag, attack),
+                Op::Cut {
+                    deposits,
+                    forced,
+                    omit,
+                } => self.cut(deposits, forced, omit).await,
                 Op::Close {
                     deposits,
                     forced,
                     attack,
-                } => self.close(deposits, forced, attack).await,
+                    defer,
+                } => {
+                    self.close(deposits, forced, attack).await;
+                    while !defer && !self.crashed && !self.unaudited.is_empty() {
+                        self.audit();
+                    }
+                }
+                Op::Audit => {
+                    if !self.unaudited.is_empty() {
+                        self.audit();
+                    }
+                }
                 Op::Payout { pick, attack } => self.payout(pick, attack).await,
                 Op::Challenge { pick, attack } => self.challenge(pick, attack),
                 Op::Halt => self.halt(),
@@ -1334,22 +1716,60 @@ impl Harness {
                 } => self.mutate(target, pick, &mutations).await,
             }
 
-            // I8: one post at most per action, none after a halt, and nothing paid is forgotten.
-            let posted = self.ledger.epoch() - epoch;
-            assert!(posted <= 1);
-            assert!(posted == 0 || halt.is_none());
-            assert_eq!(posted == 1, self.model.log.len() > log);
-            assert!(self.model.log.len() >= log);
-            assert!(self.ledger.paid.is_superset(&paid));
-            if halt.is_some() {
-                assert_eq!(self.ledger.halt, halt);
+            // A crash loses the runtime and every database handle, and nothing else the roles
+            // hold.
+            if self.crashed {
+                self.crashed = false;
+                self.store = None;
+                self.shadow = None;
+                self.context = None;
+                return Some(Crashed {
+                    harness: self,
+                    ops,
+                    before,
+                });
             }
-            self.check().await;
+            self.after(before).await;
         }
+
+        // I9: receivers audit, and senders resolve, every post still unaudited.
+        while !self.unaudited.is_empty() {
+            self.audit();
+        }
+        self.check().await;
 
         // The last checkpoint renders for triage.
         let rendered = format!("{:?}", self.parent);
         assert!(rendered.contains("Checkpoint"));
+        None
+    }
+
+    /// Checks an action against the state `before` it, then the invariants that hold after every
+    /// action.
+    async fn after(&mut self, before: Before) {
+        // I8: one post at most per action, none after a halt, and nothing paid is forgotten.
+        let posted = self.ledger.epoch() - before.epoch;
+        assert!(posted <= 1);
+        assert!(posted == 0 || before.halt.is_none());
+        assert_eq!(posted == 1, self.model.log.len() > before.log);
+        assert!(self.model.log.len() >= before.log);
+        assert!(self.ledger.paid.is_superset(&before.paid));
+        if before.halt.is_some() {
+            assert_eq!(self.ledger.halt, before.halt);
+        }
+
+        // I3: the payout log holds what the model logged since the last check, and what a
+        // recovery wrote again.
+        let start = self.verified;
+        Self::check_entries(
+            &self.store().log,
+            &self.accounts,
+            start,
+            &self.model.log[start..],
+        )
+        .await;
+        self.verified = self.model.log.len();
+        self.check().await;
     }
 
     /// Checks the invariants that hold after every action.
@@ -1417,6 +1837,32 @@ impl Harness {
             let expected = self.model.balances[user];
             assert_eq!(held, (expected != 0).then_some(expected));
         }
+
+        // I2: a sender with no request in flight records, for every epoch the operator still
+        // holds records of, the state and map the operator countersigned last. A state the
+        // released close does not settle is exempt: its acknowledgement may never have reached
+        // the sender, whose request then paid its batch in the next epoch instead (O6).
+        let closing = self.desk.closing.as_ref();
+        for (user, book) in self.books.iter().enumerate() {
+            if book.pending.is_some() || book.late.is_some() {
+                continue;
+            }
+            let mut epochs = vec![(self.desk.epoch, self.desk.admitted.get(&user))];
+            if let Some(closing) = closing {
+                let latest = closing.admitted.get(&user);
+                if latest.is_none_or(|latest| closing.rows.get(&user) == Some(&latest.map)) {
+                    epochs.push((self.desk.epoch - 1, latest));
+                }
+            }
+            for (epoch, latest) in epochs {
+                let operator = latest.map(|latest| (&latest.state, &latest.map));
+                let sender = book
+                    .records
+                    .get(&epoch)
+                    .map(|record| (&record.state, &record.map));
+                assert_eq!(sender, operator, "sender {user} disagrees in epoch {epoch}");
+            }
+        }
     }
 
     fn deposit(&mut self, user: u8, amount: Size) {
@@ -1464,17 +1910,18 @@ impl Harness {
         assert!(self.ledger.deposits.is_empty() && self.ledger.forced.is_empty());
     }
 
-    /// Returns the request `user` signs to pay `batch` on its latest countersigned state, with the
-    /// states it signed.
+    /// Returns the request `user` signs to pay `batch` in the open epoch on its own latest
+    /// countersigned state (S1), with the states it signed.
     fn sign_request(&self, user: usize, batch: &TestAmounts, external: bool) -> Pending {
-        let epoch = self.ledger.epoch();
-        let latest = self.desk.admitted.get(&user);
+        let epoch = self.desk.epoch;
+        let latest = self.books[user].records.get(&epoch);
+        let previous = self.builds_on(user, epoch);
         let states = TestRequest::states::<Sha256>(
             epoch,
             self.accounts[user].clone(),
             batch.clone(),
             latest.map(|latest| (&latest.state, &latest.payments)),
-            &self.previous(user),
+            &previous,
         )
         .expect("a payable batch derives its states");
         let request = states.sign(&self.keys[user], &self.namespace);
@@ -1491,7 +1938,7 @@ impl Harness {
         // the next epoch pays the batch alone on the latest map.
         let latest_root = latest.map_or_else(empty_root, |latest| latest.state.payments);
         assert_eq!(states.batch, *batch);
-        assert_eq!(states.current.previous, self.previous(user));
+        assert_eq!(states.current.previous, previous);
         assert_eq!(states.current.payments, states.payments.root::<Sha256>());
         assert_eq!(states.next.epoch, epoch + 1);
         assert_eq!(states.next.payments, batch.root::<Sha256>());
@@ -1519,7 +1966,12 @@ impl Harness {
                     previous,
                 )
             };
-            let elsewhere = states.current.payments;
+            // The new map's root, or a fixed one when the new map repeats the row it builds on.
+            let elsewhere = if states.current.payments == latest.state.previous {
+                Sha256::hash(&[b"elsewhere"])
+            } else {
+                states.current.payments
+            };
             assert!(matches!(
                 derive((&latest.state, &latest.payments), &elsewhere),
                 Err(RequestError::InvalidPrevious)
@@ -1529,23 +1981,33 @@ impl Harness {
                 ..latest.state.clone()
             };
             assert!(matches!(
-                derive((&holding, &latest.payments), &self.previous(user)),
+                derive((&holding, &latest.payments), &previous),
                 Err(RequestError::InvalidLatest)
             ));
         }
+        let signatures = request.signatures.clone();
         Pending {
             request,
             signed: Signed {
                 current: states.current,
                 next: states.next,
-                by_sender: true,
+                signatures,
             },
+            payments: states.payments,
+            sent: 0,
         }
     }
 
-    /// Returns what the operator must do with `request` from `user`.
-    fn expect(&self, user: usize, request: &TestRequest, signed: &Signed) -> Expect {
-        let epoch = self.ledger.epoch();
+    /// Returns what the operator must do with `request` admitted in `epoch` against `latest` on
+    /// `previous`, when `signed` holds the states and signatures its sender made.
+    fn expect(
+        &self,
+        epoch: Epoch,
+        latest: Option<&Admitted>,
+        previous: Digest,
+        request: &TestRequest,
+        signed: &Signed,
+    ) -> Expect {
         let account = request.account.clone();
         let (state, authentic) = if request.epoch == epoch {
             let state = State {
@@ -1554,7 +2016,8 @@ impl Harness {
                 payments: request.payments,
                 previous: request.previous,
             };
-            let authentic = signed.by_sender && state == signed.current;
+            let authentic =
+                state == signed.current && request.signatures.current == signed.signatures.current;
             (state, authentic)
         } else if request.epoch.checked_add(1) == Some(epoch) {
             let state = State {
@@ -1563,7 +2026,8 @@ impl Harness {
                 payments: request.batch.root::<Sha256>(),
                 previous: request.latest,
             };
-            let authentic = signed.by_sender && state == signed.next;
+            let authentic =
+                state == signed.next && request.signatures.next == signed.signatures.next;
             (state, authentic)
         } else {
             return Expect::WrongEpoch;
@@ -1574,11 +2038,10 @@ impl Harness {
         if !authentic {
             return Expect::InvalidSignature;
         }
-        let latest = self.desk.admitted.get(&user);
         if latest.is_some_and(|latest| latest.state == state) {
             return Expect::Retry;
         }
-        if state.previous != self.previous(user) {
+        if state.previous != previous {
             return Expect::InvalidSignature;
         }
         let mut map = latest.map(|latest| latest.map.clone()).unwrap_or_default();
@@ -1598,18 +2061,78 @@ impl Harness {
         Expect::New(map)
     }
 
+    /// Checks the operator's admission of `request` in `epoch` against `latest` on `previous`
+    /// against the model's `expected` outcome, and returns the state, map, sender's signature and
+    /// model map of a new admission.
+    #[allow(clippy::type_complexity)]
+    fn admission(
+        &self,
+        admission: Result<Admission<PublicKey, Digest, u64>, RequestError>,
+        expected: Expect,
+        epoch: Epoch,
+        latest: Option<&Admitted>,
+        previous: Digest,
+        request: &TestRequest,
+    ) -> Option<(TestState, TestAmounts, Signature, Map)> {
+        match (admission, expected) {
+            (Ok(Admission::Retry(state)), Expect::Retry) => {
+                let latest = latest.expect("a retry repeats a countersigned state");
+                assert_eq!(state, latest.state);
+                None
+            }
+            (
+                Ok(Admission::New {
+                    state,
+                    payments,
+                    signature,
+                }),
+                Expect::New(map),
+            ) => {
+                // The state is the one the sender signed for the epoch, on the map the model
+                // derives, with the request's signature over it.
+                let expected = State {
+                    epoch,
+                    account: request.account.clone(),
+                    payments: payments.root::<Sha256>(),
+                    previous,
+                };
+                assert_eq!(state, expected);
+                assert_eq!(payments, self.amounts(&map));
+                let signed = if request.epoch == epoch {
+                    &request.signatures.current
+                } else {
+                    &request.signatures.next
+                };
+                assert_eq!(&signature, signed);
+                Some((state, payments, signature, map))
+            }
+            (Err(RequestError::WrongEpoch { expected, found }), Expect::WrongEpoch) => {
+                assert_eq!((expected, found), (epoch, request.epoch));
+                None
+            }
+            (Err(RequestError::NoReceivers), Expect::NoReceivers)
+            | (Err(RequestError::InvalidSignature), Expect::InvalidSignature) => None,
+            (admission, expected) => {
+                panic!("admission {admission:?} where the model expects {expected:?}")
+            }
+        }
+    }
+
     /// Delivers `request` from `user` to the operator, which countersigns it if it is admitted
-    /// and fits the sender's balance and the limits. The sender then issues receipts, which
-    /// receivers verify and keep. Returns the receipts issued.
+    /// and fits the sender's balance and the limits, or repeats its countersignature on a retry.
+    /// Returns the acknowledgement the operator releases, with the state it countersigns.
     fn deliver(
         &mut self,
         user: usize,
         request: &TestRequest,
         signed: &Signed,
         faulty: bool,
-    ) -> Vec<TestReceipt> {
+    ) -> Option<(TestState, Signature)> {
         let before = self.snapshot();
-        let expected = self.expect(user, request, signed);
+        let epoch = self.desk.epoch;
+        let previous = self.previous(user);
+        let latest = self.desk.admitted.get(&user).cloned();
+        let expected = self.expect(epoch, latest.as_ref(), previous, request, signed);
 
         // I12: the operator decodes requests under its receiver limit, which refuses a batch
         // beyond it or empty.
@@ -1619,13 +2142,10 @@ impl Harness {
             assert_eq!(decoded.as_ref().ok(), Some(request));
         } else {
             assert!(decoded.is_err());
-            return Vec::new();
+            return None;
         }
 
         // I5: the operator verifies the request before reading its records, then admits it.
-        let epoch = self.ledger.epoch();
-        let previous = self.previous(user);
-        let latest = self.desk.admitted.get(&user).cloned();
         let admission = request
             .verify::<Sha256>(&self.namespace, epoch)
             .and_then(|verified| {
@@ -1636,42 +2156,23 @@ impl Harness {
                     &previous,
                 )
             });
-        let (state, payments, signature, map) = match (admission, expected) {
-            (Ok(Admission::Retry(state)), Expect::Retry) => {
-                // A retry is countersigned again and pays nothing twice.
-                let latest = latest.expect("a retry repeats a countersigned state");
-                assert_eq!(state, latest.state);
-                let acknowledgement = state.acknowledge(&self.operator, &self.namespace);
-                assert_eq!(acknowledgement, latest.acknowledgement);
-                assert_eq!(self.snapshot(), before);
-                return Vec::new();
-            }
-            (
-                Ok(Admission::New {
-                    state,
-                    payments,
-                    signature,
-                }),
-                Expect::New(map),
-            ) => {
-                assert_eq!(state.epoch, epoch);
-                assert_eq!(state.previous, previous);
-                assert_eq!(payments, self.amounts(&map));
-                (state, payments, signature, map)
-            }
-            (Err(RequestError::WrongEpoch { expected, found }), Expect::WrongEpoch) => {
-                assert_eq!((expected, found), (epoch, request.epoch));
-                assert_eq!(self.snapshot(), before);
-                return Vec::new();
-            }
-            (Err(RequestError::NoReceivers), Expect::NoReceivers)
-            | (Err(RequestError::InvalidSignature), Expect::InvalidSignature) => {
-                assert_eq!(self.snapshot(), before);
-                return Vec::new();
-            }
-            (admission, expected) => {
-                panic!("admission {admission:?} where the model expects {expected:?}")
-            }
+        let retry = matches!(admission, Ok(Admission::Retry(_)));
+        let admitted = self.admission(
+            admission,
+            expected,
+            epoch,
+            latest.as_ref(),
+            previous,
+            request,
+        );
+        let Some((state, payments, signature, map)) = admitted else {
+            // A refusal changes nothing, and a retry is countersigned again and pays nothing
+            // twice.
+            assert_eq!(self.snapshot(), before);
+            let latest = latest.filter(|_| retry)?;
+            let acknowledgement = latest.state.acknowledge(&self.operator, &self.namespace);
+            assert_eq!(acknowledgement, latest.acknowledgement);
+            return Some((latest.state, acknowledgement));
         };
 
         // O3, O5: a new state must fit the limits and what the sender can still spend.
@@ -1682,28 +2183,20 @@ impl Harness {
         let poor = total.is_none_or(|total| total > live);
         if full || (poor && !faulty) {
             assert_eq!(self.snapshot(), before);
-            return Vec::new();
+            return None;
         }
         if poor {
             self.desk.overdrawn.insert(user);
         }
 
-        // O7: the admission is recorded before its acknowledgement is released, which the sender
-        // verifies before recording the map (S2).
+        // O7: the admission is recorded before its acknowledgement is released.
         let acknowledgement = state.acknowledge(&self.operator, &self.namespace);
-        let operator = self.operator.public_key();
-        assert!(state.verify_acknowledgement(&self.namespace, &operator, &acknowledgement));
-        assert!(!state.verify_acknowledgement(
-            &self.namespace,
-            &self.rogue.public_key(),
-            &acknowledgement
-        ));
         let mut admitted = Admitted {
             state: state.clone(),
-            payments: payments.clone(),
-            signature: signature.clone(),
+            payments,
+            signature,
             acknowledgement: acknowledgement.clone(),
-            map: map.clone(),
+            map,
             requests: vec![request.clone()],
             earlier: Vec::new(),
         };
@@ -1716,32 +2209,157 @@ impl Harness {
                 .push((latest.state, latest.payments, latest.signature, latest.map));
         }
         self.desk.admitted.insert(user, admitted);
+        Some((state, acknowledgement))
+    }
 
-        // R1, R2: each receiver of the batch verifies its receipt and keeps the largest.
-        let receivers: Vec<_> = request
+    /// Delivers `user`'s pending request, and its acknowledgement unless `lose`. A refused
+    /// request delivered once, with no copy in flight, is dropped (S4). Returns the receipts the
+    /// sender issued.
+    fn send(&mut self, user: usize, faulty: bool, lose: bool) -> Vec<TestReceipt> {
+        let book = &mut self.books[user];
+        let pending = book.pending.as_mut().expect("a pending request");
+        pending.sent += 1;
+        let pending = pending.clone();
+        match self.deliver(user, &pending.request, &pending.signed, faulty) {
+            Some(acknowledgement) if lose => {
+                self.books[user].late = Some(acknowledgement);
+                Vec::new()
+            }
+            Some((state, acknowledgement)) => self.acknowledged(user, &state, &acknowledgement),
+            None => {
+                if pending.sent == 1 {
+                    self.books[user].pending = None;
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// The operator's acknowledgement of `state` reaches `user`. The sender records the map of
+    /// its pending request's state, in one write that clears the request (S3), only if the
+    /// acknowledgement verifies and it has not resolved the state's epoch (S2). It then issues
+    /// receipts, which receivers verify and keep. Returns the receipts issued.
+    fn acknowledged(
+        &mut self,
+        user: usize,
+        state: &TestState,
+        acknowledgement: &Signature,
+    ) -> Vec<TestReceipt> {
+        let operator = self.operator.public_key();
+        assert!(state.verify_acknowledgement(&self.namespace, &operator, acknowledgement));
+        assert!(!state.verify_acknowledgement(
+            &self.namespace,
+            &self.rogue.public_key(),
+            acknowledgement
+        ));
+        let book = &self.books[user];
+        let pending = book
+            .pending
+            .as_ref()
+            .filter(|_| state.epoch > book.resolved);
+        let Some(pending) = pending else {
+            // An acknowledgement repeated for a recorded state, or one arriving after the post of
+            // its epoch was resolved, records nothing.
+            if let Some(record) = book.records.get(&state.epoch)
+                && record.state == *state
+            {
+                assert_eq!(&record.acknowledgement, acknowledgement);
+            }
+            return Vec::new();
+        };
+        let (payments, signature) = if *state == pending.signed.current {
+            (&pending.payments, &pending.signed.signatures.current)
+        } else if *state == pending.signed.next {
+            (&pending.request.batch, &pending.signed.signatures.next)
+        } else {
+            panic!("an acknowledgement of a state the sender did not send");
+        };
+        let receivers: Vec<_> = pending
+            .request
             .batch
             .iter()
             .map(|(account, _)| account.clone())
             .collect();
-        let issue = |payments: &TestAmounts, receivers: Vec<PublicKey>| {
-            TestReceipt::issue::<Sha256>(&state, &signature, &acknowledgement, payments, receivers)
+        let record = Record {
+            state: state.clone(),
+            payments: payments.clone(),
+            signature: signature.clone(),
+            acknowledgement: acknowledgement.clone(),
+            map: self.map(payments),
         };
-        let receipts = issue(&payments, receivers.clone())
+        let receipts = self.issue(user, &record, receivers);
+        let book = &mut self.books[user];
+        book.records.insert(state.epoch, record);
+        book.pending = None;
+        receipts
+    }
+
+    /// Issues `user`'s receipts of `record` to `receivers`, which verify them and keep the
+    /// largest (R1, R2). A sender issues receipts of an epoch only until it resolves that epoch's
+    /// post, which happens when receivers audit it, so receivers accept them until then (R3).
+    fn issue(
+        &mut self,
+        user: usize,
+        record: &Record,
+        receivers: Vec<PublicKey>,
+    ) -> Vec<TestReceipt> {
+        let operator = self.operator.public_key();
+        let issue = |payments: &TestAmounts, receivers: Vec<PublicKey>| {
+            TestReceipt::issue::<Sha256>(
+                &record.state,
+                &record.signature,
+                &record.acknowledgement,
+                payments,
+                receivers,
+            )
+        };
+        let receipts = issue(&record.payments, receivers.clone())
             .expect("a countersigned map opens each receiver of its batch");
+
+        // I5: exactly one receipt per receiver asked for, in that order, of its entry of the map.
+        assert_eq!(receipts.len(), receivers.len());
+        for (receipt, receiver) in receipts.iter().zip(&receivers) {
+            assert_eq!(&receipt.receiver, receiver);
+            assert_eq!(receipt.state, record.state);
+            assert_eq!(receipt.signature, record.signature);
+            assert_eq!(receipt.acknowledgement, record.acknowledgement);
+            assert_eq!(receipt.amount, record.payments.get(receiver));
+            let position = record.payments.position(receiver).expect("a receiver");
+            assert_eq!(receipt.position as usize, position);
+        }
+
+        // Asked for every receiver of the map, it issues one receipt each, in the map's order.
+        let every: Vec<_> = record
+            .payments
+            .iter()
+            .map(|(account, _)| account.clone())
+            .collect();
+        let all = issue(&record.payments, every).expect("a countersigned map opens each receiver");
+        assert_eq!(all.len(), record.payments.len());
+        for (position, (receipt, (receiver, amount))) in
+            all.iter().zip(record.payments.iter()).enumerate()
+        {
+            assert_eq!(&receipt.receiver, receiver);
+            assert_eq!(receipt.amount, amount);
+            assert_eq!(receipt.position as usize, position);
+            assert_eq!(receipt.state, record.state);
+            assert_eq!(receipt.signature, record.signature);
+            assert_eq!(receipt.acknowledgement, record.acknowledgement);
+        }
 
         // A map the state does not commit to issues nothing, and neither does a receiver the map
         // does not pay.
-        let mut other = map.clone();
+        let mut other = record.map.clone();
         let first = other.values_mut().next().expect("a countersigned map pays");
         *first = first.wrapping_add(1).max(1);
         assert!(issue(&self.amounts(&other), receivers).is_none());
-        assert!(issue(&payments, vec![self.rogue.public_key()]).is_none());
+        assert!(issue(&record.payments, vec![self.rogue.public_key()]).is_none());
+        let epoch = record.state.epoch;
         for receipt in &receipts {
             roundtrip(receipt, &());
             assert!(receipt.verify::<Sha256>(&self.namespace, &operator));
             let receiver = self.index(&receipt.receiver).expect("a user");
-            assert_eq!(receipt.amount, map[&receiver]);
-            assert_eq!(receipt.state.epoch, epoch);
+            assert_eq!(receipt.amount, record.map[&receiver]);
             let held = self
                 .receipts
                 .entry((epoch, user, receiver))
@@ -1757,11 +2375,23 @@ impl Harness {
         if self.ledger.halt.is_some() {
             return;
         }
-        let user = self.payer(sender);
+        // A lost acknowledgement reaches its sender late, possibly after a post resolved its
+        // request (S2). Any sender can have one, funded or not.
+        let user = self.user(sender);
+        if let Some((state, acknowledgement)) = self.books[user].late.take() {
+            self.acknowledged(user, &state, &acknowledgement);
+            return;
+        }
 
-        // S1: a sender signs nothing new while a request is pending, so it delivers that one.
-        if let Some(pending) = self.pending[user].take() {
-            self.deliver(user, &pending.request, &pending.signed, false);
+        // S1: a sender signs nothing new while a request is pending, so it sends that one again.
+        if self.books[user].pending.is_some() {
+            self.send(user, false, matches!(attack, Some(PayAttack::LoseAck)));
+            return;
+        }
+
+        // A new payment comes from a sender that can still spend, with nothing in flight.
+        let user = self.payer(sender);
+        if self.books[user].late.is_some() || self.books[user].pending.is_some() {
             return;
         }
 
@@ -1790,15 +2420,18 @@ impl Harness {
         }
         let mut batch = self.amounts(&map);
         if let Some(PayAttack::Overcommit) = attack {
-            // The sender asks for one unit more than it can spend.
-            let receiver = self.other(user);
-            map.insert(receiver, live.saturating_add(1));
+            // The sender asks for one unit more than it can spend, split over two receivers when
+            // no single amount exceeds what it can spend.
+            let Some(over) = self.overspend(user, live) else {
+                return;
+            };
+            map = over;
             batch = self.amounts(&map);
         }
         if batch.is_empty() {
             assert!(matches!(
                 TestRequest::states::<Sha256>(
-                    self.ledger.epoch(),
+                    self.desk.epoch,
                     self.accounts[user].clone(),
                     batch,
                     None,
@@ -1810,29 +2443,34 @@ impl Harness {
         }
 
         // A batch that overflows the sender's map derives no states.
-        let latest = self.desk.admitted.get(&user);
+        let epoch = self.desk.epoch;
+        let latest = self.books[user].records.get(&epoch);
         if let Some(latest) = latest
             && latest.payments.combine(&batch).is_err()
         {
             let derived = TestRequest::states::<Sha256>(
-                self.ledger.epoch(),
+                epoch,
                 self.accounts[user].clone(),
                 batch,
                 Some((&latest.state, &latest.payments)),
-                &self.previous(user),
+                &self.builds_on(user, epoch),
             );
             assert!(matches!(derived, Err(RequestError::Overflow)));
             return;
         }
         let external = matches!(attack, Some(PayAttack::External));
-        let Pending {
-            mut request,
-            mut signed,
-        } = self.sign_request(user, &batch, external);
+        let pending = self.sign_request(user, &batch, external);
+        let (mut request, mut signed) = (pending.request.clone(), pending.signed.clone());
         let before = self.snapshot();
         match attack {
+            // S3: the sender persists the request before sending it.
             None | Some(PayAttack::External) => {
-                self.deliver(user, &request, &signed, false);
+                self.books[user].pending = Some(pending);
+                self.send(user, false, false);
+            }
+            Some(PayAttack::LoseAck) => {
+                self.books[user].pending = Some(pending);
+                self.send(user, false, true);
             }
             Some(PayAttack::WrongSigner) => {
                 let other = &self.keys[self.other(user)];
@@ -1840,7 +2478,6 @@ impl Harness {
                     current: other.sign(&self.namespace.state, &signed.current.encode()),
                     next: other.sign(&self.namespace.state, &signed.next.encode()),
                 };
-                signed.by_sender = false;
                 self.deliver(user, &request, &signed, false);
             }
             Some(PayAttack::TamperBatch) => {
@@ -1867,15 +2504,10 @@ impl Harness {
                 )
                 .expect("a first payment derives on any root");
                 request = states.sign(&self.keys[user], &self.namespace);
-                signed = Signed {
-                    current: states.current,
-                    next: states.next,
-                    by_sender: true,
-                };
+                signed = Signed::of(&request);
                 self.deliver(user, &request, &signed, false);
             }
             Some(PayAttack::StaleEpoch(future)) => {
-                let epoch = self.ledger.epoch();
                 request.epoch = if future || epoch < 2 {
                     epoch + 1
                 } else {
@@ -1884,8 +2516,9 @@ impl Harness {
                 self.deliver(user, &request, &signed, false);
             }
             Some(PayAttack::Replay) => {
-                self.deliver(user, &request, &signed, false);
-                self.deliver(user, &request, &signed, false);
+                self.books[user].pending = Some(pending);
+                self.send(user, false, false);
+                self.replay(user, &request);
             }
             Some(PayAttack::ReplayOld) => {
                 let old = self
@@ -1894,27 +2527,11 @@ impl Harness {
                     .get(&user)
                     .map(|latest| latest.requests[0].clone());
                 match old {
-                    Some(old) => {
-                        // An older request's states are the sender's, signed when it was sent.
-                        let signed = Signed {
-                            current: State {
-                                epoch: old.epoch,
-                                account: old.account.clone(),
-                                payments: old.payments,
-                                previous: old.previous,
-                            },
-                            next: State {
-                                epoch: old.epoch + 1,
-                                account: old.account.clone(),
-                                payments: old.batch.root::<Sha256>(),
-                                previous: old.latest,
-                            },
-                            by_sender: true,
-                        };
-                        self.deliver(user, &old, &signed, false);
-                    }
+                    // An older request's states are the sender's, signed when it was sent.
+                    Some(old) => self.replay(user, &old),
                     None => {
-                        self.deliver(user, &request, &signed, false);
+                        self.books[user].pending = Some(pending);
+                        self.send(user, false, false);
                     }
                 }
             }
@@ -1930,15 +2547,17 @@ impl Harness {
                 }
             }
             Some(PayAttack::Overcommit) => {
-                self.deliver(user, &request, &signed, true);
+                self.books[user].pending = Some(pending);
+                self.send(user, true, false);
             }
             Some(PayAttack::Underivable(kind)) => self.underivable(user, &batch, kind),
             Some(PayAttack::Delay) => {
-                self.pending[user] = Some(Pending { request, signed });
+                self.books[user].pending = Some(pending);
                 return;
             }
             Some(PayAttack::TamperReceipt(kind)) => {
-                let receipts = self.deliver(user, &request, &signed, false);
+                self.books[user].pending = Some(pending);
+                let receipts = self.send(user, false, false);
                 if let Some(receipt) = receipts.first() {
                     self.tamper_receipt(user, receipt, kind);
                 }
@@ -1952,6 +2571,7 @@ impl Harness {
                     | PayAttack::Overcommit
                     | PayAttack::Replay
                     | PayAttack::ReplayOld
+                    | PayAttack::LoseAck
             )
         ) {
             // I10: every other attack is refused.
@@ -1959,11 +2579,32 @@ impl Harness {
         }
     }
 
+    /// Delivers a copy of a request `user` sent earlier, whose acknowledgement, if the operator
+    /// countersigns again, reaches the sender.
+    fn replay(&mut self, user: usize, request: &TestRequest) {
+        let signed = Signed::of(request);
+        if let Some((state, acknowledgement)) = self.deliver(user, request, &signed, false) {
+            let receipts = self.acknowledged(user, &state, &acknowledgement);
+            assert!(receipts.is_empty(), "a copy pays nothing twice");
+        }
+    }
+
+    /// Returns a map paying receivers other than `user` one unit more than `live` in total, or
+    /// `None` if no receiver is left for the unit past the largest amount.
+    fn overspend(&self, user: usize, live: u64) -> Option<Map> {
+        let receiver = self.other(user);
+        if let Some(over) = live.checked_add(1) {
+            return Some(Map::from([(receiver, over)]));
+        }
+        let second = self.other(receiver);
+        (second != user).then(|| Map::from([(receiver, live), (second, 1)]))
+    }
+
     /// Checks that states the crate must refuse do not derive, and that no amounts form from
     /// entries it must refuse.
     fn underivable(&self, user: usize, batch: &TestAmounts, kind: u8) {
         let account = self.accounts[user].clone();
-        let epoch = self.ledger.epoch();
+        let epoch = self.desk.epoch;
         let previous = self.previous(user);
         let receiver = self.accounts[self.other(user)].clone();
         let full = Amounts::new([(receiver.clone(), u64::MAX)]).expect("a nonzero amount");
@@ -1996,7 +2637,10 @@ impl Harness {
             }
             2 => {
                 let state = latest(&full);
-                let elsewhere = full.root::<Sha256>();
+                let mut elsewhere = full.root::<Sha256>();
+                if elsewhere == previous {
+                    elsewhere = Sha256::hash(&[b"elsewhere"]);
+                }
                 assert!(matches!(
                     derive(epoch, Some((&state, &full)), &elsewhere),
                     Err(RequestError::InvalidPrevious)
@@ -2082,7 +2726,7 @@ impl Harness {
             return;
         }
         let user = self.payer(user);
-        let epoch = self.ledger.epoch();
+        let epoch = self.desk.epoch;
         let amount = amount.resolve(self.desk.balances[user]);
         let tag = u64::from(tag % 4);
         let account = self.accounts[user].clone();
@@ -2127,15 +2771,20 @@ impl Harness {
         }
     }
 
-    /// Returns the rows of the epoch's close, less `skip`, with each sender in `earlier` settling
-    /// its earliest countersigned map instead of its latest.
-    fn rows(&mut self, skip: &BTreeSet<usize>, earlier: Option<usize>) -> Rows {
+    /// Returns the rows of a close of the senders `admitted`, less `skip`, with each sender in
+    /// `earlier` settling its earliest countersigned map instead of its latest.
+    fn rows(
+        &mut self,
+        admitted: &BTreeMap<usize, Admitted>,
+        skip: &BTreeSet<usize>,
+        earlier: Option<usize>,
+    ) -> Rows {
         let mut plan = Rows {
             rows: Vec::new(),
             model: BTreeMap::new(),
             omitted: skip.clone(),
         };
-        for (user, admitted) in &self.desk.admitted {
+        for (user, admitted) in admitted {
             if skip.contains(user) {
                 continue;
             }
@@ -2160,20 +2809,30 @@ impl Harness {
 
         // Assembly orders the rows itself.
         for index in (1..plan.rows.len()).rev() {
-            let other = (self.context.next_u64() % (index as u64 + 1)) as usize;
+            let other = (self.rng().next_u64() % (index as u64 + 1)) as usize;
             plan.rows.swap(index, other);
         }
         plan
     }
 
-    /// Returns the soft withdrawals the operator honored.
+    /// Returns the soft withdrawals the operator honored in the epoch being closed.
     fn withdrawals(&self) -> Vec<TestWithdrawal> {
-        self.desk.withdrawals.values().cloned().collect()
+        let closing = self.desk.closing.as_ref();
+        let honored = closing.map_or(&self.desk.withdrawals, |closing| &closing.withdrawals);
+        honored.values().cloned().collect()
+    }
+
+    /// Returns the operator's record of the epoch being closed: its admissions and the root each
+    /// sender's states of it build on.
+    fn closed(&self) -> (&BTreeMap<usize, Admitted>, &[Option<Digest>]) {
+        match &self.desk.closing {
+            Some(closing) => (&closing.admitted, &closing.previous),
+            None => (&self.desk.admitted, &self.desk.previous),
+        }
     }
 
     /// Returns the model's settlement of a close over `rows` and the prefix of `queue` its counts
     /// select, with honored `withdrawals`.
-    #[allow(clippy::type_complexity)]
     fn settle_model(
         &self,
         rows: &BTreeMap<usize, Map>,
@@ -2181,7 +2840,7 @@ impl Harness {
         queue: &TestQueue,
         deposits: u64,
         forced: u64,
-    ) -> Result<(Vec<u64>, Vec<(usize, u64)>, Vec<usize>), Refused> {
+    ) -> Result<Effects, Refused> {
         let users = self.users();
         let mut sums = vec![[0u128; 3]; users];
         let mut touched = vec![false; users];
@@ -2231,7 +2890,7 @@ impl Harness {
         summary: &TestSummary,
         signers: usize,
     ) -> Result<U64, certificate::AssemblyError> {
-        let start = (self.context.next_u64() % u64::from(VALIDATORS)) as usize;
+        let start = (self.rng().next_u64() % u64::from(VALIDATORS)) as usize;
         let attestations: Vec<_> = (0..signers)
             .map(|offset| {
                 self.schemes[(start + offset) % self.schemes.len()]
@@ -2298,11 +2957,17 @@ impl Harness {
         }
     }
 
-    /// Returns a user with no row in the epoch's close, if any.
+    /// Returns a user with no row in the close of the epoch being closed, if any.
     fn idle(&self, choice: usize) -> Option<usize> {
+        let (admitted, _) = self.closed();
         (0..self.users())
             .map(|offset| (choice + offset) % self.users())
-            .find(|user| !self.desk.admitted.contains_key(user))
+            .find(|user| !admitted.contains_key(user))
+    }
+
+    /// Returns the root `user`'s states of the epoch being closed build on.
+    fn closed_previous(&self, user: usize) -> Digest {
+        self.closed().1[user].unwrap_or_else(empty_root)
     }
 
     /// Runs a deviation from the honest close that the protocol must refuse, and checks that it
@@ -2316,7 +2981,8 @@ impl Harness {
     ) {
         let before = self.snapshot();
         let epoch = queue.epoch;
-        let plan = self.rows(&BTreeSet::new(), None);
+        let admitted = self.closed().0.clone();
+        let plan = self.rows(&admitted, &BTreeSet::new(), None);
         let withdrawals = self.withdrawals();
         let operator = self.operator.clone();
         let parent = self.parent.clone();
@@ -2399,7 +3065,7 @@ impl Harness {
                 if row {
                     // Two rows of one account, however their maps compare.
                     let duplicate = rows.first().cloned().unwrap_or_else(|| {
-                        self.sign_row(0, epoch, &Map::from([(0, 1)]), self.previous(0))
+                        self.sign_row(0, epoch, &Map::from([(0, 1)]), self.closed_previous(0))
                     });
                     let mut second = duplicate.clone();
                     second.payments = self.amounts(&Map::from([(self.other(0), u64::MAX)]));
@@ -2515,7 +3181,7 @@ impl Harness {
                 let user = self.idle(usize::from(kind)).unwrap_or(0);
                 rows.retain(|row| row.account != self.accounts[user]);
                 let map = Map::from([(self.other(user), 1)]);
-                let previous = self.previous(user);
+                let previous = self.closed_previous(user);
                 let row = match kind % 3 {
                     // Signed on a root other than its posted row.
                     0 => self.sign_row(user, epoch, &map, Sha256::hash(&[b"elsewhere"])),
@@ -2562,7 +3228,8 @@ impl Harness {
                 let close = honest(self);
                 if mismatch {
                     // A checkpoint whose matrix is not its summary's.
-                    let row = self.sign_row(0, epoch, &Map::from([(0, 1)]), self.previous(0));
+                    let row =
+                        self.sign_row(0, epoch, &Map::from([(0, 1)]), self.closed_previous(0));
                     let (other, _) = self
                         .assemble(&operator, queue, vec![row], Vec::new(), deposits, forced)
                         .expect("one row assembles");
@@ -2598,18 +3265,19 @@ impl Harness {
                 let Some(user) = self.idle(0) else {
                     return;
                 };
-                let amount = self.desk.balances[user].saturating_add(1);
-                let map = Map::from([(self.other(user), amount)]);
+                let Some(map) = self.overspend(user, self.desk.balances[user]) else {
+                    return;
+                };
                 let mut rows = plan.rows;
-                rows.push(self.sign_row(user, epoch, &map, self.previous(user)));
+                rows.push(self.sign_row(user, epoch, &map, self.closed_previous(user)));
                 let mut model = plan.model;
                 model.insert(user, map);
                 let predicted = self.settle_model(&model, &withdrawals, queue, deposits, forced);
-                let (close, _) = self
+                let (close, flows) = self
                     .assemble(&operator, queue, rows, withdrawals, deposits, forced)
                     .expect("a signed row assembles");
                 let checked = self
-                    .check_close(close, &parent, queue)
+                    .check_close(close.clone(), &parent, queue)
                     .expect("a signed row checks");
                 let store = self.store();
                 let settled = checked.settle(&store.balances, &store.log).await;
@@ -2617,7 +3285,13 @@ impl Harness {
                     (Err(SettleError::Flow(error)), Err(refused)) => {
                         assert!(refused.matches(&error))
                     }
-                    (Ok(_), Ok(_)) => {}
+                    // Credits in the same close can cover the row, and then the close settles
+                    // exactly as the model does.
+                    (Ok(proposal), Ok(effects)) => {
+                        self.check_flows(&flows, epoch, &effects);
+                        self.check_proposal(&proposal, &close, queue, deposits, forced, &effects)
+                            .await;
+                    }
                     (settled, predicted) => panic!(
                         "overdraft settled as {:?} where the model expects {predicted:?}",
                         settled.map(|proposal| *proposal.summary())
@@ -2636,11 +3310,11 @@ impl Harness {
                 let deposits = forged.deposits.len() as u64;
                 let predicted =
                     self.settle_model(&plan.model, &withdrawals, &forged, deposits, forced);
-                let (close, _) = self
+                let (close, flows) = self
                     .assemble(&operator, &forged, plan.rows, withdrawals, deposits, forced)
                     .expect("the forged queue assembles");
                 let checked = self
-                    .check_close(close, &parent, &forged)
+                    .check_close(close.clone(), &parent, &forged)
                     .expect("validators check against the queue they read");
                 let store = self.store();
                 let settled = checked.settle(&store.balances, &store.log).await;
@@ -2648,13 +3322,17 @@ impl Harness {
                     (Err(SettleError::Flow(error)), Err(refused)) => {
                         assert!(refused.matches(&error))
                     }
-                    (Ok(proposal), Ok(_)) => {
+                    (Ok(proposal), Ok(effects)) => {
+                        // The validator settles the forged deposit exactly as the model does.
+                        self.check_flows(&flows, epoch, &effects);
+                        self.check_proposal(&proposal, &close, &forged, deposits, forced, &effects)
+                            .await;
                         let summary = *proposal.summary();
                         assert_eq!(summary.deposits.count, deposits);
                         let certificate =
                             self.certify(&summary, QUORUM).expect("a quorum certifies");
                         let posted = self.ledger.post(
-                            &mut self.context,
+                            self.context.as_mut().expect("the process is up"),
                             &self.verifier,
                             &summary,
                             &certificate,
@@ -2719,7 +3397,8 @@ impl Harness {
             CloseAttack::Sibling
             | CloseAttack::Replay
             | CloseAttack::Certificate(_)
-            | CloseAttack::Omit(_) => unreachable!("handled in the honest close"),
+            | CloseAttack::Omit(_)
+            | CloseAttack::Crash(_) => unreachable!("handled in the honest close"),
         }
 
         // I10: the refused deviation changed nothing.
@@ -2794,9 +3473,12 @@ impl Harness {
             },
         };
         let (certificate, expected) = expected;
-        let result = self
-            .ledger
-            .post(&mut self.context, &self.verifier, &posted, &certificate);
+        let result = self.ledger.post(
+            self.context.as_mut().expect("the process is up"),
+            &self.verifier,
+            &posted,
+            &certificate,
+        );
         match result {
             Err(Refusal::Halted) => assert!(halted),
             Err(Refusal::Summary(error)) => {
@@ -2814,9 +3496,17 @@ impl Harness {
         assert_eq!(self.snapshot(), before);
     }
 
-    async fn close(&mut self, deposits: u8, forced: u8, attack: Option<CloseAttack>) {
+    /// The operator cuts the epoch the ledger expects, unless it already released its close (O8).
+    /// It fixes the epoch's rows, soft withdrawals and processed counts by setting its records of
+    /// the epoch aside, settles each flow on its own balances as validators will, and releases only
+    /// a close that settles. It then opens the next epoch against what the close may take (O3, O7).
+    async fn cut(&mut self, deposits: u8, forced: u8, omit: Option<u8>) {
+        if self.desk.closing.is_some() {
+            return;
+        }
         let queue = self.ledger.queue();
         let epoch = queue.epoch;
+        assert_eq!(self.desk.epoch, epoch);
         let deposits = pick(queue.required_deposits, queue.deposits.len(), deposits);
         let forced = pick(
             queue.required_forced_withdrawals,
@@ -2824,23 +3514,11 @@ impl Harness {
             forced,
         );
         assert!(queue.prefix(deposits, forced).is_some());
-        if let Some(attack) = attack
-            && !matches!(
-                attack,
-                CloseAttack::Sibling
-                    | CloseAttack::Replay
-                    | CloseAttack::Certificate(_)
-                    | CloseAttack::Omit(_)
-            )
-        {
-            self.attempt(attack, &queue, deposits, forced).await;
-        }
 
-        // The operator omits a countersigned row, or settles an earlier map of it, only when
-        // the attack says so or when a faulty admission leaves no close that settles.
+        // A faulty operator omits a countersigned row, or settles an earlier map of it.
         let mut skip = BTreeSet::new();
         let mut earlier = None;
-        if let Some(CloseAttack::Omit(choice)) = attack
+        if let Some(choice) = omit
             && !self.desk.admitted.is_empty()
         {
             let user = *self
@@ -2856,8 +3534,9 @@ impl Harness {
             }
         }
         let withdrawals = self.withdrawals();
-        let (plan, close, flows, checked, proposal, effects) = loop {
-            let plan = self.rows(&skip, earlier);
+        let admitted = self.desk.admitted.clone();
+        let (plan, close, flows) = loop {
+            let plan = self.rows(&admitted, &skip, earlier);
             let (close, flows) = self
                 .assemble(
                     &self.operator.clone(),
@@ -2869,88 +3548,125 @@ impl Harness {
                 )
                 .expect("the honest close assembles");
             self.inspect(&close, &plan, &withdrawals, deposits, forced);
-            let checked = self
-                .check_close(close.clone(), &self.parent.clone(), &queue)
-                .expect("the honest close checks");
             let predicted = self.settle_model(&plan.model, &withdrawals, &queue, deposits, forced);
+            let settles = flows.iter().all(|(account, flow)| {
+                let user = self.index(account).expect("a user");
+                flow.settle(self.desk.balances[user]).is_ok()
+            });
+            assert_eq!(settles, predicted.is_ok());
+            let Err(refused) = predicted else {
+                break (plan, close, flows);
+            };
+
+            // O3: a faulty admission leaves no acceptable close with every countersigned row, as
+            // its sender goes below zero or its receiver past the largest amount, whichever comes
+            // first in account order. Validators refuse the close as the model does, and the
+            // operator drops those rows and assembles again.
+            let checked = self
+                .check_close(close, &self.parent.clone(), &queue)
+                .expect("the honest close checks");
             let store = self.store();
-            let settled = checked.settle(&store.balances, &store.log).await;
-            match (settled, predicted) {
-                (Ok(proposal), Ok(effects)) => {
-                    break (plan, close, flows, checked, proposal, effects);
-                }
-                (Err(SettleError::Flow(error)), Err(refused)) if refused.matches(&error) => {
-                    // O3: a faulty admission leaves no acceptable close with every countersigned
-                    // row, as its sender goes below zero or its receiver past the largest amount,
-                    // whichever comes first in account order. The operator drops those rows.
-                    assert!(!self.desk.overdrawn.is_subset(&skip));
-                    skip.extend(self.desk.overdrawn.iter().copied());
-                }
-                (settled, predicted) => panic!(
-                    "the close settled as {:?} where the model expects {predicted:?}",
+            match checked.settle(&store.balances, &store.log).await {
+                Err(SettleError::Flow(error)) if refused.matches(&error) => {}
+                settled => panic!(
+                    "the close settled as {:?} where the model expects {refused:?}",
                     settled.map(|proposal| *proposal.summary())
                 ),
             }
+            assert!(!self.desk.overdrawn.is_subset(&skip));
+            skip.extend(self.desk.overdrawn.iter().copied());
         };
-        let (settled_balances, payouts, touched) = effects;
 
-        // I3: the flows the operator gets back settle as the model does.
-        assert_eq!(flows.len(), touched.len());
-        for ((account, flow), user) in flows.iter().zip(&touched) {
-            assert_eq!(account, &self.accounts[*user]);
-            assert_eq!(flow.epoch(), epoch);
-            let (flow_epoch, sums) = flow_sums(flow);
-            assert_eq!(flow_epoch, epoch);
-            let settled = flow
-                .settle(self.desk.balances[*user])
-                .expect("a settling close settles each flow");
-            assert_eq!(Ok(settled), settle_sums(self.desk.balances[*user], sums));
-            assert_eq!(settled.balance, settled_balances[*user]);
-            let payout = payouts.iter().find(|(payee, _)| payee == user);
-            assert_eq!(settled.payout, payout.map_or(0, |(_, amount)| *amount));
+        // O3: the close may take each account's payments in it and the soft and forced withdrawals
+        // it processes. The next epoch's states build on its rows (O4).
+        let mut take = vec![0u128; self.users()];
+        for (user, map) in &plan.model {
+            take[*user] += total(map);
         }
-
-        // I7: the summary chains to the last post and commits to what the model holds.
-        let summary = *proposal.summary();
+        let soft = withdrawals.iter().map(|soft| (&soft.account, soft.amount));
+        let forced_withdrawals = &queue.forced_withdrawals[..forced as usize];
+        let forced_withdrawals = forced_withdrawals.iter().map(|w| (&w.account, w.amount));
+        for (account, amount) in soft.chain(forced_withdrawals) {
+            take[self.index(account).expect("a user")] += u128::from(amount);
+        }
         let matrix = close.matrix::<Sha256>(&Sequential);
-        let size = self.model.log.len() + payouts.len() + 1;
-        assert_eq!(summary.epoch, epoch);
-        assert_eq!(summary.parent, self.ledger.last);
-        assert_eq!(summary.matrix, matrix.root());
-        assert_eq!(proposal.matrix().root(), matrix.root());
-        assert_eq!(*summary.payouts.size, size as u64);
-        let expected = Processed {
-            count: deposits,
-            hash: chain(
-                self.model.deposits_hash,
-                &queue.deposits[..deposits as usize],
-            ),
-        };
-        assert_eq!(summary.deposits, expected);
-        let expected = Processed {
-            count: forced,
-            hash: chain(
-                self.model.forced_hash,
-                &queue.forced_withdrawals[..forced as usize],
-            ),
-        };
-        assert_eq!(summary.forced_withdrawals, expected);
-        let expected = payouts
+        let previous = self
+            .accounts
             .iter()
-            .map(|(user, amount)| (self.accounts[*user].clone(), *amount));
-        let expected = TestAmounts::new(expected).expect("distinct payouts");
-        assert_eq!(proposal.payouts(), &expected);
-        for (position, (account, amount)) in expected.iter().enumerate() {
-            assert_eq!(proposal.payouts().position(account), Some(position));
-            assert_eq!(proposal.payouts().get(account), amount);
-        }
-        assert_eq!(proposal.payouts().total().is_some(), {
-            payouts
-                .iter()
-                .try_fold(0u64, |total, (_, amount)| total.checked_add(*amount))
-                .is_some()
+            .map(|account| matrix.payments_root(account))
+            .collect();
+        let desk = &mut self.desk;
+        desk.closing = Some(Closing {
+            queue,
+            deposits,
+            forced,
+            previous: std::mem::replace(&mut desk.previous, previous),
+            admitted: std::mem::take(&mut desk.admitted),
+            withdrawals: std::mem::take(&mut desk.withdrawals),
+            overdrawn: std::mem::take(&mut desk.overdrawn),
+            close,
+            flows,
+            rows: plan.model,
+            omitted: plan.omitted,
+            take,
         });
-        roundtrip(&summary, &());
+        desk.epoch = epoch + 1;
+    }
+
+    async fn close(&mut self, deposits: u8, forced: u8, attack: Option<CloseAttack>) {
+        let omit = match attack {
+            Some(CloseAttack::Omit(choice)) => Some(choice),
+            _ => None,
+        };
+        self.cut(deposits, forced, omit).await;
+        let closing = self.desk.closing.clone().expect("a released close");
+        let (deposits, forced) = (closing.deposits, closing.forced);
+
+        // V3: validators read the queues as the ledger holds them now. They grew only at their
+        // tails since the cut, so the close processes the same requests. A halt since the cut
+        // dropped them, and the ledger expects no close, so validators keep what they read before.
+        let queue = if self.ledger.halt.is_some() {
+            closing.queue.clone()
+        } else {
+            self.ledger.queue()
+        };
+        let epoch = queue.epoch;
+        assert_eq!(closing.close.epoch(), epoch);
+        assert_eq!(
+            queue.prefix(deposits, forced),
+            closing.queue.prefix(deposits, forced)
+        );
+        if let Some(attack) = attack
+            && !matches!(
+                attack,
+                CloseAttack::Sibling
+                    | CloseAttack::Replay
+                    | CloseAttack::Certificate(_)
+                    | CloseAttack::Omit(_)
+                    | CloseAttack::Crash(_)
+            )
+        {
+            self.attempt(attack, &queue, deposits, forced).await;
+        }
+
+        // I3, I7: the released close checks and settles as the model says.
+        let withdrawals = self.withdrawals();
+        let close = closing.close.clone();
+        let checked = self
+            .check_close(close.clone(), &self.parent.clone(), &queue)
+            .expect("the released close checks");
+        let effects = self
+            .settle_model(&closing.rows, &withdrawals, &queue, deposits, forced)
+            .expect("the operator releases only a close that settles");
+        let store = self.store();
+        let proposal = checked
+            .settle(&store.balances, &store.log)
+            .await
+            .expect("the released close settles");
+        self.check_flows(&closing.flows, epoch, &effects);
+        self.check_proposal(&proposal, &close, &queue, deposits, forced, &effects)
+            .await;
+        let summary = *proposal.summary();
 
         // A sibling close the ledger does not post, and a second settlement for a replay.
         let sibling = match attack {
@@ -2995,12 +3711,15 @@ impl Harness {
         }
 
         // The committee certifies the summary, and the ledger posts it unless it halted.
-        let signers = QUORUM + (self.context.next_u64() % 2) as usize;
+        let signers = QUORUM + (self.rng().next_u64() % 2) as usize;
         let certificate = self.certify(&summary, signers).expect("a quorum certifies");
         let halted = self.ledger.halt.is_some();
-        let posted = self
-            .ledger
-            .post(&mut self.context, &self.verifier, &summary, &certificate);
+        let posted = self.ledger.post(
+            self.context.as_mut().expect("the process is up"),
+            &self.verifier,
+            &summary,
+            &certificate,
+        );
         match posted {
             Ok(()) => assert!(!halted),
             Err(Refusal::Halted) => {
@@ -3010,6 +3729,77 @@ impl Harness {
             Err(refusal) => panic!("an honest post refused as {refusal:?}"),
         }
         let digest = summary.digest();
+
+        // V4: the validator persisted the close, the queue prefix it processes and its summary
+        // before attesting, which is all it needs to apply the close again. `history` stands for
+        // that durable record, which no crash here reaches.
+        let (processed, processed_forced) = queue.prefix(deposits, forced).expect("in bounds");
+        let prefix = Queue {
+            epoch,
+            deposits: processed.to_vec(),
+            required_deposits: processed.len(),
+            forced_withdrawals: processed_forced.to_vec(),
+            required_forced_withdrawals: processed_forced.len(),
+        };
+        let posted = Posted {
+            summary,
+            certificate,
+            checkpoint: Checkpoint {
+                summary,
+                matrix: close.matrix::<Sha256>(&Sequential),
+            },
+            close,
+            queue,
+            prefix,
+            parent: self.parent.clone(),
+            rows: closing.rows.clone(),
+            omitted: closing.omitted.clone(),
+            unsettled: closing
+                .admitted
+                .iter()
+                .filter(|(user, latest)| closing.rows.get(user) != Some(&latest.map))
+                .map(|(user, latest)| (*user, latest.state.clone()))
+                .collect(),
+        };
+        self.unaudited.push_back(self.history.len());
+        self.history.push(posted.clone());
+
+        // The model, its shadow databases and the operator apply the post, which lifts the close's
+        // deductions (O3).
+        let (settled, payouts, _) = effects;
+        let before = std::mem::replace(&mut self.model.balances, settled.clone());
+        let accounts = self.accounts.clone();
+        let shadow = self.shadow.as_mut().expect("open");
+        let roots = shadow
+            .settle(&accounts, &before, &settled, &payouts, true)
+            .await;
+        assert_eq!(roots, (summary.balances, summary.payouts.root));
+        for (user, amount) in &payouts {
+            self.model.log.push(Some((*user, *amount)));
+        }
+        self.model.log.push(None);
+        self.model.deposits_hash = summary.deposits.hash;
+        self.model.forced_hash = summary.forced_withdrawals.hash;
+        for (account, flow) in &closing.flows {
+            let user = self.index(account).expect("a user");
+            let settled = flow.settle(self.desk.balances[user]).expect("settles");
+            self.desk.balances[user] = settled.balance;
+        }
+        let rows: Vec<_> = accounts
+            .iter()
+            .map(|account| posted.checkpoint.matrix.payments_root(account))
+            .collect();
+        assert_eq!(self.desk.previous, rows);
+        self.desk.closing = None;
+
+        // I3: the close leaves each balance at or above what the next epoch admitted against it,
+        // unless a faulty operator admitted past it.
+        for user in 0..self.users() {
+            if !self.desk.overdrawn.contains(&user) {
+                assert!(self.paid(user) <= u128::from(self.desk.balances[user]));
+            }
+        }
+        self.stale = Some(checked);
 
         // V5: the validator applies the posted close and no other.
         let (proposal, replay) = match sibling {
@@ -3023,17 +3813,15 @@ impl Harness {
             }
             other => (proposal, other),
         };
-        let parent = self.parent.clone();
-        let Store { balances, log } = self.store.take().expect("open");
-        let (balances, log, checkpoint) = proposal
-            .apply(balances, log, &digest)
-            .await
-            .expect("the posted close applies");
-        let balances = balances.commit().await.expect("the balances commit");
-        self.store = Some(Store { balances, log });
-        assert_eq!(checkpoint.summary, summary);
-        assert_eq!(checkpoint.matrix.root(), summary.matrix);
-        self.parent = checkpoint;
+        let crash = match attack {
+            Some(CloseAttack::Crash(kind)) => Some(kind % 3),
+            _ => None,
+        };
+        if !self.apply(proposal, &digest, crash).await {
+            return;
+        }
+        assert_eq!(self.parent.summary, summary);
+        assert_eq!(self.parent.matrix.root(), summary.matrix);
         if let Some(replay) = replay {
             self.apply_refused(replay, &digest).await;
         }
@@ -3044,40 +3832,264 @@ impl Harness {
             .await
             .expect("the balances database must read");
         assert_eq!(metadata, Some(0));
+    }
 
-        // The model, the operator and the senders apply the post.
-        for (user, amount) in &payouts {
-            self.model.log.push(Some((*user, *amount)));
-        }
-        self.model.log.push(None);
-        self.model.balances = settled_balances;
-        self.model.deposits_hash = summary.deposits.hash;
-        self.model.forced_hash = summary.forced_withdrawals.hash;
-        for (account, flow) in &flows {
-            let user = self.index(account).expect("a user");
-            let settled = flow.settle(self.desk.balances[user]).expect("settles");
-            self.desk.balances[user] = settled.balance;
-        }
-        self.desk.previous = self
-            .accounts
-            .iter()
-            .map(|account| self.parent.matrix.payments_root(account))
-            .collect();
-        self.desk.admitted.clear();
-        self.desk.withdrawals.clear();
-        self.desk.overdrawn.clear();
-        self.stale = Some(checked);
-        let posted = Posted {
-            summary,
-            certificate,
-            close,
-            queue,
-            parent,
-            checkpoint: self.parent.clone(),
-            rows: plan.model,
+    /// Applies the posted `proposal` and commits the balances (V5), or fails partway as `crash`
+    /// says. Returns whether the process is still up: a failed write leaves it up to recover in
+    /// place (V2), and a stop before the balances commit crashes it, losing every write not yet
+    /// durable.
+    async fn apply(&mut self, proposal: TestProposal, digest: &Digest, crash: Option<u8>) -> bool {
+        let Store { balances, log } = self.store.take().expect("open");
+        let faults = self.runtime().storage_fault_config();
+        let failing = FaultConfig {
+            sync_rate: Some(Probability::new(1, 1).expect("a probability")),
+            ..Default::default()
         };
-        self.audit(&posted, &plan.omitted);
-        self.history.push(posted);
+        match crash {
+            None => {
+                let (balances, log, checkpoint) = proposal
+                    .apply(balances, log, digest)
+                    .await
+                    .expect("the posted close applies");
+                let balances = balances.commit().await.expect("the balances commit");
+                self.store = Some(Store { balances, log });
+                self.parent = checkpoint;
+                return true;
+            }
+            Some(0) => {
+                // The payout log cannot be made durable, so apply fails before it writes to the
+                // balances.
+                *faults.write() = failing;
+                let applied = proposal.apply(balances, log, digest).await;
+                *faults.write() = FaultConfig::default();
+                assert!(matches!(applied, Err(ApplyError::Log(_))));
+            }
+            Some(1) => {
+                // The process stops once the payout log is durable, before the balances commit,
+                // so the payout log is ahead of the balances when it comes back.
+                let applied = proposal
+                    .apply(balances, log, digest)
+                    .await
+                    .expect("the posted close applies");
+                drop(applied);
+                self.crashed = true;
+                return false;
+            }
+            Some(_) => {
+                // The balances cannot commit once the payout log is durable.
+                let (balances, log, _) = proposal
+                    .apply(balances, log, digest)
+                    .await
+                    .expect("the posted close applies");
+                *faults.write() = failing;
+                let committed = balances.commit().await;
+                *faults.write() = FaultConfig::default();
+                assert!(committed.is_err());
+                drop(log);
+            }
+        }
+        self.recover().await;
+        true
+    }
+
+    /// Reopens the validator's databases as after a crash and brings them to the ledger's last
+    /// post from what it persisted (V2, V4, V5): the balances at their last commit, the payout log
+    /// rewound to the payouts size of the post those balances hold, and every later post applied
+    /// again from its persisted close and queue prefix. The persisted records are `history`,
+    /// held as durable.
+    async fn recover(&mut self) {
+        let balances = Store::open_balances(self.runtime(), "balances").await;
+        let root = balances.root();
+
+        // V2: the persisted summary on the chain ending at the ledger's last digest whose balances
+        // root is the database's, or the genesis summary for a database that holds no close.
+        let last = self
+            .history
+            .last()
+            .map_or(self.ledger.last, |posted| posted.summary.digest());
+        assert_eq!(last, self.ledger.last);
+        let found = self
+            .history
+            .iter()
+            .rposition(|posted| posted.summary.balances == root);
+        let (start, mut parent) = match found {
+            Some(index) => {
+                let posted = &self.history[index];
+                let checkpoint = Checkpoint {
+                    summary: posted.summary,
+                    matrix: posted.close.matrix::<Sha256>(&Sequential),
+                };
+                (index + 1, checkpoint)
+            }
+            None => {
+                let metadata = balances
+                    .get_metadata()
+                    .await
+                    .expect("the balances database must read");
+                assert_eq!(metadata, None, "the balances hold a close no post holds");
+                let genesis = TestSummary::genesis::<PublicKey, u64>(root);
+                let first = self
+                    .history
+                    .first()
+                    .map_or(self.ledger.last, |posted| posted.summary.parent);
+                assert_eq!(genesis.digest(), first);
+                let checkpoint = Checkpoint {
+                    summary: genesis,
+                    matrix: Matrix::empty(),
+                };
+                (0, checkpoint)
+            }
+        };
+        let size = parent.summary.payouts.size;
+        self.verified = self.verified.min(*size as usize);
+        let log = Store::open_log(self.runtime(), "payouts", Some(size)).await;
+        assert_eq!(log.bounds().end, parent.summary.payouts.size);
+        assert_eq!(log.root(), parent.summary.payouts.root);
+        let mut store = Store { balances, log };
+
+        // V5: every later post applies again, checked against exactly the prefix it processed.
+        for index in start..self.history.len() {
+            let posted = self.history[index].clone();
+            let checked = self
+                .check_close(posted.close.clone(), &parent, &posted.prefix)
+                .expect("a persisted post checks again");
+            let proposal = checked
+                .settle(&store.balances, &store.log)
+                .await
+                .expect("a persisted post settles again");
+            assert_eq!(*proposal.summary(), posted.summary);
+            let (balances, log, checkpoint) = proposal
+                .apply(store.balances, store.log, &posted.summary.digest())
+                .await
+                .expect("a persisted post applies again");
+            let balances = balances.commit().await.expect("the balances commit");
+            store = Store { balances, log };
+            parent = checkpoint;
+        }
+
+        // I11: the validator is back at the ledger's last post.
+        assert_eq!(parent.summary.digest(), self.ledger.last);
+        assert_eq!(
+            store.roots(),
+            (self.ledger.balances, parent.summary.payouts.root)
+        );
+        self.parent = parent;
+        self.store = Some(store);
+    }
+
+    /// I3: the flows assembly returns settle each touched account as the model does.
+    fn check_flows(&self, flows: &TestFlows, epoch: Epoch, effects: &Effects) {
+        let (balances, payouts, touched) = effects;
+        assert_eq!(flows.len(), touched.len());
+        for ((account, flow), user) in flows.iter().zip(touched) {
+            assert_eq!(account, &self.accounts[*user]);
+            assert_eq!(flow.epoch(), epoch);
+            let (flow_epoch, sums) = flow_sums(flow);
+            assert_eq!(flow_epoch, epoch);
+            let settled = flow
+                .settle(self.desk.balances[*user])
+                .expect("a settling close settles each flow");
+            assert_eq!(Ok(settled), settle_sums(self.desk.balances[*user], sums));
+            assert_eq!(settled.balance, balances[*user]);
+            let payout = payouts.iter().find(|(payee, _)| payee == user);
+            assert_eq!(settled.payout, payout.map_or(0, |(_, amount)| *amount));
+        }
+    }
+
+    /// I3, I7: a settled proposal chains to the last post and commits to the close's matrix, the
+    /// model's payouts and payouts size, the prefix of `queue` the close processes, and the
+    /// balances and payout log roots the shadow reaches with the model's `effects`.
+    async fn check_proposal(
+        &mut self,
+        proposal: &TestProposal,
+        close: &TestClose,
+        queue: &TestQueue,
+        deposits: u64,
+        forced: u64,
+        effects: &Effects,
+    ) {
+        let (balances, payouts, _) = effects;
+        let summary = *proposal.summary();
+        let accounts = self.accounts.clone();
+        let before = self.model.balances.clone();
+        let shadow = self.shadow.as_mut().expect("open");
+        let roots = shadow
+            .settle(&accounts, &before, balances, payouts, false)
+            .await;
+        assert_eq!(roots, (summary.balances, summary.payouts.root));
+        let matrix = close.matrix::<Sha256>(&Sequential);
+        let size = self.model.log.len() + payouts.len() + 1;
+        assert_eq!(summary.epoch, close.epoch());
+        assert_eq!(summary.parent, self.ledger.last);
+        assert_eq!(summary.matrix, matrix.root());
+        assert_eq!(proposal.matrix().root(), matrix.root());
+        assert_eq!(*summary.payouts.size, size as u64);
+        let expected = Processed {
+            count: deposits,
+            hash: chain(
+                self.model.deposits_hash,
+                &queue.deposits[..deposits as usize],
+            ),
+        };
+        assert_eq!(summary.deposits, expected);
+        let expected = Processed {
+            count: forced,
+            hash: chain(
+                self.model.forced_hash,
+                &queue.forced_withdrawals[..forced as usize],
+            ),
+        };
+        assert_eq!(summary.forced_withdrawals, expected);
+        let expected = payouts
+            .iter()
+            .map(|(user, amount)| (self.accounts[*user].clone(), *amount));
+        let expected = TestAmounts::new(expected).expect("distinct payouts");
+        assert_eq!(proposal.payouts(), &expected);
+        for (position, (account, amount)) in expected.iter().enumerate() {
+            assert_eq!(proposal.payouts().position(account), Some(position));
+            assert_eq!(proposal.payouts().get(account), amount);
+        }
+        assert_eq!(proposal.payouts().total().is_some(), {
+            payouts
+                .iter()
+                .try_fold(0u64, |total, (_, amount)| total.checked_add(*amount))
+                .is_some()
+        });
+        roundtrip(&summary, &());
+    }
+
+    /// I3: the payout log ends with `expected` from index `start` on, each payout of a close in
+    /// account order and then its commit.
+    async fn check_entries(
+        log: &TestLog,
+        accounts: &[PublicKey],
+        start: usize,
+        expected: &[Option<(usize, u64)>],
+    ) {
+        assert_eq!(*log.bounds().end, (start + expected.len()) as u64);
+        let Some(count) = NonZeroU64::new(expected.len() as u64) else {
+            return;
+        };
+        let (_, operations) = log
+            .proof(Location::new(start as u64), count)
+            .await
+            .expect("the payout log proves its operations");
+        assert_eq!(operations.len(), expected.len());
+        for (operation, entry) in operations.iter().zip(expected) {
+            match (operation, entry) {
+                (keyless::fixed::Operation::Append(payout), Some((user, amount))) => {
+                    let expected = Payout {
+                        account: accounts[*user].clone(),
+                        amount: *amount,
+                    };
+                    assert_eq!(payout, &expected);
+                }
+                (keyless::fixed::Operation::Commit(None, floor), None) => assert_eq!(**floor, 0),
+                (operation, entry) => {
+                    panic!("the payout log holds {operation:?} where the model holds {entry:?}")
+                }
+            }
+        }
     }
 
     /// Checks the close the operator assembled against the rows and withdrawals it holds.
@@ -3151,15 +4163,31 @@ impl Harness {
         ));
 
         // I11: a refusal writes to neither database.
-        let store = Store::open(&self.context, Some(self.parent.summary.payouts.size)).await;
+        let store = Store::open(self.runtime(), Some(self.parent.summary.payouts.size)).await;
         assert_eq!(store.roots(), roots);
         self.store = Some(store);
     }
 
-    /// Receivers audit the post and challenge every receipt it credits short (R3), and senders
-    /// learn their rows (S5).
-    fn audit(&mut self, posted: &Posted, omitted: &BTreeSet<usize>) {
+    /// Receivers audit the oldest post not yet audited and challenge every receipt it credits
+    /// short (R3), and senders learn their rows in it (S5).
+    fn audit(&mut self) {
+        let index = self.unaudited.pop_front().expect("a post to audit");
+        let posted = self.history[index].clone();
+        let omitted = &posted.omitted;
         let epoch = posted.summary.epoch;
+
+        // A receiver can challenge an omission only with a receipt, which its sender issues once
+        // it holds the acknowledgement of the state the close does not settle, before or after
+        // the post, until it resolves the post below.
+        let acked: BTreeSet<usize> = posted
+            .unsettled
+            .iter()
+            .filter(|(user, state)| {
+                let record = self.books[**user].records.get(&epoch);
+                record.is_some_and(|record| record.state == **state)
+            })
+            .map(|(user, _)| *user)
+            .collect();
         let matrix = &posted.checkpoint.matrix;
         let root = matrix.root();
         let credited = |sender: usize, receiver: usize| {
@@ -3207,13 +4235,19 @@ impl Harness {
             }
         }
 
+        // S5: each sender resolves the post against the row it proves.
+        for sender in 0..self.users() {
+            let row = matrix.payments_root(&self.accounts[sender]);
+            self.resolve(sender, epoch, row, omitted.contains(&sender));
+        }
+
         // I9: an honest post credits each receipt in full, and a short one is challenged.
         let held: Vec<_> = self
             .receipts
             .range((epoch, 0, 0)..(epoch + 1, 0, 0))
             .map(|(key, receipt)| (*key, receipt.clone()))
             .collect();
-        let mut contradicted = false;
+        let mut contradicted = BTreeSet::new();
         let operator = self.operator.public_key();
         for (index, ((_, sender, receiver), receipt)) in held.into_iter().enumerate() {
             let (account, paid) = (&self.accounts[sender], &self.accounts[receiver]);
@@ -3268,7 +4302,7 @@ impl Harness {
                 omitted.contains(&sender),
                 "an honest close credits receipts"
             );
-            contradicted = true;
+            contradicted.insert(sender);
             roundtrip(&challenge, &());
             match self
                 .ledger
@@ -3279,10 +4313,51 @@ impl Harness {
                 Err(refusal) => panic!("a contradicting challenge refused as {refusal:?}"),
             }
         }
-        assert_eq!(contradicted, !omitted.is_empty());
-        if contradicted {
+        assert!(contradicted.is_subset(omitted));
+        assert!(
+            acked.is_subset(&contradicted),
+            "an omission went unchallenged"
+        );
+        if !contradicted.is_empty() {
             assert!(self.ledger.halt.is_some());
         }
+    }
+
+    /// `user` resolves the post of `epoch`, which proves `row` as its row (S5). Its pending
+    /// request settled if one of its states of the epoch has the row's root, and is dropped once
+    /// none of its states can settle. Unless the operator `omitted` its countersigned state, the
+    /// close settled exactly the map the sender recorded for the epoch or had pending.
+    fn resolve(&mut self, user: usize, epoch: Epoch, row: Option<Digest>, omitted: bool) {
+        let root = row.unwrap_or_else(empty_root);
+        let book = &mut self.books[user];
+        let mut recorded = book
+            .records
+            .get(&epoch)
+            .map_or_else(empty_root, |record| record.state.payments);
+        if let Some(pending) = &book.pending {
+            let first = pending.request.epoch;
+            let settled = (first == epoch && pending.signed.current.payments == root)
+                || (first + 1 == epoch && pending.signed.next.payments == root);
+            if settled {
+                recorded = root;
+            }
+            let next = first == epoch && pending.signed.next.previous == root;
+            if settled || (first <= epoch && !next) {
+                book.pending = None;
+            }
+        }
+
+        // I9: an honest close settles what the sender holds, and its states of the next epoch
+        // build on the row.
+        if !omitted {
+            assert_eq!(recorded, root, "the post of {epoch} settled another map");
+        }
+        if let Some(record) = book.records.get(&(epoch + 1)) {
+            assert_eq!(record.state.previous, root);
+        }
+        book.records.retain(|recorded, _| *recorded > epoch);
+        book.resolved = epoch;
+        book.row = row;
     }
 
     async fn payout(&mut self, pick: u8, attack: Option<PayoutAttack>) {
@@ -3409,7 +4484,9 @@ impl Harness {
         let held: Vec<_> = self
             .receipts
             .iter()
-            .filter(|((held, _, _), _)| (*held == epoch) == unposted)
+            // Receipts of posted epochs, or of the epoch the ledger expects and those after it,
+            // which a cut lets senders hold before the post.
+            .filter(|((held, _, _), _)| named_posted(*held, epoch) != unposted)
             .map(|(key, receipt)| (*key, receipt.clone()))
             .collect();
         if held.is_empty() {
@@ -3421,7 +4498,7 @@ impl Harness {
         let operator = self.operator.public_key();
         let (sender_key, receiver_key) = (&self.accounts[sender], &self.accounts[receiver]);
         let posted = self.history.get(held as usize - 1).cloned();
-        let (matrix, credited) = match posted {
+        let (matrix, credited, omitted) = match posted {
             Some(posted) => (
                 posted.checkpoint.matrix,
                 posted
@@ -3430,15 +4507,23 @@ impl Harness {
                     .and_then(|map| map.get(&receiver))
                     .copied()
                     .unwrap_or(0),
+                posted.omitted.contains(&sender),
             ),
-            None => (self.parent.matrix.clone(), 0),
+            None => (self.parent.matrix.clone(), 0, false),
         };
-        let mut opening = matrix.open(sender_key, receiver_key);
+
+        // A held receipt the post credits short contradicts it until receivers audit it and halt
+        // the ledger, which only an omission allows (I9).
+        let honest = matrix.open(sender_key, receiver_key);
+        let contradicts = !unposted && named_posted(held, epoch) && credited < receipt.amount;
+        assert!(!contradicts || omitted, "an honest close credits receipts");
+        let mut opening = honest.clone();
         let mut named = held;
+        let mut halts = false;
         let mut expected: fn(&ChallengeError) -> bool =
             |error| matches!(error, ChallengeError::NoContradiction);
         match attack {
-            ChallengeAttack::Resubmit => {}
+            ChallengeAttack::Resubmit => halts = contradicts,
             ChallengeAttack::WrongEpoch => {
                 named = if held > 1 { held - 1 } else { held + 1 };
                 expected = |error| matches!(error, ChallengeError::WrongEpoch { .. });
@@ -3452,8 +4537,9 @@ impl Harness {
                     }
                 }
                 expected = |error| matches!(error, ChallengeError::InvalidOpening);
-                if opening == matrix.open(sender_key, receiver_key) {
+                if opening == honest {
                     expected = |error| matches!(error, ChallengeError::NoContradiction);
+                    halts = contradicts;
                 }
             }
             ChallengeAttack::Inflate | ChallengeAttack::Forged => {
@@ -3462,11 +4548,15 @@ impl Harness {
                 let Some(inflated) = credited.checked_add(1) else {
                     return;
                 };
+                let genuine = receipt.amount >= inflated;
                 receipt.amount = inflated.max(receipt.amount);
                 if let ChallengeAttack::Forged = attack {
                     receipt.signature = self
                         .rogue
                         .sign(&self.namespace.state, &receipt.state.encode());
+                } else if genuine {
+                    // The receipt already promises more, so it is the genuine one.
+                    halts = contradicts;
                 }
                 expected = |error| matches!(error, ChallengeError::InvalidReceipt);
             }
@@ -3478,12 +4568,17 @@ impl Harness {
             .ledger
             .challenge(&self.namespace, &operator, named, &challenge);
         match result {
+            Ok(()) => {
+                assert!(halts && !halted);
+                assert_eq!(self.ledger.halt, Some(Halt::Challenge(named)));
+                return;
+            }
             Err(Refusal::Halted) => assert!(halted),
             Err(Refusal::NotPosted) => assert!(named >= epoch),
             Err(Refusal::Challenge(error)) => {
-                assert!(expected(&error), "challenge refused as {error:?}")
+                assert!(!halts && expected(&error), "challenge refused as {error:?}")
             }
-            result => panic!("a challenge of an honest post returned {result:?}"),
+            result => panic!("a challenge returned {result:?}"),
         }
         assert_eq!(self.snapshot(), before);
     }
@@ -3558,22 +4653,25 @@ impl Harness {
     }
 
     async fn restart(&mut self) {
-        // V2: the validator reopens at the payouts size of the last post.
-        let roots = self.store().roots();
+        // Senders lose the acknowledgements in flight to them and keep what they persisted (S3).
+        for book in &mut self.books {
+            book.late = None;
+        }
+
+        // V2: the validator recovers the last post from what it persisted alone.
+        let (roots, parent) = (self.store().roots(), self.parent.clone());
         drop(self.store.take());
-        let store = Store::open(&self.context, Some(self.parent.summary.payouts.size)).await;
-        assert_eq!(store.roots(), roots);
-        let metadata = store
+        self.recover().await;
+        assert_eq!(self.store().roots(), roots);
+        assert_eq!(self.parent.summary, parent.summary);
+        assert_eq!(self.parent.matrix.root(), parent.matrix.root());
+        let metadata = self
+            .store()
             .balances
             .get_metadata()
             .await
             .expect("the balances database must read");
         assert_eq!(metadata.is_some(), self.parent.summary.epoch > 0);
-        if self.parent.summary.epoch == 0 {
-            let genesis = TestSummary::genesis::<PublicKey, u64>(store.balances.root());
-            assert_eq!(genesis, self.parent.summary);
-        }
-        self.store = Some(store);
     }
 
     /// An arbitrary value of one wire type reaches the role that consumes it, which must refuse
@@ -3581,7 +4679,7 @@ impl Harness {
     fn garbage(&mut self, kind: Garbage) {
         let before = self.snapshot();
         let mut bytes = vec![0; GARBAGE_BYTES];
-        self.context.fill_bytes(&mut bytes);
+        self.rng().fill_bytes(&mut bytes);
         let u = &mut Unstructured::new(&bytes);
         let operator = self.operator.public_key();
         let epoch = self.ledger.epoch();
@@ -3645,9 +4743,12 @@ impl Harness {
                 };
                 roundtrip(&summary, &());
                 let certificate = U64::new(certificate);
-                let result =
-                    self.ledger
-                        .post(&mut self.context, &self.verifier, &summary, &certificate);
+                let result = self.ledger.post(
+                    self.context.as_mut().expect("the process is up"),
+                    &self.verifier,
+                    &summary,
+                    &certificate,
+                );
                 assert!(result.is_err());
             }
             Garbage::Opening => {
@@ -3827,7 +4928,9 @@ impl Harness {
         let choice = usize::from(pick);
         match target {
             Target::Opening | Target::Challenge => {
-                let Some(posted) = self.history.last() else {
+                // One of the eight newest posts, since older ones may still be unaudited.
+                let back = usize::from(pick >> 5) % self.history.len().max(1);
+                let Some(posted) = self.history.iter().rev().nth(back) else {
                     return;
                 };
                 let (sender, receiver) = (self.user(pick), self.user(pick / 8));
@@ -3868,7 +4971,23 @@ impl Harness {
                         .ledger
                         .challenge(&self.namespace, &operator, epoch, &mutated);
                     if result.is_ok() {
-                        panic!("a mutated challenge halted the ledger: {mutated:?}");
+                        // Only a genuine receipt the post credits short, which only an omission
+                        // leaves unaudited, halts the ledger.
+                        let receipt = &mutated.receipt;
+                        assert!(receipt.verify::<Sha256>(&self.namespace, &operator));
+                        let (sender, receiver) = (
+                            self.index(&receipt.state.account).expect("a user"),
+                            self.index(&receipt.receiver).expect("a user"),
+                        );
+                        let posted = &self.history[epoch as usize - 1];
+                        let credited = posted
+                            .rows
+                            .get(&sender)
+                            .and_then(|map| map.get(&receiver))
+                            .copied()
+                            .unwrap_or(0);
+                        assert!(credited < receipt.amount && posted.omitted.contains(&sender));
+                        return;
                     }
                 }
             }
@@ -3916,7 +5035,7 @@ impl Harness {
                 let (deposits, forced) = (honest.deposits.count, honest.forced_withdrawals.count);
                 let certificate = posted.certificate.clone();
                 let verified = summary.verify(
-                    &mut self.context,
+                    self.context.as_mut().expect("the process is up"),
                     &self.verifier,
                     &certificate,
                     honest.epoch,
@@ -3930,14 +5049,19 @@ impl Harness {
                 }
             }
             Target::Request => {
-                let Some(admitted) = self
+                // An admitted request of the open epoch or of the epoch being closed.
+                let closing = self.desk.closing.as_ref();
+                let admitted: Vec<_> = self
                     .desk
                     .admitted
-                    .values()
-                    .nth(choice % self.desk.admitted.len().max(1))
-                else {
+                    .iter()
+                    .chain(closing.into_iter().flat_map(|closing| &closing.admitted))
+                    .collect();
+                if admitted.is_empty() {
                     return;
-                };
+                }
+                let (user, admitted) = admitted[choice % admitted.len()];
+                let user = *user;
                 let honest = admitted
                     .requests
                     .last()
@@ -3946,13 +5070,25 @@ impl Harness {
                 let Some(request) = mutate(&honest, &LIMITS.receivers, mutations) else {
                     return;
                 };
-                if request
-                    .verify::<Sha256>(&self.namespace, honest.epoch)
-                    .is_ok()
-                {
-                    assert_eq!(request.account, honest.account);
-                    assert_eq!(request.payments, honest.payments);
-                    assert_eq!(request.previous, honest.previous);
+
+                // I5: in each epoch it can name, the operator admits the mutated request exactly
+                // as the model admits it against the records of that epoch.
+                let signed = Signed::of(&honest);
+                for epoch in [honest.epoch, honest.epoch + 1] {
+                    let Some((latest, previous)) = self.records(user, epoch) else {
+                        continue;
+                    };
+                    let expected = self.expect(epoch, latest, previous, &request, &signed);
+                    let admission =
+                        request
+                            .verify::<Sha256>(&self.namespace, epoch)
+                            .and_then(|verified| {
+                                verified.admit::<Sha256>(
+                                    latest.map(|latest| (&latest.state, &latest.payments)),
+                                    &previous,
+                                )
+                            });
+                    self.admission(admission, expected, epoch, latest, previous, &request);
                 }
             }
             Target::PayoutProof => {
@@ -4038,11 +5174,30 @@ fn run(plan: Plan) {
         entropy,
     } = plan;
     let cfg = deterministic::Config::new().with_rng(FuzzRng::from(entropy));
-    let runner = deterministic::Runner::new(cfg);
-    runner.start(|context| async move {
-        let harness = Harness::new(context, users).await;
-        harness.run(ops).await;
-    });
+    let mut runner = deterministic::Runner::new(cfg);
+
+    // A crash ends the runtime, which drops every write not yet durable, and the plan resumes
+    // in a runtime recovered from what storage kept.
+    let mut ops = Some(VecDeque::from(ops));
+    let mut crashed = None;
+    loop {
+        let (plan, resumed) = (ops.take(), crashed.take());
+        let (outcome, checkpoint) = runner.start_and_recover(|context| async move {
+            match resumed {
+                Some(crashed) => Harness::resume(context, crashed).await,
+                None => {
+                    let harness = Harness::new(context, users).await;
+                    harness.check().await;
+                    harness.run(plan.expect("the plan")).await
+                }
+            }
+        });
+        let Some(outcome) = outcome else {
+            return;
+        };
+        crashed = Some(outcome);
+        runner = deterministic::Runner::from(checkpoint);
+    }
 }
 
 fuzz_target!(|plan: Plan| {
