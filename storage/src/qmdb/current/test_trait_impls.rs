@@ -30,7 +30,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Removal};
 use core::borrow::Borrow;
 use std::{ops::Range, sync::Arc};
 
@@ -216,6 +216,14 @@ where
 
     async fn prune(self, loc: Location<F>) -> Result<Self, Error<F>> {
         Self::prune(self, loc).await
+    }
+
+    fn removals(&self) -> Removal {
+        Self::removals(self)
+    }
+
+    async fn wait_for_removals(&self) -> Result<(), Error<F>> {
+        Self::wait_for_removals(self).await
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {

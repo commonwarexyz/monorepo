@@ -1397,13 +1397,14 @@ mod tests {
         rayon::ThreadPoolBuilder,
     };
     use commonware_runtime::{
-        Error as RuntimeError, Runner as _, Spawner as _, Storage as _, Strategizer as _,
-        Supervisor as _,
+        Clock as _, Error as RuntimeError, Runner as _, Spawner as _, Storage as _,
+        Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
-            RecordingContext, drive_pending_syncs, fail_pending_syncs, next_pending_sync,
+            DeferredRemoveContext, DeferredRemoves, DelayedSyncContext, MutationFaultContext,
+            MutationFaults, PendingSyncs, RecordingContext, drive_pending_syncs,
+            fail_pending_syncs, next_pending_sync,
         },
         reschedule,
         telemetry::traces::collector::TraceStorage,
@@ -2405,6 +2406,480 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| {
             test_read_pruned_operation_returns_error_inner::<mmb::Family>(context)
+        });
+    }
+
+    /// A crash with a prune's deletions failed leaves the released blobs on disk. The journal
+    /// reopens at its oldest blob with every released operation readable and the Merkle structure
+    /// at the boundary it persisted, and the next prune deletes the blobs again.
+    fn test_crash_with_failed_removals_recovers<F: Family + PartialEq>() {
+        let suffix = "failed_removals";
+        let partition = format!("journal-{suffix}-blobs");
+        let executor = deterministic::Runner::default();
+        let ((boundary, root), checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            move |context| async move {
+                let mut journal =
+                    create_journal_with_ops::<F>(context.child("first"), suffix, 100).await;
+                (journal, _) = journal
+                    .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
+                    .await
+                    .unwrap();
+                let journal = journal.sync().await.unwrap();
+                context.storage_fault_config().write().remove_rate =
+                    Some(commonware_utils::probability!(1.0));
+                let (journal, boundary) = journal.prune(Location::<F>::new(50)).await.unwrap();
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let blobs = commonware_runtime::Storage::scan(&context, &partition).await;
+                assert_eq!(blobs.unwrap().len(), 15);
+                let root = journal.root(0).unwrap();
+                drop(journal);
+                (boundary, root)
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            // The Merkle structure persisted its boundary at the retained start, 49.
+            let journal = create_empty_journal::<F>(context.child("second"), suffix).await;
+            assert_eq!(journal.bounds(), 0..101);
+            assert_eq!(journal.merkle.bounds().start, Location::<F>::new(49));
+            assert_eq!(journal.root(0).unwrap(), root);
+            assert_eq!(journal.read(0).await.unwrap(), create_operation::<F>(0));
+
+            // The next prune releases the surviving blobs again, and storage deletes them.
+            let (journal, _) = journal.prune(boundary).await.unwrap();
+            journal.wait_for_removals().await.unwrap();
+            let blobs = commonware_runtime::Storage::scan(&context, &partition).await;
+            assert_eq!(blobs.unwrap().len(), 8);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_failed_removals_recovers_mmr() {
+        test_crash_with_failed_removals_recovers::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_failed_removals_recovers_mmb() {
+        test_crash_with_failed_removals_recovers::<mmb::Family>();
+    }
+
+    /// Authenticated journal whose item and node deletions park in separate queues.
+    type DeferredJournal<F> = Journal<
+        F,
+        DeferredRemoveContext<Context>,
+        ContiguousJournal<DeferredRemoveContext<Context>, TestOp<F>>,
+        Sha256,
+        Sequential,
+    >;
+
+    /// Build a [DeferredJournal] and return it with its item and node deletion queues.
+    async fn deferred_journal<F: Family + PartialEq>(
+        context: &Context,
+        suffix: &str,
+    ) -> (DeferredJournal<F>, DeferredRemoves, DeferredRemoves) {
+        let (item_context, item_removes) = DeferredRemoveContext::new(context.child("items"));
+        let (node_context, node_removes) = DeferredRemoveContext::new(context.child("nodes"));
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(node_context, &hasher, merkle_config(suffix))
+                .await
+                .unwrap();
+        let items = ContiguousJournal::<_, TestOp<F>>::init(item_context, journal_config(suffix))
+            .await
+            .unwrap();
+        let journal = Journal {
+            journal: items,
+            merkle,
+            hasher,
+        };
+        (journal, item_removes, node_removes)
+    }
+
+    /// Append the operations numbered `ops` and a commit with inactivity floor `floor`, then
+    /// sync.
+    async fn append_committed<F: Family + PartialEq>(
+        mut journal: DeferredJournal<F>,
+        ops: Range<u8>,
+        floor: u64,
+    ) -> DeferredJournal<F> {
+        for i in ops {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        (journal, _) = journal
+            .append(&TestOp::<F>::Commit(None, Location::new(floor)))
+            .await
+            .unwrap();
+        journal.sync().await.unwrap()
+    }
+
+    /// Reopen the journal and check that it starts at `start`, with the Merkle structure at
+    /// `merkle_start`, has `root`, and holds `expected`, the operations from `boundary` onward.
+    async fn check_recovered<F: Family + PartialEq>(
+        context: Context,
+        suffix: &str,
+        start: u64,
+        merkle_start: u64,
+        boundary: Location<F>,
+        root: Digest,
+        expected: Vec<TestOp<F>>,
+    ) {
+        let recovered = create_empty_journal::<F>(context, suffix).await;
+        assert_eq!(recovered.bounds().start, start);
+        assert_eq!(recovered.merkle.bounds().start, Location::new(merkle_start));
+        assert_eq!(recovered.root(0).unwrap(), root);
+        assert!(recovered.read(start).await.is_ok());
+        for (position, op) in (*boundary..).zip(expected) {
+            assert_eq!(recovered.read(position).await.unwrap(), op);
+        }
+        recovered.destroy().await.unwrap();
+    }
+
+    /// The retained operations of `journal` from `boundary` onward.
+    async fn retained<F: Family + PartialEq>(
+        journal: &DeferredJournal<F>,
+        boundary: Location<F>,
+    ) -> Vec<TestOp<F>> {
+        let mut ops = Vec::new();
+        for position in *boundary..journal.bounds().end {
+            ops.push(journal.read(position).await.unwrap());
+        }
+        ops
+    }
+
+    /// A failed item deletion stops the same prune's node deletion, so every node stays on disk.
+    /// The journal reopens at its oldest blob and the Merkle structure at its persisted boundary.
+    fn test_item_removal_failure_stops_node_removals<F: Family + PartialEq>() {
+        deterministic::Runner::default().start(|context| async move {
+            let suffix = "item-failure-stops-nodes";
+            let (journal, item_removes, node_removes) =
+                deferred_journal::<F>(&context, suffix).await;
+            let journal = append_committed(journal, 0..100, 50).await;
+            let root = journal.root(0).unwrap();
+            let node_partition = format!("mmr-journal-{suffix}-blobs");
+            let nodes = commonware_runtime::Storage::scan(&context, &node_partition)
+                .await
+                .unwrap();
+            let (journal, boundary) = journal.prune(Location::new(50)).await.unwrap();
+            assert_eq!(item_removes.len(), 1);
+            assert_eq!(node_removes.len(), 1);
+
+            // The item deletion fails, and the node deletion then runs without the fault.
+            context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            item_removes.release(&context).await;
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            node_removes.release(&context).await;
+            assert!(journal.removals().await.is_err());
+            assert_eq!(
+                commonware_runtime::Storage::scan(&context, &node_partition)
+                    .await
+                    .unwrap(),
+                nodes
+            );
+            let expected = retained(&journal, boundary).await;
+            drop(journal);
+            check_recovered(
+                context.child("recover"),
+                suffix,
+                0,
+                49,
+                boundary,
+                root,
+                expected,
+            )
+            .await;
+        });
+    }
+
+    /// A failed node deletion stops the next prune's item deletion, so no later item is deleted.
+    /// The journal reopens at the first prune's retained start and the Merkle structure at the
+    /// boundary the second prune persisted.
+    fn test_node_removal_failure_stops_item_removals<F: Family + PartialEq>() {
+        deterministic::Runner::default().start(|context| async move {
+            let suffix = "node-failure-stops-items";
+            let (journal, item_removes, node_removes) =
+                deferred_journal::<F>(&context, suffix).await;
+            let journal = append_committed(journal, 0..100, 50).await;
+            let (journal, _) = journal.prune(Location::new(50)).await.unwrap();
+            let journal = append_committed(journal, 100..200, 150).await;
+            let root = journal.root(0).unwrap();
+            let (journal, boundary) = journal.prune(Location::new(150)).await.unwrap();
+            assert_eq!(item_removes.len(), 2);
+            assert_eq!(node_removes.len(), 2);
+
+            // The first prune's item deletion succeeds and its node deletion fails. The second
+            // prune's deletions then run without the fault.
+            let item_partition = format!("journal-{suffix}-blobs");
+            assert!(item_removes.release_one(&context).await);
+            let items = commonware_runtime::Storage::scan(&context, &item_partition)
+                .await
+                .unwrap();
+            context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            assert!(node_removes.release_one(&context).await);
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            item_removes.release(&context).await;
+            node_removes.release(&context).await;
+            assert!(journal.removals().await.is_err());
+            assert_eq!(
+                commonware_runtime::Storage::scan(&context, &item_partition)
+                    .await
+                    .unwrap(),
+                items
+            );
+            let expected = retained(&journal, boundary).await;
+            drop(journal);
+            check_recovered(
+                context.child("recover"),
+                suffix,
+                49,
+                147,
+                boundary,
+                root,
+                expected,
+            )
+            .await;
+        });
+    }
+
+    /// A destroy waiting on a deletion that fails reports it before changing anything, so the
+    /// journal reopens as it was.
+    fn test_destroy_reports_pending_removal_failure<F: Family + PartialEq>() {
+        deterministic::Runner::default().start(|context| async move {
+            let suffix = "destroy-pending-failure";
+            let (journal, item_removes, node_removes) =
+                deferred_journal::<F>(&context, suffix).await;
+            let journal = append_committed(journal, 0..100, 50).await;
+            let root = journal.root(0).unwrap();
+            let (journal, boundary) = journal.prune(Location::new(50)).await.unwrap();
+            let expected = retained(&journal, boundary).await;
+            let destroy = context.child("destroy").spawn(move |_| journal.destroy());
+
+            // Fail the item deletion once the destroy waits on it. The node deletion follows it.
+            context.sleep(Duration::from_millis(10)).await;
+            context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            item_removes.release(&context).await;
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            node_removes.release(&context).await;
+            assert!(destroy.await.unwrap().is_err());
+            check_recovered(
+                context.child("recover"),
+                suffix,
+                0,
+                49,
+                boundary,
+                root,
+                expected,
+            )
+            .await;
+        });
+    }
+
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure_mmr() {
+        test_destroy_reports_pending_removal_failure::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure_mmb() {
+        test_destroy_reports_pending_removal_failure::<mmb::Family>();
+    }
+
+    /// A failed node deletion surfaces from the next commit even when no node needs flushing.
+    fn test_commit_reports_node_removal_failure<F: Family + PartialEq>() {
+        deterministic::Runner::default().start(|context| async move {
+            let suffix = "commit-node-failure";
+            let (journal, item_removes, node_removes) =
+                deferred_journal::<F>(&context, suffix).await;
+            let journal = append_committed(journal, 0..100, 50).await;
+            let (journal, _) = journal.prune(Location::new(50)).await.unwrap();
+
+            // The item deletion succeeds and the node deletion fails, unobserved until commit.
+            item_removes.release(&context).await;
+            context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            node_removes.release(&context).await;
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(matches!(
+                journal.commit().await,
+                Err(Error::Merkle(crate::merkle::Error::Journal(
+                    JournalError::Removal(_)
+                )))
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_commit_reports_node_removal_failure_mmr() {
+        test_commit_reports_node_removal_failure::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_commit_reports_node_removal_failure_mmb() {
+        test_commit_reports_node_removal_failure::<mmb::Family>();
+    }
+
+    #[test_traced]
+    fn test_node_removal_failure_stops_item_removals_mmr() {
+        test_node_removal_failure_stops_item_removals::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_node_removal_failure_stops_item_removals_mmb() {
+        test_node_removal_failure_stops_item_removals::<mmb::Family>();
+    }
+
+    #[test_traced]
+    fn test_item_removal_failure_stops_node_removals_mmr() {
+        test_item_removal_failure_stops_node_removals::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_item_removal_failure_stops_node_removals_mmb() {
+        test_item_removal_failure_stops_node_removals::<mmb::Family>();
+    }
+
+    /// A crash with a prune's deletions still queued leaves every released blob on disk. A reopen
+    /// capped inside the released blobs is rejected before anything is truncated, as it is once
+    /// they are deleted. An unbounded reopen starts at the oldest blob, and the next prune deletes
+    /// the released blobs again.
+    fn test_crash_with_pending_removals_recovers<F: Family + PartialEq>() {
+        let suffix = "pending_removals";
+        let partition = format!("journal-{suffix}-blobs");
+        let executor = deterministic::Runner::default();
+        let (boundary, checkpoint) = executor.start_and_recover({
+            let partition = partition.clone();
+            move |context| async move {
+                let (journal, item_removes, node_removes) =
+                    deferred_journal::<F>(&context, suffix).await;
+                let journal = append_committed(journal, 0..100, 50).await;
+                let (journal, boundary) = journal.prune(Location::new(50)).await.unwrap();
+                assert_eq!((item_removes.len(), node_removes.len()), (1, 1));
+                let blobs = commonware_runtime::Storage::scan(&context, &partition).await;
+                assert_eq!(blobs.unwrap().len(), 15);
+                drop(journal);
+                boundary
+            }
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            // The Merkle structure persisted its boundary at the retained start, 49, so the
+            // operations below it are pruned history. A reopen capped at 48 is rejected as it is
+            // once the released blobs are deleted, even though the operation journal still holds
+            // 48.
+            let capped = TestJournal::<F>::init_at_most(
+                context.child("bounded"),
+                merkle_config(suffix),
+                journal_config(suffix),
+                48,
+                |_| true,
+                ForwardFold,
+            )
+            .await;
+            assert!(matches!(
+                capped,
+                Err(Error::Journal(JournalError::ItemPruned(48)))
+            ));
+
+            // An unbounded reopen finds every operation in place.
+            let journal = create_empty_journal::<F>(context.child("second"), suffix).await;
+            assert_eq!(journal.bounds(), 0..101);
+            assert_eq!(journal.merkle.bounds().start, Location::<F>::new(49));
+            assert_eq!(journal.read(0).await.unwrap(), create_operation::<F>(0));
+
+            // The next prune releases the surviving blobs again, and storage deletes them.
+            let (journal, _) = journal.prune(boundary).await.unwrap();
+            journal.wait_for_removals().await.unwrap();
+            let blobs = commonware_runtime::Storage::scan(&context, &partition).await;
+            assert_eq!(blobs.unwrap().len(), 8);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_pending_removals_recovers_mmr() {
+        test_crash_with_pending_removals_recovers::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_crash_with_pending_removals_recovers_mmb() {
+        test_crash_with_pending_removals_recovers::<mmb::Family>();
+    }
+
+    /// Item and node deletions both follow the caller's `after`, including when only the Merkle
+    /// structure releases storage, so a failed `after` deletes neither.
+    #[test_traced]
+    fn test_prune_follows_caller_after() {
+        for nodes_only in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                let suffix = "caller-after";
+                let mut journal =
+                    create_journal_with_ops::<mmr::Family>(context.child("journal"), suffix, 100)
+                        .await;
+                (journal, _) = journal
+                    .append(&TestOp::<mmr::Family>::Commit(None, Location::new(50)))
+                    .await
+                    .unwrap();
+                let mut journal = journal.sync().await.unwrap();
+
+                // Prune the items alone, as a crash between item and node pruning leaves them, so
+                // the prune below releases only nodes.
+                if nodes_only {
+                    (journal.journal, _) = journal.journal.prune(50).await.unwrap();
+                }
+                let partitions = [
+                    format!("journal-{suffix}-blobs"),
+                    format!("mmr-journal-{suffix}-blobs"),
+                ];
+                let mut before = Vec::new();
+                for partition in &partitions {
+                    before.push(
+                        commonware_runtime::Storage::scan(&context, partition)
+                            .await
+                            .unwrap(),
+                    );
+                }
+
+                let failed = Removal::ready(Err(commonware_runtime::Error::Closed));
+                let (journal, pruned) = Mutable::prune_after(journal, 50, Some(failed))
+                    .await
+                    .unwrap();
+                assert!(pruned);
+                assert!(matches!(
+                    journal.removals().await,
+                    Err(commonware_runtime::Error::Closed)
+                ));
+                for (partition, before) in partitions.iter().zip(before) {
+                    let after = commonware_runtime::Storage::scan(&context, partition).await;
+                    assert_eq!(after.unwrap(), before, "{nodes_only}");
+                }
+            });
+        }
+    }
+
+    /// A node deletion failure surfaces from the next sync even when no node needs syncing.
+    #[test_traced]
+    fn test_sync_reports_node_removal_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let journal = create_journal_with_ops::<mmr::Family>(
+                context.child("journal"),
+                "node_failure",
+                100,
+            )
+            .await;
+
+            // Remove the oldest node blob behind the journal's back, so the prune's node deletion
+            // fails while its item deletion succeeds.
+            commonware_runtime::Storage::remove(
+                &context,
+                "mmr-journal-node_failure-blobs",
+                Some(&0u64.to_be_bytes()),
+            )
+            .await
+            .unwrap();
+            let (journal, _, removals) = journal.start_prune(Location::new(50)).await.unwrap();
+            journal.journal.wait_for_removals().await.unwrap();
+            assert!(removals.await.is_err());
+            assert!(journal.sync().await.is_err());
         });
     }
 
