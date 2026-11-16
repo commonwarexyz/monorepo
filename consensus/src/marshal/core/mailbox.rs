@@ -22,6 +22,7 @@ use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
     num::NonZeroUsize,
+    ops::Range,
     sync::Arc,
 };
 use tracing::{Span, info_span};
@@ -93,6 +94,17 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         fetch: bool,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
+    },
+    /// A lease requesting speculative fetches of the blocks for a range of commitments.
+    Prefetch {
+        /// The span carried with this request.
+        span: Span,
+        /// The commitments in forward order.
+        commitments: Arc<[V::Commitment]>,
+        /// The selected indices within the commitment sequence.
+        range: Range<usize>,
+        /// The sender retained while the caller owns the lease receiver.
+        lease: oneshot::Sender<()>,
     },
     /// A request to wait for a finalized block at a height.
     AwaitFinalized {
@@ -232,6 +244,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetFinalization { span, .. }
             | Self::GetVerified { span, .. }
             | Self::Acquire { span, .. }
+            | Self::Prefetch { span, .. }
             | Self::AwaitFinalized { span, .. }
             | Self::Forward { span, .. }
             | Self::Proposed { span, .. }
@@ -259,6 +272,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetAnchor { .. } => "get_anchor",
             Self::Acquire { fetch: true, .. } => "acquire",
             Self::Acquire { fetch: false, .. } => "subscribe",
+            Self::Prefetch { .. } => "prefetch",
             Self::AwaitFinalized { .. } => "await_finalized",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::GetVerified { .. } => "get_verified",
@@ -303,6 +317,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetAnchor { .. } => false,
             Self::Acquire { .. }
             | Self::AwaitFinalized { .. }
+            | Self::Prefetch { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
             | Self::Prepared { .. }
@@ -326,6 +341,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::Acquire { response, .. } | Self::AwaitFinalized { response, .. } => {
                 response.is_closed()
             }
+            Self::Prefetch { lease, .. } => lease.is_closed(),
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
@@ -735,6 +751,36 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             commitment,
             fetch: false,
             response,
+        });
+        receiver
+    }
+
+    /// Registers best-effort forward prefetch demand for `range` within `commitments`.
+    ///
+    /// Dropping the returned receiver releases the demand. Marshal may retire the demand for a
+    /// commitment earlier, such as when it stores the block or an [`Self::acquire`] caller takes
+    /// over the fetch. The receiver never delivers a value. An empty or invalid range returns one
+    /// that is already closed.
+    pub(crate) fn prefetch(
+        &self,
+        commitments: Arc<[V::Commitment]>,
+        range: Range<usize>,
+    ) -> oneshot::Receiver<()> {
+        let (lease, receiver) = oneshot::channel();
+
+        // An empty or invalid range sends no request. Returning drops the sender and so closes
+        // the receiver.
+        if !commitments
+            .get(range.clone())
+            .is_some_and(|selected| !selected.is_empty())
+        {
+            return receiver;
+        }
+        let _ = self.sender.enqueue(Message::Prefetch {
+            span: info_span!("marshal.mailbox.prefetch"),
+            commitments,
+            range,
+            lease,
         });
         receiver
     }

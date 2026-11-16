@@ -117,11 +117,12 @@ where
     /// block bound this configuration reports.
     pub block_codec_config: AB::Cfg,
 
-    /// Maximum number of missing finalized heights fetched from peers at a time.
+    /// Maximum combined number of speculative fetches and prefetched bodies.
     ///
-    /// Repair fetches the lowest missing heights above the processed height and moves up as they
-    /// fill, so a larger value fills a gap with more parallel requests. Blocks requested by
-    /// commitment, hints, and subscriptions are not counted.
+    /// Also bounds the finalized heights requested in one forward gap-repair pass and the
+    /// number of resolver messages handled in one batch. Direct acquisitions are not limited by
+    /// the shared capacity. Each stays active until its block is delivered, or until marshal
+    /// handles an event after its receiver is dropped.
     ///
     /// Sources from [`Mailbox::blocks_with_parent`](super::core::Mailbox::blocks_with_parent)
     /// and [`Mailbox::finalized_blocks`](super::core::Mailbox::finalized_blocks) give each range

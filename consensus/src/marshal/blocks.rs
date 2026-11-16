@@ -3,7 +3,7 @@
 use super::core::{Mailbox, Variant};
 use crate::{Block, Heightable, History, types::Height};
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
-use commonware_utils::sync::Mutex;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use futures::{
     FutureExt as _, Stream,
     future::{BoxFuture, WeakShared},
@@ -33,6 +33,10 @@ trait Source<B: Block>: Send + Sync {
         self: Arc<Self>,
         height: Height,
     ) -> BoxFuture<'static, Result<Option<B::Digest>, Error>>;
+
+    /// Registers forward demand for the part of `heights` whose commitments the source holds,
+    /// if it serves such demand.
+    fn prefetch(&self, heights: RangeInclusive<Height>) -> Option<oneshot::Receiver<()>>;
 }
 
 /// Adapts the callback constructor to a branch source.
@@ -68,6 +72,10 @@ where
     ) -> BoxFuture<'static, Result<Option<B::Digest>, Error>> {
         let digest = self.digest(height);
         Box::pin(async move { Ok(digest) })
+    }
+
+    fn prefetch(&self, _heights: RangeInclusive<Height>) -> Option<oneshot::Receiver<()>> {
+        None
     }
 }
 
@@ -191,6 +199,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// parent's, the anchor's inferred height is wrong, and a read below it can wait on a height
     /// that is not finalized. Such a block fails its own certification, so nothing built on it can
     /// finalize.
+    ///
+    /// A polled range keeps the part of its remaining heights that `history` covers prefetched
+    /// in forward order, within the capacity shared by all ranges
+    /// ([`Config::max_repair`](super::Config)). Each range's window of pending acquisitions and
+    /// buffered bodies is additional to that capacity, as are the bodies a walk retains.
     pub fn blocks_with_parent(
         &self,
         parent_height: Height,
@@ -479,6 +492,22 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
             Ok(commitment.map(V::commitment_to_inner))
         })
     }
+
+    fn prefetch(&self, heights: RangeInclusive<Height>) -> Option<oneshot::Receiver<()>> {
+        // Demand covers only the requested heights the supplied commitments select, as indices
+        // into them.
+        let first = suffix_start(self.parent_height, self.commitments.len())?;
+        let start = heights.start().get().max(first);
+        let end = heights.end().get().min(self.parent_height.get());
+        let range = if start > end || self.commitments.is_empty() {
+            0..0
+        } else {
+            let start = usize::try_from(start - first).ok()?;
+            let end = usize::try_from(end - first).ok()?.checked_add(1)?;
+            start..end
+        };
+        Some(self.marshal.prefetch(self.commitments.clone(), range))
+    }
 }
 
 impl<B: Block> Blocks<B> {
@@ -582,6 +611,7 @@ impl<B: Block> Blocks<B> {
             end,
             previous: None,
             pending: FuturesOrdered::new(),
+            lease: Lease::Idle,
         }
     }
 }
@@ -598,6 +628,18 @@ pub struct BlockRange<B: Block> {
     previous: Option<B::Digest>,
     /// Acquisitions in flight or completed but not yet yielded, in height order.
     pending: FuturesOrdered<BoxFuture<'static, Result<Digested<B>, Error>>>,
+    /// Forward demand registered for the remaining heights.
+    lease: Lease,
+}
+
+/// Forward demand held by a range. Dropping an active lease cancels it.
+enum Lease {
+    /// The range has not registered demand.
+    Idle,
+    /// Demand is registered with the source.
+    Active { _lease: oneshot::Receiver<()> },
+    /// The range finished or failed, or its source serves no demand.
+    Released,
 }
 
 impl<B: Block> Unpin for BlockRange<B> {}
@@ -612,6 +654,17 @@ impl<B: Block> Stream for BlockRange<B> {
         if this.next.is_some() && this.end > this.blocks.tip {
             this.next = None;
             return Poll::Ready(Some(Err(Error::InvalidHeight)));
+        }
+
+        // The first poll registers forward demand for the remaining heights.
+        if matches!(this.lease, Lease::Idle)
+            && let Some(height) = this.next
+        {
+            this.lease = this
+                .blocks
+                .source
+                .prefetch(height..=this.end)
+                .map_or(Lease::Released, |lease| Lease::Active { _lease: lease });
         }
 
         // Keep up to a window of acquisitions pending, in height order.
@@ -644,9 +697,14 @@ impl<B: Block> Stream for BlockRange<B> {
             Ok(block)
         });
 
+        // An error ends the range and cancels its outstanding acquisitions, and a finished
+        // range releases its demand.
         if result.is_err() {
             this.next = None;
             this.pending.clear();
+        }
+        if this.next.is_none() && this.pending.is_empty() {
+            this.lease = Lease::Released;
         }
         Poll::Ready(Some(result))
     }
@@ -666,7 +724,7 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex};
     use futures::{FutureExt, StreamExt};
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, ops::Range};
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestMessage = Message<harness::S, Standard<TestBlock>>;
@@ -735,7 +793,9 @@ mod tests {
         infos: Vec<Height>,
         acquired: Vec<Sha256Digest>,
         awaited: Vec<Height>,
+        prefetched: Vec<Range<usize>>,
         open: Vec<oneshot::Sender<Digested<TestBlock>>>,
+        leases: Vec<oneshot::Sender<()>>,
     }
 
     impl Scripted {
@@ -787,6 +847,10 @@ mod tests {
                             Some(block) => drop(response.send(digested(block.clone()))),
                             None => self.open.push(response),
                         }
+                    }
+                    TestMessage::Prefetch { range, lease, .. } => {
+                        self.prefetched.push(range);
+                        self.leases.push(lease);
                     }
                     _ => panic!("test must script every marshal request"),
                 }
@@ -914,6 +978,49 @@ mod tests {
         });
     }
 
+    /// A range's first poll registers demand only for its heights that the history supplies, and
+    /// dropping the range closes that lease.
+    #[test]
+    fn range_scopes_prefetch_to_its_lifetime() {
+        deterministic::Runner::default().start(|context| async move {
+            // A source over an anchored history of heights 4 through 9.
+            let (marshal, mut receiver) = marshal(context, 8);
+            let blocks = chain(10);
+            let commitments: Arc<[_]> = blocks[4..].iter().map(Digestible::digest).collect();
+            let source = marshal.blocks_with_parent(
+                Height::new(9),
+                blocks[9].digest(),
+                History::anchored(commitments.clone()),
+            );
+            let source_clone = source.clone();
+
+            // The first poll registers demand for heights 4 through 7 of the range.
+            let mut range = source.range(Height::new(2)..=Height::new(7));
+            assert!(receiver.recv().now_or_never().is_none());
+            assert!(range.next().now_or_never().is_none());
+            let TestMessage::Prefetch {
+                commitments: observed,
+                range: selected,
+                lease,
+                ..
+            } = receiver.recv().await.unwrap()
+            else {
+                panic!("range demand must precede body acquisition");
+            };
+            assert!(Arc::ptr_eq(&commitments, &observed));
+            assert_eq!(selected, 0..4);
+            assert!(!lease.is_closed());
+
+            // Dropping the range releases the demand, and clones keep the metadata.
+            drop(range);
+            assert!(lease.is_closed());
+            assert_eq!(
+                source_clone.digest(Height::new(7)),
+                Some(blocks[7].digest())
+            );
+        });
+    }
+
     /// Reading heights a suffix supplies, including its lowest commitment, sends only demand and
     /// acquisitions and never starts the walk. Bodies that arrive out of order are yielded in
     /// height order.
@@ -942,11 +1049,21 @@ mod tests {
             assert_eq!(source.digest(Height::new(6)), None);
             assert!(drain(&mut receiver).is_empty());
 
+            // Polling a range over heights 8 and 9 registers their demand and acquires each body.
             let mut range = source.range(Height::new(8)..=Height::new(9));
             assert!(range.next().now_or_never().is_none());
+            let mut lease = None;
             let mut responses = BTreeMap::new();
             for message in drain(&mut receiver) {
                 match message {
+                    TestMessage::Prefetch {
+                        range: selected,
+                        lease: held,
+                        ..
+                    } => {
+                        assert_eq!(selected, 1..3);
+                        lease = Some(held);
+                    }
                     TestMessage::Acquire {
                         commitment,
                         fetch,
@@ -959,6 +1076,7 @@ mod tests {
                     _ => panic!("a resident range must only prefetch and acquire"),
                 }
             }
+            let lease = lease.expect("resident range must register demand");
             assert_eq!(responses.len(), 2);
 
             // Out-of-order results are delivered in order.
@@ -974,6 +1092,7 @@ mod tests {
                 range.next().await.unwrap().unwrap().height(),
                 Height::new(8)
             );
+            assert!(!lease.is_closed());
             assert_eq!(
                 range.next().await.unwrap().unwrap().height(),
                 Height::new(9)
@@ -984,13 +1103,19 @@ mod tests {
             assert!(range.next().now_or_never().is_none());
             for message in drain(&mut receiver) {
                 assert!(
-                    matches!(message, TestMessage::Acquire { .. }),
+                    matches!(
+                        message,
+                        TestMessage::Prefetch { .. } | TestMessage::Acquire { .. }
+                    ),
                     "a resident range must only prefetch and acquire"
                 );
             }
         });
     }
 
+    /// With nothing finalized, a range below a suffix discovers each commitment by walking parent
+    /// links. Every body is acquired once, demand covers only the supplied commitments, and no read
+    /// waits on finalized storage.
     #[test]
     fn range_below_suffix_walks_parent_links() {
         deterministic::Runner::default().start(|context| async move {
@@ -1008,6 +1133,9 @@ mod tests {
             // Read heights 3 through 9, below and through the suffix.
             let mut range = source.range(Height::new(3)..=Height::new(9));
             scripted.read(&mut receiver, &mut range, &blocks[3..]);
+
+            // Demand covers only the supplied commitments.
+            assert_eq!(scripted.prefetched, vec![0..3]);
 
             // Each step sampled finalized storage at the lowest known height, and no read
             // waited on it.
@@ -1288,6 +1416,7 @@ mod tests {
             assert_eq!(scripted.awaited, [0, 0, 1, 2, 3].map(Height::new));
             assert!(scripted.infos.is_empty());
             assert!(scripted.acquired.is_empty());
+            assert!(scripted.prefetched.is_empty());
 
             // A bound parent seeds an empty anchored history. The parent is read by its
             // commitment and everything below it from finalized storage.
@@ -1445,12 +1574,13 @@ mod tests {
             );
             let mut range = source.range(Height::new(5)..=Height::new(8));
             assert!(range.next().now_or_never().is_none());
-            assert_eq!(scripted.answer(&mut receiver), 2);
+            assert_eq!(scripted.answer(&mut receiver), 3);
             assert!(range.next().now_or_never().is_none());
             assert_eq!(scripted.answer(&mut receiver), 1);
 
             // The range acquires the body above the lowest commitment, and the walk's first
             // step the body at it.
+            assert_eq!(scripted.prefetched, vec![0..2]);
             assert_eq!(scripted.infos, [Height::new(7)]);
             assert_eq!(scripted.acquisitions(&blocks[7]), 1);
             assert_eq!(scripted.acquisitions(&blocks[8]), 1);
@@ -1461,6 +1591,7 @@ mod tests {
             drop(source);
             drop(range);
             assert!(scripted.open.iter().all(oneshot::Sender::is_closed));
+            assert!(scripted.leases.iter().all(oneshot::Sender::is_closed));
             assert_eq!(scripted.answer(&mut receiver), 0);
 
             // A later reader starts the same step again.
@@ -1578,6 +1709,105 @@ mod tests {
                 assert_eq!(scripted.infos, [9, 8].map(Height::new));
                 assert_eq!(scripted.acquired, [blocks[9].digest()]);
                 assert!(scripted.awaited.is_empty());
+            }
+        });
+    }
+
+    /// Any error a range yields, whether height, digest, parent, or availability, closes its
+    /// demand, cancels its outstanding acquisitions, and releases its buffered bodies before the
+    /// range drops.
+    #[test]
+    fn range_error_releases_prefetch_and_bodies() {
+        deterministic::Runner::default().start(|context| async move {
+            // Each error case uses its own marshal and fails the range at height 1.
+            for expected in [
+                Error::InvalidHeight,
+                Error::InvalidDigest,
+                Error::InvalidParent,
+                Error::Unavailable,
+            ] {
+                let (marshal, mut receiver) = marshal(
+                    context.child(match expected {
+                        Error::InvalidHeight => "invalid_height",
+                        Error::InvalidDigest => "invalid_digest",
+                        Error::InvalidParent => "invalid_parent",
+                        Error::Unavailable => "unavailable",
+                    }),
+                    8,
+                );
+                let mut blocks = chain(6);
+                let replacement = match expected {
+                    Error::InvalidHeight => TestBlock::new(blocks[0].digest(), Height::new(7), 1),
+                    Error::InvalidDigest => TestBlock::new(blocks[0].digest(), Height::new(1), 99),
+                    Error::InvalidParent => {
+                        // Match the detached body's digest so linkage is the only failed check.
+                        blocks[1] = TestBlock::new(Sha256::fill(7), Height::new(1), 1);
+                        blocks[1].clone()
+                    }
+                    Error::Unavailable => blocks[1].clone(),
+                };
+
+                // A range over an anchored history of the chain registers demand and acquires
+                // every body.
+                let commitments: Vec<_> = blocks.iter().map(Digestible::digest).collect();
+                let source = marshal.blocks_with_parent(
+                    Height::new(5),
+                    blocks[5].digest(),
+                    History::anchored(commitments),
+                );
+                let mut range = source.range(Height::new(1)..=Height::new(5));
+                assert!(range.next().now_or_never().is_none());
+                let TestMessage::Prefetch {
+                    range: selected,
+                    lease,
+                    ..
+                } = receiver.recv().await.unwrap()
+                else {
+                    panic!("range demand must precede body acquisition");
+                };
+                assert_eq!(selected, 1..6);
+                let mut responses = BTreeMap::new();
+                for _ in 1..=5 {
+                    let TestMessage::Acquire {
+                        commitment,
+                        response,
+                        ..
+                    } = receiver.recv().await.unwrap()
+                    else {
+                        panic!("the range must acquire every body");
+                    };
+                    responses.insert(commitment, response);
+                }
+
+                // Keep a completed body buffered behind the failing request.
+                let buffered = Arc::new(blocks[5].clone());
+                let retained = Arc::downgrade(&buffered);
+                responses
+                    .remove(&blocks[5].digest())
+                    .unwrap()
+                    .send(digested(buffered))
+                    .unwrap();
+                assert!(range.next().now_or_never().is_none());
+                assert!(retained.upgrade().is_some());
+                assert!(!lease.is_closed());
+                assert!(responses.values().all(|response| !response.is_closed()));
+
+                // Height 1 fails when its acquisition closes or its replacement arrives.
+                let response = responses.remove(&blocks[1].digest()).unwrap();
+                if expected == Error::Unavailable {
+                    drop(response);
+                } else {
+                    response.send(digested(replacement)).unwrap();
+                }
+                assert_eq!(range.next().await.unwrap().unwrap_err(), expected);
+
+                // Terminal errors cancel demand while the range itself remains alive.
+                assert!(lease.is_closed());
+                assert_eq!(responses.len(), 3);
+                assert!(responses.values().all(oneshot::Sender::is_closed));
+                assert!(retained.upgrade().is_none());
+                assert!(range.next().await.is_none());
+                assert!(receiver.recv().now_or_never().is_none());
             }
         });
     }

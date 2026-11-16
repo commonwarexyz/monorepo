@@ -195,6 +195,8 @@ impl<D: Digest> Producer for Handler<D> {
 /// [`Height`](Annotation::Height) only bounds retention.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Annotation {
+    /// Retain until the block arrives or the caller or prefetch lease that owns the request
+    /// releases it. Carries no evidence for the commitment.
     Subscription,
     /// Retain until the processed round floor covers this round. On a block request, a
     /// finalization at this round names the commitment.
@@ -270,6 +272,8 @@ impl<D: Digest> Request<D> {
         }
     }
 
+    /// Fetch a block by commitment for a caller or prefetch lease.
+    ///
     /// The request carries no evidence for `commitment`.
     pub const fn subscription(commitment: D) -> Self {
         Self::new(commitment, Annotation::Subscription)
