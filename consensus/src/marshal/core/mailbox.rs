@@ -295,25 +295,26 @@ pub enum CommitmentFallback {
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or retention bound.
     FetchByRound { round: Round },
-    /// Request the exact commitment from peers and prune the request once the processed height
-    /// reaches `height` or, for an uncertified block, the processed round floor covers `round`.
+    /// Request the exact commitment from peers.
     ///
-    /// Use this when the caller reads the block's height from the block above it. Examples
-    /// include repairing a finalized gap or walking a block's ancestry. Peers serve the block
-    /// from wherever they store it, so the request also resolves after they prune its round's
+    /// Use this when the caller reads the block's height from the block above it, as when
+    /// repairing a finalized gap or walking a block's ancestry. Peers serve the block from
+    /// wherever they store it, so the request still resolves after they prune its round's
     /// notarization. Do not use it for a candidate's immediate parent when the consensus context
     /// supplies the parent round.
     ///
-    /// At least one bound must be locally validated. A height read from a block counts only once
-    /// that block has been checked against its own parent. Otherwise supply a `round` that ends
-    /// the need for the block. That is either the round consensus bound to the commitment, such as
-    /// the parent round in a block's consensus context, or the round of the consensus request the
-    /// block is fetched for.
+    /// The request is pruned once the processed height reaches `height` or, for an uncertified
+    /// block, the processed round floor covers `round`.
     ///
-    /// Neither bound is sent to peers, and neither is part of response validity. A fetched block is
-    /// delivered if its commitment matches. A matching block above `height` is delivered but not
-    /// cached. So is a matching block whose own height lies in an epoch later than any the cache
-    /// has recorded.
+    /// At least one of `height` and `round` must be locally validated, and a height read from the
+    /// block above is validated only once that block has been checked against its own parent.
+    /// Otherwise supply a `round` that ends the need for the block, either the round that
+    /// consensus bound to the commitment (such as the parent round in a block's consensus context)
+    /// or the round of the consensus request the block is fetched for.
+    ///
+    /// Neither `height` nor `round` is sent to peers or decides whether a response is valid, so any
+    /// block that matches the commitment is delivered. A delivered block is not cached when its own
+    /// height is above `height` or lies in an epoch later than any the cache has recorded.
     FetchByCommitment {
         height: Height,
         round: Option<Round>,
