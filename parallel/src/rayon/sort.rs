@@ -1797,7 +1797,7 @@ mod tests {
                     assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
 
                     // Test heapsort using `>` operator.
-                    let mut tmp = v.clone();
+                    let mut tmp = v;
                     heapsort(&mut tmp, |a, b| a > b);
                     assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
                 }
