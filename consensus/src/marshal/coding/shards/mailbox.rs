@@ -76,14 +76,6 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
-    /// by its digest.
-    SubscribeByDigest {
-        /// The block's digest.
-        digest: B::Digest,
-        /// The response channel.
-        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
-    },
 }
 
 impl<B, C, H> Message<B, C, H>
@@ -98,8 +90,7 @@ where
                 response.is_closed()
             }
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
-            Self::SubscribeByCommitment { response, .. }
-            | Self::SubscribeByDigest { response, .. } => response.is_closed(),
+            Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::Disperse { .. } | Self::Gather { .. } => false,
         }
     }
@@ -285,19 +276,6 @@ where
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,
-            response: responder,
-        });
-        receiver
-    }
-
-    /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
-    pub fn subscribe_by_digest(
-        &self,
-        digest: B::Digest,
-    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
-        let (responder, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::SubscribeByDigest {
-            digest,
             response: responder,
         });
         receiver

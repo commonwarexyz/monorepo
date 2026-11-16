@@ -61,7 +61,8 @@ where
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Certified blocks indexed by height and keyed by digest.
     ///
-    /// Also includes uncertified ancestors fetched during optimistic verification.
+    /// Holds fetched blocks whose commitments this node certified, directly or through the parent
+    /// link of a certified descendant.
     certified_blocks:
         prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
     /// Notarizations stored by view
@@ -589,6 +590,21 @@ where
             .expect("failed to get notarization")
     }
 
+    /// Get a notarization from the prunable archive by block digest.
+    pub(crate) async fn get_notarization_for(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> Option<Notarization<S, V::Commitment>> {
+        for cache in self.caches.values().rev() {
+            match cache.notarizations.get(Identifier::Key(&digest)).await {
+                Ok(Some(notarization)) => return Some(notarization),
+                Ok(None) => continue,
+                Err(e) => panic!("failed to get cached notarization: {e}"),
+            }
+        }
+        None
+    }
+
     /// Returns whether the verified archive holds `digest` at `round`.
     pub(crate) async fn has_verified(
         &self,
@@ -648,42 +664,22 @@ where
         digest: <V::Block as Digestible>::Digest,
         mut predicate: impl FnMut(&V::Block) -> bool,
     ) -> Option<V::Block> {
-        // Check in reverse order
+        // Check newer epochs first, preserving archive priority within each epoch.
         for cache in self.caches.values().rev() {
-            // Check verified blocks
-            if let Some(block) = cache
-                .verified_blocks
-                .get(Identifier::Key(&digest))
-                .await
-                .expect("failed to get verified block")
-                .map(|stored| V::restore(stored, digest))
-                && predicate(&block)
-            {
-                return Some(block);
-            }
-
-            // Check notarized blocks
-            if let Some(block) = cache
-                .notarized_blocks
-                .get(Identifier::Key(&digest))
-                .await
-                .expect("failed to get notarized block")
-                .map(|stored| V::restore(stored, digest))
-                && predicate(&block)
-            {
-                return Some(block);
-            }
-
-            // Check certified blocks
-            if let Some(block) = cache
-                .certified_blocks
-                .get(Identifier::Key(&digest))
-                .await
-                .expect("failed to get certified block")
-                .map(|stored| V::restore(stored, digest))
-                && predicate(&block)
-            {
-                return Some(block);
+            for (archive, error) in [
+                (&cache.verified_blocks, "failed to get verified block"),
+                (&cache.notarized_blocks, "failed to get notarized block"),
+                (&cache.certified_blocks, "failed to get certified block"),
+            ] {
+                if let Some(block) = archive
+                    .get(Identifier::Key(&digest))
+                    .await
+                    .expect(error)
+                    .map(|stored| V::restore(stored, digest))
+                    && predicate(&block)
+                {
+                    return Some(block);
+                }
             }
         }
         None

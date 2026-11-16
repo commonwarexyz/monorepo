@@ -334,8 +334,8 @@ where
     /// the verification result.
     ///
     /// If `prefetched_block` is provided, it is used directly. This is useful in `certify` when
-    /// we've already fetched the block to extract its embedded context. Otherwise, a local-only
-    /// wait for the block is sent to marshal before this method returns.
+    /// we've already fetched the block to extract its embedded context. Otherwise, a wait for
+    /// local delivery is registered with marshal before this method returns.
     fn deferred_verify(
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
@@ -350,17 +350,12 @@ where
         let verify_duration = self.verify_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
-        // Verification needs the full block but waits only for local delivery. Certification starts
-        // recovery only when the block is not available locally. If the shard engine evicts a
-        // cached block before verification registers its wait, verification is left with neither
-        // the block nor an active fetch. Register the wait before the caller publishes the gate so
-        // it receives the cached block or is waiting when recovery delivers it.
+        // A proposal alone does not show that its block is available, so verification waits for
+        // local reconstruction and certification acquires the notarized block from peers. Own
+        // the candidate or register the wait before the caller publishes the gate so it receives
+        // a cached block or is waiting when certification delivers one.
         let candidate = prefetched_block.map_or_else(
-            || {
-                Either::Right(
-                    marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait),
-                )
-            },
+            || Either::Right(marshal.subscribe(commitment)),
             Either::Left,
         );
 
@@ -379,21 +374,11 @@ where
                 let round = consensus_context.round;
                 let (parent_view, parent_commitment) = consensus_context.parent;
 
-                // Start the parent fetch immediately so it can proceed in parallel
-                // with candidate reconstruction. The parent round comes from the
-                // caller's context (the certified consensus context in verify, the
-                // quorum-defended embedded context in certify), never from the
-                // unverified child block.
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    core::CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
+                // Acquire the exact parent concurrently with candidate reconstruction.
+                let parent_request = marshal.acquire(parent_commitment);
 
-                // Get the candidate block either from the caller or by waiting for
-                // local reconstruction. Candidate data remains local-only: a
-                // notarization is not sufficient reason to request it from peers.
+                // Get the candidate block either from the caller or by waiting for local
+                // reconstruction.
                 let block = match candidate {
                     Either::Left(block) => block,
                     Either::Right(block_request) => select! {
@@ -518,6 +503,7 @@ where
         &self,
         round: Round,
         payload: Commitment<B, C, H>,
+        block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
         history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
         // No in-progress task means we never verified this proposal locally.
@@ -526,22 +512,12 @@ where
         // will verify against the proper context and reject the mismatch, preventing a 2f+1
         // finalization quorum.
         //
-        // We must fetch here rather than only wait for local reconstruction. A Byzantine
-        // leader can send enough shards to just f+1 honest validators, collect enough honest
-        // notarize votes to form a notarization, and leave the remaining honest validators
-        // unable to reconstruct the block. Those validators need the notarized round to
-        // recover and certify; otherwise they can remain stuck if the Byzantine validators
-        // stop participating in the next view.
-        //
-        // Subscribe to the block and verify using its embedded context once available.
+        // Verify the acquired block against its embedded context once it arrives.
         debug!(
             ?round,
             ?payload,
-            "subscribing to block for certification using embedded context"
+            "waiting for acquired block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
         let marshaled = self.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self.context.child("certify").with_attribute("round", round);
@@ -622,17 +598,13 @@ where
         round: Round,
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
+        block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
         history: History<Commitment<B, C, H>>,
     ) -> oneshot::Receiver<bool> {
-        // `verify()` intentionally waits only for local candidate data. Once
-        // certification starts, a notarization exists and the same pending
-        // verifier must be unblocked by round-bound recovery if local
-        // reconstruction never completes.
-        self.marshal.hint_notarized(round, payload);
-
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
-        // recovers via the embedded-context fetch path.
+        // recovers via the embedded-context fetch path. The acquisition stays live until
+        // the gate resolves or recovery consumes it.
         let marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
@@ -641,7 +613,7 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, payload, move || {
-                marshaled.certify_from_embedded_context(round, payload, history)
+                marshaled.certify_from_embedded_context(round, payload, block_rx, history)
             })
             .instrument(info_span!(
                 "marshal.coding.certify.existing",
@@ -656,8 +628,8 @@ where
     /// next: re-propose the epoch boundary block, decline a parent the marshal cannot build on,
     /// or build on the fetched parent.
     ///
-    /// `parent_fallback` decides how a parent missing locally is acquired. A propose request
-    /// fetches it by round. A prepare request builds on a parent that only our own shard vote may
+    /// `fetch_parent` decides whether a parent missing locally is acquired from peers. A propose
+    /// request acquires it. A prepare request builds on a parent that only our own shard vote may
     /// attest to, so it draws no peer fetch. Local reconstruction or the parent's certification,
     /// which acquires the block from peers, delivers it.
     ///
@@ -667,7 +639,7 @@ where
         &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         _history: History<Commitment<B, C, H>>,
-        parent_fallback: core::CommitmentFallback,
+        fetch_parent: bool,
     ) -> impl Future<Output = CodingResolved<B, C, H, impl Ancestry<B>>> + Send + 'static {
         let scheme_provider = self.scheme_provider.clone();
         let context = self.context.clone();
@@ -689,13 +661,14 @@ where
             // boundary block of the previous epoch is the genesis block of the
             // current epoch.
             //
-            // Proposal context carries the parent view and commitment but not
-            // the parent height. The parent may sit above the finalized tip and
-            // may still be uncertified, so a fetch must stay round-bound until the
-            // block is returned.
+            // Consensus supplies the exact parent commitment. `fetch_parent` selects whether to
+            // acquire it from peers or await it locally.
             let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request =
-                marshal.subscribe_by_commitment(parent_commitment, parent_fallback);
+            let parent_request = if fetch_parent {
+                marshal.acquire(parent_commitment)
+            } else {
+                marshal.subscribe(parent_commitment)
+            };
             let parent_timer = proposal_parent_fetch_duration.timer(&*context);
             let Ok(parent) = parent_request.await else {
                 debug!(
@@ -790,13 +763,9 @@ where
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
-        let checks = self.checks(
-            consensus_context.clone(),
-            history,
-            core::CommitmentFallback::FetchByRound {
-                round: Round::new(consensus_context.epoch(), parent_view),
-            },
-        );
+
+        // A certified proposal parent can be fetched from peers.
+        let checks = self.checks(consensus_context.clone(), history, true);
         let span = info_span!(
             "marshal.coding.propose.task",
             round = %consensus_context.round
@@ -899,18 +868,8 @@ where
         // 2. The parent-child height check would fail (parent IS the block)
         // 3. Waiting for shards could stall if the leader doesn't rebroadcast
         if is_reproposal {
-            // Fetch the block to verify it's at the epoch boundary. This should be fast
-            // since the parent block is typically already cached. A re-proposal names its
-            // own parent, so the parent round is a certified round for this commitment and
-            // lets a participant that never received the original proposal acquire it
-            // instead of waiting for shards it cannot yet classify.
-            let (parent_view, _) = consensus_context.parent;
-            let block_rx = self.marshal.subscribe_by_commitment(
-                payload,
-                core::CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                },
-            );
+            // Acquire the boundary block before classifying the re-proposal.
+            let block_rx = self.marshal.acquire(payload);
             let marshal = self.marshal.clone();
             let shards = self.shards.clone();
             let epocher = self.epocher.clone();
@@ -1089,11 +1048,9 @@ where
         let erasure_encode_duration = self.erasure_encode_duration.clone();
         let clock = self.context.clone();
         let (parent_view, parent_commitment) = consensus_context.parent;
-        let checks = self.checks(
-            consensus_context.clone(),
-            history,
-            core::CommitmentFallback::Wait,
-        );
+
+        // A preparation parent may be uncertified, so it is awaited locally without a peer fetch.
+        let checks = self.checks(consensus_context.clone(), history, false);
         let span = info_span!(
             "marshal.coding.prepare.task",
             round = %consensus_context.round
@@ -1136,15 +1093,20 @@ where
         // starts reconstruction from the shards already buffered for it.
         self.shards.gather(payload, round);
 
+        // A pending verification waits only for local reconstruction. The notarization behind
+        // this request shows the block is available, so acquire it from peers for the existing
+        // gate or for recovery from the block's embedded context.
+        let block_rx = self.marshal.acquire(payload);
+
         // Check for an in-progress certification gate task.
         let task = self.gates.claim(round, payload, |block, ack| {
             self.marshal.verified_deferred(round, block, ack)
         });
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, payload, task, history);
+            return self.certify_from_existing_task(round, payload, task, block_rx, history);
         }
 
-        self.certify_from_embedded_context(round, payload, history)
+        self.certify_from_embedded_context(round, payload, block_rx, history)
     }
 }
 

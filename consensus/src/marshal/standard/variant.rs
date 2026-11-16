@@ -7,9 +7,8 @@ use crate::{
     Block, Heightable,
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
+        core::{Buffer, ExpectedCommitment, Mailbox, Variant},
     },
-    simplex::scheme::Scheme as SimplexScheme,
     types::Round,
 };
 use commonware_broadcast::{Broadcaster as _, buffered};
@@ -54,13 +53,6 @@ where
         block.parent()
     }
 
-    fn check_payload<S>(_scheme: &S, _payload: Self::Commitment) -> bool
-    where
-        S: SimplexScheme<Self::Commitment>,
-    {
-        true
-    }
-
     fn decode_block(
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
@@ -99,9 +91,13 @@ where
 
     fn from_application_block(
         block: Digested<Self::ApplicationBlock>,
-        payload: Self::Commitment,
+        commitment: Self::Commitment,
     ) -> Self::Block {
-        assert_eq!(block.digest(), payload, "payload does not commit to block");
+        assert_eq!(
+            block.digest(),
+            commitment,
+            "commitment must commit to the block"
+        );
         block
     }
 
@@ -130,15 +126,11 @@ where
         self.find_by_digest(commitment).await
     }
 
-    fn subscribe_by_digest(&self, digest: B::Digest) -> Option<oneshot::Receiver<Digested<B>>> {
-        Some(self.subscribe(digest))
-    }
-
     fn subscribe_by_commitment(
         &self,
         commitment: B::Digest,
     ) -> Option<oneshot::Receiver<Digested<B>>> {
-        self.subscribe_by_digest(commitment)
+        Some(self.subscribe(commitment))
     }
 
     fn send(&self, _round: Round, block: Digested<B>, recipients: Recipients<K>) {
@@ -157,14 +149,10 @@ where
         &self,
         block: &Digested<Self::Block>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
-        let receiver = block.height().previous().map(|parent_height| {
-            self.subscribe_by_commitment(
-                block.parent(),
-                CommitmentFallback::FetchByCommitment {
-                    height: parent_height,
-                },
-            )
-        });
+        let receiver = block
+            .height()
+            .previous()
+            .map(|_| self.acquire(block.parent()));
         async move { receiver?.await.ok() }
     }
 }

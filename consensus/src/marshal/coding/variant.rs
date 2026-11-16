@@ -6,9 +6,9 @@ use crate::{
             shards,
             types::{CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants},
         },
-        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
+        core::{Buffer, ExpectedCommitment, Mailbox, Variant},
     },
-    simplex::{scheme::Scheme as SimplexScheme, types::Context},
+    simplex::types::Context,
     types::{Round, coding::Commitment},
 };
 use commonware_codec::{Codec, Decode as _, Error as CodecError, Input, Read};
@@ -84,15 +84,6 @@ where
         block.context().parent.1
     }
 
-    fn check_payload<S>(scheme: &S, payload: Self::Commitment) -> bool
-    where
-        S: SimplexScheme<Self::Commitment>,
-    {
-        let n_participants = u16::try_from(scheme.participants().len())
-            .expect("scheme must have at most 2^16-1 participants");
-        payload.config() == coding_config_for_participants(n_participants)
-    }
-
     fn decode_block(
         buf: impl Input,
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
@@ -130,9 +121,9 @@ where
 
     fn from_application_block(
         block: Digested<Self::ApplicationBlock>,
-        payload: Self::Commitment,
+        commitment: Self::Commitment,
     ) -> Self::Block {
-        Arc::new(CodedBlock::precomputed(block, payload))
+        Arc::new(CodedBlock::precomputed(block, commitment))
     }
 
     fn max_backfill_block_size(application: usize) -> usize {
@@ -186,13 +177,6 @@ where
         self.get(commitment).await
     }
 
-    fn subscribe_by_digest(
-        &self,
-        digest: <CodedBlock<B, C, H> as Digestible>::Digest,
-    ) -> Option<oneshot::Receiver<Arc<CodedBlock<B, C, H>>>> {
-        Some(self.subscribe_by_digest(digest))
-    }
-
     fn subscribe_by_commitment(
         &self,
         commitment: Commitment<B, C, H>,
@@ -220,14 +204,10 @@ where
         &self,
         block: &Digested<Self::Block>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
-        let receiver = block.height().previous().map(|parent_height| {
-            self.subscribe_by_commitment(
-                block.context().parent.1,
-                CommitmentFallback::FetchByCommitment {
-                    height: parent_height,
-                },
-            )
-        });
+        let receiver = block
+            .height()
+            .previous()
+            .map(|_| self.acquire(block.context().parent.1));
         async move { receiver?.await.ok().map(|block| block.inner_digested()) }
     }
 }

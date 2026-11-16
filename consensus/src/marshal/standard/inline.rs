@@ -60,7 +60,7 @@ use crate::{
             gates::{GateOutcome, Gates},
             relay,
         },
-        core::{CommitmentFallback, DigestFallback, Mailbox},
+        core::Mailbox,
         standard::{
             Standard,
             validation::{
@@ -257,17 +257,9 @@ where
             // boundary block of the previous epoch is the genesis block of the
             // current epoch.
             //
-            // Proposal context carries the parent view and commitment but not
-            // the parent height. The parent may sit above the finalized tip and
-            // may still be uncertified, so this must stay round-bound until the
-            // block is returned.
-            let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request = marshal.subscribe_by_commitment(
-                parent_commitment,
-                CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                },
-            );
+            // Consensus supplies the exact parent commitment.
+            let parent_commitment = consensus_context.parent.1;
+            let parent_request = marshal.acquire(parent_commitment);
             let parent_timer = proposal_parent_fetch_duration.timer(&*context);
             let Ok(parent) = parent_request.await else {
                 debug!(
@@ -354,7 +346,7 @@ where
     /// Performs complete verification inline.
     ///
     /// This method:
-    /// 1. Waits for the block by digest
+    /// 1. Waits for the candidate block to arrive locally (certification fetches it from peers)
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
     /// 4. Runs application verification over ancestry
@@ -372,14 +364,11 @@ where
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
 
-        // Verification needs the full block but waits only for local delivery. Certification starts
-        // recovery only when the block is not buffered. If a buffered block is evicted before
-        // verification registers its wait, verification is left with neither the block nor an
-        // active fetch. Register the wait before publishing the gate so it receives the buffered
-        // block or is waiting when recovery delivers it.
-        let block_request = self
-            .marshal
-            .subscribe_by_digest(digest, DigestFallback::Wait);
+        // A proposal alone does not show that its block is available, so verification waits for
+        // local delivery and certification acquires the notarized block from peers. Register the
+        // wait before publishing the gate so it receives a buffered block or is waiting when
+        // certification delivers one.
+        let block_request = self.marshal.subscribe(digest);
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
 
@@ -400,20 +389,10 @@ where
         );
         runtime_context.spawn(move |runtime_context| {
             async move {
-                // Start the parent fetch immediately: its commitment and certified
-                // round are known from the consensus context, so it can proceed in
-                // parallel with broadcast delivery of the candidate block.
-                // Reproposals (digest == context.parent.1) skip parent validation
-                // entirely, so they must not fetch: the "parent" is the candidate
-                // itself, and candidate acquisition is deliberately local-only.
+                // Acquire the parent concurrently with the candidate, except when they coincide.
                 let parent_request = (digest != context.parent.1).then(|| {
-                    let (parent_view, parent_commitment) = context.parent;
-                    marshal.subscribe_by_commitment(
-                        parent_commitment,
-                        CommitmentFallback::FetchByRound {
-                            round: Round::new(context.epoch(), parent_view),
-                        },
-                    )
+                    let (_, parent_commitment) = context.parent;
+                    marshal.acquire(parent_commitment)
                 });
 
                 let Some(block) =
@@ -523,7 +502,7 @@ where
 }
 
 /// Inline certification consumes a registered certification gate when present, and
-/// falls back to a round-bound fetch/persist path when the gate is missing (after
+/// falls back to an exact-commitment fetch/persist path when the gate is missing (after
 /// an unclean restart) or cannot speak for the notarized proposal.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
@@ -593,13 +572,10 @@ where
             self.marshal.verified_deferred(round, block, ack)
         });
 
-        // `verify()` waits only on local broadcast delivery, so nudge a
-        // round-bound notarized fetch that can unblock the existing waiter
-        // if local broadcast never arrives. For the standard variant, the
-        // digest is also the variant commitment.
-        if task.is_some() {
-            self.marshal.hint_notarized(round, digest);
-        }
+        // The notarization behind this request shows the block is available. Fetching it
+        // unblocks a verification waiting for local delivery and supplies recovery below.
+        let block_request = self.marshal.acquire(digest);
+
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -631,14 +607,13 @@ where
                 }
 
                 // No local certification gate task (for example after an unclean restart):
-                // fetch the notarized block and persist it. A Byzantine leader can form a
+                // persist the notarized block fetched above. A Byzantine leader can form a
                 // notarization after sending the proposal to only f+1 honest validators, so
-                // the validators left without the block must fetch it here to certify and
-                // avoid getting stuck.
-                let block_rx =
-                    marshal.subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
+                // the validators left without the block must fetch it to certify and avoid
+                // getting stuck.
                 let Some(block) =
-                    await_block_subscription(&mut tx, block_rx, &digest, "certification").await
+                    await_block_subscription(&mut tx, block_request, &digest, "certification")
+                        .await
                 else {
                     return;
                 };
@@ -881,7 +856,7 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            // Seed the parent and child blocks in marshal without starting a verify task.
+            // Marshal stores the candidate, and its parent's body is missing.
             let parent_round = Round::new(Epoch::zero(), View::new(1));
             let parent_ctx = Ctx {
                 round: parent_round,
@@ -890,7 +865,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, ready(parent)).await);
+            assert!(marshal.get_block(&parent_digest).await.is_none());
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
