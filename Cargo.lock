@@ -2822,12 +2822,14 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-formatting",
+ "commonware-runtime",
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
  "num-bigint",
  "num-rational",
  "num-traits",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
