@@ -12,6 +12,7 @@ use rand::{Rng, RngExt as _};
 use std::{fmt::Debug, future::Future};
 
 pub mod floor;
+pub mod index;
 
 /// Check strict, non-wrapping neighbors against the model's live keys.
 pub fn assert_ordered_neighbors<K: Ord + Debug>(
