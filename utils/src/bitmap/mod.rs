@@ -1108,8 +1108,7 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 /// change while the iterator lives.
 ///
 /// The shared borrow of an owned bitmap (`BitMap`, `Prunable`) guarantees that. A `Readable`
-/// with interior mutability, such as a lock-guarded bitmap, does not: iterate it through a held
-/// read guard, not through the shared handle.
+/// with interior mutability must not be mutated for the duration of the iteration.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
     /// The exclusive end of iteration: the range's end, capped at the bitmap's length when the

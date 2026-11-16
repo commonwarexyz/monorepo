@@ -18,7 +18,7 @@ use crate::{
             operation::{Operation, update},
             ordered::{Neighbors, find_next_key_ascending},
         },
-        bitmap::{Candidates, Shared},
+        bitmap::Candidates,
         chain::{self, Bounds, Commitment, Compatible},
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         operation::{Key, Operation as OperationTrait},
@@ -30,7 +30,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Widen,
+    Widen, bitmap,
     iter::zip_eq,
     prefetch::{self, Lookahead},
     range::contains_cyclic,
@@ -1829,7 +1829,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let fill: &Shared<N> = &db.bitmap;
+        let fill: &bitmap::Prunable<N> = &db.bitmap;
         let (prepared, staged) = self
             .resolve_updates_prefetched(slots, unstaged, db, &*policy, fill)
             .await?;
@@ -2016,7 +2016,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let fill: &Shared<N> = &db.bitmap;
+        let fill: &bitmap::Prunable<N> = &db.bitmap;
         let (batch, staged) = self.resolve_updates(slots, unstaged, db.strategy());
         let prepared = batch.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
@@ -2389,7 +2389,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let fill: &Shared<N> = &db.bitmap;
+        let fill: &bitmap::Prunable<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
             .walk_floor_and_merkleize(Vec::new(), fill, policy)
@@ -2581,7 +2581,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let fill: &Shared<N> = &db.bitmap;
+        let fill: &bitmap::Prunable<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
             .walk_floor_and_merkleize(Vec::new(), fill, policy)
@@ -3486,7 +3486,7 @@ pub(crate) mod tests {
         mocks::{Explorer, explore},
     };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{bitmap, test_rng};
+    use commonware_utils::{bitmap::Readable as _, test_rng};
     use rand::RngExt as _;
     use std::{
         cell::Cell,
@@ -3864,7 +3864,7 @@ pub(crate) mod tests {
             // An ordinary round selects both active updates and passes the last commit.
             let prepared = db.new_batch().prepare(&db).unwrap();
             let mut scan = db.inactivity_floor();
-            let mut source = db.bitmap.as_ref();
+            let mut source = &db.bitmap;
             let round = prepared
                 .merkleizer
                 .read_round(&db.log, &mut scan, last, usize::MAX, &inactive, &mut source)
@@ -3885,13 +3885,7 @@ pub(crate) mod tests {
             };
             let (staged, _) = db.new_batch().stage(&keys[..0], &db).await.unwrap();
             let (prepared, _) = staged
-                .resolve_updates_prefetched(
-                    Vec::new(),
-                    Vec::new(),
-                    &db,
-                    &policy,
-                    db.bitmap.as_ref(),
-                )
+                .resolve_updates_prefetched(Vec::new(), Vec::new(), &db, &policy, &db.bitmap)
                 .await
                 .unwrap();
             let (round, scan) = prepared.prefetched.as_ref().unwrap();
@@ -3905,7 +3899,7 @@ pub(crate) mod tests {
 
             // The round after the prefetch finds only inactive locations.
             let need = usize::MAX - round.candidates.len();
-            let mut source = db.bitmap.as_ref();
+            let mut source = &db.bitmap;
             let tail = prepared
                 .merkleizer
                 .read_round(&db.log, &mut scan, last, need, &inactive, &mut source)
@@ -3935,13 +3929,7 @@ pub(crate) mod tests {
             assert_eq!(parent.bounds().inactivity_floor, last);
             let (staged, _) = parent.new_batch().stage(&keys[..0], &db).await.unwrap();
             let (prepared, _) = staged
-                .resolve_updates_prefetched(
-                    Vec::new(),
-                    Vec::new(),
-                    &db,
-                    &policy,
-                    db.bitmap.as_ref(),
-                )
+                .resolve_updates_prefetched(Vec::new(), Vec::new(), &db, &policy, &db.bitmap)
                 .await
                 .unwrap();
             let (round, scan) = prepared.prefetched.as_ref().unwrap();
@@ -4122,7 +4110,7 @@ pub(crate) mod tests {
             let unstaged = vec![(keys[1], update), (keys[2], None)];
             let slots = vec![Slot::Keep; staged.len()];
             let (prepared, _) = staged
-                .resolve_updates_prefetched(slots, unstaged, &db, &Proportional, db.bitmap.as_ref())
+                .resolve_updates_prefetched(slots, unstaged, &db, &Proportional, &db.bitmap)
                 .await
                 .unwrap();
             assert_eq!(
@@ -4738,7 +4726,7 @@ pub(crate) mod tests {
                     Vec::new(),
                     &db,
                     &Proportional,
-                    db.bitmap.as_ref(),
+                    &db.bitmap,
                 )
                 .await
                 .unwrap();
@@ -4837,7 +4825,7 @@ pub(crate) mod tests {
                 .walk_floor_and_merkleize(
                     Vec::new(),
                     FnCandidates(|floor, tip: u64, limit, out: &mut Vec<_>| {
-                        db.bitmap.as_ref().fill(floor, tip.min(5), limit, out)
+                        (&db.bitmap).fill(floor, tip.min(5), limit, out)
                     }),
                     &mut Proportional,
                 )
@@ -4926,7 +4914,7 @@ pub(crate) mod tests {
                         ));
                     }
                     let (merkleized, _) = prepared
-                        .walk_floor_and_merkleize(Vec::new(), db.bitmap.as_ref(), &mut policy)
+                        .walk_floor_and_merkleize(Vec::new(), &db.bitmap, &mut policy)
                         .await
                         .unwrap();
                     let predecessor = if write.is_some() { 7 } else { 5 };
@@ -5111,13 +5099,13 @@ pub(crate) mod tests {
         StagedLoc::Committed(loc(n))
     }
 
-    fn shared_with<F>(build: F) -> Shared<BITMAP_CHUNK_BYTES>
+    fn bitmap_with<F>(build: F) -> bitmap::Prunable<BITMAP_CHUNK_BYTES>
     where
         F: FnOnce(&mut bitmap::Prunable<BITMAP_CHUNK_BYTES>),
     {
         let mut bm = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::new();
         build(&mut bm);
-        Shared::new(bm)
+        bm
     }
 
     /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs
@@ -5255,7 +5243,7 @@ pub(crate) mod tests {
     /// `[floor, tip)`. `bitmap_fill_candidates_matches_oracle` checks that the production batch
     /// fill produces this exact sequence over its constructed chains.
     fn next_candidate<F: Family, const N: usize>(
-        bitmap: &Shared<N>,
+        bitmap: &bitmap::Prunable<N>,
         floor: Location<F>,
         tip: u64,
     ) -> Option<Location<F>> {
@@ -5263,7 +5251,7 @@ pub(crate) mod tests {
         let bitmap_len = bitmap::Readable::<N>::len(bitmap);
         let committed_end = bitmap_len.min(tip);
         if floor < committed_end
-            && let Some(idx) = bitmap.next_one_from(floor)
+            && let Some(idx) = bitmap.ones_iter_from(floor).next()
             && idx < committed_end
         {
             return Some(Location::new(idx));
@@ -5384,13 +5372,13 @@ pub(crate) mod tests {
 
     #[test]
     fn bitmap_scan_empty() {
-        let bitmap = shared_with(|_| {});
+        let bitmap = bitmap_with(|_| {});
         assert_eq!(next_candidate(&bitmap, loc(0), 0), None);
     }
 
     #[test]
     fn bitmap_scan_uncommitted_tail() {
-        let bitmap = shared_with(|_| {});
+        let bitmap = bitmap_with(|_| {});
         assert_eq!(next_candidate(&bitmap, loc(0), 3), Some(loc(0)));
         assert_eq!(next_candidate(&bitmap, loc(1), 3), Some(loc(1)));
         assert_eq!(next_candidate(&bitmap, loc(2), 3), Some(loc(2)));
@@ -5399,7 +5387,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bitmap_scan_committed_region() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(10);
             bm.set_bit(*loc(3), true);
             bm.set_bit(*loc(7), true);
@@ -5414,7 +5402,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bitmap_scan_transitions_into_tail() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(5);
             bm.set_bit(*loc(2), true);
         });
@@ -5427,7 +5415,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bitmap_scan_after_prune() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(BITMAP_CHUNK_BITS * 3);
             bm.set_bit(*loc(BITMAP_CHUNK_BITS * 2 + 5), true);
             bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
@@ -5445,7 +5433,7 @@ pub(crate) mod tests {
 
     #[test]
     fn bitmap_scan_after_truncate() {
-        let bitmap = shared_with(|bm| {
+        let bitmap = bitmap_with(|bm| {
             bm.extend_to(BITMAP_CHUNK_BITS * 2);
             bm.set_bit(*loc(BITMAP_CHUNK_BITS + 3), true);
             bm.truncate(BITMAP_CHUNK_BITS);
@@ -5463,11 +5451,11 @@ pub(crate) mod tests {
     /// and truncated bitmaps, every batch limit, and tips below the bitmap length.
     #[test]
     fn bitmap_fill_candidates_matches_oracle() {
-        let shapes: Vec<(&str, Shared<BITMAP_CHUNK_BYTES>)> = vec![
-            ("empty", shared_with(|_| {})),
+        let shapes: Vec<(&str, bitmap::Prunable<BITMAP_CHUNK_BYTES>)> = vec![
+            ("empty", bitmap_with(|_| {})),
             (
                 "committed_bits",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(10);
                     bm.set_bit(3, true);
                     bm.set_bit(7, true);
@@ -5475,14 +5463,14 @@ pub(crate) mod tests {
             ),
             (
                 "transition_into_tail",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(5);
                     bm.set_bit(2, true);
                 }),
             ),
             (
                 "pruned",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(BITMAP_CHUNK_BITS * 3);
                     bm.set_bit(BITMAP_CHUNK_BITS * 2 + 5, true);
                     bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
@@ -5490,7 +5478,7 @@ pub(crate) mod tests {
             ),
             (
                 "truncated",
-                shared_with(|bm| {
+                bitmap_with(|bm| {
                     bm.extend_to(BITMAP_CHUNK_BITS * 2);
                     bm.set_bit(BITMAP_CHUNK_BITS + 3, true);
                     bm.truncate(BITMAP_CHUNK_BITS);

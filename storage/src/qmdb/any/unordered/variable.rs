@@ -779,7 +779,7 @@ pub(crate) mod test {
                     FnCandidates(|floor, tip, limit, out: &mut Vec<_>| {
                         // Preparation must retain the chain before prefetch starts.
                         drop(caller_ancestors.take());
-                        db.bitmap.as_ref().fill(floor, tip, limit, out)
+                        (&db.bitmap).fill(floor, tip, limit, out)
                     }),
                 )
                 .await
@@ -788,7 +788,7 @@ pub(crate) mod test {
             assert!(weak_grandparent.upgrade().is_some());
 
             let (batch, retained_ancestors) = prepared
-                .walk_floor_and_merkleize(updates, db.bitmap.as_ref(), &mut Proportional)
+                .walk_floor_and_merkleize(updates, &db.bitmap, &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);

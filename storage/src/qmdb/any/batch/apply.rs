@@ -220,14 +220,14 @@ where
         // The journal append and the in-memory index application touch disjoint state (the log vs
         // the index and bitmap), so run them concurrently. The index application is spawned as a
         // job on the strategy while the journal append proceeds on this task. The job owns the
-        // index until it returns it, so this method requires `I: 'static`. A journal failure
-        // leaves the instance unusable either way (mutable storage failures are fatal and consume
-        // the database), so the index job's effects on error do not need to be rolled back.
+        // index and bitmap until it returns them, so this method requires `I: 'static`. A journal
+        // failure leaves the instance unusable either way (mutable storage failures are fatal and
+        // consume the database), so the index job's effects on error do not need to be rolled back.
         let strategy = self.strategy().clone();
         let log = self.log;
         let mut index = self.index;
         let index_batch = Arc::clone(&batch);
-        let index_bitmap = Arc::clone(&self.bitmap);
+        let mut bitmap = self.bitmap;
 
         // The job's size class counts the diff entries it merges or scans. The strategy estimates
         // cost per call site, so databases of different index types that share a strategy blend
@@ -239,14 +239,16 @@ where
                 .map(|diff| diff.len())
                 .sum::<usize>();
         let index_job = strategy.spawn(work_hint, move |_| {
-            index_batch.apply_to_index(&mut index, &mut index_bitmap.write(), db_size);
-            index
+            index_batch.apply_to_index(&mut index, &mut bitmap, db_size);
+            (index, bitmap)
         });
 
         // Apply journal (handles its own partial ancestor skipping) while the index job runs.
-        let (log, index) = futures::join!(log.apply_batch(&batch.journal_batch), index_job);
+        let (log, (index, bitmap)) =
+            futures::join!(log.apply_batch(&batch.journal_batch), index_job);
         self.log = log?;
         self.index = index;
+        self.bitmap = bitmap;
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;

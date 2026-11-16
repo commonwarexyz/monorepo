@@ -37,11 +37,7 @@ use commonware_runtime::{
         histogram::{ScopedTimer, Timed},
     },
 };
-use commonware_utils::{
-    Widen,
-    bitmap::{self, Readable as _},
-    sequence::prefixed_u64::U64,
-};
+use commonware_utils::{Widen, bitmap, sequence::prefixed_u64::U64};
 use core::{borrow::Borrow, num::NonZeroU64};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -347,7 +343,7 @@ where
     /// that contain a bit below `len()` are readable. Calling `get_chunk()` or `get_bit()` for a
     /// pruned or out-of-bounds location panics.
     pub fn bitmap(&self) -> &impl bitmap::Readable<N> {
-        self.any.bitmap.as_ref()
+        &self.any.bitmap
     }
 
     /// Returns a virtual [`crate::merkle::storage::Storage`] view over the grafted tree and ops
@@ -409,7 +405,7 @@ where
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
         OperationProof::new::<H, _>(
-            self.any.bitmap.as_ref(),
+            &self.any.bitmap,
             &storage,
             self.any.inactivity_floor_loc,
             loc,
@@ -448,7 +444,7 @@ where
         let storage = self.grafted_storage();
         let ops_root = self.any.root();
         RangeProof::new_with_ops::<H, _, _, N>(
-            self.any.bitmap.as_ref(),
+            &self.any.bitmap,
             &storage,
             &self.any.log,
             RangeProofSpec {
@@ -660,7 +656,6 @@ where
     pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
         self.metadata.clear();
 
-        // Snapshot the pruning boundary under the read lock; the guard drops before any await.
         let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
 
         // Write the number of pruned chunks.
@@ -2154,7 +2149,7 @@ mod tests {
             let mut next_idx = 0;
             db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 256).await;
             next_idx += 256;
-            while partial_chunk::<_, 32>(db.any.bitmap.as_ref()).is_some() {
+            while partial_chunk::<_, 32>(&db.any.bitmap).is_some() {
                 db = populate_fixed_db::<mmr::Family, _>(db, next_idx, 1).await;
                 next_idx += 1;
             }
