@@ -1,4 +1,7 @@
-use crate::authenticated::discovery::types;
+use crate::authenticated::{
+    connection::{Kill, Killed},
+    discovery::types,
+};
 use commonware_actor::mailbox::{self, UnreliablePolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Metrics;
@@ -31,7 +34,10 @@ impl<C: PublicKey> UnreliablePolicy for Message<C> {
     }
 }
 
-pub struct Mailbox<C: PublicKey>(mailbox::UnreliableSender<Message<C>>);
+pub struct Mailbox<C: PublicKey> {
+    control: mailbox::UnreliableSender<Message<C>>,
+    kill: Kill,
+}
 
 impl<C: PublicKey> Mailbox<C> {
     pub fn new(
@@ -39,25 +45,39 @@ impl<C: PublicKey> Mailbox<C> {
         size: NonZeroUsize,
     ) -> (Self, mailbox::UnreliableReceiver<Message<C>>) {
         let (sender, receiver) = mailbox::new_unreliable(metrics, size);
-        (Self(sender), receiver)
+        (
+            Self {
+                control: sender,
+                kill: Kill::new(),
+            },
+            receiver,
+        )
     }
 
     pub fn bit_vec(&self, bit_vec: types::BitVec) {
-        let _ = self.0.enqueue(Message::BitVec(bit_vec));
+        let _ = self.control.enqueue(Message::BitVec(bit_vec));
     }
 
     pub fn peers(&self, peers: Vec<types::Info<C>>) {
-        let _ = self.0.enqueue(Message::Peers(peers));
+        let _ = self.control.enqueue(Message::Peers(peers));
     }
 
     pub fn kill(&self) {
-        let _ = self.0.enqueue(Message::Kill);
+        self.kill.fire();
+        let _ = self.control.enqueue(Message::Kill);
+    }
+
+    pub(crate) fn killed(&self) -> Killed {
+        self.kill.subscribe()
     }
 }
 
 impl<C: PublicKey> Clone for Mailbox<C> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            control: self.control.clone(),
+            kill: self.kill.clone(),
+        }
     }
 }
 

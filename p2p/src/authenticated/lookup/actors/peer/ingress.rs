@@ -1,3 +1,4 @@
+use crate::authenticated::connection::{Kill, Killed};
 use commonware_utils::channel::ring;
 use std::{fmt, num::NonZeroUsize};
 
@@ -8,22 +9,39 @@ pub enum Message {
     Kill,
 }
 
-pub struct Mailbox(ring::Sender<Message>);
+pub struct Mailbox {
+    control: ring::Sender<Message>,
+    kill: Kill,
+}
 
 impl Mailbox {
     pub fn new(size: NonZeroUsize) -> (Self, ring::Receiver<Message>) {
         let (sender, receiver) = ring::channel(size);
-        (Self(sender), receiver)
+        (
+            Self {
+                control: sender,
+                kill: Kill::new(),
+            },
+            receiver,
+        )
     }
 
     pub fn kill(&self) {
-        let _ = self.0.send_lossy(Message::Kill);
+        self.kill.fire();
+        let _ = self.control.send_lossy(Message::Kill);
+    }
+
+    pub(crate) fn killed(&self) -> Killed {
+        self.kill.subscribe()
     }
 }
 
 impl Clone for Mailbox {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            control: self.control.clone(),
+            kill: self.kill.clone(),
+        }
     }
 }
 
