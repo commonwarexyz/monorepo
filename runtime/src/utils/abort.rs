@@ -1,27 +1,33 @@
 //! Aborting a wrapped future from handles held elsewhere.
 //!
 //! [AbortHandle::new_pair] creates an [AbortHandle] and an [AbortRegistration] that share one
-//! allocation holding an abort flag and a waker slot. An [Abortable] wraps a future and consumes
-//! the registration. [AbortHandle::abort] sets the flag, then wakes the waker in the slot. From
-//! then on the wrapper resolves to [Aborted] without polling its future again. A future that
-//! already completed keeps its output.
+//! allocation holding an abort state and a waker slot. An [Abortable] wraps a future and consumes
+//! the registration. [AbortHandle::abort] marks the state aborted, then wakes the waker in the
+//! slot. From then on the wrapper resolves to [Aborted] without polling its future again. A
+//! future that already completed keeps its output.
 //!
-//! Each poll of the wrapper checks the flag, polls the future and, if the future is pending,
-//! registers the poll's waker in the slot and checks the flag again:
+//! [AbortHandle::suspend] marks the state suspended instead: the wrapper stops polling its future
+//! but stays pending, so the task neither makes progress nor ends, until an abort follows. A
+//! closing supervision subtree suspends every task in it before it aborts any (see
+//! [super::supervision::Tree]), so no task in the subtree is aborted, and no other task can
+//! observe such an abort, while a task in the subtree still polls its future.
+//!
+//! Each poll of the wrapper checks the state, polls the future unless it is suspended and, if the
+//! wrapper stays pending, registers the poll's waker in the slot and checks the state again:
 //!
 //! ```text
 //! poll of the wrapper                   shared state            AbortHandle::abort
 //! -------------------                   ------------            ------------------
-//! 1. flag set? ------------- load ----> [ aborted ] <---- store -- a. set the flag
-//! 2. poll the future: pending               |
+//! 1. aborted? -------------- load ----> [ state   ] <---- store -- a. mark aborted
+//! 2. poll the future unless suspended       |
 //! 3. register the waker ---- store ---> [ waker   ] <---- take --- b. wake the waker
-//! 4. flag set? ------------- load ----> [ aborted ]
+//! 4. aborted? -------------- load ----> [ state   ]
 //! -> Pending, or Ready(Err(Aborted)) at 1 or 4
 //! ```
 //!
 //! An abort that lands between 1 and 3 may find the slot empty and wake nothing, so 4 checks
 //! again, and registering orders that check after the abort. An abort that lands after 3 wakes
-//! the registered waker, and the poll it causes sees the flag at 1.
+//! the registered waker, and the poll it causes sees the abort at 1.
 //!
 //! Executors usually poll a task with the same waker every time, and registering it again would
 //! only repeat atomic read-modify-writes on the shared allocation. The wrapper of a runtime task
@@ -34,7 +40,7 @@
 //! ----------------------------------           ------------
 //! 3. same addresses as last time? -- load ---> [ registered ]
 //!    yes: skip, the slot still holds           [ waker      ]  a clone that wakes this task
-//!    a waker of this task                      [ aborted    ]
+//!    a waker of this task                      [ state      ]
 //! ```
 //!
 //! This relies on the runtime polling the task's future only with wakers of that task, so the
@@ -69,7 +75,7 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicU8, AtomicUsize, Ordering},
         };
 
         /// A linearizable model of [futures::task::AtomicWaker]: a wake that follows a
@@ -113,20 +119,29 @@ cfg_if::cfg_if! {
         use futures::task::AtomicWaker;
         use std::sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicU8, AtomicUsize, Ordering},
         };
     }
 }
+
+/// The wrapper polls its future.
+const LIVE: u8 = 0;
+
+/// The wrapper stays pending without polling its future until it is aborted.
+const SUSPENDED: u8 = 1;
+
+/// The wrapper resolves to [Aborted] without polling its future.
+const ABORTED: u8 = 2;
 
 /// State shared by an [Abortable] and its abort handles.
 ///
 /// A pending poll of a task only reads this state unless it registers a new waker.
 struct Shared {
-    /// Set once by [AbortHandle::abort] and never cleared.
-    aborted: AtomicBool,
+    /// [LIVE], then possibly [SUSPENDED], then possibly [ABORTED]. It never moves back.
+    state: AtomicU8,
     /// The waker of the last poll that left the [Abortable] pending.
     ///
-    /// Only an [AbortHandle::abort] empties this slot, after setting `aborted`, either by
+    /// Only an [AbortHandle::abort] empties this slot, after marking `state` aborted, either by
     /// taking and waking the waker itself or through a registration that raced it and woke
     /// the waker on its behalf.
     waker: AtomicWaker,
@@ -168,7 +183,7 @@ impl AbortHandle {
     /// Creates a handle and the registration its [Abortable] consumes.
     pub(crate) fn new_pair() -> (Self, AbortRegistration) {
         let shared = Arc::new(Shared {
-            aborted: AtomicBool::new(false),
+            state: AtomicU8::new(LIVE),
             waker: AtomicWaker::new(),
             registered: Registered {
                 data: AtomicUsize::new(0),
@@ -189,17 +204,41 @@ impl AbortHandle {
     /// A poll already in progress runs to completion, and a future that completes keeps its
     /// output.
     pub(crate) fn abort(&self) {
-        // Relaxed suffices. The wake happens before the poll it schedules (the `Waker`
-        // contract), so that poll observes the flag, and a registration racing this wake
-        // synchronizes with it inside `AtomicWaker` before the poll checks the flag again.
-        self.shared.aborted.store(true, Ordering::Relaxed);
+        // The wake happens before the poll it schedules (the `Waker` contract), so that poll
+        // observes the abort, and a registration racing this wake synchronizes with it inside
+        // `AtomicWaker` before the poll checks the state again. Release pairs with the
+        // wrapper's acquire load: a task that resolves as aborted, and anything that observes it
+        // ending, then also observes the suspensions this thread made before, so the other tasks
+        // of a closing subtree already stopped polling their futures.
+        self.shared.state.store(ABORTED, Ordering::Release);
         self.shared.waker.wake();
+    }
+
+    /// Suspends the paired [Abortable]: its polls stop polling the wrapped future and leave it
+    /// pending until [AbortHandle::abort] aborts it. Nothing is woken, and a poll already in
+    /// progress runs to completion.
+    pub(crate) fn suspend(&self) {
+        // A failed exchange found the future already aborted, which a suspension must not undo.
+        // Relaxed suffices: a suspended task only stays pending, and the abort that follows
+        // publishes the suspension to anything that observes that abort.
+        let _ = self.shared.state.compare_exchange(
+            LIVE,
+            SUSPENDED,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
     }
 
     /// Returns whether [AbortHandle::abort] was called.
     #[cfg(test)]
     pub(crate) fn is_aborted(&self) -> bool {
-        self.shared.aborted.load(Ordering::Relaxed)
+        self.shared.state.load(Ordering::Relaxed) == ABORTED
+    }
+
+    /// Returns whether [AbortHandle::suspend] suspended the future and no abort followed yet.
+    #[cfg(test)]
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.shared.state.load(Ordering::Relaxed) == SUSPENDED
     }
 }
 
@@ -245,16 +284,21 @@ impl<F> Abortable<F, true> {
 impl<F, const TASK: bool> Abortable<F, TASK> {
     /// Returns whether [AbortHandle::abort] was called on the paired handle.
     pub(crate) fn is_aborted(&self) -> bool {
-        self.shared.aborted.load(Ordering::Relaxed)
+        self.state() == ABORTED
+    }
+
+    /// Loads the shared state, acquiring what the abort that set it published.
+    fn state(&self) -> u8 {
+        self.shared.state.load(Ordering::Acquire)
     }
 
     /// Registers `waker` for the abort wake.
     ///
     /// A task wrapper does not register a waker equal to the last registered one again (an
     /// unequal one replaces it, so the slot follows the latest waker). The slot keeps holding a
-    /// waker of the task until [AbortHandle::abort] wakes it, and abort sets the flag first. So
+    /// waker of the task until [AbortHandle::abort] wakes it, and abort marks the state first. So
     /// re-registering would change nothing, and a concurrent abort still wakes the task, whose
-    /// next poll observes the flag (a wake happens before the poll it schedules). A
+    /// next poll observes the abort (a wake happens before the poll it schedules). A
     /// registration that raced an abort's wake may leave the slot empty, but the check that
     /// follows it in [Abortable::poll] observes that abort.
     ///
@@ -292,14 +336,17 @@ impl<F: Future, const TASK: bool> Future for Abortable<F, TASK> {
         let this = unsafe { self.get_unchecked_mut() };
 
         // Once aborted, the future is never polled again, even if it was never polled at all.
-        if this.is_aborted() {
+        // A suspended future is not polled either, and stays pending until it is aborted.
+        let state = this.state();
+        if state == ABORTED {
             return Poll::Ready(Err(Aborted));
         }
-
-        // SAFETY: See above, `future` stays pinned for as long as `self` is.
-        let future = unsafe { Pin::new_unchecked(&mut this.future) };
-        if let Poll::Ready(output) = future.poll(cx) {
-            return Poll::Ready(Ok(output));
+        if state == LIVE {
+            // SAFETY: See above, `future` stays pinned for as long as `self` is.
+            let future = unsafe { Pin::new_unchecked(&mut this.future) };
+            if let Poll::Ready(output) = future.poll(cx) {
+                return Poll::Ready(Ok(output));
+            }
         }
 
         // Register for the abort wake, then check again so an abort that raced the poll is
@@ -441,6 +488,21 @@ mod tests {
         assert_eq!(poll(&mut future, &waker), Poll::Ready(Err(Aborted)));
     }
 
+    /// A suspended wrapper stays pending without polling its future until an abort resolves it.
+    #[test]
+    fn suspend_holds_future_until_abort() {
+        let (handle, registration) = AbortHandle::new_pair();
+        let mut future = Abortable::new(future::lazy(|_| panic!("polled")), registration);
+        let (counter, waker) = counter();
+        handle.suspend();
+        assert!(poll(&mut future, &waker).is_pending());
+
+        // The abort wakes the suspended poll's waker, and the woken poll resolves.
+        handle.abort();
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert_eq!(poll(&mut future, &waker), Poll::Ready(Err(Aborted)));
+    }
+
     /// A task wrapper keeps an unchanged waker registered and replaces it with a new one, so an
     /// abort wakes only the latest waker.
     #[test]
@@ -538,7 +600,7 @@ mod tests {
         // The future completes on its first poll, so no waker is ever registered.
         assert_eq!(poll(&mut future, &waker), Poll::Ready(Ok(7)));
 
-        // A later abort finds nothing to wake and only sets the flag.
+        // A later abort finds nothing to wake and only marks the state.
         handle.abort();
         assert!(handle.is_aborted());
     }
@@ -603,7 +665,10 @@ mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::*;
-    use loom::{sync::atomic::AtomicUsize, thread};
+    use loom::{
+        sync::atomic::{AtomicBool, AtomicUsize},
+        thread,
+    };
     use std::task::{RawWaker, RawWakerVTable};
 
     /// Vtable of the counter wakers.
@@ -688,7 +753,7 @@ mod loom_tests {
                     );
 
                     // Wait for the wake rather than joining the aborter first, so the join cannot
-                    // order the next poll, which must observe the flag the abort set before
+                    // order the next poll, which must observe the state the abort set before
                     // waking.
                     loop {
                         let finished = done.load(Ordering::SeqCst);
@@ -721,5 +786,44 @@ mod loom_tests {
     #[test]
     fn abort_races_repeat_poll_new_waker() {
         race(1, false);
+    }
+
+    /// A closing subtree suspends an observer and the work it watches, then aborts the work
+    /// first. Whoever learns that the work ended also sees the observer suspended, so the
+    /// observer's future is never polled after the work ended.
+    #[test]
+    fn abort_publishes_earlier_suspensions() {
+        loom::model(|| {
+            let (observer, registration) = AbortHandle::new_pair();
+            let mut observer_task = Abortable::task(std::future::ready(()), registration);
+            let (work, registration) = AbortHandle::new_pair();
+            let mut work_task = Abortable::task(std::future::pending::<()>(), registration);
+
+            // The work runs on its own thread and reports that it ended, as dropping a channel
+            // sender would.
+            let ended = Arc::new(AtomicBool::new(false));
+            let worker = {
+                let ended = ended.clone();
+                thread::spawn(move || {
+                    let (_, waker) = counter();
+                    if poll(&mut work_task, &waker).is_ready() {
+                        ended.store(true, Ordering::Release);
+                    }
+                })
+            };
+            let watcher = thread::spawn(move || {
+                if ended.load(Ordering::Acquire) {
+                    let (_, waker) = counter();
+                    assert_ne!(poll(&mut observer_task, &waker), Poll::Ready(Ok(())));
+                }
+            });
+
+            observer.suspend();
+            work.suspend();
+            work.abort();
+            observer.abort();
+            worker.join().unwrap();
+            watcher.join().unwrap();
+        });
     }
 }

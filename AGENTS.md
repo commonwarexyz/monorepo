@@ -57,6 +57,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 - Keep `mod.rs` minimal, use `cfg_if!` for platform-specific implementations, and put imports at module scope.
 - Use `thiserror` for error types.
 - Label runtime actors with `context.child(...)`; use `context.shared(true).spawn()` for CPU-intensive work in async code.
+- An actor keeps its context in a plain field for its whole life and starts with `self.context.child("run").spawn(move |_| self.run())`. Dropping a context aborts everything started under it, so a helper that takes a context by value and starts work must keep or hand over that context.
 - Per-peer gauges report current state, so remove a peer's entry when that state ends, such as when it leaves the tracked set, disconnects, or is unblocked. Per-peer counters record history and keep their entries.
 - Benchmark names use `module_path!()` and the format `module::operation/key=value key=value`.
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.

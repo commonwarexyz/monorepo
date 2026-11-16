@@ -196,11 +196,7 @@ use crate::{
         CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
         raw, task::Label, validate_label,
     },
-    utils::{
-        self, FactoryGuard, MetricHandle, Panicker,
-        signal::Stopper,
-        supervision::Tree,
-    },
+    utils::{self, FactoryGuard, MetricHandle, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::select;
 use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
@@ -2379,11 +2375,11 @@ impl crate::Runner for Runner {
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
 
         let metric = MetricHandle::new(shared.metrics.tasks_running.get_or_create(&label).clone());
-        // The root context owns the root node, so the runner only keeps a weak
-        // link to abort whatever is left once the root returns.
-        let context_tree = Tree::root();
-        let tree = Arc::downgrade(&context_tree);
+        // The runner owns the root's supervision node, so dropping the root context
+        // aborts nothing, and the runner aborts every task only after it closed admission.
+        let tree = Tree::root();
         let context_shared = shared.clone();
+        let context_tree = tree.clone();
 
         // A pool worker that fails interrupts the root even when task panics
         // are caught, since the pool cannot run without it. The worker wakes
@@ -2432,11 +2428,7 @@ impl crate::Runner for Runner {
             // dedicated, and blocking tasks, then clean up this worker, which
             // stops the other pool workers and waits for them to drain the
             // task set.
-            worker.panics.run(|| {
-                if let Some(tree) = tree.upgrade() {
-                    tree.abort();
-                }
-            });
+            worker.panics.run(|| tree.abort());
             worker.cleanup();
             worker.panics.run(|| threads.join());
             if let Some(panic) = pool_failures.try_take() {

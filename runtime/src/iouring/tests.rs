@@ -1292,6 +1292,7 @@ fn test_root_destruction_can_spawn_work_before_shutdown() {
         let drops = Arc::new(AtomicUsize::new(0));
 
         Runner::new(config()).start(|context| {
+            let context = context.child("root_drop");
             Root {
                 context: Some(if dedicated {
                     context.dedicated()
@@ -1547,9 +1548,12 @@ fn test_closed_task_set_skips_local_and_foreign_factories() {
             // so the refusal comes from the spawn's check of the set.
             context.shared.tasks.close();
 
-            // Spawn from the worker's thread and from another thread.
+            // Spawn from the worker's thread and from another thread. The refused
+            // spawn drops its context, which closes the context's node.
+            let rejected = context.child("rejected");
+            let retained = rejected.child("retained");
             let spawn = move || {
-                context.spawn(|_| -> Ready<()> {
+                rejected.spawn(|_| -> Ready<()> {
                     panic!("a closed task set must not invoke its factory");
                 })
             };
@@ -1560,6 +1564,10 @@ fn test_closed_task_set_skips_local_and_foreign_factories() {
             };
 
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+            assert!(
+                Tree::child(&retained.tree).1,
+                "rejected context stayed open"
+            );
         });
     }
 }
@@ -1573,11 +1581,16 @@ fn test_closed_registry_skips_dedicated_factories() {
         for execution in [Execution::Dedicated, Execution::Shared(true)] {
             let mut rejected = context.child("rejected");
             rejected.execution = execution;
+            let retained = rejected.child("retained");
             let handle = rejected.spawn(|_| -> Ready<()> {
                 panic!("a closed registry must not invoke its factory");
             });
 
             assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+            assert!(
+                Tree::child(&retained.tree).1,
+                "rejected context stayed open"
+            );
         }
 
         assert_eq!(context.shared.workers.state.lock().active, 0);
@@ -4199,7 +4212,13 @@ fn test_busy_worker_checks_the_global_queue_every_interval() {
             });
 
             let (done, records) = oneshot::channel();
-            chain_foreign_spawns(Arc::new(context.child("chain")), polls, Vec::new(), CHAIN, done);
+            chain_foreign_spawns(
+                Arc::new(context.child("chain")),
+                polls,
+                Vec::new(),
+                CHAIN,
+                done,
+            );
             let records = records.await.unwrap();
             stop.store(true, Ordering::Relaxed);
             yielder.await.unwrap();

@@ -22,7 +22,6 @@ pub(crate) use handle::Panicked;
 pub use handle::{AbortOnDrop, Handle};
 pub(crate) use handle::{Aborter, FactoryGuard, MetricHandle, Panicker};
 
-
 pub(crate) mod supervision;
 
 /// The execution mode of a task.

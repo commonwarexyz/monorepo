@@ -540,12 +540,18 @@ impl Runner {
             State::Checkpoint(checkpoint) => Context::recover(checkpoint),
         };
 
+        // The runner owns the root's supervision node, so dropping the root context
+        // aborts nothing before the root completes.
+        let tree = Arc::clone(&context.tree);
+
         // Pin root task to the heap
         let storage = context.storage.clone();
         let root = Box::pin(panicked.interrupt(f(context)));
 
         // Drive the root to completion and snapshot the runtime
-        Self::run(executor, storage, root)
+        let result = Self::run(executor, storage, root);
+        drop(tree);
+        result
     }
 
     /// Drive the pinned root task to completion and return its output together with a
@@ -1155,12 +1161,7 @@ impl crate::Spawner for Context {
         let guard = FactoryGuard::new(&parent, metric);
         let executor = self.executor();
         let future = f(self);
-        let (f, handle) = Handle::init(
-            future,
-            guard.disarm(),
-            executor.panicker.clone(),
-            Arc::clone(&parent),
-        );
+        let (f, handle) = Handle::init(future, guard.disarm(), executor.panicker.clone(), parent);
         Tasks::register_work(&executor.tasks, label, Box::pin(f));
 
         handle

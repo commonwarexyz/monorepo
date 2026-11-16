@@ -397,11 +397,11 @@ where
 
 /// Calls [`Handle::abort`] when dropped.
 ///
-/// Supervision ties spawned tasks to their spawning task's lifetime, but work spawned from a plain
-/// future outlives that future's drop. Wrapping the handle (see [`Handle::abort_on_drop`]) ties the
-/// task's cancellation to the guard instead. Dropping the guard signals cancellation. Use
-/// [`AbortOnDrop::abort`] to also join the handle. Completion handles only stop waiting and
-/// do not cancel the underlying work (see [`Handle`]).
+/// Supervision ties spawned tasks to the context they were spawned from, so work spawned from a
+/// context that a plain future only borrows outlives that future's drop. Wrapping the handle (see
+/// [`Handle::abort_on_drop`]) ties the task's cancellation to the guard instead. Dropping the
+/// guard signals cancellation. Use [`AbortOnDrop::abort`] to also join the handle. Completion
+/// handles only stop waiting and do not cancel the underlying work (see [`Handle`]).
 pub struct AbortOnDrop<T: Send + 'static>(Handle<T>);
 
 impl<T: Send + 'static> AbortOnDrop<T> {
@@ -637,6 +637,11 @@ impl Aborter {
         // We might never poll the future again after aborting it, so run the
         // metric cleanup right away
         self.metric.finish();
+    }
+
+    /// Stops the task from polling its future without ending it. [Aborter::abort] ends it.
+    pub(crate) fn suspend(&self) {
+        self.inner.suspend();
     }
 }
 

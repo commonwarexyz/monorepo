@@ -255,8 +255,9 @@ stability_scope!(BETA {
         /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
         /// [Spawner::stopped] to coordinate clean shutdown.
         ///
-        /// `f` receives the root context. Like any other context, dropping it aborts every
-        /// task spawned from it (see [Mandatory Supervision](Spawner#mandatory-supervision)).
+        /// `f` receives the root context. The runner owns its supervision node, as a task
+        /// owns the node of the context it was spawned from, so dropping the root context
+        /// aborts nothing. Every task is aborted once the root task completes.
         fn start<F, Fut>(self, f: F) -> Fut::Output
         where
             F: FnOnce(Self::Context) -> Fut,
@@ -287,11 +288,19 @@ stability_scope!(BETA {
         /// The child is supervised by this context from the moment it is created:
         /// dropping this context, or ending the task it is spawned into, closes the
         /// child and aborts every task spawned from it (see
-        /// [Mandatory Supervision](Spawner#mandatory-supervision)). Keep this context
+        /// [Mandatory Supervision](Spawner#mandatory-supervision)). The root context is
+        /// the exception: the runner owns its node (see [Runner::start]). Keep this context
         /// alive for as long as work started from the child should run. A temporary
         /// parent does not live past its statement, so
         /// `context.child("a").child("b").spawn(f)` aborts the task it spawns as soon
-        /// as the statement ends.
+        /// as the statement ends, and `let c = context.child("a").child("b");` binds a
+        /// context that is already closed. Likewise, a function that takes a context by
+        /// value and starts work under a child of it must keep that context, return it,
+        /// or hand it to the work.
+        ///
+        /// A closed context still serves metrics, storage, networking and time, but a
+        /// spawn from it, or from any context derived from it, resolves to
+        /// [`Error::Closed`].
         ///
         /// Labels must start with `[a-zA-Z]` and contain only
         /// `[a-zA-Z0-9_]`. Runtime-reserved metric prefixes must not be used.
@@ -420,7 +429,8 @@ stability_scope!(BETA {
         ///
         /// A spawn that cannot start, because the context's node already closed or the
         /// runtime is shutting down, returns a handle that resolves to [`Error::Closed`]
-        /// without calling `f`, and closes the context's node.
+        /// and closes the context's node. It usually does so without calling `f`, but a
+        /// spawn that races a close may call `f` and drop the future it returns unpolled.
         ///
         /// # Components
         ///
@@ -457,6 +467,13 @@ stability_scope!(BETA {
         /// from that context, before or after `start`, ends when the task ends. Dropping
         /// an actor that never started ends that work too.
         ///
+        /// The run task sits below the component's context, so the component must keep
+        /// that context until `run` returns. Dropping it, or moving it into a sub-state
+        /// that finishes earlier, aborts the run task itself: hand sub-states a child
+        /// instead. The child also starts from a clean spawn configuration, so set any
+        /// placement on it (`self.context.child("run").dedicated()`), not on the
+        /// component's context.
+        ///
         /// # Spawn Configuration
         ///
         /// [`Spawner::dedicated`] and [`Spawner::shared`] only affect the
@@ -475,9 +492,15 @@ stability_scope!(BETA {
         /// Signals the runtime to stop execution and waits for all outstanding tasks
         /// to perform any required cleanup and exit.
         ///
-        /// This method does not actually kill any tasks but rather signals to them, using
-        /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
-        /// It then waits for all [signal::Signal] references to be dropped before returning.
+        /// The stop itself aborts no task but signals to them, using the
+        /// [signal::Signal] returned by [Spawner::stopped], that they should exit. It
+        /// then waits for all [signal::Signal] references to be dropped before returning.
+        ///
+        /// The method consumes this context, so once its future resolves (or is dropped)
+        /// the context's node closes like that of any dropped context, aborting every task
+        /// below it, including tasks still cleaning up after a timeout. Call it on a child
+        /// to keep this context's scope open. Stopping the root context aborts nothing
+        /// this way, because the runner owns its node until the root task completes.
         ///
         /// ## Multiple Stop Calls
         ///

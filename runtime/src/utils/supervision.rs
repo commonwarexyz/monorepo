@@ -141,25 +141,42 @@ impl Tree {
             return;
         };
 
-        // Abort the task before descending so observers see the parent
-        // transition before any surviving children are visited.
-        if let Some(aborter) = task {
-            aborter.abort();
+        // Most nodes that close have no live children, so abort a lone task
+        // without allocating.
+        let mut pending: Vec<Arc<Self>> =
+            children.into_iter().filter_map(|c| c.upgrade()).collect();
+        if pending.is_empty() {
+            if let Some(aborter) = task {
+                aborter.abort();
+            }
+            return;
         }
 
-        // Most nodes that close have no children, so only allocate a work list
-        // when there is a subtree. Walk it iteratively so deep chains do not
-        // exhaust the thread stack. Each node's list was drained when it closed,
-        // so every live descendant is visited once.
-        let mut pending: Vec<Arc<Self>> = children.into_iter().filter_map(|c| c.upgrade()).collect();
+        // Suspend every task in the subtree before aborting any of them. A
+        // suspended task stops polling its future without ending, so no task in
+        // the subtree is aborted, and none can observe another one's abort (a
+        // closed channel, a handle resolving to closed), before all of them
+        // stopped polling.
+        // The walk is iterative so deep chains do not exhaust the thread stack.
+        // Each node's list was drained when it closed, so every live descendant
+        // is visited once.
+        let mut suspended = Vec::new();
+        if let Some(aborter) = task {
+            aborter.suspend();
+            suspended.push(aborter);
+        }
         while let Some(node) = pending.pop() {
             let Some((task, children)) = node.inner.lock().close() else {
                 continue;
             };
             if let Some(aborter) = task {
-                aborter.abort();
+                aborter.suspend();
+                suspended.push(aborter);
             }
             pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
+        }
+        for aborter in suspended {
+            aborter.abort();
         }
     }
 }
@@ -179,7 +196,7 @@ mod tests {
         telemetry::metrics::raw::Gauge,
         utils::{
             MetricHandle,
-            abort::{AbortHandle, Abortable},
+            abort::{AbortHandle, Abortable, Aborted},
         },
     };
     use futures::future::pending;
@@ -232,6 +249,57 @@ mod tests {
         drop(parent);
         assert!(future.is_aborted(), "child task was not aborted");
         assert!(Tree::child(&child).1, "grandchild was not born aborted");
+    }
+
+    #[test]
+    fn suspended_tasks_do_not_end_before_the_walk_suspends_every_task() {
+        use futures::{FutureExt as _, future::ready, task::noop_waker};
+        use std::{
+            task::Poll,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        // A component's run task, a node the test holds locked to pause the
+        // walk, and work that would end as soon as it is polled. The walk
+        // visits the newest child first.
+        let scope = Tree::root();
+        let (run, _) = Tree::child(&scope);
+        let (gate, _) = Tree::child(&scope);
+        let (work, _) = Tree::child(&scope);
+        let task = |node: &Arc<Tree>| {
+            let (handle, registration) = AbortHandle::new_pair();
+            node.register(Aborter::new(
+                handle.clone(),
+                MetricHandle::new(Gauge::default()),
+            ));
+            (handle, Abortable::new(ready(()), registration))
+        };
+        let (run_handle, _run_task) = task(&run);
+        let (work_handle, mut work_task) = task(&work);
+
+        // Close the scope on another thread and pause the walk at the gate,
+        // after it suspended the work.
+        let paused = gate.inner.lock();
+        let closer = thread::spawn(move || drop(scope));
+        let start = Instant::now();
+        while !work_handle.is_suspended() {
+            assert!(start.elapsed() < Duration::from_secs(10), "walk stalled");
+            thread::yield_now();
+        }
+
+        // The work does not end while the run task still runs.
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(work_task.poll_unpin(&mut cx).is_pending());
+        assert!(!run_handle.is_suspended() && !run_handle.is_aborted());
+
+        // Once the walk suspended every task, it aborts them all.
+        drop(paused);
+        closer.join().unwrap();
+        assert!(run_handle.is_aborted());
+        assert_eq!(work_task.poll_unpin(&mut cx), Poll::Ready(Err(Aborted)));
+        drop((run, gate, work));
     }
 
     #[test]

@@ -18,11 +18,7 @@ use crate::{
         CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
         task::Label, validate_label,
     },
-    utils::{
-        self, FactoryGuard, Panicker,
-        signal::Stopper,
-        supervision::Tree,
-    },
+    utils::{self, FactoryGuard, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -470,17 +466,17 @@ impl crate::Runner for Runner {
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
-        // Run the future. The root context owns the root node, so the runner only
-        // keeps a weak link to abort whatever is left once the root returns.
-        let root = Tree::root();
-        let tree = Arc::downgrade(&root);
+        // Run the future. The runner owns the root's supervision node, so dropping the
+        // root context aborts nothing, and the runner aborts every task only after it
+        // closed admission.
+        let tree = Tree::root();
         let context = Context {
             storage,
             name: label.name().to_string(),
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
-            tree: root,
+            tree: Arc::clone(&tree),
             execution: Execution::default(),
         };
 
@@ -496,9 +492,7 @@ impl crate::Runner for Runner {
             runtime.block_on(panicked.interrupt(async {
                 let output = root.await;
                 executor.tasks.close();
-                if let Some(tree) = tree.upgrade() {
-                    tree.abort();
-                }
+                tree.abort();
                 executor.tasks.wait().await;
                 output
             }))
@@ -506,9 +500,7 @@ impl crate::Runner for Runner {
 
         // Finish cleanup if the root or a task panic unwound first.
         executor.tasks.close();
-        if let Some(tree) = tree.upgrade() {
-            tree.abort();
-        }
+        tree.abort();
         runtime.block_on(executor.tasks.wait());
         gauge.dec();
 
@@ -582,12 +574,7 @@ impl crate::Spawner for Context {
         // running gauge and closes the supervision node the wrapper never received.
         let guard = FactoryGuard::new(&parent, metric);
         let future = f(self);
-        let (f, handle) = Handle::init(
-            future,
-            guard.disarm(),
-            executor.panicker.clone(),
-            Arc::clone(&parent),
-        );
+        let (f, handle) = Handle::init(future, guard.disarm(), executor.panicker.clone(), parent);
 
         // Destroying a finished or cancelled future, or an undelivered output, can
         // unwind outside the user-poll boundary. Report it before releasing the tracker.
@@ -1380,7 +1367,7 @@ mod tests {
             let invoked = Arc::new(AtomicBool::new(false));
             let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
             Runner::new(cfg).start(|context| Root {
-                context: Some(placed(context, execution)),
+                context: Some(placed(context.child("root"), execution)),
                 invoked: invoked.clone(),
                 dropped: dropped_tx,
             });
