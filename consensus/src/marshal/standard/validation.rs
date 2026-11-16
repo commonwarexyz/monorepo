@@ -1,5 +1,5 @@
 use crate::{
-    Application, Block, Epochable, Heightable,
+    Application, Block, Epochable, Heightable, History,
     marshal::{
         ancestry::has_contiguous_height,
         application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
@@ -193,6 +193,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<T>,
     ancestor_fetch_duration: Timed,
+    _history: History<B::Digest>,
 ) -> Option<bool>
 where
     E: Supervisor + Clock,

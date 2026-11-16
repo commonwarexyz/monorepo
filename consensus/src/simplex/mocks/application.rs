@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    Automaton as Au, CertifiableAutomaton as CAu, Handoff, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Handoff, History, Relay as Re,
     simplex::{Plan, types::Context},
     types::{Epoch, Round},
 };
@@ -30,20 +30,24 @@ use tracing::debug;
 pub enum Message<D: Digest, P: PublicKey> {
     Prepare {
         context: Context<D, P>,
+        history: History<D>,
         response: oneshot::Sender<Handoff<D>>,
     },
     Propose {
         context: Context<D, P>,
+        history: History<D>,
         response: oneshot::Sender<D>,
     },
     Verify {
         context: Context<D, P>,
         payload: D,
+        history: History<D>,
         response: oneshot::Sender<bool>,
     },
     Certify {
         round: Round,
         payload: D,
+        history: History<D>,
         response: oneshot::Sender<bool>,
     },
     Broadcast {
@@ -67,22 +71,31 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
     type Context = Context<D, P>;
 
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    fn propose(
+        &mut self,
+        context: Self::Context,
+        history: History<Self::Digest>,
+    ) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Propose { context, response });
+        self.sender.send_lossy(Message::Propose {
+            context,
+            history,
+            response,
+        });
         receiver
     }
 
-    async fn verify(
+    fn verify(
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Verify {
             context,
             payload,
+            history,
             response,
         });
         receiver
@@ -90,21 +103,31 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn prepare(
+    fn prepare(
         &mut self,
         context: Self::Context,
+        history: History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Prepare { context, response });
+        self.sender.send_lossy(Message::Prepare {
+            context,
+            history,
+            response,
+        });
         receiver
     }
 
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    fn certify(
+        &mut self,
+        round: Round,
+        payload: Self::Digest,
+        history: History<Self::Digest>,
+    ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
             round,
             payload,
+            history,
             response: tx,
         });
         rx
@@ -150,6 +173,12 @@ type VerifyObserver<H, P> =
 type VerifyHolder<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, oneshot::Sender<bool>) + Send + 'static>;
 
+/// Observer invoked with the history of every proposal, prepare, and verification request.
+pub type HistoryObserver<D> = Box<dyn Fn(Round, &History<D>) + Send + 'static>;
+
+/// Predicate that receives a certification request's round, payload, and history.
+type HistoryCertifier<D> = Box<dyn Fn(Round, D, &History<D>) -> bool + Send + 'static>;
+
 /// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
 
@@ -159,6 +188,8 @@ pub enum Certifier<D: Digest> {
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
+    /// A custom predicate that also receives the request's history.
+    WithHistory(HistoryCertifier<D>),
     /// Lets a test decide when and how to complete each certification request.
     Controlled(CertificationController<D>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
@@ -208,6 +239,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     handoff: Handoff<()>,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
+    history_observer: Option<HistoryObserver<H::Digest>>,
 
     pending: HashMap<H::Digest, Bytes>,
     seen: HashMap<H::Digest, Bytes>,
@@ -274,6 +306,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 handoff: Handoff::Wait,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
+                history_observer: None,
 
                 pending: HashMap::new(),
                 seen: HashMap::new(),
@@ -330,6 +363,18 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     pub fn set_verify_holder(&mut self, holder: VerifyHolder<H, P>) {
         self.verify_holder = Some(holder);
+    }
+
+    /// Sets the observer called with the history of each propose, prepare, and verify request.
+    pub fn set_history_observer(&mut self, observer: HistoryObserver<H::Digest>) {
+        self.history_observer = Some(observer);
+    }
+
+    /// Passes a request's round and history to the history observer, if one is set.
+    fn observe_history(&self, round: Round, history: &History<H::Digest>) {
+        if let Some(observer) = &self.history_observer {
+            observer(round, history);
+        }
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -421,6 +466,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         round: Round,
         payload: H::Digest,
         _contents: Bytes,
+        history: History<H::Digest>,
         response: oneshot::Sender<bool>,
     ) {
         // Simulate the certify latency
@@ -436,6 +482,9 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
             }
             Certifier::Custom(func) => {
                 response.send_lossy(func(round, payload));
+            }
+            Certifier::WithHistory(func) => {
+                response.send_lossy(func(round, payload, &history));
             }
             Certifier::Controlled(controller) => controller(round, payload, response),
             Certifier::Cancel => {}
@@ -501,8 +550,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 match message {
                     Message::Prepare {
                         context,
+                        history,
                         response,
                     } => {
+                        self.observe_history(context.round, &history);
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
@@ -527,7 +578,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             response.send_lossy(proposal);
                         }
                     }
-                    Message::Propose { context, response } => {
+                    Message::Propose { context, history, response } => {
+                        self.observe_history(context.round, &history);
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
@@ -544,8 +596,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     Message::Verify {
                         context,
                         payload,
+                        history,
                         response,
                     } => {
+                        self.observe_history(context.round, &history);
                         if let Some(observer) = &self.verify_observer {
                             observer(context.clone(), payload);
                         }
@@ -569,10 +623,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     Message::Certify {
                         round,
                         payload,
+                        history,
                         response,
                     } => {
                         let contents = self.seen.get(&payload).cloned().unwrap_or_default();
-                        self.certify(round, payload, contents, response).await;
+                        self.certify(round, payload, contents, history, response).await;
                     }
                     Message::Broadcast { payload, plan } => {
                         self.broadcast(payload, plan);

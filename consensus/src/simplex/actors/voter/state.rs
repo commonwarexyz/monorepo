@@ -3,7 +3,7 @@ use super::{
     round::{Round, VerifyRequest},
 };
 use crate::{
-    Viewable,
+    History, Viewable,
     simplex::{
         Floor, Lookahead, Viewport,
         actors::span::MISSING_SPAN,
@@ -1473,6 +1473,128 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
         removed
+    }
+
+    /// Returns the commitments consensus holds on the selected branch through `parent`, the
+    /// view a proposal or verification request builds on.
+    pub fn parent_history(&self, parent: View) -> History<D> {
+        self.history(parent, false)
+    }
+
+    /// Returns the commitments consensus holds on the selected branch below the certification
+    /// candidate at `candidate`.
+    pub fn certification_history(&self, candidate: View) -> History<D> {
+        self.history(candidate, true)
+    }
+
+    /// Walks the selected branch from `start` down toward the finalized view.
+    ///
+    /// Returns the commitments in forward order, with consecutive re-proposals collapsed. The
+    /// history is anchored if the walk reached the finalized or genesis anchor, and a suffix if
+    /// it stopped at a missing or inconsistent link. `exclusive` leaves out the proposal at
+    /// `start` itself, before re-proposals collapse.
+    fn history(&self, start: View, exclusive: bool) -> History<D> {
+        // The commitments collected so far, newest first, and the view the walk is at.
+        let mut path = Vec::new();
+        let mut view = start;
+
+        // Whether the walk has passed a certificate.
+        let mut below_certificate = false;
+
+        // The parent payload the round above was verified against, if it recorded one.
+        let mut expected = None;
+
+        // Follow the selected parent links until the walk reaches an anchor or a link it cannot
+        // use. The loop yields whether it reached an anchor.
+        let anchored = loop {
+            // A view below the finalized view means the path did not pass through the
+            // finalized view, so it has no anchor.
+            if view < self.last_finalized {
+                break false;
+            }
+
+            // Genesis has no round. Its payload anchors the history.
+            if view == GENESIS_VIEW {
+                path.push(self.genesis.expect("genesis must be present"));
+                break true;
+            }
+
+            // Consensus tracks nothing at this view.
+            let Some(round) = self.views.get(&view) else {
+                break false;
+            };
+
+            // Select the proposal at this view, and the parent payload it expects below.
+            let certificate = round
+                .finalization()
+                .map(|finalization| &finalization.proposal)
+                .or_else(|| {
+                    round
+                        .notarization()
+                        .map(|notarization| &notarization.proposal)
+                });
+            let (proposal, binding) = match (certificate, round.proposal()) {
+                // A certificate names the proposal selected at this view. Every link below it
+                // must be certificate-backed too, because a local vote at an earlier view may
+                // name a proposal on another branch. A certificate names its parent's view, not
+                // its payload, so it expects none.
+                (Some(proposal), _) => {
+                    below_certificate = true;
+                    (proposal, None)
+                }
+
+                // Above the first certificate, a round contributes the proposal this node
+                // verified and voted for. The parent payload that vote was verified against
+                // binds the link below. A genesis parent needs no binding because its view
+                // identifies it. A vote with no recorded parent payload, such as a replayed vote
+                // whose parent round already held a certificate, stops the walk above it.
+                (None, Some(proposal))
+                    if !below_certificate && round.broadcast_notarize() && round.is_verified() =>
+                {
+                    match round.verifying() {
+                        Some((_, parent)) => (proposal, Some(*parent)),
+                        None if proposal.parent == GENESIS_VIEW => (proposal, None),
+                        None => break false,
+                    }
+                }
+
+                // No other round selects a proposal, so the walk stops.
+                _ => break false,
+            };
+
+            // A parent that is not below its view could never reach the anchor. A payload other
+            // than the one the round above was verified against puts that round on another
+            // branch.
+            if proposal.parent >= view
+                || expected.is_some_and(|expected| expected != proposal.payload)
+            {
+                break false;
+            }
+
+            // A certification candidate is not part of its own history.
+            if !exclusive || view != start {
+                path.push(proposal.payload);
+            }
+
+            // The finalized view anchors the history.
+            if view == self.last_finalized {
+                break true;
+            }
+
+            // Step to the parent view, carrying the payload this round expects there.
+            view = proposal.parent;
+            expected = binding;
+        };
+
+        // The walk collected the newest commitment first, and consecutive views that re-propose
+        // one payload contribute one commitment.
+        path.reverse();
+        path.dedup();
+        if anchored {
+            History::anchored(path)
+        } else {
+            History::suffix(path)
+        }
     }
 
     // The `*_ancestry_payload` resolvers answer what payload a view may
@@ -7688,7 +7810,8 @@ mod tests {
             );
             let application = application.start();
             relay.broadcast(&participants[3], Recipients::All, (c.payload, contents));
-            assert!(!mailbox.verify(ctx, c.payload).await.await.unwrap());
+            let history = follower.parent_history(b5.view());
+            assert!(!mailbox.verify(ctx, c.payload, history).await.unwrap());
             follower.verification_failed(c.view(), TimeoutReason::InvalidProposal);
             assert!(follower.construct_notarize(c.view()).is_none());
             application.abort();
@@ -10236,6 +10359,595 @@ mod tests {
             // Leader of view 4 may differ since it's a new term (depends on election).
             // Just verify the leader is set.
             assert!(state.leader_index(View::new(4)).is_some());
+        });
+    }
+
+    /// Returns a history's commitments and whether it is anchored.
+    fn parts(history: History<Sha256Digest>) -> (Vec<Sha256Digest>, bool) {
+        (history.commitments().to_vec(), history.is_anchored())
+    }
+
+    /// A history holds the commitments above the highest view below its tip with no certificate,
+    /// as a suffix. It is anchored once every link down to genesis is held, and a finalized
+    /// candidate becomes its anchor.
+    #[test]
+    fn history_holds_commitments_above_first_gap() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 9, 10, 1, 4);
+
+            // Build a chain of four proposals on genesis and notarize only the newest.
+            let chain: Vec<_> = (1..=4)
+                .map(|view| fetch_proposal(view, view - 1, view as u8))
+                .collect();
+            let payloads: Vec<_> = chain.iter().map(|proposal| proposal.payload).collect();
+            let candidate = chain.last().unwrap();
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, candidate))
+                    .0
+            );
+
+            // Each certificate that arrives extends the suffix down by one commitment. The
+            // certification history leaves out the candidate.
+            for missing in [3, 2, 1] {
+                assert_eq!(
+                    parts(state.parent_history(candidate.view())),
+                    (payloads[missing..].to_vec(), false)
+                );
+                assert_eq!(
+                    parts(state.certification_history(candidate.view())),
+                    (payloads[missing..3].to_vec(), false)
+                );
+                let proposal = &chain[missing - 1];
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &schemes, proposal))
+                        .0
+                );
+            }
+
+            // With every link down to genesis held, both histories are anchored.
+            let complete: Vec<_> = std::iter::once(test_genesis()).chain(payloads).collect();
+            assert_eq!(
+                parts(state.parent_history(candidate.view())),
+                (complete.clone(), true)
+            );
+            assert_eq!(
+                parts(state.certification_history(candidate.view())),
+                (complete[..4].to_vec(), true)
+            );
+
+            // Finalizing the candidate makes it the anchor.
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, candidate))
+                    .0
+            );
+            assert_eq!(
+                parts(state.parent_history(candidate.view())),
+                (vec![candidate.payload], true)
+            );
+            assert_eq!(
+                parts(state.certification_history(candidate.view())),
+                (vec![], true)
+            );
+        });
+    }
+
+    /// A history follows each proposal's named parent past a notarized sibling, anchors at the
+    /// finalized view after pruning, and is empty for a request parent below the finalized view.
+    #[test]
+    fn history_follows_selected_links_to_finalized_anchor() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 9, 0, 1, 4);
+
+            // Notarize an anchor and a sibling on genesis, and a parent built on the anchor.
+            let anchor = fetch_proposal(1, 0, 11);
+            let sibling = fetch_proposal(2, 0, 12);
+            let parent = fetch_proposal(3, 1, 13);
+            for proposal in [&anchor, &sibling, &parent] {
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &schemes, proposal))
+                        .0
+                );
+            }
+
+            // The parent names the anchor, so the notarized sibling between them is skipped.
+            assert_eq!(
+                parts(state.parent_history(parent.view())),
+                (vec![test_genesis(), anchor.payload, parent.payload], true)
+            );
+
+            // A finalization becomes the anchor, and pruning below it changes nothing.
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, &anchor))
+                    .0
+            );
+            state.prune();
+            assert_eq!(
+                parts(state.parent_history(parent.view())),
+                (vec![anchor.payload, parent.payload], true)
+            );
+
+            // A request parent below the finalized view selects nothing.
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, &parent))
+                    .0
+            );
+            assert_eq!(parts(state.parent_history(anchor.view())), (vec![], false));
+        });
+    }
+
+    /// Proposals this node built and voted for on uncertified parents join the history. With no
+    /// certificate at either view, the history is still anchored at genesis.
+    #[test]
+    fn history_includes_optimistic_local_proposals() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (_, mut state) = setup_state_with(
+                &mut context,
+                4,
+                2,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // This node proposes and votes at view 1, and the optimistic child builds on it.
+            let first = propose_and_notarize_view1(&mut state, 21);
+            let next = state
+                .try_propose()
+                .expect("optimistic child must be ready")
+                .into_context();
+            assert_eq!(
+                parts(state.parent_history(next.parent.0)),
+                (vec![test_genesis(), first.payload], true)
+            );
+
+            // Building on the uncertified parent records the parent payload the vote rests on.
+            let second = fetch_proposal(2, 1, 22);
+            assert!(state.proposed(&next, second.payload));
+            assert_eq!(
+                state.views.get(&second.view()).unwrap().verifying(),
+                Some(&(second.clone(), next.parent.1))
+            );
+            assert!(state.construct_notarize(second.view()).is_some());
+            assert!(state.notarization(first.view()).is_none());
+            assert!(state.notarization(second.view()).is_none());
+            assert_eq!(
+                parts(state.parent_history(second.view())),
+                (vec![test_genesis(), first.payload, second.payload], true)
+            );
+        });
+    }
+
+    /// Checks that a notarization, or a finalization when `finalized`, that replaces a voted
+    /// ancestor stops the history above it.
+    fn check_history_stops_at_replaced_ancestor(finalized: bool) {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // This node verifies and votes for an ancestor and a parent built on it.
+            let ancestor = fetch_proposal(1, 0, 140);
+            let parent = fetch_proposal(2, 1, 141);
+            for (proposal, parent_payload) in
+                [(&ancestor, test_genesis()), (&parent, ancestor.payload)]
+            {
+                // Verification binds each proposal to its parent's payload.
+                assert!(state.set_proposal(proposal.view(), proposal));
+                let Verify::Ready(context, verifying) = state.try_verify() else {
+                    panic!("optimistic proposal must be ready");
+                };
+                assert_eq!(verifying, *proposal);
+                assert_eq!(context.parent, (proposal.parent, parent_payload));
+                assert!(state.verified(proposal.view()));
+
+                // A verified proposal joins the history only once this node votes for it.
+                assert_eq!(
+                    parts(state.parent_history(proposal.view())),
+                    (vec![], false)
+                );
+                assert!(state.construct_notarize(proposal.view()).is_some());
+            }
+
+            // Both votes form a history anchored at genesis.
+            assert_eq!(
+                parts(state.parent_history(parent.view())),
+                (vec![test_genesis(), ancestor.payload, parent.payload], true)
+            );
+
+            // The other quorum can select a different ancestor without our vote.
+            let selected = fetch_proposal(1, 0, 142);
+            let quorum = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            if finalized {
+                assert!(
+                    state
+                        .add_finalization(build_finalization(&verifier, &quorum, &selected))
+                        .0
+                );
+            } else {
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &quorum, &selected))
+                        .0
+                );
+            }
+
+            // The parent's vote rests on the replaced ancestor, so the history stops above
+            // the certificate.
+            assert_eq!(
+                parts(state.parent_history(parent.view())),
+                (vec![parent.payload], false)
+            );
+        });
+    }
+
+    #[test]
+    fn history_stops_at_replaced_ancestor() {
+        check_history_stops_at_replaced_ancestor(false);
+    }
+
+    #[test]
+    fn history_stops_at_finalized_replacement() {
+        check_history_stops_at_replaced_ancestor(true);
+    }
+
+    /// A local vote stays in the history when a notarization of the ancestor it was verified
+    /// against arrives, and a finalization of that ancestor becomes the anchor.
+    #[test]
+    fn history_rests_local_votes_on_matching_certificate() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // This node verifies and votes for an ancestor and a parent built on it.
+            let ancestor = fetch_proposal(1, 0, 150);
+            let parent = fetch_proposal(2, 1, 151);
+            for proposal in [&ancestor, &parent] {
+                assert!(state.set_proposal(proposal.view(), proposal));
+                assert!(matches!(state.try_verify(), Verify::Ready(..)));
+                assert!(state.verified(proposal.view()));
+                assert!(state.construct_notarize(proposal.view()).is_some());
+            }
+
+            // The quorum notarizes the ancestor this node voted for, so the vote above it
+            // still rests on the selected branch.
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &ancestor))
+                    .0
+            );
+            assert_eq!(
+                parts(state.parent_history(parent.view())),
+                (vec![test_genesis(), ancestor.payload, parent.payload], true)
+            );
+
+            // Finalizing that ancestor makes it the anchor of the same history.
+            assert!(
+                state
+                    .add_finalization(build_finalization(&verifier, &schemes, &ancestor))
+                    .0
+            );
+            assert_eq!(
+                parts(state.parent_history(parent.view())),
+                (vec![ancestor.payload, parent.payload], true)
+            );
+        });
+    }
+
+    /// A replayed vote counts when its parent is genesis or a replayed proposal with no
+    /// certificate, and stops the history when its parent round already held a certificate. Its
+    /// own certificate restores the link, below which only certificates count.
+    #[test]
+    fn history_stops_at_replayed_vote_without_binding() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // Three proposals form a chain on genesis.
+            let ancestor = fetch_proposal(1, 0, 144);
+            let parent = fetch_proposal(2, 1, 145);
+            let child = fetch_proposal(3, 2, 146);
+
+            // A replayed vote on genesis needs no recorded binding.
+            let vote = Notarize::sign(&schemes[1], ancestor.clone()).unwrap();
+            state.replay(&Artifact::Notarize(vote));
+            assert_eq!(
+                parts(state.parent_history(ancestor.view())),
+                (vec![test_genesis(), ancestor.payload], true)
+            );
+
+            // Replay binds a vote to its parent round's proposal while that round holds no
+            // certificate.
+            let vote = Notarize::sign(&schemes[1], parent.clone()).unwrap();
+            state.replay(&Artifact::Notarize(vote));
+            assert_eq!(
+                parts(state.parent_history(parent.view())),
+                (vec![test_genesis(), ancestor.payload, parent.payload], true)
+            );
+
+            // Replay records no binding for a vote whose parent round already holds a
+            // certificate, so the history stops above that vote.
+            let notarization = build_notarization(&verifier, &schemes, &parent);
+            state.replay(&Artifact::Notarization(notarization.clone()));
+            assert!(state.add_notarization(notarization).0);
+            let vote = Notarize::sign(&schemes[1], child.clone()).unwrap();
+            state.replay(&Artifact::Notarize(vote));
+            assert_eq!(parts(state.parent_history(child.view())), (vec![], false));
+
+            // The vote's own certificate restores the link. Below it only certificates count.
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &child))
+                    .0
+            );
+            assert_eq!(
+                parts(state.parent_history(child.view())),
+                (vec![parent.payload, child.payload], false)
+            );
+        });
+    }
+
+    /// This node's vote leaves the history once a conflicting proposal arrives at its view, and a
+    /// notarization selects the conflicting proposal even after this node declines to certify it.
+    #[test]
+    fn history_uses_only_unequivocated_votes_and_certificates() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                2,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // This node's own vote at view 1 forms a history anchored at genesis.
+            let local = propose_and_notarize_view1(&mut state, 61);
+            assert_eq!(
+                parts(state.parent_history(local.view())),
+                (vec![test_genesis(), local.payload], true)
+            );
+
+            // A conflicting proposal at the view leaves no unequivocated local vote.
+            let selected = fetch_proposal(1, 0, 62);
+            assert!(!state.set_proposal(selected.view(), &selected));
+            assert_eq!(parts(state.parent_history(local.view())), (vec![], false));
+
+            // A certificate selects its proposal, even after this node rejects certifying it.
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &selected))
+                    .0
+            );
+            assert!(state.certified(selected.view(), false).is_some());
+            assert_eq!(
+                parts(state.parent_history(selected.view())),
+                (vec![test_genesis(), selected.payload], true)
+            );
+        });
+    }
+
+    /// Consecutive views that re-propose one payload contribute one commitment to parent and
+    /// certification histories, while a payload repeated after a distinct one counts again.
+    #[test]
+    fn history_collapses_only_consecutive_reproposals() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 9, 10, 1, 4);
+
+            // Notarize a chain where view 2 re-proposes view 1 and view 4 repeats that payload
+            // after a distinct one.
+            let first = fetch_proposal(1, 0, 41);
+            let repeated = fetch_proposal(2, 1, 41);
+            let distinct = fetch_proposal(3, 2, 42);
+            let nonconsecutive = fetch_proposal(4, 3, 41);
+            for proposal in [&first, &repeated, &distinct, &nonconsecutive] {
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &schemes, proposal))
+                        .0
+                );
+            }
+
+            // Only the consecutive re-proposal collapses.
+            assert_eq!(
+                parts(state.parent_history(repeated.view())),
+                (vec![test_genesis(), first.payload], true)
+            );
+            assert_eq!(
+                parts(state.parent_history(nonconsecutive.view())),
+                (
+                    vec![
+                        test_genesis(),
+                        first.payload,
+                        distinct.payload,
+                        nonconsecutive.payload
+                    ],
+                    true
+                )
+            );
+
+            // A candidate is left out before re-proposals collapse, so a candidate that
+            // re-proposes its parent keeps the parent's commitment.
+            assert_eq!(
+                parts(state.certification_history(repeated.view())),
+                (vec![test_genesis(), first.payload], true)
+            );
+            assert_eq!(
+                parts(state.certification_history(nonconsecutive.view())),
+                (vec![test_genesis(), first.payload, distinct.payload], true)
+            );
+        });
+    }
+
+    /// A certified proposal whose parent is not below its view contributes nothing to a history.
+    /// The fault bound rules out such a certificate, but nothing rejects one on arrival.
+    #[test]
+    fn history_stops_at_parent_not_below_view() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 9, 10, 1, 4);
+
+            // Notarize a proposal whose parent is above its view, a child built on it, and a
+            // proposal that names its own view as parent.
+            let malformed = fetch_proposal(2, 3, 91);
+            let child = fetch_proposal(4, 2, 92);
+            let own_parent = fetch_proposal(5, 5, 93);
+            for proposal in [&malformed, &child, &own_parent] {
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &schemes, proposal))
+                        .0
+                );
+            }
+
+            // Neither malformed proposal contributes, and the child's history stops above its
+            // malformed parent.
+            for proposal in [&malformed, &own_parent] {
+                assert_eq!(
+                    parts(state.parent_history(proposal.view())),
+                    (vec![], false)
+                );
+            }
+            assert_eq!(
+                parts(state.parent_history(child.view())),
+                (vec![child.payload], false)
+            );
+        });
+    }
+
+    /// A local vote counts in a parent history built on it, but not in the certification history
+    /// of a notarized candidate above it. That history is anchored only once a certificate selects
+    /// a proposal at the voted view.
+    #[test]
+    fn history_below_candidate_requires_certificates() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+
+            // This node verifies and votes for a proposal at view 1.
+            let local = fetch_proposal(1, 0, 130);
+            assert!(state.set_proposal(local.view(), &local));
+            assert!(matches!(state.try_verify(), Verify::Ready(..)));
+            assert!(state.verified(local.view()));
+            assert!(state.construct_notarize(local.view()).is_some());
+
+            // The other quorum notarizes a term-start candidate on another proposal at the
+            // view this node voted in.
+            let quorum = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let selected = fetch_proposal(1, 0, 131);
+            let candidate = fetch_proposal(6, 1, 132);
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &quorum, &candidate))
+                    .0
+            );
+
+            // The local vote counts for a request built on it, but not below a certificate,
+            // where it may name a proposal on another branch.
+            assert_eq!(
+                parts(state.parent_history(local.view())),
+                (vec![test_genesis(), local.payload], true)
+            );
+            assert_eq!(
+                parts(state.certification_history(candidate.view())),
+                (vec![], false)
+            );
+
+            // Once the quorum notarizes its own proposal at view 1, the candidate's history is
+            // anchored through it.
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &quorum, &selected))
+                    .0
+            );
+            assert_eq!(
+                parts(state.certification_history(candidate.view())),
+                (vec![test_genesis(), selected.payload], true)
+            );
         });
     }
 }
