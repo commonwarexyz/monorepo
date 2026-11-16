@@ -152,6 +152,7 @@ mod tests {
         sync::Mutex,
         vec::NonEmptyVec,
     };
+    use futures::{FutureExt as _, StreamExt as _};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -2549,6 +2550,12 @@ mod tests {
     fn test_standard_hint_finalized_triggers_fetch() {
         harness::hint_finalized_triggers_fetch::<InlineHarness>();
         harness::hint_finalized_triggers_fetch::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_blocks_forward_range() {
+        harness::blocks_forward_range::<InlineHarness>();
+        harness::blocks_forward_range::<DeferredHarness>();
     }
 
     #[test_traced("WARN")]
@@ -14602,10 +14609,13 @@ mod tests {
             .await;
             let buffer = buffer.unwrap();
 
+            // An acquiring caller, a waiting caller, and a finalized waiter register before the
+            // parent is available anywhere. The buffer offers no notification for it.
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 101);
             let acquired = mailbox.acquire(parent.digest());
             let subscribed = mailbox.subscribe(parent.digest());
+            let finalized_parent = mailbox.finalized(parent.height());
             assert!(mailbox.get_block(&parent.digest()).await.is_none());
             assert!(resolver.active_subscription(parent.digest()).is_some());
             assert_eq!(buffer.commitment_subscription_count(), 0);
@@ -14622,6 +14632,7 @@ mod tests {
                 child.digest(),
             )
             .await;
+            assert_eq!(finalized_parent.await.unwrap().digest(), parent.digest());
 
             // Both callers receive the archived parent, and the acquiring caller's request is
             // canceled.
@@ -14983,6 +14994,122 @@ mod tests {
         });
     }
 
+    /// A floor closes skipped canonical waits while exact callers retain their demand.
+    #[test_traced("WARN")]
+    fn test_standard_floor_closes_missing_predecessor_waiter() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "floor-closes-missing-predecessor",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
+                reschedule().await;
+            }
+
+            // A canonical wait, a range read, and an exact caller all wait for the missing parent
+            // of a future floor anchor.
+            let missing_height = Height::new(4);
+            let missing = make_raw_block(Sha256::hash(&[b"missing-parent"]), missing_height, 400);
+            let anchor = make_raw_block(missing.digest(), Height::new(5), 500);
+            let mut finalized = mailbox.finalized(missing_height);
+            let source = mailbox.blocks_with_parent(
+                anchor.height(),
+                anchor.digest(),
+                History::anchored([anchor.digest()]),
+            );
+            let mut range = source.range(missing_height..=missing_height);
+            let mut read = Box::pin(range.next());
+            assert!(read.as_mut().now_or_never().is_none());
+            let mut exact = mailbox.acquire(missing.digest());
+
+            // FIFO processing registers both canonical waits and the independent exact caller.
+            // Only the exact caller requests the predecessor.
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::zero()))
+            );
+            assert!(matches!(finalized.try_recv(), Err(TryRecvError::Empty)));
+            assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
+            let fetch = resolver
+                .active_subscription(missing.digest())
+                .expect("the exact caller must request the predecessor");
+            assert_eq!(
+                resolver.fetches().len(),
+                1,
+                "canonical waits must not fetch"
+            );
+
+            // A floor at the anchor skips the missing height without storing it.
+            let round = Round::new(Epoch::zero(), View::new(5));
+            assert!(mailbox.verified(round, ready(anchor.clone())).await);
+            mailbox.set_floor(StandardHarness::make_finalization(
+                Proposal::new(round, View::new(4), anchor.digest()),
+                &schemes,
+                QUORUM,
+            ));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(missing_height))
+            );
+            assert_eq!(
+                mailbox
+                    .get_anchor()
+                    .await
+                    .map(|(processed, block)| (processed, block.digest())),
+                Some((Processed::Absent(missing_height), anchor.digest())),
+            );
+            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+            assert!(mailbox.get_block(missing_height).await.is_none());
+
+            // The skip closes the canonical waits but keeps the exact caller's request.
+            select! {
+                result = finalized => assert!(result.is_err(), "skipped predecessor must close"),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("floor must close the pre-existing missing-predecessor waiter");
+                },
+            }
+            select! {
+                result = read => assert!(matches!(
+                    result, Some(Err(crate::marshal::blocks::Error::Unavailable))
+                )),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("floor must end the canonical range at its missing predecessor");
+                },
+            }
+            assert!(range.next().await.is_none());
+            assert!(mailbox.finalized(missing_height).await.is_err());
+            assert_eq!(
+                mailbox.finalized(anchor.height()).await.unwrap().digest(),
+                anchor.digest()
+            );
+            assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
+            assert!(resolver.active_fetches().iter().any(|current| {
+                current.key == fetch.key && current.subscriber == fetch.subscriber
+            }));
+
+            // A canonical skip does not prevent later exact-body ingress for a live caller.
+            deliver_acquisition_test_block(&resolver, fetch, &missing).await;
+            select! {
+                result = exact => assert_eq!(result.unwrap().digest(), missing.digest()),
+                _ = context.sleep(Duration::from_secs(1)) => panic!("floor must keep exact demand"),
+            }
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(missing_height))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![anchor.height()]);
+        });
+    }
+
     /// A finalized-height response is rejected when its block is at another height, it carries
     /// trailing bytes, or its certificate is truncated. A rejected response publishes nothing and
     /// leaves its waiters for a valid response.
@@ -15027,7 +15154,10 @@ mod tests {
                 .await;
                 assert_eq!(application.acknowledged().await, Height::zero());
 
+                // An exact caller for the offered block and a canonical waiter for the height wait
+                // while a hint requests the height from a peer.
                 let mut exact = mailbox.acquire(offered.digest());
+                let mut canonical = mailbox.finalized(height);
                 mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
                 assert!(mailbox.get_block(height).await.is_none());
 
@@ -15072,6 +15202,10 @@ mod tests {
                     matches!(exact.try_recv(), Err(TryRecvError::Empty)),
                     "{case}"
                 );
+                assert!(
+                    matches!(canonical.try_recv(), Err(TryRecvError::Empty)),
+                    "{case}"
+                );
                 assert!(!application.blocks().contains_key(&height), "{case}");
 
                 // A valid response then satisfies the height, and the exact caller only when it
@@ -15079,6 +15213,7 @@ mod tests {
                 let valid_exact = mailbox.acquire(valid.digest());
                 deliver_finalized_test_block(&resolver, finalization.clone(), &valid).await;
                 assert_eq!(valid_exact.await.unwrap().digest(), valid.digest());
+                assert_eq!(canonical.await.unwrap().digest(), valid.digest());
                 assert_eq!(
                     mailbox.get_block(height).await.unwrap().digest(),
                     valid.digest()
@@ -15182,6 +15317,97 @@ mod tests {
                 .expect("finalized delivery must receive a verdict"),
             Outcome::Resolved(Resolution::Complete)
         );
+    }
+
+    /// A range over locally stored blocks that its consumer stops polling decodes at most a window
+    /// of bodies, so a stalled application cannot make marshal read the whole range.
+    #[test_traced("WARN")]
+    fn test_standard_parked_local_range_bounds_body_reads() {
+        const PARTITION: &str = "parked-local-range-body-reads";
+        const LENGTH: u64 = 64;
+        const BODY_WINDOW: usize = 8;
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // The finalized archive holds a 64-block chain and records every body read.
+            let (finalizations, mut stored) = prunable_finalized_stores(&context, PARTITION).await;
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let mut selected = vec![genesis.digest()];
+            for height in 1..=LENGTH {
+                let block = Arc::new(make_raw_block(
+                    *selected.last().unwrap(),
+                    Height::new(height),
+                    height,
+                ));
+                selected.push(block.digest());
+                stored = stored
+                    .put_sync(height, block.digest(), &block)
+                    .await
+                    .unwrap();
+            }
+            let stored = Recording::new(stored, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let operations = stored.ops();
+            let mut config = test_config(
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(BODY_WINDOW);
+            assert!(LENGTH as usize > config.max_repair.get());
+            let (actor, mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, stored, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(
+                application.clone(),
+                RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "held genesis acknowledgement",
+                || application.pending_ack_heights() == vec![Height::zero()],
+            )
+            .await;
+            let _ = mailbox.get_processed().await;
+            operations.lock().clear();
+
+            // The application takes the first body of a range over the whole chain.
+            let expected = selected[1];
+            let source = mailbox.blocks_with_parent(
+                Height::new(LENGTH),
+                *selected.last().unwrap(),
+                History::anchored(selected),
+            );
+            let mut range = source.range(Height::new(1)..=Height::new(LENGTH));
+            let first = range.next().await.unwrap().unwrap();
+            assert_eq!(first.digest(), expected);
+
+            // Keep the range alive without polling it again. Marshal decodes at most one window of
+            // stored bodies ahead of the consumer and fetches none from peers.
+            context.sleep(Duration::from_millis(100)).await;
+            let reads = operations
+                .lock()
+                .iter()
+                .filter(|op| matches!(op, Op::Get(None)))
+                .count();
+            assert!(
+                reads <= BODY_WINDOW,
+                "a parked range must decode at most {BODY_WINDOW} stored bodies, decoded {reads}"
+            );
+            assert!(
+                reads > 0,
+                "the range must acquire bodies from recorded storage"
+            );
+            assert!(
+                resolver.fetches().is_empty(),
+                "locally stored bodies must not be fetched"
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::zero()]);
+            drop(range);
+        });
     }
 
     /// Forward repair fills internal gaps in height order within each pass's request bound.
@@ -15467,6 +15693,118 @@ mod tests {
         });
     }
 
+    /// A prune above the processed height that arrives through mailbox overflow is ignored, so it
+    /// neither closes finalized-height waiters nor ends canonical reads, whether it is sent before
+    /// or after they register.
+    #[test_traced("WARN")]
+    fn test_standard_rejected_overflow_prune_preserves_canonical_waiters() {
+        for prune_first in [true, false] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |mut context| async move {
+                    const PREFIX: &str = "rejected-overflow-prune";
+                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+
+                    // A one-message mailbox makes later messages overflow until the actor starts.
+                    let (finalizations, blocks) = prunable_finalized_stores(&context, PREFIX).await;
+                    let mut config = test_config(
+                        PREFIX,
+                        ConstantProvider::new(schemes[0].clone()),
+                        NZUsize!(1),
+                    );
+                    config.mailbox_size = NZUsize!(1);
+                    let (actor, mut mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                        context.child("actor"),
+                        finalizations,
+                        blocks,
+                        config,
+                    )
+                    .await;
+                    assert_eq!(floor.processed(), None);
+                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                    let height = Height::new(1);
+                    let round = Round::new(Epoch::zero(), View::new(1));
+                    let block = make_raw_block(genesis.digest(), height, 100);
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(round, View::zero(), block.digest()),
+                        &schemes,
+                        QUORUM,
+                    );
+
+                    // Before the actor starts, this acquire fills the mailbox, and canonical
+                    // waiters for height 1 register around a prune to height 10.
+                    let pending = mailbox.acquire(genesis.digest());
+                    if prune_first {
+                        mailbox.prune(Height::new(10));
+                    }
+                    let mut direct = mailbox.finalized(height);
+                    let source = mailbox.finalized_blocks(height);
+                    let mut range = source.range(height..=height);
+                    let mut read = Box::pin(range.next());
+                    let early = read.as_mut().now_or_never();
+                    let mut canceled = mailbox.finalized(Height::new(10));
+                    assert!(matches!(canceled.try_recv(), Err(TryRecvError::Empty)));
+                    drop(canceled);
+                    if !prune_first {
+                        mailbox.prune(Height::new(10));
+                    }
+                    let (resolver_rx, resolver) =
+                        RecordingResolver::holding(context.child("resolver"));
+                    let _actor = actor
+                        .start_unbuffered(Application::<B>::manual_ack(), (resolver_rx, resolver));
+
+                    // This read follows the overflowed prune in the actor mailbox.
+                    assert!(mailbox.get_verified(round).await.is_none());
+                    assert_eq!(pending.await.unwrap().digest(), genesis.digest());
+                    assert_eq!(mailbox.get_processed().await, None);
+                    assert_eq!(
+                        mailbox.get_block(Height::zero()).await.unwrap().digest(),
+                        genesis.digest(),
+                    );
+                    assert!(mailbox.get_block(height).await.is_none());
+                    assert!(mailbox.get_finalization(height).await.is_none());
+                    let direct_before = direct.try_recv();
+                    let canonical_before = early.or_else(|| read.as_mut().now_or_never());
+
+                    // Finalization stores the verified block at height 1.
+                    assert!(mailbox.verified(round, ready(block.clone())).await);
+                    assert!(mailbox.get_block(height).await.is_none());
+                    StandardHarness::report_finalization(&mut mailbox, finalization).await;
+                    assert_eq!(
+                        mailbox
+                            .get_finalization(height)
+                            .await
+                            .unwrap()
+                            .proposal
+                            .payload,
+                        block.digest(),
+                    );
+                    assert_eq!(
+                        mailbox.get_block(height).await.unwrap().digest(),
+                        block.digest(),
+                    );
+                    assert_eq!(mailbox.get_processed().await, None);
+
+                    // The canonical waiters stayed open through the prune and receive the block.
+                    assert!(
+                        canonical_before.is_none(),
+                        "canonical read must stay pending ({prune_first}): {canonical_before:?}",
+                    );
+                    assert!(
+                        matches!(direct_before, Err(TryRecvError::Empty)),
+                        "finalized waiter must stay open (prune_first={prune_first})",
+                    );
+                    assert_eq!(direct.await.unwrap().digest(), block.digest());
+                    assert_eq!(read.await.unwrap().unwrap().digest(), block.digest());
+                    assert!(range.next().await.is_none());
+                },
+            );
+        }
+    }
+
     /// A validator that learns only the tip finalization repairs a 64-block gap from one peer
     /// within ten round trips. Gap repair must keep many heights in flight to meet that bound.
     #[test_traced("WARN")]
@@ -15586,6 +15924,65 @@ mod tests {
                 elapsed < Duration::from_secs(2),
                 "cold gap repair must finish within ten round trips: {elapsed:?}"
             );
+        });
+    }
+
+    /// A range below a history suffix requests each missing body once, although the walk and the
+    /// range both read it. Nothing notarizes these bodies, so marshal does not store them and a
+    /// second reader would download them again.
+    #[test_traced("WARN")]
+    fn test_standard_range_requests_walked_body_once() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "walked-body-requested-once",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // Marshal holds the bound parent alone, and nothing notarizes the blocks below it.
+            let one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let two = make_raw_block(one.digest(), Height::new(2), 200);
+            let three = make_raw_block(two.digest(), Height::new(3), 300);
+            let round = Round::new(Epoch::zero(), View::new(3));
+            assert!(mailbox.verified(round, ready(three.clone())).await);
+            let history = History::suffix([three.digest()]);
+            let source = mailbox.blocks_with_parent(three.height(), three.digest(), history);
+            let mut range = source.range(one.height()..=three.height());
+
+            // The body is delivered as soon as its first request reaches the resolver, before
+            // the range is polled again. Marshal does not store it.
+            for block in [&two, &one] {
+                while resolver.subscriptions(block.digest()) == 0 {
+                    assert!(range.next().now_or_never().is_none());
+                    let _ = mailbox.get_processed().await;
+                    assert!(
+                        resolver.subscriptions(two.digest()) <= 1,
+                        "a walked body must be requested once"
+                    );
+                }
+                let fetch = resolver.active_subscription(block.digest()).unwrap();
+                deliver_acquisition_test_block(&resolver, fetch, block).await;
+                assert!(mailbox.get_block(&block.digest()).await.is_none());
+            }
+
+            // The range yields every block in height order without another request.
+            for block in [&one, &two, &three] {
+                assert_eq!(
+                    range.next().await.unwrap().unwrap().digest(),
+                    block.digest()
+                );
+            }
+            assert!(range.next().await.is_none());
+            assert_eq!(resolver.subscriptions(one.digest()), 1);
+            assert_eq!(resolver.subscriptions(two.digest()), 1);
+            assert_eq!(resolver.subscriptions(three.digest()), 0);
         });
     }
 }

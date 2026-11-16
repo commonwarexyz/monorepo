@@ -55,7 +55,7 @@ pub use floor::{Cutoff, Floor, Processed};
 mod staged;
 mod stream;
 
-mod mailbox;
+pub(crate) mod mailbox;
 pub use mailbox::Mailbox;
 
 mod subscriptions;

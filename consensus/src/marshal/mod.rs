@@ -198,6 +198,7 @@ mod limits;
 pub use limits::max_payload_size;
 
 pub mod ancestry;
+pub mod blocks;
 pub mod core;
 pub mod resolver;
 pub mod standard;
