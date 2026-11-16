@@ -369,12 +369,14 @@ where
         // The public message is journaled and synced before the private half is
         // stored, and replay restores a dealing only when it finds that half. A
         // dealing interrupted before its private half is stored leaves at most
-        // its public message in the journal, and a dealing that completes later
-        // is journaled after it. Once a private half is stored, the dealer is
-        // in the cache in this process and after every replay, so the check
-        // above returns before writing anything for it. The stored private half
+        // its public message in the journal, and a later dealing from the same
+        // dealer journals its own message after that one.
+        //
+        // Once a private half is stored, the dealer is in the cache in this
+        // process and after every replay, so the check above returns before
+        // anything more is written for that dealer. The stored private half
         // therefore belongs to the dealer's last journaled message, and the
-        // secret store is never asked to replace one.
+        // secret store is never asked to replace it.
         let event = Event::Dealing(dealer.clone(), public.clone());
         rebind(&mut self.events, |events| {
             append_synced(events, epoch, &event)
