@@ -1,5 +1,5 @@
 use crate::{
-    BlobVersion, Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, Removal, WriteOptions,
     telemetry::{
         metrics::{Counter, Gauge, Register, raw},
         traces::TracedExt as _,
@@ -17,6 +17,10 @@ pub struct Metrics {
     pub storage_write_bytes: Counter,
     pub storage_syncs: Counter,
     pub storage_resizes: Counter,
+    pub removals_submitted: Counter,
+    pub removals_completed: Counter,
+    pub removals_failed: Counter,
+    pub removals_pending: Gauge,
 }
 
 impl Metrics {
@@ -58,7 +62,35 @@ impl Metrics {
                 "Total number of storage resizes",
                 raw::Counter::default(),
             ),
+            removals_submitted: registry.register(
+                "removals_submitted",
+                "Total number of removal batches submitted",
+                raw::Counter::default(),
+            ),
+            removals_completed: registry.register(
+                "removals_completed",
+                "Total number of removal batches that removed every blob",
+                raw::Counter::default(),
+            ),
+            removals_failed: registry.register(
+                "removals_failed",
+                "Total number of removal batches that failed",
+                raw::Counter::default(),
+            ),
+            removals_pending: registry.register(
+                "removals_pending",
+                "Number of removal batches submitted but not finished",
+                raw::Gauge::default(),
+            ),
         }
+    }
+
+    /// Count a finished removal batch.
+    fn finish_removals(&self, result: &Result<(), Error>) {
+        match result {
+            Ok(()) => self.removals_completed.inc(),
+            Err(_) => self.removals_failed.inc(),
+        };
     }
 }
 
@@ -108,6 +140,29 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.inner.remove(partition, name).await
+    }
+
+    async fn start_remove_many(
+        &self,
+        removals: Vec<(String, Vec<u8>)>,
+        after: Option<Removal>,
+    ) -> Removal {
+        let removal = self.inner.start_remove_many(removals, after).await;
+        self.metrics.removals_submitted.inc();
+        if let Some(result) = removal.peek() {
+            self.metrics.finish_removals(result);
+            return removal;
+        }
+
+        // A batch still running is counted as finished once its completion is next polled.
+        self.metrics.removals_pending.inc();
+        let metrics = self.metrics.clone();
+        Removal::submitted(Handle::from_future(async move {
+            let result = removal.await;
+            metrics.removals_pending.dec();
+            metrics.finish_removals(&result);
+            result
+        }))
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
