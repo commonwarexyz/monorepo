@@ -77,6 +77,7 @@ use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc,
 mod common;
 pub(crate) mod fixtures;
 mod floor;
+mod forward_history;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod properties;
@@ -1060,6 +1061,17 @@ impl Application<deterministic::Context> for GatedMultiApp {
 }
 
 async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, Vec<Block>) {
+    let leader = ed25519::PrivateKey::from_seed(0).public_key();
+    build_chain_with_leaders(context, blocks, |_| leader.clone()).await
+}
+
+/// Builds `blocks` blocks above genesis on a private QMDB, asking `leader` for each view's
+/// leader.
+async fn build_chain_with_leaders(
+    context: &deterministic::Context,
+    blocks: u64,
+    leader: impl Fn(u64) -> ed25519::PublicKey,
+) -> (Block, Vec<Block>) {
     let initial_target =
         <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
     let genesis = Block::genesis(initial_target.root, initial_target.range);
@@ -1088,7 +1100,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::zero(), View::new(height.get())),
-                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                leader: leader(height.get()),
                 parent: (parent.context.round.view(), parent.digest()),
             },
             parent: parent.digest(),
