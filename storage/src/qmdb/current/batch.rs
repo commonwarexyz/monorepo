@@ -54,7 +54,7 @@ pub(crate) struct ChunkOverlay<const N: usize> {
 
 /// Parent-bitmap dimensions captured once per overlay. `chunk_mut` needs them on every newly
 /// materialized chunk, so they are read once instead of per touched chunk. `len` also records
-/// the committed length the overlay was built on (see `BitmapView::trim_committed`).
+/// the length of the DB's bitmap the overlay was built on (see `BitmapView::trim_committed`).
 #[derive(Clone, Copy, Debug, Default)]
 struct Dimensions {
     len: u64,
@@ -1019,12 +1019,11 @@ where
 /// A batch's speculative bitmap overlays, oldest first. Read through [`BitmapView`].
 pub(crate) type Overlays<const N: usize> = Vec<Arc<ChunkOverlay<N>>>;
 
-/// A batch's bitmap: `overlays` read over `committed`, the database bitmap they were built on.
-/// A chunk comes from the newest overlay that materialized it, else from the committed bitmap.
+/// A batch's bitmap: `overlays` read over `committed`, the DB's bitmap they were built on. A
+/// chunk comes from the newest overlay that materialized it, else from the DB's bitmap.
 ///
-/// The view performs no validity check of its own. Its committed-read consumers run behind the
-/// batch-chain gate (see [`crate::qmdb::chain`]), which refuses stale batches before they
-/// read through it.
+/// The view performs no validity check of its own. Its consumers run behind the batch-chain gate
+/// (see [`crate::qmdb::chain`]), which refuses stale batches before they read through it.
 #[derive(Debug)]
 pub(crate) struct BitmapView<'a, const N: usize> {
     overlays: Overlays<N>,
@@ -1041,9 +1040,9 @@ impl<'a, const N: usize> BitmapView<'a, N> {
         }
     }
 
-    /// Drop the overlays the committed bitmap already contains. Returns `None` when the oldest
-    /// remaining overlay was not built on the committed bitmap: a bounded reopen at an ancestor state
-    /// removed an applied overlay from under it, so reads would mix two bitmaps.
+    /// Drop the overlays `apply_batch` has already applied to the DB's bitmap. Returns `None` when
+    /// the oldest remaining overlay was not built on the DB's bitmap. A bounded reopen at an
+    /// ancestor state removed an applied overlay from under it, so reads would mix two bitmaps.
     fn trim_committed(mut self) -> Option<Self> {
         let committed = self.committed.len();
         self.overlays.retain(|overlay| overlay.len > committed);
@@ -1888,12 +1887,12 @@ mod tests {
         assert_eq!(got, want);
     }
 
-    // `trim_committed` runs at merkleize to drop the overlays a prior apply has already absorbed
-    // into the committed bitmap. These tests cover distinct input shapes directly, without going
-    // through the full Db/batch machinery, so the structural output can be asserted.
+    // `trim_committed` runs at merkleize to drop the overlays a prior apply has already applied to
+    // the DB's bitmap. These tests cover distinct input shapes directly, without going through the
+    // full Db/batch machinery, so the structural output can be asserted.
 
-    /// Build a view over `committed` with one overlay per length in `overlay_lens` (oldest
-    /// first), each materialized against the view below it.
+    /// Build a view over the DB bitmap `committed` with one overlay per length in `overlay_lens`
+    /// (oldest first), each materialized against the view below it.
     fn make_view<'a>(committed: &'a Bm, overlay_lens: &[u64]) -> BitmapView<'a, N> {
         let mut view = BitmapView::over(Vec::new(), committed);
         for &len in overlay_lens {
@@ -1918,13 +1917,13 @@ mod tests {
         assert!(result.overlays.is_empty());
     }
 
-    /// Every overlay has been absorbed by prior applies, so all are dropped. This is the
-    /// steady-state "extend a just-applied batch" flow: after `apply_batch(A)`, `A`'s own
-    /// overlay has `len == committed` and the child's merkleize should start from the committed
-    /// bitmap alone.
+    /// Every overlay has been applied by prior applies, so all are dropped. This is the
+    /// steady-state "extend a just-applied batch" flow. After `apply_batch(A)`, `A`'s own overlay
+    /// has `len == committed.len()`, and the child's merkleize should start from the DB's bitmap
+    /// alone.
     #[test]
     fn trim_committed_all_committed() {
-        // `committed.len() == 64`; the single overlay's `len == 64`, so it's committed.
+        // `committed.len() == 64` and the single overlay's `len == 64`, so it is applied.
         let committed = make_bitmap(&[true; 64]);
         let result = make_view(&committed, &[64]).trim_committed().unwrap();
         assert!(result.overlays.is_empty());
@@ -1935,28 +1934,30 @@ mod tests {
     /// in between.
     #[test]
     fn trim_committed_none_committed() {
-        // `committed.len() == 32`; both overlays have `len > 32`, so neither is committed.
+        // `committed.len() == 32` and both overlays have `len > 32`, so neither is applied.
         let committed = make_bitmap(&[true; 32]);
         let result = make_view(&committed, &[64, 96]).trim_committed().unwrap();
         assert_eq!(overlay_lens(&result), vec![64, 96]);
     }
 
-    /// Exactly one overlay is uncommitted (the newest) on top of a committed one -- the dominant
-    /// pattern in chained growth. Real-world trigger: apply parent A, then B held alive off A,
-    /// then merkleize C built off B.
+    /// Exactly one overlay is unapplied (the newest) on top of an applied one. This is the
+    /// dominant pattern in chained growth. Real-world trigger: apply parent A, keep B (built on A)
+    /// held, then merkleize C built on B.
     #[test]
     fn trim_committed_exactly_one_uncommitted() {
-        // `committed.len() == 64`; committed overlay (`len == 64`) + uncommitted (`96`).
+        // `committed.len() == 64`, so the first overlay (`len == 64`) is applied and the second
+        // (`96`) is not.
         let committed = make_bitmap(&[true; 64]);
         let result = make_view(&committed, &[64, 96]).trim_committed().unwrap();
         assert_eq!(overlay_lens(&result), vec![96]);
     }
 
-    /// Two or more uncommitted overlays on top of a committed one. Real-world trigger: build A,
-    /// then B off A, then C off B; apply only A; then merkleize a child of C.
+    /// Two or more unapplied overlays on top of an applied one. Real-world trigger: build A, then
+    /// B on A, then C on B, apply only A, and merkleize a child of C.
     #[test]
     fn trim_committed_multiple_uncommitted() {
-        // `committed.len() == 64`; committed overlay (64), then two uncommitted (96, 128).
+        // `committed.len() == 64`, so the first overlay (64) is applied and the next two (96, 128)
+        // are not.
         let committed = make_bitmap(&[true; 64]);
         let result = make_view(&committed, &[64, 96, 128])
             .trim_committed()
@@ -1964,9 +1965,9 @@ mod tests {
         assert_eq!(overlay_lens(&result), vec![96, 128]);
     }
 
-    /// The oldest kept overlay must have been built on the committed bitmap. Viewing overlays
-    /// built on a 64-bit bitmap over a 32-bit one is what a bounded reopen at an ancestor state looks
-    /// like, and must be refused.
+    /// The oldest kept overlay must have been built on the DB's bitmap. Viewing overlays built on
+    /// a 64-bit bitmap over a 32-bit one is what a bounded reopen at an ancestor state looks like,
+    /// and must be refused.
     #[test]
     fn trim_committed_rejects_earlier_committed_prefix() {
         let committed = make_bitmap(&[true; 64]);
