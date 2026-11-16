@@ -863,30 +863,36 @@ pub mod tests {
 
         // The first push claims worker one, the lowest bit, and reserves its count.
         let mut tasks = vec![push(&pool, &set)];
-        assert!(!pool.idle().is_idle(1) && pool.idle().is_idle(2));
-        assert!(notified(&pool, 1) && !notified(&pool, 2));
+        assert!(!pool.idle().is_idle(1));
+        assert!(pool.idle().is_idle(2));
+        assert!(notified(&pool, 1));
+        assert!(!notified(&pool, 2));
         assert_eq!(pool.idle().search_count(), 1);
 
         // A second push claims worker two, although worker one's count is held.
         tasks.push(push(&pool, &set));
-        assert!(!pool.idle().is_idle(2) && notified(&pool, 2));
+        assert!(!pool.idle().is_idle(2));
+        assert!(notified(&pool, 2));
         assert_eq!(pool.idle().search_count(), 2);
 
         // A kick leaves its backlog to the workers holding counts.
         tasks.extend(enqueue(&pool, &mut readies[0], &set, STEALABLE));
-        assert!(pool.idle().is_idle(3) && !notified(&pool, 3));
+        assert!(pool.idle().is_idle(3));
+        assert!(!notified(&pool, 3));
 
         // Each claimed worker resumes with its count. The first return is not
         // the last, and the last wakes worker three.
         parked[0].finish_park();
         parked[1].finish_park();
-        assert!(parked[0].searching && parked[1].searching);
+        assert!(parked[0].searching);
+        assert!(parked[1].searching);
 
         parked[0].leave_search();
         assert!(pool.idle().is_idle(3));
 
         parked[1].leave_search();
-        assert!(!pool.idle().is_idle(3) && notified(&pool, 3));
+        assert!(!pool.idle().is_idle(3));
+        assert!(notified(&pool, 3));
 
         // Worker three resumes with the count handed on, and returns it.
         parked[2].finish_park();
@@ -930,12 +936,14 @@ pub mod tests {
 
         // One runnable short of a stealable backlog, worker zero's pushes do not kick.
         let mut tasks = enqueue(&pool, &mut zero, &set, STEALABLE - 1);
-        assert!(pool.idle().is_idle(1) && !notified(&pool, 1));
+        assert!(pool.idle().is_idle(1));
+        assert!(!notified(&pool, 1));
 
         // The push that makes the backlog stealable kicks, and with no count
         // held, the kick claims worker one.
         tasks.extend(enqueue(&pool, &mut zero, &set, 1));
-        assert!(!pool.idle().is_idle(1) && notified(&pool, 1));
+        assert!(!pool.idle().is_idle(1));
+        assert!(notified(&pool, 1));
 
         // The woken worker holds the count its wake took and steals.
         parked.finish_park();
@@ -995,7 +1003,9 @@ pub mod tests {
             assert!(!searcher.search(ready));
         }
 
-        assert!(searchers[0].searching && searchers[1].searching && !searchers[2].searching);
+        assert!(searchers[0].searching);
+        assert!(searchers[1].searching);
+        assert!(!searchers[2].searching);
 
         // Worker three's kick finds counts held.
         let tasks = enqueue(&pool, &mut readies[3], &set, STEALABLE);
@@ -1003,7 +1013,8 @@ pub mod tests {
         // Worker two parks despite the backlog, since the held counts cover it,
         // and no wake claims it yet.
         assert_eq!(searchers[2].prepare_park(&readies[2]), Park::Wait);
-        assert!(pool.idle().is_idle(2) && !notified(&pool, 2));
+        assert!(pool.idle().is_idle(2));
+        assert!(!notified(&pool, 2));
 
         // The first return is not the last, so worker two stays parked.
         searchers[0].leave_search();
@@ -1011,7 +1022,8 @@ pub mod tests {
 
         // The last return hands the duty on and claims worker two.
         searchers[1].leave_search();
-        assert!(!pool.idle().is_idle(2) && notified(&pool, 2));
+        assert!(!pool.idle().is_idle(2));
+        assert!(notified(&pool, 2));
 
         // Worker two resumes with the count its wake took and steals the backlog.
         searchers[2].finish_park();
@@ -1060,7 +1072,8 @@ pub mod tests {
 
                 // Worker zero's return is the last, so it claims worker one.
                 holder.leave_search();
-                assert!(!pool.idle().is_idle(1) && notified(&pool, 1));
+                assert!(!pool.idle().is_idle(1));
+                assert!(notified(&pool, 1));
                 searcher.finish_park();
             } else {
                 // With no count held, worker one takes one and withdraws to search.
@@ -1108,8 +1121,10 @@ pub mod tests {
         // Worker three fills its run queue and overflows. Its kicks see the
         // held count, and the overflow's push claims only worker zero.
         let tasks = enqueue(&pool, &mut r3, &set, CAPACITY + 1);
-        assert!(!pool.idle().is_idle(0) && notified(&pool, 0));
-        assert!(pool.idle().is_idle(1) && !notified(&pool, 1));
+        assert!(!pool.idle().is_idle(0));
+        assert!(notified(&pool, 0));
+        assert!(pool.idle().is_idle(1));
+        assert!(!notified(&pool, 1));
         assert_eq!(pool.idle().search_count(), 2);
 
         // Worker zero resumes with the claim's count, takes a share, and
@@ -1117,14 +1132,16 @@ pub mod tests {
         zero.finish_park();
         pool.take(&mut r0).unwrap().discard();
         zero.leave_search();
-        assert!(pool.idle().is_idle(1) && !notified(&pool, 1));
+        assert!(pool.idle().is_idle(1));
+        assert!(!notified(&pool, 1));
         assert_eq!(pool.idle().search_count(), 1);
 
         // Worker two parks and returns the last count. Its look sees the
         // global queue, so it runs and hands the duty on to worker one.
         assert_eq!(two.prepare_park(&r2), Park::Run);
         assert!(!two.searching);
-        assert!(!pool.idle().is_idle(1) && notified(&pool, 1));
+        assert!(!pool.idle().is_idle(1));
+        assert!(notified(&pool, 1));
         assert_eq!(pool.idle().search_count(), 1);
 
         // Worker one resumes with the count its wake reserved and steals a
@@ -1176,7 +1193,8 @@ pub mod tests {
         // although a backlog is stealable.
         assert_eq!(zero.room(), 0);
         assert_eq!(searcher.prepare_park(&zero), Park::Wait);
-        assert!(pool.idle().is_idle(0) && !notified(&pool, 0));
+        assert!(pool.idle().is_idle(0));
+        assert!(!notified(&pool, 0));
         assert_eq!(pool.idle().search_count(), 1);
 
         // The thief finishes its claim, freeing worker zero's slots.
@@ -1186,7 +1204,8 @@ pub mod tests {
 
         // The thief's return is the last and hands the duty on to worker zero.
         thief.leave_search();
-        assert!(!pool.idle().is_idle(0) && notified(&pool, 0));
+        assert!(!pool.idle().is_idle(0));
+        assert!(notified(&pool, 0));
 
         // Worker zero resumes with the count its wake took and steals the backlog.
         searcher.finish_park();
@@ -1278,7 +1297,8 @@ pub mod tests {
         // Worker zero's kick fails its claim, returns the last count, and looks
         // again, so it claims worker two.
         let tasks = enqueue(pool, &mut parts[0].borrow_mut().1, &set, STEALABLE);
-        assert!(!pool.idle().is_idle(2) && notified(pool, 2));
+        assert!(!pool.idle().is_idle(2));
+        assert!(notified(pool, 2));
 
         // Worker two resumes with the count and steals, leaving a clean idle state.
         let (later, ready, _) = &mut *parts[2].borrow_mut();
@@ -1342,7 +1362,8 @@ pub mod tests {
         // The push's wake fails its claim, returns the last count, and looks
         // again, so it claims worker two.
         let pushed = push(pool, &set);
-        assert!(!pool.idle().is_idle(2) && notified(pool, 2));
+        assert!(!pool.idle().is_idle(2));
+        assert!(notified(pool, 2));
 
         // Worker two resumes with the count and steals the kicked backlog.
         let (later, ready, _) = &mut *parts[2].borrow_mut();
