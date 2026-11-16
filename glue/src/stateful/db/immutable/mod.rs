@@ -1,7 +1,8 @@
-//! [`Qmdb`](crate::stateful::db::qmdb::Qmdb) implementations for
-//! [`qmdb::immutable`](commonware_storage::qmdb::immutable) databases.
+//! [`Qmdb`](super::qmdb::Qmdb) support for QMDB [`immutable`](commonware_storage::qmdb::immutable)
+//! databases.
 //!
-//! [`standard`] retains the operation log. [`compact`] retains only the current Merkle peaks.
+//! [`standard`] retains the operation log. [`compact`] adds `set` to the shared
+//! [compact adapter](super::compact), which retains only the current Merkle peaks.
 
 mod compact;
 mod standard;

@@ -27,7 +27,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::{
@@ -139,11 +139,11 @@ enum ProposalState<D> {
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
 
 /// The verification request in flight for the current or an optimistic future view, if any.
-type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
+type PendingVerification = Option<Request<Rnd, oneshot::Receiver<bool>>>;
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -180,7 +180,7 @@ pub struct Actor<
 }
 
 impl<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -432,7 +432,6 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    #[allow(clippy::async_yields_async)]
     async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
@@ -468,10 +467,7 @@ impl<
 
     /// Attempt to verify a proposed block.
     #[allow(clippy::async_yields_async)]
-    async fn try_verify(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> PendingVerification<D, S::PublicKey> {
+    async fn try_verify(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> PendingVerification {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
@@ -494,15 +490,14 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
+        let round = context.round;
         let receiver = async {
             debug!(?proposal, "requested proposal verification");
-            self.automaton
-                .verify(context.clone(), proposal.payload)
-                .await
+            self.automaton.verify(context, proposal.payload).await
         }
         .instrument(span.clone())
         .await;
-        Some(Request(context, span, receiver))
+        Some(Request(round, span, receiver))
     }
 
     /// Drops obsolete pending application requests and dispatches eligible new ones.
@@ -510,12 +505,13 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
-        pending_verify: &mut PendingVerification<D, S::PublicKey>,
+        pending_verify: &mut PendingVerification,
     ) {
         // Retain requests for the current and optimistic future views. Drop requests for exited
-        // views, and a proposal request whose captured parent is no longer valid once a
-        // replacement parent is selectable. Certification of an exited view continues after its
-        // verification receiver is dropped.
+        // views, a verification request whose proposal a certificate replaced, and a proposal
+        // request whose captured parent is no longer valid once a replacement parent is
+        // selectable. Certification of a view continues after its verification receiver is
+        // dropped.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -532,10 +528,9 @@ impl<
                 *pending_propose = None;
             }
         }
-        if pending_verify
-            .as_ref()
-            .is_some_and(|request| request.view() < current_view)
-        {
+        if pending_verify.as_ref().is_some_and(|request| {
+            request.view() < current_view || self.state.verification_superseded(request.view())
+        }) {
             *pending_verify = None;
         }
 
@@ -595,7 +590,6 @@ impl<
     /// the vote for broadcast by [Self::notify], along with the best entry
     /// certificate for the current view (on retry) to help others enter it
     /// (see [State::get_best_certificate]).
-    #[allow(clippy::type_complexity)]
     async fn timeout(
         mut self,
         reason: TimeoutReason,
@@ -823,22 +817,22 @@ impl<
     /// Returns the view to notify.
     fn process_verified(
         &mut self,
-        context: Context<D, S::PublicKey>,
+        round: Rnd,
         verified: Result<bool, oneshot::error::RecvError>,
     ) -> View {
-        let view = context.view();
+        let view = round.view();
         match verified {
             Ok(true) => {
                 // Mark verification complete
                 self.state.verified(view);
             }
             Ok(false) => {
-                warn!(round = ?context.round, "proposal failed verification");
+                warn!(?round, "proposal failed verification");
                 self.state
                     .verification_failed(view, TimeoutReason::InvalidProposal);
             }
             Err(err) => {
-                debug!(?err, round = ?context.round, "failed to verify proposal");
+                debug!(?err, ?round, "failed to verify proposal");
                 self.state
                     .verification_failed(view, TimeoutReason::IgnoredProposal);
             }
@@ -851,7 +845,6 @@ impl<
     /// Returns whether the round was still active (false if it was already
     /// pruned) and, if the result was recorded, the certification outcome to
     /// stage for [Self::notify].
-    #[allow(clippy::type_complexity)]
     async fn process_certified(
         mut self,
         round: Rnd,
@@ -898,7 +891,7 @@ impl<
                     return (self, None);
                 }
                 trace!(%view, "received proposal");
-                if !self.state.set_proposal(view, proposal) {
+                if !self.state.set_proposal(view, &proposal) {
                     return (self, None);
                 }
                 (self, Some(view))
@@ -1070,12 +1063,12 @@ impl<
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) {
         // Wrap channels
-        let pool = self.context.network_buffer_pool();
-        let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
-        let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
+        let mut vote_sender = WrappedSender::new(vote_sender);
+        let mut certificate_sender = WrappedSender::new(certificate_sender);
 
-        // Initialize journal
-        let journal = Journal::<_, Artifact<S, D>>::init(
+        // Open the journal. Replayed artifacts become in-memory state, so journal pages don't
+        // need to stay in the OS page cache.
+        let mut replay = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),
@@ -1083,14 +1076,15 @@ impl<
                 codec_config: self.certificate_config.clone(),
                 page_cache: self.page_cache.clone(),
                 write_buffer: self.write_buffer,
+                replay_buffer: self.replay_buffer,
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("unable to open journal");
 
         // Add initial view from the configured floor. Replay skips all
-        // artifacts at or below the floor's view (see the nullify-skip
-        // rationale in the replay loop below).
+        // artifacts at or below the floor's view.
         let floor = self.floor.take().expect("floor not initialized");
         let replay_floor = floor.view();
 
@@ -1102,31 +1096,36 @@ impl<
         let start_span = info_span!("simplex.voter.start", epoch = epoch.traced());
 
         // Apply the configured floor, forwarding and reporting any finalization.
-        start_span.in_scope(|| {
-            if let Some(finalization) = self.state.set_floor(floor) {
-                let report = finalization.clone();
-                resolver.updated(Certificate::Finalization(finalization));
-                self.reporter.report(Activity::Finalization(report));
-            }
+        // The finalization is journaled after replay unless the journal already
+        // holds a finalization at or above it, so a later restart with a lower
+        // floor does not roll the voter back.
+        let mut floor_finalization = start_span.in_scope(|| {
+            let finalization = self.state.set_floor(floor)?;
+            resolver.updated(Certificate::Finalization(finalization.clone()));
+            self.reporter
+                .report(Activity::Finalization(finalization.clone()));
+            Some(finalization)
         });
 
         // Rebuild from journal, nested under the startup span.
-        // Replayed artifacts become in-memory state, so journal pages need not
-        // remain in the OS page cache.
         let replayed;
         (self, replayed) = async {
-            let mut replay = journal
-                .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
-                .await
-                .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
+                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+
+                // A journaled finalization at or above the floor already anchors later restarts
+                // there, so the configured floor need not be journaled.
+                if matches!(artifact, Artifact::Finalization(_)) && artifact.view() >= replay_floor
+                {
+                    floor_finalization = None;
+                }
+
                 // Dropping our own nullify votes at or below the floor is safe
                 // for the same-term finalize gate: the floor finalization
                 // covers any such vote (it lies between the vote and any later
                 // same-term view), so the gate would treat it as healed anyway.
                 // If the gate ever stops keying off last_finalized, this skip
                 // must be revisited.
-                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
                 if artifact.view() <= replay_floor {
                     continue;
                 }
@@ -1185,6 +1184,20 @@ impl<
         .await;
         self.journal = Some(replayed);
 
+        // Every recovered certificate has been forwarded, so the resolver can
+        // start background repair above the recovered floor.
+        resolver.replayed();
+        if let Some(finalization) = floor_finalization {
+            self = async {
+                self.append_journal(Artifact::Finalization(finalization))
+                    .await
+                    .sync_journal()
+                    .await
+            }
+            .instrument(start_span)
+            .await;
+        }
+
         // Log current view after recovery
         let end = self.context.current();
         let elapsed = end.duration_since(start).unwrap_or_default();
@@ -1210,7 +1223,7 @@ impl<
 
         // Process messages
         let mut pending_propose: PendingProposal<D, S::PublicKey> = None;
-        let mut pending_verify: PendingVerification<D, S::PublicKey> = None;
+        let mut pending_verify: PendingVerification = None;
         let mut certify_pool = AbortablePool::default();
         select_loop! {
             self.context,
@@ -1359,12 +1372,12 @@ impl<
                 };
                 view = proposed_view;
             },
-            (context, span, verified) = verify_wait => {
+            (round, span, verified) = verify_wait => {
                 // Clear verify waiter
                 pending_verify = None;
 
                 // Process the automaton's response
-                view = span.in_scope(|| self.process_verified(context, verified));
+                view = span.in_scope(|| self.process_verified(round, verified));
             },
             // Aborted futures are expected when old views are pruned
             Ok((round, span, certified)) = certify_wait else continue => {
@@ -1402,11 +1415,12 @@ impl<
             on_end => {
                 // Attempt to send any new view messages
                 //
-                // The batcher may drop votes we construct here if it has not yet been updated to the
-                // message's view. This only happens when we skip ahead multiple views, which always
-                // coincides with entering a new view (triggering a batcher update below before we send
-                // any votes for the new current view). This has no impact on liveness, however, we may miss
-                // building a finalization for an old view where we otherwise could have contributed.
+                // The batcher buffers votes we construct here even before its update to the
+                // message's view (own votes are bounded only by the retention floor) and
+                // revisits them on the update sent below, so a multi-view jump delays their
+                // processing. A vote for a view the batcher skipped is reported but not
+                // assembled here. A peer that tracked the view may assemble its certificate,
+                // and otherwise a later finalization covers it.
                 let span = info_span!(
                     parent: self.state.view_span(view),
                     "simplex.voter.notify",

@@ -23,14 +23,14 @@ impl<T> Key for T where
 /// An operation that may be a commit. Commits declare an inactivity floor.
 pub trait Committable<F: Family> {
     /// The inactivity floor if this operation is a commit.
-    fn floor(&self) -> Option<Location<F>>;
+    fn inactivity_floor(&self) -> Option<Location<F>>;
 
     /// The commit a freshly initialized database holds.
     fn initial_commit() -> Self;
 
     /// If this operation is a commit.
     fn is_commit(&self) -> bool {
-        self.floor().is_some()
+        self.inactivity_floor().is_some()
     }
 }
 
@@ -45,7 +45,7 @@ pub trait Operation<F: Family>: Committable<F> {
     /// Consumes the operation and returns its owned key, if any.
     fn into_key(self) -> Option<Self::Key>;
 
-    /// If this operation updates its key's value.
+    /// If this operation replaces its key's value, making the key's previous location inactive.
     fn is_update(&self) -> bool;
 
     /// If this operation deletes its key's value.

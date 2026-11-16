@@ -54,7 +54,7 @@ impl RMap {
     /// map.insert(0); // Map: [0, 3]
     /// map.insert(5); // Map: [0, 3], [5, 5]
     /// map.insert(4); // Map: [0, 5]
-    /// assert_eq!(map.get(&3), Some((0, 5)));
+    /// assert_eq!(map.get(3), Some((0, 5)));
     /// ```
     pub fn insert(&mut self, value: u64) {
         let prev_opt = self
@@ -120,9 +120,9 @@ impl RMap {
     }
 
     /// Returns the range that contains the given value.
-    pub fn get(&self, value: &u64) -> Option<(u64, u64)> {
+    pub fn get(&self, value: u64) -> Option<(u64, u64)> {
         if let Some((&start, &end)) = self.ranges.range(..=value).next_back()
-            && *value <= end
+            && value <= end
         {
             return Some((start, end));
         }
@@ -158,10 +158,10 @@ impl RMap {
     /// map.insert(5); map.insert(6); map.insert(7); // Map: [1, 3], [5, 7]
     ///
     /// map.remove(2, 6); // Results in [1, 1], [7, 7]
-    /// assert_eq!(map.get(&1), Some((1, 1)));
-    /// assert_eq!(map.get(&2), None);
-    /// assert_eq!(map.get(&6), None);
-    /// assert_eq!(map.get(&7), Some((7, 7)));
+    /// assert_eq!(map.get(1), Some((1, 1)));
+    /// assert_eq!(map.get(2), None);
+    /// assert_eq!(map.get(6), None);
+    /// assert_eq!(map.get(7), Some((7, 7)));
     /// ```
     pub fn remove(&mut self, start: u64, end: u64) {
         if start > end {
@@ -425,7 +425,7 @@ mod tests {
     fn test_insert_empty() {
         let mut map = RMap::new();
         map.insert(5);
-        assert_eq!(map.get(&5), Some((5, 5)));
+        assert_eq!(map.get(5), Some((5, 5)));
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5, &5)]);
     }
 
@@ -434,8 +434,8 @@ mod tests {
         let mut map = RMap::new();
         map.insert(5);
         map.insert(10);
-        assert_eq!(map.get(&5), Some((5, 5)));
-        assert_eq!(map.get(&10), Some((10, 10)));
+        assert_eq!(map.get(5), Some((5, 5)));
+        assert_eq!(map.get(10), Some((10, 10)));
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5, &5), (&10, &10)]);
     }
 
@@ -446,9 +446,9 @@ mod tests {
         map.insert(2);
         map.insert(3); // Range is 1-3
         map.insert(2); // Insert value already covered
-        assert_eq!(map.get(&1), Some((1, 3)));
-        assert_eq!(map.get(&2), Some((1, 3)));
-        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.get(1), Some((1, 3)));
+        assert_eq!(map.get(2), Some((1, 3)));
+        assert_eq!(map.get(3), Some((1, 3)));
         assert_eq!(map.iter().count(), 1);
         assert_eq!(map.iter().next(), Some((&1, &3)));
     }
@@ -459,8 +459,8 @@ mod tests {
         map.insert(1);
         map.insert(2); // Range is 1-2
         map.insert(3); // Adjacent to end
-        assert_eq!(map.get(&1), Some((1, 3)));
-        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.get(1), Some((1, 3)));
+        assert_eq!(map.get(3), Some((1, 3)));
         assert_eq!(map.iter().next(), Some((&1, &3)));
     }
 
@@ -470,8 +470,8 @@ mod tests {
         map.insert(2);
         map.insert(3); // Range is 2-3
         map.insert(1); // Adjacent to start
-        assert_eq!(map.get(&1), Some((1, 3)));
-        assert_eq!(map.get(&3), Some((1, 3)));
+        assert_eq!(map.get(1), Some((1, 3)));
+        assert_eq!(map.get(3), Some((1, 3)));
         assert_eq!(map.iter().next(), Some((&1, &3)));
     }
 
@@ -480,23 +480,23 @@ mod tests {
         let mut map = RMap::new();
         map.insert(1);
         map.insert(2);
-        assert_eq!(map.get(&1), Some((1, 2)));
+        assert_eq!(map.get(1), Some((1, 2)));
         map.insert(5);
         map.insert(6);
-        assert_eq!(map.get(&5), Some((5, 6)));
+        assert_eq!(map.get(5), Some((5, 6)));
         // Current: (1,2), (5,6)
         map.insert(3); // Insert 3, should become (1,3), (5,6)
-        assert_eq!(map.get(&1), Some((1, 3)));
-        assert_eq!(map.get(&2), Some((1, 3)));
-        assert_eq!(map.get(&3), Some((1, 3)));
-        assert_eq!(map.get(&5), Some((5, 6)));
+        assert_eq!(map.get(1), Some((1, 3)));
+        assert_eq!(map.get(2), Some((1, 3)));
+        assert_eq!(map.get(3), Some((1, 3)));
+        assert_eq!(map.get(5), Some((5, 6)));
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&1, &3), (&5, &6)]);
 
         map.insert(4); // Insert 4, should bridge to (1,6)
-        assert_eq!(map.get(&1), Some((1, 6)));
-        assert_eq!(map.get(&3), Some((1, 6)));
-        assert_eq!(map.get(&4), Some((1, 6)));
-        assert_eq!(map.get(&6), Some((1, 6)));
+        assert_eq!(map.get(1), Some((1, 6)));
+        assert_eq!(map.get(3), Some((1, 6)));
+        assert_eq!(map.get(4), Some((1, 6)));
+        assert_eq!(map.get(6), Some((1, 6)));
         assert_eq!(map.iter().count(), 1);
         assert_eq!(map.iter().next(), Some((&1, &6)));
     }
@@ -507,40 +507,40 @@ mod tests {
         map.insert(10); // (10,10)
         map.insert(12); // (10,10), (12,12)
         map.insert(11); // (10,12)
-        assert_eq!(map.get(&10), Some((10, 12)));
-        assert_eq!(map.get(&11), Some((10, 12)));
-        assert_eq!(map.get(&12), Some((10, 12)));
+        assert_eq!(map.get(10), Some((10, 12)));
+        assert_eq!(map.get(11), Some((10, 12)));
+        assert_eq!(map.get(12), Some((10, 12)));
 
         map.insert(15); // (10,12), (15,15)
         map.insert(13); // (10,13), (15,15)
-        assert_eq!(map.get(&13), Some((10, 13)));
-        assert_eq!(map.get(&12), Some((10, 13)));
-        assert_eq!(map.get(&15), Some((15, 15)));
+        assert_eq!(map.get(13), Some((10, 13)));
+        assert_eq!(map.get(12), Some((10, 13)));
+        assert_eq!(map.get(15), Some((15, 15)));
 
         map.insert(14); // (10,15)
-        assert_eq!(map.get(&10), Some((10, 15)));
-        assert_eq!(map.get(&14), Some((10, 15)));
-        assert_eq!(map.get(&15), Some((10, 15)));
+        assert_eq!(map.get(10), Some((10, 15)));
+        assert_eq!(map.get(14), Some((10, 15)));
+        assert_eq!(map.get(15), Some((10, 15)));
         assert_eq!(map.iter().count(), 1);
         assert_eq!(map.iter().next(), Some((&10, &15)));
 
         map.insert(5); // (5,5), (10,15)
         map.insert(7); // (5,5), (7,7), (10,15)
         map.insert(6); // (5,7), (10,15)
-        assert_eq!(map.get(&5), Some((5, 7)));
-        assert_eq!(map.get(&6), Some((5, 7)));
-        assert_eq!(map.get(&7), Some((5, 7)));
+        assert_eq!(map.get(5), Some((5, 7)));
+        assert_eq!(map.get(6), Some((5, 7)));
+        assert_eq!(map.get(7), Some((5, 7)));
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5, &7), (&10, &15)]);
 
         map.insert(9); // (5,7), (9,9), (10,15) -> should become (5,7), (9,15)
-        assert_eq!(map.get(&9), Some((9, 15)));
-        assert_eq!(map.get(&10), Some((9, 15)));
+        assert_eq!(map.get(9), Some((9, 15)));
+        assert_eq!(map.get(10), Some((9, 15)));
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&5, &7), (&9, &15)]);
 
         map.insert(8); // (5,15)
-        assert_eq!(map.get(&5), Some((5, 15)));
-        assert_eq!(map.get(&8), Some((5, 15)));
-        assert_eq!(map.get(&15), Some((5, 15)));
+        assert_eq!(map.get(5), Some((5, 15)));
+        assert_eq!(map.get(8), Some((5, 15)));
+        assert_eq!(map.get(15), Some((5, 15)));
         assert_eq!(map.iter().next(), Some((&5, &15)));
     }
 
@@ -548,10 +548,10 @@ mod tests {
     fn test_insert_max_value() {
         let mut map = RMap::new();
         map.insert(u64::MAX);
-        assert_eq!(map.get(&u64::MAX), Some((u64::MAX, u64::MAX)));
+        assert_eq!(map.get(u64::MAX), Some((u64::MAX, u64::MAX)));
         map.insert(u64::MAX - 1);
-        assert_eq!(map.get(&(u64::MAX - 1)), Some((u64::MAX - 1, u64::MAX)));
-        assert_eq!(map.get(&u64::MAX), Some((u64::MAX - 1, u64::MAX)));
+        assert_eq!(map.get(u64::MAX - 1), Some((u64::MAX - 1, u64::MAX)));
+        assert_eq!(map.get(u64::MAX), Some((u64::MAX - 1, u64::MAX)));
     }
 
     #[test]
@@ -563,14 +563,14 @@ mod tests {
         map.insert(5);
         map.insert(6); // Range 5-6
 
-        assert_eq!(map.get(&1), Some((1, 3)));
-        assert_eq!(map.get(&2), Some((1, 3)));
-        assert_eq!(map.get(&3), Some((1, 3)));
-        assert_eq!(map.get(&4), None);
-        assert_eq!(map.get(&5), Some((5, 6)));
-        assert_eq!(map.get(&6), Some((5, 6)));
-        assert_eq!(map.get(&0), None);
-        assert_eq!(map.get(&7), None);
+        assert_eq!(map.get(1), Some((1, 3)));
+        assert_eq!(map.get(2), Some((1, 3)));
+        assert_eq!(map.get(3), Some((1, 3)));
+        assert_eq!(map.get(4), None);
+        assert_eq!(map.get(5), Some((5, 6)));
+        assert_eq!(map.get(6), Some((5, 6)));
+        assert_eq!(map.get(0), None);
+        assert_eq!(map.get(7), None);
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
         map.insert(5);
         map.insert(6); // 5-6
         map.remove(1, 3);
-        assert_eq!(map.get(&2), None);
+        assert_eq!(map.get(2), None);
         assert_eq!(map.iter().next(), Some((&5, &6)));
         map.remove(5, 6);
         assert_eq!(map.iter().count(), 0);
@@ -626,9 +626,9 @@ mod tests {
         map.insert(4);
         map.insert(5); // 1-5
         map.remove(3, 3); // Remove 3 from 1-5 -> (1,2), (4,5)
-        assert_eq!(map.get(&2), Some((1, 2)));
-        assert_eq!(map.get(&3), None);
-        assert_eq!(map.get(&4), Some((4, 5)));
+        assert_eq!(map.get(2), Some((1, 2)));
+        assert_eq!(map.get(3), None);
+        assert_eq!(map.get(4), Some((4, 5)));
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&1, &2), (&4, &5)]);
 
         // Reset and test another split
@@ -639,11 +639,11 @@ mod tests {
         map2.insert(4);
         map2.insert(5); // 1-5
         map2.remove(2, 4); // Remove 2-4 from 1-5 -> (1,1), (5,5)
-        assert_eq!(map2.get(&1), Some((1, 1)));
-        assert_eq!(map2.get(&2), None);
-        assert_eq!(map2.get(&3), None);
-        assert_eq!(map2.get(&4), None);
-        assert_eq!(map2.get(&5), Some((5, 5)));
+        assert_eq!(map2.get(1), Some((1, 1)));
+        assert_eq!(map2.get(2), None);
+        assert_eq!(map2.get(3), None);
+        assert_eq!(map2.get(4), None);
+        assert_eq!(map2.get(5), Some((5, 5)));
         assert_eq!(map2.iter().collect::<Vec<_>>(), vec![(&1, &1), (&5, &5)]);
     }
 
@@ -656,9 +656,9 @@ mod tests {
         map.insert(4);
         map.insert(5); // 1-5
         map.remove(0, 2); // Remove 0-2 from 1-5 -> (3,5)
-        assert_eq!(map.get(&1), None);
-        assert_eq!(map.get(&2), None);
-        assert_eq!(map.get(&3), Some((3, 5)));
+        assert_eq!(map.get(1), None);
+        assert_eq!(map.get(2), None);
+        assert_eq!(map.get(3), Some((3, 5)));
         assert_eq!(map.iter().next(), Some((&3, &5)));
     }
 
@@ -671,9 +671,9 @@ mod tests {
         map.insert(4);
         map.insert(5); // 1-5
         map.remove(4, 6); // Remove 4-6 from 1-5 -> (1,3)
-        assert_eq!(map.get(&3), Some((1, 3)));
-        assert_eq!(map.get(&4), None);
-        assert_eq!(map.get(&5), None);
+        assert_eq!(map.get(3), Some((1, 3)));
+        assert_eq!(map.get(4), None);
+        assert_eq!(map.get(5), None);
         assert_eq!(map.iter().next(), Some((&1, &3)));
     }
 
@@ -688,10 +688,10 @@ mod tests {
         map.insert(8); // 7-8
 
         map.remove(3, 6); // Removes 4-5, no truncation as 3 and 6 are in gaps. (1,2), (7,8)
-        assert_eq!(map.get(&2), Some((1, 2)));
-        assert_eq!(map.get(&4), None);
-        assert_eq!(map.get(&5), None);
-        assert_eq!(map.get(&7), Some((7, 8)));
+        assert_eq!(map.get(2), Some((1, 2)));
+        assert_eq!(map.get(4), None);
+        assert_eq!(map.get(5), None);
+        assert_eq!(map.get(7), Some((7, 8)));
         assert_eq!(map.iter().collect::<Vec<_>>(), vec![(&1, &2), (&7, &8)]);
 
         map.remove(0, 10); // Removes all remaining ranges
@@ -712,13 +712,13 @@ mod tests {
         map.insert(11); // 9-11
 
         map.remove(2, 6); // Affects 1-3 (becomes 1-1) and 5-7 (becomes 7-7)
-        assert_eq!(map.get(&1), Some((1, 1)));
-        assert_eq!(map.get(&2), None);
-        assert_eq!(map.get(&3), None);
-        assert_eq!(map.get(&5), None);
-        assert_eq!(map.get(&6), None);
-        assert_eq!(map.get(&7), Some((7, 7)));
-        assert_eq!(map.get(&9), Some((9, 11)));
+        assert_eq!(map.get(1), Some((1, 1)));
+        assert_eq!(map.get(2), None);
+        assert_eq!(map.get(3), None);
+        assert_eq!(map.get(5), None);
+        assert_eq!(map.get(6), None);
+        assert_eq!(map.get(7), Some((7, 7)));
+        assert_eq!(map.get(9), Some((9, 11)));
         assert_eq!(
             map.iter().collect::<Vec<_>>(),
             vec![(&1, &1), (&7, &7), (&9, &11)]
@@ -761,12 +761,12 @@ mod tests {
         map.insert(u64::MAX); // MAX-2 to MAX
 
         map.remove(u64::MAX, u64::MAX); // Remove MAX -> (MAX-2, MAX-1)
-        assert_eq!(map.get(&(u64::MAX - 2)), Some((u64::MAX - 2, u64::MAX - 1)));
-        assert_eq!(map.get(&u64::MAX), None);
+        assert_eq!(map.get(u64::MAX - 2), Some((u64::MAX - 2, u64::MAX - 1)));
+        assert_eq!(map.get(u64::MAX), None);
 
         map.remove(u64::MAX - 2, u64::MAX - 2); // Remove MAX-2 -> (MAX-1, MAX-1)
-        assert_eq!(map.get(&(u64::MAX - 2)), None);
-        assert_eq!(map.get(&(u64::MAX - 1)), Some((u64::MAX - 1, u64::MAX - 1)));
+        assert_eq!(map.get(u64::MAX - 2), None);
+        assert_eq!(map.get(u64::MAX - 1), Some((u64::MAX - 1, u64::MAX - 1)));
 
         map.remove(u64::MAX - 1, u64::MAX - 1); // Remove MAX-1 -> empty
         assert_eq!(map.iter().count(), 0);

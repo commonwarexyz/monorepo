@@ -283,8 +283,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Gets the peer set (primary and secondary) at the given index.
-    pub fn get_peer_set(&self, index: &u64) -> Option<TrackedPeers<C>> {
-        let entry = self.peer_sets.get(index)?;
+    pub fn get_peer_set(&self, index: u64) -> Option<TrackedPeers<C>> {
+        let entry = self.peer_sets.get(&index)?;
         Some(TrackedPeers::new(
             entry.primary.deref().clone(),
             entry.secondary.clone(),
@@ -301,16 +301,24 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let index = self.latest_set_index()?;
         Some(PeerSetUpdate {
             index,
-            latest: self.get_peer_set(&index).unwrap(),
+            latest: self.get_peer_set(index).unwrap(),
             all: self.all(),
         })
     }
 
     /// Attempt to reserve a peer for the dialer.
     ///
-    /// Returns `Some` on success, `None` otherwise.
+    /// Returns `None` if the peer is no longer dialable or cannot be reserved. The dialer works
+    /// from a [Self::dialable] snapshot that may predate changes to the peer's record.
     pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
-        let ingress = self.peers.get(peer)?.ingress()?.clone();
+        let record = self.peers.get(peer)?;
+
+        // Only an unavailable peer is refused here because the reservation enforces the cooldown.
+        let now = self.context.current();
+        if record.dialable(now, self.allow_private_ips, self.allow_dns) == DialStatus::Unavailable {
+            return None;
+        }
+        let ingress = record.ingress()?.clone();
         self.reserve(Metadata::Dialer(peer.clone(), ingress))
     }
 
@@ -356,7 +364,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return false;
         }
 
-        let blocked_until = self.context.current() + self.block_duration;
+        let blocked_until = self
+            .context
+            .current()
+            .saturating_add_ext(self.block_duration);
         self.blocked.put(peer.clone(), blocked_until);
         let _ = self
             .metrics
@@ -395,7 +406,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
+    pub fn infos(&self, bit_vec: &types::BitVec) -> Option<Vec<types::Info<C>>> {
         let Some(entry) = self.peer_sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
@@ -481,7 +492,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         )
     }
 
-    /// Unblock all peers whose block has expired and update primary peer set knowledge bitmaps.
+    /// Unblock all peers whose block has expired.
     ///
     /// Returns `true` if any peers were unblocked.
     pub fn unblock_expired(&mut self) -> bool {
@@ -495,14 +506,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(?peer, "unblocked peer");
             self.metrics.blocked.remove_by(&peer);
             any_unblocked = true;
-
-            // Update primary-set knowledge (BitVec gossip); secondaries have no bitmap.
-            if let Some(record) = self.peers.get(&peer) {
-                let want = record.want(self.dial_fail_limit);
-                for entry in self.peer_sets.values_mut() {
-                    entry.primary.update(&peer, !want);
-                }
-            }
         }
 
         any_unblocked
@@ -591,7 +594,7 @@ mod tests {
     use commonware_cryptography::{Signer, secp256r1::standard::PrivateKey};
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        NZUsize, SystemTimeExt, TryCollect, bitmap::BitMap, ordered::Set as OrderedSet,
+        NZUsize, SystemTimeExt, TryCollect, bitmap::BitMap, hostname, ordered::Set as OrderedSet,
     };
     use std::net::SocketAddr;
 
@@ -817,7 +820,7 @@ mod tests {
                     .is_some()
             );
 
-            let peer_set = directory.get_peer_set(&0).unwrap();
+            let peer_set = directory.get_peer_set(0).unwrap();
             assert_eq!(peer_set.secondary.len(), 1);
             assert!(peer_set.secondary.position(&pk_c).is_some());
             assert!(peer_set.secondary.position(&pk_b).is_none());
@@ -1866,7 +1869,7 @@ mod tests {
             };
 
             // Both peers' info should be returned
-            let infos = directory.infos(bit_vec.clone()).unwrap();
+            let infos = directory.infos(&bit_vec).unwrap();
             assert_eq!(infos.len(), 2, "Should have info for both peers");
 
             // Block peer 1 and release their connection
@@ -1877,7 +1880,7 @@ mod tests {
             ));
 
             // Now only peer 2's info should be returned (peer 1 is Inert after disconnect)
-            let infos = directory.infos(bit_vec).unwrap();
+            let infos = directory.infos(&bit_vec).unwrap();
             assert_eq!(
                 infos.len(),
                 1,
@@ -2172,6 +2175,145 @@ mod tests {
                 directory.dial(&peer_pk).is_none(),
                 "re-blocked peer should not be reservable"
             );
+        });
+    }
+
+    #[test]
+    fn test_dial_rejects_peer_demoted_to_secondary() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_info(&signer, test_socket(), 100);
+        let peer_signer = PrivateKey::from_seed(1);
+        let peer_pk = peer_signer.public_key();
+        let other_pk = PrivateKey::from_seed(2).public_key();
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: NZUsize!(1),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
+
+            // The dialer snapshots dialable peers while the peer is primary.
+            let primary: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.track(0, TrackedPeers::from(primary)).unwrap();
+            directory.update_peers(vec![create_info(&peer_signer, test_socket(), 0)]);
+            assert_eq!(directory.dialable().peers, vec![peer_pk.clone()]);
+
+            // The next set keeps the peer only as secondary and evicts the old set.
+            directory
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        [other_pk].try_into().unwrap(),
+                        [peer_pk.clone()].try_into().unwrap(),
+                    ),
+                )
+                .unwrap();
+            assert!(directory.eligible(&peer_pk));
+            assert!(!directory.dialable().peers.contains(&peer_pk));
+
+            // Outbound dialing is restricted to primary (or persistent) peers, so a dial request
+            // from the stale snapshot must not reserve the secondary peer.
+            assert!(
+                directory.dial(&peer_pk).is_none(),
+                "secondary-only peer must not be reserved for an outbound dial"
+            );
+        });
+    }
+
+    #[test]
+    fn test_dial_rejects_ingress_disallowed_after_update() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_info(&signer, test_socket(), 100);
+        let peer_signer = PrivateKey::from_seed(1);
+        let peer_pk = peer_signer.public_key();
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: false,
+            max_sets: NZUsize!(1),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
+
+            // The dialer snapshots the peer while it advertises a dialable socket.
+            let primary: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.track(0, TrackedPeers::from(primary)).unwrap();
+            directory.update_peers(vec![create_info(&peer_signer, test_socket(), 0)]);
+            assert_eq!(directory.dialable().peers, vec![peer_pk.clone()]);
+
+            // The peer then advertises a DNS ingress, which this node does not allow.
+            let dns = types::Info::sign(
+                peer_pk.clone(),
+                NAMESPACE,
+                Ingress::Dns {
+                    host: hostname!("peer.example.com"),
+                    port: 8080,
+                },
+                1,
+                |namespace, message| peer_signer.sign(namespace, message),
+            );
+            directory.update_peers(vec![dns]);
+            assert!(directory.dialable().peers.is_empty());
+
+            // A dial request from the stale snapshot must not hand out the disallowed ingress.
+            assert!(directory.dial(&peer_pk).is_none());
+        });
+    }
+
+    #[test]
+    fn test_block_with_unbounded_duration_does_not_panic() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_info(&signer, test_socket(), 100);
+        let peer_pk = PrivateKey::from_seed(1).public_key();
+        let config = Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            max_sets: NZUsize!(1),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::MAX,
+        };
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(
+                context.child("directory"),
+                vec![],
+                my_info,
+                config,
+                releaser,
+            );
+            let primary: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
+            directory.track(0, TrackedPeers::from(primary)).unwrap();
+
+            // A block that never expires must not overflow the expiry computation.
+            assert!(directory.block(&peer_pk));
+            assert!(!directory.eligible(&peer_pk));
         });
     }
 }

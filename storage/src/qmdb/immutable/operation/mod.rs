@@ -12,17 +12,18 @@ pub(crate) mod variable;
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        any::ValueEncoding,
-        operation::{Committable, Key, Operation as OperationTrait},
+        operation::{Committable, Key},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use core::fmt::Display;
 
-// Context byte prefixes for identifying the operation type.
-pub(crate) const SET_CONTEXT: u8 = 0;
-pub(crate) const COMMIT_CONTEXT: u8 = 1;
+/// Wire tag for [Operation::Set].
+pub const SET_CONTEXT: u8 = 0;
+/// Wire tag for [Operation::Commit].
+pub const COMMIT_CONTEXT: u8 = 1;
 
 /// An operation applied to an immutable authenticated database.
 ///
@@ -46,42 +47,32 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
             Self::Commit(_, _) => None,
         }
     }
-}
 
-impl<F: Family, K: Key, V: ValueEncoding> Committable<F> for Operation<F, K, V> {
-    fn floor(&self) -> Option<Location<F>> {
+    /// Returns true if this is a commit operation.
+    pub const fn is_commit(&self) -> bool {
+        matches!(self, Self::Commit(_, _))
+    }
+
+    /// Returns the inactivity floor location if this is a commit operation.
+    pub const fn inactivity_floor(&self) -> Option<Location<F>> {
         match self {
             Self::Commit(_, loc) => Some(*loc),
             Self::Set(_, _) => None,
         }
     }
+}
+
+impl<F: Family, K: Key, V: ValueEncoding> Committable<F> for Operation<F, K, V> {
+    fn inactivity_floor(&self) -> Option<Location<F>> {
+        self.inactivity_floor()
+    }
 
     fn initial_commit() -> Self {
         Self::Commit(None, Location::new(0))
     }
-}
 
-impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, V> {
-    type Key = K;
-
-    fn key(&self) -> Option<&Self::Key> {
-        self.key()
-    }
-
-    fn into_key(self) -> Option<Self::Key> {
-        match self {
-            Self::Set(key, _) => Some(key),
-            Self::Commit(_, _) => None,
-        }
-    }
-
-    fn is_delete(&self) -> bool {
-        // Immutable databases don't support deletion
-        false
-    }
-
-    fn is_update(&self) -> bool {
-        matches!(self, Self::Set(_, _))
+    fn is_commit(&self) -> bool {
+        self.is_commit()
     }
 }
 
@@ -130,7 +121,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
+    use crate::{merkle::mmr, qmdb::value::VariableEncoding};
     use commonware_codec::Encode;
     use commonware_utils::sequence::U64;
 
@@ -167,22 +158,25 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_floor() {
+    fn test_operation_inactivity_floor() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
         let set_op = VarOp::Set(key, value.clone());
-        assert_eq!(<VarOp as Committable<mmr::Family>>::floor(&set_op), None);
+        assert_eq!(
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&set_op),
+            None
+        );
 
         let commit_op = VarOp::Commit(Some(value), Location::new(42));
         assert_eq!(
-            <VarOp as Committable<mmr::Family>>::floor(&commit_op),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&commit_op),
             Some(Location::new(42))
         );
 
         let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(
-            <VarOp as Committable<mmr::Family>>::floor(&commit_op_none),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&commit_op_none),
             Some(Location::new(0))
         );
     }

@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
@@ -7,10 +8,12 @@ use futures::executor::block_on;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
-#[cfg(not(full_bench))]
-const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(full_bench)]
-const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
+fn n_leaves() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[10_000, 100_000],
+    }
+}
 
 fn make_elements(n: usize) -> Vec<sha256::Digest> {
     let mut elements = Vec::with_capacity(n);
@@ -22,7 +25,7 @@ fn make_elements(n: usize) -> Vec<sha256::Digest> {
 }
 
 fn bench_append_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {
             b.iter_batched(
                 || make_elements(n),

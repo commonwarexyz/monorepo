@@ -17,6 +17,7 @@ pub struct Config<C: PublicKey> {
     pub mailbox_size: NonZeroUsize,
     pub send_batch_size: NonZeroUsize,
     pub ping_frequency: std::time::Duration,
+    pub max_message_size: u32,
     pub sent_messages: CounterFamily<metrics::Message<C>>,
     pub received_messages: CounterFamily<metrics::Message<C>>,
     pub rate_limited: CounterFamily<metrics::Message<C>>,

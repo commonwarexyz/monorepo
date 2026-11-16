@@ -9,20 +9,18 @@ use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
-    SinkOf, Spawner, StreamOf, spawn_cell,
+    Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota, SinkOf,
+    Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_stream::Upgrader;
 use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
-use futures::{Sink, StreamExt};
 use rand_core::CryptoRng;
 use std::{
     collections::HashSet,
     fmt,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
-    pin::Pin,
     sync::Arc,
 };
 use tracing::debug;
@@ -50,8 +48,8 @@ impl Mailbox {
         (Self(sender), receiver)
     }
 
-    pub(crate) fn set(&mut self, registered_ips: HashSet<IpAddr>) -> Feedback {
-        if Pin::new(&mut self.0).start_send(registered_ips).is_ok() {
+    pub(crate) fn set(&self, registered_ips: HashSet<IpAddr>) -> Feedback {
+        if self.0.send_lossy(registered_ips) {
             Feedback::Ok
         } else {
             Feedback::Closed
@@ -70,7 +68,7 @@ pub struct Config<U: Upgrader> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
+pub struct Actor<E: Spawner + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -88,7 +86,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
+impl<E: Spawner + Clock + Network + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
 where
     U::PublicKey: PublicKey,
 {
@@ -227,7 +225,7 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping listener");
             },
-            Some(registered_ips) = self.updates.next() else {
+            Some(registered_ips) = self.updates.recv() else {
                 debug!("listener updates closed");
                 break;
             } => {
@@ -344,7 +342,7 @@ mod tests {
     fn mailbox_keeps_latest_registered_ips() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
-            let (mut mailbox, mut receiver) = Mailbox::new();
+            let (mailbox, mut receiver) = Mailbox::new();
             let first = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]);
             let second = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
             let third = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3))]);
@@ -353,7 +351,7 @@ mod tests {
             assert_eq!(mailbox.set(second), Feedback::Ok);
             assert_eq!(mailbox.set(third.clone()), Feedback::Ok);
 
-            assert_eq!(receiver.next().await, Some(third));
+            assert_eq!(receiver.recv().await, Some(third));
         });
     }
 
@@ -377,7 +375,7 @@ mod tests {
                 cups::Version::V1,
             );
 
-            let (mut updates_tx, updates_rx) = Mailbox::new();
+            let (updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -730,7 +728,7 @@ mod tests {
                 cups::Version::V1,
             );
 
-            let (mut updates_tx, updates_rx) = Mailbox::new();
+            let (updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {

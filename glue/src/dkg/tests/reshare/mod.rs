@@ -263,8 +263,12 @@ fn reshare_e2e_multiple_epochs(#[case] network: Network) {
 #[case::lookup(Network::Lookup)]
 #[test_group("slow")]
 #[test_traced("INFO")]
-fn reshare_e2e_multiple_epochs_rotating_subset(#[case] network: Network) {
+fn reshare_e2e_multiple_epochs_rotating_subset(
+    #[case] network: Network,
+    #[values(0, 5, 7)] seed: u64,
+) {
     successful_reshare_plan_with_schemes(ReshareEngine::with_committee(network, 7, 4), 4)
+        .seed(seed)
         .timeout(Duration::from_secs(90))
         .run()
         .unwrap();
@@ -313,7 +317,7 @@ fn reshare_e2e_consecutive_failed_ceremonies_carry_state(#[case] network: Networ
 #[test_traced("INFO")]
 fn reshare_e2e_many_failed_ceremonies_carry_state(#[case] network: Network) {
     failed_carry_over_plan(
-        ReshareEngine::with_committees(network, 8, vec![4, 5]).with_failures([0, 2, 3]),
+        ReshareEngine::with_committees(network, 8, vec![4, 5], 1).with_failures([0, 2, 3]),
         4,
         BoundaryEpochInfos::new(5)
             .with_min_successes(2)
@@ -332,7 +336,7 @@ fn reshare_e2e_many_failed_ceremonies_carry_state(#[case] network: Network) {
 #[test_traced("INFO")]
 fn reshare_e2e_four_epochs_changing_size(#[case] network: Network) {
     successful_reshare_plan_with_schemes(
-        ReshareEngine::with_committees(network, 8, vec![4, 5, 6, 7, 4]),
+        ReshareEngine::with_committees(network, 8, vec![4, 5, 6, 7, 4], 1),
         4,
     )
     .run()
@@ -788,6 +792,179 @@ fn reshare_e2e_rotating_subset(#[case] network: Network) {
     successful_reshare_plan_with_schemes(ReshareEngine::with_committee(network, 7, 4), 0)
         .run()
         .unwrap();
+}
+
+/// A validator that crashed early in an epoch restarts while the rest of the
+/// committee waits on the epoch's final block. Another validator stops at the
+/// block before the final block, so the restarted validator completes the only
+/// possible quorum.
+///
+/// The restarted validator's final-block requests reach its reshare actor while
+/// the actor is still replaying the epoch's dealing window, and the actor must
+/// answer them once it leaves that window. Across the seeds, these requests
+/// include a proposal as well as verifications.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_lagging_validator(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let first = epocher
+        .first(epoch)
+        .expect("epocher must know the test epoch");
+    let midpoint = epocher
+        .midpoint(epoch)
+        .expect("epocher must know the test epoch");
+    let last = final_height(epoch.get());
+    let stopped_at = last.previous().expect("final height must have a parent");
+
+    for seed in 0..3 {
+        let engine = ReshareEngine::with_committee(network, 4, 4);
+        let stopped = engine.participants[2].clone();
+        let lagging = engine.participants[3].clone();
+        let active = engine.participants.len() - 1;
+        let engine = engine.with_processed_hold(stopped.clone(), stopped_at);
+
+        // The stopped validator stays down for the rest of the run, so the
+        // active validators reach the final height only once the restarted
+        // validator certifies the final block.
+        PlanBuilder::new(engine)
+            .seed(seed)
+            .crash(Crash::ProcessedHeight {
+                participant: lagging,
+                heights: first.next().get()..=midpoint.get() - 8,
+                downtime: Duration::from_secs(10),
+            })
+            .crash(Crash::ProcessedHeight {
+                participant: stopped,
+                heights: stopped_at.get()..=stopped_at.get(),
+                downtime: Duration::from_secs(3600),
+            })
+            .exit_condition(AllActiveProcessedHeight::new(last, active))
+            .timeout(Duration::from_secs(60))
+            .run()
+            .unwrap();
+    }
+}
+
+/// A validator crashes mid-epoch and restarts after the epoch's final block,
+/// by which time every member of the committee that finalized that epoch has
+/// stopped. The validator belongs only to the next committee, so the remaining
+/// members of that committee are the only peers holding the blocks it missed.
+/// The run ends once the restarted validator and the rest of its committee have
+/// all processed blocks well past the boundary.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_full_rotation_departed_committee_catch_up(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let midpoint = epocher
+        .midpoint(epoch)
+        .expect("epocher must know the test epoch");
+    let boundary = final_height(epoch.get());
+
+    for seed in 0..3 {
+        // With eight participants and committees of four rotating by four,
+        // epoch 1 is finalized by the first four participants and every later
+        // epoch by the last four.
+        let engine = ReshareEngine::with_committees(network, 8, vec![4], 4);
+        let lagging = engine.participants[4].clone();
+        let departed = engine.participants[..4].to_vec();
+
+        // The lagging validator returns while the departed committee is down.
+        // A departed validator stops only after processing a block of the next
+        // epoch, so the next committee already holds the boundary block.
+        let mut plan = PlanBuilder::new(engine)
+            .seed(seed)
+            .crash(Crash::ProcessedHeight {
+                participant: lagging,
+                heights: midpoint.get() + 2..=midpoint.get() + 6,
+                downtime: Duration::from_secs(3),
+            });
+        for participant in departed {
+            plan = plan.crash(Crash::ProcessedHeight {
+                participant,
+                heights: boundary.get() + 1..=boundary.get() + 4 * EPOCH_LENGTH.get(),
+                downtime: Duration::from_secs(3600),
+            });
+        }
+        plan.exit_condition(AllActiveProcessedHeight::new(
+            Height::new(boundary.get() + 2 * EPOCH_LENGTH.get()),
+            4,
+        ))
+        .timeout(Duration::from_secs(60))
+        .run()
+        .unwrap();
+    }
+}
+
+/// A validator state synced before the midpoint holds a share of its synced
+/// epoch. With one validator stopped, the epoch's final block requires the
+/// synced validator to vote with that share. Depending on the seed, its
+/// orchestrator reaches the epoch before or after the reshare actor registers
+/// the signer scheme, so starting the epoch's engine must wait for that
+/// registration.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_participating_synced_validator(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let last = final_height(epoch.get());
+    let stopped_at = Height::new(last.get() - 2);
+
+    // `stopped_at` finalizes in a later round than `start`, so the synced
+    // validator starts no later than the stopped one stops.
+    let start = height_round(
+        stopped_at
+            .previous()
+            .expect("stop height must have a parent"),
+    );
+
+    let floor = FixedEpocher::new(EPOCH_LENGTH)
+        .first(epoch)
+        .expect("epocher must know the test epoch")
+        .next()
+        .next();
+
+    for seed in 0..6 {
+        // Failure in epoch 0 carries the genesis output and share into the synced
+        // epoch, so the synced validator holds a share for the epoch it joins.
+        let engine = ReshareEngine::with_committee(network, 4, 4)
+            .with_failures([0])
+            .with_state_sync_floor(floor);
+        let stopped = engine.participants[2].clone();
+        let synced = engine.participants[3].clone();
+        let active = engine.participants.len() - 1;
+        let state_syncs = engine.state_syncs.clone();
+        let engine = engine.with_processed_hold(stopped.clone(), stopped_at);
+
+        // The stopped validator stays down for the rest of the run, so the
+        // active validators reach the final height only with the synced
+        // validator's votes.
+        PlanBuilder::new(engine)
+            .crash(Crash::DelayRound {
+                participants: vec![synced.clone()],
+                round: start,
+            })
+            .crash(Crash::ProcessedHeight {
+                participant: stopped,
+                heights: stopped_at.get()..=stopped_at.get(),
+                downtime: Duration::from_secs(3600),
+            })
+            .property(StateSyncedAtHeight::new(synced, floor, floor, state_syncs))
+            .exit_condition(AllActiveProcessedHeight::new(last, active))
+            .timeout(Duration::from_secs(60))
+            .seed(seed)
+            .run()
+            .unwrap();
+    }
 }
 
 #[rstest]

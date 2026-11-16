@@ -1,21 +1,18 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB databases.
 //!
-//! Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! Batch reads consult the database at the time of the read for data their batch chain does not
+//! hold, and return a `StaleRead` error once the database is at no state of that chain.
 
 use super::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
     SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, validate_initialization,
 };
 use commonware_runtime::Handle;
-use commonware_storage::{
-    merkle::Location,
-    qmdb::{
-        Error,
-        sync::{self, MerkleizedBatch as _},
-    },
+use commonware_storage::qmdb::{
+    Error,
+    sync::{self, MerkleizedBatch as _},
 };
-use commonware_utils::channel::mpsc;
+use commonware_utils::channel::{mpsc, ring};
 use std::{future::Future, ops::Deref, sync::Arc};
 
 /// A QMDB database that glue can manage and state-sync.
@@ -31,13 +28,6 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
         > + Send
         + Sync;
 
-    /// Commit metadata carried by a batch.
-    type Metadata: Send;
-
-    /// `Option<Location<..>>` where a batch may set the inactivity floor, `()` where storage
-    /// derives it.
-    type Floor: Default + Send;
-
     /// Batch rooted at the applied state.
     fn new_batch(&self) -> Self::Batch;
 
@@ -45,8 +35,6 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     fn merkleize(
         &self,
         batch: Self::Batch,
-        metadata: Option<Self::Metadata>,
-        floor: Self::Floor,
     ) -> impl Future<Output = Result<Arc<Self::MerkleizedBatch>, Error<Self::Family>>> + Send;
 
     /// Apply a merkleized batch.
@@ -71,8 +59,6 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
 pub struct Unmerkleized<D: Qmdb> {
     pub(super) batch: D::Batch,
     pub(super) db: Shared<D>,
-    pub(super) metadata: Option<D::Metadata>,
-    pub(super) floor: D::Floor,
 }
 
 impl<D: Qmdb> Deref for Unmerkleized<D> {
@@ -83,44 +69,17 @@ impl<D: Qmdb> Deref for Unmerkleized<D> {
     }
 }
 
-impl<D: Qmdb> Unmerkleized<D> {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
-    ///
-    /// The metadata carries over when the batch is staged.
-    pub fn with_metadata(mut self, metadata: D::Metadata) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-}
-
-impl<D> Unmerkleized<D>
-where
-    D: Qmdb<Floor = Option<Location<<D as sync::Database>::Family>>>,
-{
-    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<D::Family>) -> Self {
-        self.floor = Some(floor);
-        self
-    }
-}
-
 impl<D: Qmdb> UnmerkleizedTrait for Unmerkleized<D> {
     type Merkleized = Merkleized<D>;
     type Error = Error<D::Family>;
 
     async fn merkleize(self) -> Result<Merkleized<D>, Error<D::Family>> {
-        let Self {
-            batch,
-            db,
-            metadata,
-            floor,
-        } = self;
+        let Self { batch, db } = self;
         let inner = {
             let guard = db.read().await;
-            guard.merkleize(batch, metadata, floor).await?
+            guard.merkleize(batch).await?
         };
-        Merkleized::new(inner, db)
+        Ok(Merkleized { inner, db })
     }
 }
 
@@ -128,22 +87,12 @@ impl<D: Qmdb> UnmerkleizedTrait for Unmerkleized<D> {
 pub struct Merkleized<D: Qmdb> {
     pub(super) inner: Arc<D::MerkleizedBatch>,
     pub(super) db: Shared<D>,
-    target: sync::Target<D::Family, D::Digest>,
 }
 
 impl<D: Qmdb> Merkleized<D> {
-    /// Wrap a merkleized storage batch, failing if it reaches no sync target.
-    pub(super) fn new(
-        inner: Arc<D::MerkleizedBatch>,
-        db: Shared<D>,
-    ) -> Result<Self, Error<D::Family>> {
-        let target = inner.target()?;
-        Ok(Self { inner, db, target })
-    }
-
     /// Sync target reached once this batch is applied.
     pub fn target(&self) -> sync::Target<D::Family, D::Digest> {
-        self.target.clone()
+        self.inner.target()
     }
 }
 
@@ -152,7 +101,6 @@ impl<D: Qmdb> Clone for Merkleized<D> {
         Self {
             inner: Arc::clone(&self.inner),
             db: self.db.clone(),
-            target: self.target.clone(),
         }
     }
 }
@@ -177,8 +125,6 @@ impl<D: Qmdb> MerkleizedTrait for Merkleized<D> {
         Unmerkleized {
             batch: self.inner.new_batch::<D::Hasher>(),
             db: self.db.clone(),
-            metadata: None,
-            floor: D::Floor::default(),
         }
     }
 }
@@ -195,7 +141,7 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
         config: D::Config,
         expected: Option<Self::SyncTarget>,
     ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
-        let db = D::init(
+        let db = <D as sync::Database>::init(
             context,
             config,
             expected.as_ref().map(|target| target.range.end()),
@@ -212,23 +158,21 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     fn new_batch(database: BatchContext<'_, Self>) -> Unmerkleized<D> {
         let (database, shared) = database.into_parts();
         Unmerkleized {
-            batch: database.new_batch(),
+            batch: Qmdb::new_batch(database),
             db: shared,
-            metadata: None,
-            floor: D::Floor::default(),
         }
     }
 
     fn matches_sync_target(batch: &Merkleized<D>, target: &Self::SyncTarget) -> bool {
-        batch.target == *target
+        batch.target() == *target
     }
 
     async fn apply(self, batch: Merkleized<D>) -> Result<Self, Error<D::Family>> {
-        self.apply_batch(batch.inner).await
+        Qmdb::apply_batch(self, batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<D::Family>> {
-        self.start_sync().await
+        Qmdb::start_sync(self).await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<D::Family>> {
@@ -236,7 +180,7 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     }
 
     fn sync_target(&self) -> Self::SyncTarget {
-        self.target()
+        sync::Database::target(self)
     }
 }
 
@@ -252,12 +196,12 @@ where
         config: D::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
-        sync::sync(sync::engine::Config {
+        sync::sync(sync::Config {
             context,
             source,
             target,

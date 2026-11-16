@@ -2,7 +2,7 @@
 //! Contains the implementation of [crate::qmdb::sync::Database] for [Db], covering every
 //! variant (ordered/unordered, fixed/variable, any snapshot index).
 //!
-//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::verify_proof`].
+//! Callers verifying `any` sync proofs directly should use [`crate::qmdb::ProofExt::verify`].
 
 use crate::{
     Context,
@@ -102,7 +102,6 @@ where
             Config = <C as sync::Journal<F>>::Config,
         > + sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
-    <C as sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
     H: Hasher,
     U: Update,
@@ -143,7 +142,7 @@ where
     ) -> Result<Self, qmdb::Error<F>> {
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            config.merkle_config,
+            config.merkle,
             log,
             config.translator,
             pinned_nodes,
@@ -158,6 +157,13 @@ where
 
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
         Ok(self)
+    }
+
+    async fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        qmdb::sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
     }
 
     async fn local_pinned_nodes(
@@ -180,15 +186,15 @@ where
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
-            config.merkle_config.clone(),
+            config.merkle.clone(),
             target,
             inactivity_floor,
         )
         .await
     }
 
-    fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
-        qmdb::sync::Target {
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
             root: Self::root(self),
             range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
         }

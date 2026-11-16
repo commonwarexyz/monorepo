@@ -24,7 +24,10 @@ impl Encoder {
     /// generated recovery shards.
     ///
     /// When the returned [`EncoderResult`] is dropped the encoder is automatically [`reset`] and
-    /// ready for a new round of encoding.
+    /// ready for a new round of encoding. A result that is leaked instead of dropped (for example
+    /// with [`core::mem::forget`]) leaves the encoder reporting a complete round, and the next
+    /// [`encode`](Encoder::encode) would transform the previous round's buffers again. Call
+    /// [`reset`] before reusing an encoder whose result was leaked.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///
@@ -36,7 +39,8 @@ impl Encoder {
     /// Creates a new encoder with the given configuration and allocates the required working
     /// space.
     ///
-    /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
+    /// See [working space](crate::reed_solomon#working-space) for its size and the configurations
+    /// a coder accepts, and [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn new(
         original_count: usize,
         recovery_count: usize,
@@ -117,7 +121,11 @@ impl Decoder {
     /// shards, or `None` if every original shard was already provided (nothing to reconstruct).
     ///
     /// When the returned [`DecoderResult`] is dropped the decoder is automatically [`reset`] and
-    /// ready for a new round of decoding.
+    /// ready for a new round of decoding. When every original shard was supplied, this returns
+    /// `None` and clears the received shards immediately. A result that is leaked instead of
+    /// dropped (for example with [`core::mem::forget`]) leaves the decoder reporting a complete
+    /// round, and the next decode would transform the previous round's buffers again. Call
+    /// [`reset`] before reusing a decoder whose result was leaked.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///
@@ -163,7 +171,8 @@ impl Decoder {
     /// Creates a new decoder with the given configuration and allocates the required working
     /// space.
     ///
-    /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
+    /// See [working space](crate::reed_solomon#working-space) for its size and the configurations
+    /// a coder accepts, and [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn new(
         original_count: usize,
         recovery_count: usize,

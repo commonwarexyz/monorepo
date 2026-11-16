@@ -721,4 +721,22 @@ mod tests {
             DialStatus::Unavailable
         );
     }
+
+    #[test]
+    fn test_reserve_with_unbounded_cooldown_does_not_panic() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+
+            // An effectively unbounded cooldown must saturate the dial deadline too.
+            assert_eq!(
+                record.reserve(&mut context, Duration::MAX),
+                ReserveResult::Reserved
+            );
+            record.release();
+            assert_eq!(
+                record.reserve(&mut context, Duration::MAX),
+                ReserveResult::RateLimited
+            );
+        });
+    }
 }

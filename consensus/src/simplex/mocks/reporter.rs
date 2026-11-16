@@ -1,7 +1,7 @@
 //! Mock `Reporter` for tests: tracks participants/leaders, verifies activities,
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
-    Monitor, Viewable,
+    IndexSubscription, Monitor, Viewable,
     simplex::{
         elector::{self, Elector, Mode as _},
         scheme,
@@ -20,10 +20,8 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
-    channel::{
-        fallible::AsyncFallibleExt,
-        mpsc::{Receiver, Sender},
-    },
+    NZUsize,
+    channel::ring,
     ordered::{Quorum, Set},
     sync::Mutex,
 };
@@ -66,7 +64,7 @@ pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
     pub invalid_certificates: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
-    subscribers: Arc<Mutex<Vec<Sender<View>>>>,
+    subscribers: Arc<Mutex<Vec<ring::Sender<View>>>>,
 }
 
 impl<E, S, L, D> Clone for Reporter<E, S, L, D>
@@ -306,10 +304,9 @@ where
 
                 // Send message to subscribers
                 *self.latest.lock() = finalization.view();
-                let mut subscribers = self.subscribers.lock();
-                for subscriber in subscribers.iter_mut() {
-                    subscriber.try_send_lossy(finalization.view());
-                }
+                self.subscribers
+                    .lock()
+                    .retain(|subscriber| subscriber.send_lossy(finalization.view()));
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
@@ -376,8 +373,8 @@ where
 {
     type Index = View;
 
-    async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
-        let (tx, rx) = commonware_utils::channel::mpsc::channel(128);
+    async fn subscribe(&mut self) -> (Self::Index, IndexSubscription<Self::Index>) {
+        let (tx, rx) = ring::channel(NZUsize!(1));
         self.subscribers.lock().push(tx);
         let latest = *self.latest.lock();
         (latest, rx)

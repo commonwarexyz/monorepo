@@ -45,9 +45,10 @@
 //! # Security
 //!
 //! Cipher positions enforce order: modified, replayed, or reordered records cannot authenticate
-//! at the next expected position. After a seal or open failure, that half cannot process further
-//! records. Callers must discard the connection after an I/O error or cancellation, as required
-//! by [crate::Sender] and [crate::Receiver], and after any receive error.
+//! at the next expected position. A sender that fails to seal refuses every later record. A
+//! receiver that returns any error refuses every later record without reading from the stream.
+//! Callers must discard the connection after an I/O error or cancellation, as required by
+//! [crate::Sender] and [crate::Receiver], and after any receive error.
 //!
 //! V0 exposes record lengths. V1 encrypts the length field. Transport sizes and timing still
 //! reveal traffic patterns. CUPS adds no padding or authenticated end-of-stream marker, so it

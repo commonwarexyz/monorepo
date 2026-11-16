@@ -46,7 +46,7 @@ hash = "b31f32f62da530fb4861e8a46e5068e0c36ed1b509ee5bc758b6ca90a2568ad7"
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
-["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<SignedDealerLog<MinPk,ed25519::PrivateKey>>"]
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<SignedDealerLog<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "fca94fb3b0df54a6a34edfbb8aeef28490262daf97870e12f869aee6cf7f7e67"
 

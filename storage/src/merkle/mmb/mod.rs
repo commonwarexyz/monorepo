@@ -103,7 +103,9 @@
 //!  7    .. same prefix ..                L6  L7  P7    [(7,  h2), (9,  h1), (12, h1)]
 //! ```
 //!
-//! The forward-bagged root hash is computed as `Hash(8 || fold(peak1, peak2, peak3))`:
+//! The forward-bagged root hash is computed as
+//! `Hash(family || bagging || 8 || fold(peak1, peak2, peak3))`, where `family` is the MMB tag (1)
+//! and `bagging` is the forward-fold tag (0):
 //!
 //! ```text
 //! peak1 = Hash(7,                                             // oldest peak (height 2)
@@ -114,7 +116,7 @@
 //!
 //! acc   = fold(peak1, peak2, peak3)
 //!       = Hash(Hash(peak1 || peak2) || peak3)
-//! root  = Hash(8 || acc)                                     // 8 = leaf count
+//! root  = Hash(family || bagging || 8 || acc)                // 8 = leaf count
 //! ```
 
 pub mod batch;
@@ -154,6 +156,8 @@ pub type Error = merkle::Error<Family>;
 pub struct Family;
 
 impl merkle::Family for Family {
+    const DOMAIN: u8 = 1;
+
     /// Maximum valid position (node count): `2^63 - 2` (the size for `2^62 + 30` leaves).
     const MAX_NODES: Position = Position::new(0x7FFF_FFFF_FFFF_FFFE);
 
@@ -226,32 +230,23 @@ impl merkle::Family for Family {
         // Height from the merge schedule: h = trailing_ones(birth + 1) + 1.
         (*birth + 1).trailing_ones() + 1
     }
+
+    fn birth_offset(height: u32) -> u64 {
+        if height == 0 {
+            return 1;
+        }
+
+        // Appending the last leaf brings the count to `2^h` past the leftmost leaf, and the merge
+        // lags it by `2^(h-1) - 1` leaves.
+        let half = 1u64
+            .checked_shl(height - 1)
+            .expect("height excessively large");
+        half.checked_mul(3).expect("height excessively large") - 1
+    }
 }
 
 impl Graftable for Family {
     type PendingChunk<D: Digest> = Option<D>;
-
-    fn peak_birth_size(pos: Position, height: u32) -> u64 {
-        if height == 0 {
-            // Leaves have no merge delay; born as soon as appended.
-            return *<Self as Graftable>::leftmost_leaf(pos, 0) + 1;
-        }
-
-        let width = 1u64.checked_shl(height).expect("height excessively large");
-        // `base` is the leaf count at which all leaves in the subtree have been appended.
-        let base = <Self as Graftable>::leftmost_leaf(pos, height)
-            .checked_add(width)
-            .expect("birth size overflow");
-
-        // In MMB, a parent at height h is not created when its last leaf is appended.
-        // Instead it is delayed by 2^(h-1) - 1 additional leaf insertions (the
-        // "1-merge-per-leaf" budget). So the node is born at `base + delay` total leaves.
-        let delay = 1u64
-            .checked_shl(height - 1)
-            .and_then(|v| v.checked_sub(1))
-            .expect("height excessively large");
-        *base.checked_add(delay).expect("birth size overflow")
-    }
 
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
         if height == 0 {
@@ -259,7 +254,7 @@ impl Graftable for Family {
         }
 
         // Recover birth leaf from position, then compute leftmost via the closed-form: `leftmost =
-        // birth - (3·2^(h-1) - 2)`.
+        // birth - (3*2^(h-1) - 2)`.
         let prev_pos = pos.checked_sub(1).expect("position underflow");
         let birth =
             Self::position_to_location(prev_pos).expect("position is neither leaf nor parent");
@@ -277,7 +272,7 @@ impl Graftable for Family {
             return Self::location_to_position(leaf_start);
         }
 
-        // birth_leaf = leaf_start + 3·2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
+        // birth_leaf = leaf_start + 3*2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
         // 2^h - 1 into birth_leaf = last_leaf + 2^(h-1) - 1)
         let offset = 3u64
             .checked_shl(height - 1)
@@ -603,9 +598,24 @@ mod tests {
                     *pos, next_pos,
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
                 );
+                assert_eq!(
+                    leftmost + Family::birth_offset(h),
+                    leaf_idx + 1,
+                    "height-{h} birth_offset mismatch at leaf {leaf_idx}"
+                );
                 next_pos += 1;
             }
         }
+    }
+
+    #[test]
+    fn test_birth_offset() {
+        assert_eq!(Family::birth_offset(0), 1);
+        assert_eq!(Family::birth_offset(1), 2);
+        assert_eq!(Family::birth_offset(3), 11);
+        // A height-61 node is the tallest that can exist.
+        assert!(Family::birth_offset(61) <= *Family::MAX_LEAVES);
+        assert!(Family::birth_offset(62) > *Family::MAX_LEAVES);
     }
 
     #[test]

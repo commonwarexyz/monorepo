@@ -56,12 +56,29 @@ pub enum Bagging {
     BackwardFold,
 }
 
+impl Bagging {
+    /// Domain tag committed by every root folded under this policy.
+    ///
+    /// Tags are unique across policies. Changing one changes every root folded under that policy.
+    pub const fn domain(self) -> u8 {
+        match self {
+            Self::ForwardFold => 0,
+            Self::BackwardFold => 1,
+        }
+    }
+}
+
 /// Marker trait for Merkle-family data structures.
 ///
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures). Families capture structural topology
 /// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
 pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
+    /// Domain tag committed by every root of this family.
+    ///
+    /// Tags are unique across families. Changing one changes every root of that family.
+    const DOMAIN: u8;
+
     /// Maximum valid node count / size.
     const MAX_NODES: Position<Self>;
 
@@ -151,6 +168,15 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// instance of this family (i.e., it is not a position that would appear in a structure of any
     /// size).
     fn pos_to_height(pos: Position<Self>) -> u32;
+
+    /// Return how many leaves, starting with its leftmost leaf, must be appended before a node at
+    /// `height` is created. A node whose leftmost leaf is `leaf_start` exists once the structure
+    /// has `leaf_start + birth_offset(height)` leaves.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the offset does not fit in a `u64`.
+    fn birth_offset(height: u32) -> u64;
 }
 
 /// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
@@ -287,7 +313,7 @@ pub trait Graftable: Family {
     /// For families without delayed merging (e.g. MMR), a node exists as soon as all leaves
     /// in its span have been appended. For families with delayed merging (e.g. MMB), the
     /// node is created some number of leaf insertions _after_ its last leaf, so the birth
-    /// size is larger. The MMB override accounts for this delay.
+    /// size is larger. The birth size is the node's leftmost leaf plus [`Family::birth_offset`].
     ///
     /// This is used by the grafted-tree pruning logic to determine when a chunk-pair's
     /// parent has been born in the ops tree, which controls when it is safe to prune the
@@ -298,8 +324,9 @@ pub trait Graftable: Family {
     /// Panics if `height` is excessively large (e.g., `>= 63`), or if arithmetic overflows.
     fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
         let leftmost = *Self::leftmost_leaf(pos, height);
-        let width = 1u64.checked_shl(height).expect("height excessively large");
-        leftmost.checked_add(width).expect("birth size overflow")
+        leftmost
+            .checked_add(Self::birth_offset(height))
+            .expect("birth size overflow")
     }
 }
 
@@ -334,6 +361,14 @@ pub enum Error<F: Family> {
     #[error("leaf location out of bounds: {0}")]
     LeafOutOfBounds(Location<F>),
 
+    /// A requested leaf location repeats the location before it.
+    #[error("duplicate leaf location: {0}")]
+    DuplicateLocation(Location<F>),
+
+    /// A requested leaf location is less than the location before it.
+    #[error("unsorted leaf location: {0}")]
+    UnsortedLocation(Location<F>),
+
     /// A required node was not available (e.g. pruned).
     #[error("element pruned: {0}")]
     ElementPruned(Position<F>),
@@ -349,8 +384,9 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Structure has diverged incompatibly from the batch's ancestor chain.
-    #[error("stale batch: base size {expected}, current size {actual}")]
+    /// The structure is at none of the states recorded by the batch's chain, so applying the
+    /// batch would combine it with a different history.
+    #[error("stale batch: no matching chain state (size {actual}, fork size {expected})")]
     StaleBatch {
         /// The base size when the batch chain was forked.
         expected: Position<F>,
@@ -358,13 +394,14 @@ pub enum Error<F: Family> {
         actual: Position<F>,
     },
 
-    /// An ancestor batch was dropped before this batch was applied, causing
-    /// data loss. All ancestors must be kept alive until descendants are applied.
+    /// An unapplied ancestor batch was dropped before this batch was merkleized, so this batch
+    /// lacks that ancestor's changes. Keep an ancestor alive until it is applied or until the
+    /// descendants that will be applied have been merkleized.
     #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
     AncestorDropped {
-        /// The expected size after applying all ancestors + this batch.
+        /// The size the structure would have after applying the batch and its ancestors.
         expected: Position<F>,
-        /// The actual size (less than expected due to missing ancestor data).
+        /// The structure's size when the batch was rejected.
         actual: Position<F>,
     },
 

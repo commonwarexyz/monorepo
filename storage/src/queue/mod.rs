@@ -26,7 +26,7 @@
 //! let (queue, mut reader) = Queue::init(context, config).await?;
 //!
 //! // Writer task
-//! let (queue, position) = queue.enqueue(item).await?;
+//! let (queue, position) = queue.enqueue(&item).await?;
 //!
 //! // Reader task
 //! loop {
@@ -52,8 +52,7 @@
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a page cache
-//!     let page_cache = CacheRef::from_pooler(
-//!         &context,
+//!     let page_cache = CacheRef::new(
 //!         NonZeroU16::new(1024).unwrap(),
 //!         NonZeroUsize::new(10).unwrap(),
 //!     );
@@ -70,8 +69,8 @@
 //!     }).await.unwrap();
 //!
 //!     // Enqueue items
-//!     (queue, _) = queue.enqueue(b"task1".to_vec()).await.unwrap();
-//!     (queue, _) = queue.enqueue(b"task2".to_vec()).await.unwrap();
+//!     (queue, _) = queue.enqueue(&b"task1".to_vec()).await.unwrap();
+//!     (queue, _) = queue.enqueue(&b"task2".to_vec()).await.unwrap();
 //!
 //!     // Receive and process items (can be acknowledged out of order)
 //!     while let Some((position, item)) = reader.try_recv().await.unwrap() {

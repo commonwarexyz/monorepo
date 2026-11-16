@@ -90,15 +90,19 @@ pub fn conformance_tests(input: TokenStream) -> TokenStream {
         let fn_name_suffix = type_to_ident(&type_name);
         let fn_name = Ident::new(&format!("test_{fn_name_suffix}"), Span::call_site());
 
+        // The manifest directory is read when the test runs, so the test binary
+        // does not embed its checkout path.
         quote! {
             #[::commonware_conformance::commonware_macros::test_group("conformance")]
             #[test]
             fn #fn_name() {
+                let manifest_dir = ::std::env::var_os("CARGO_MANIFEST_DIR")
+                    .expect("CARGO_MANIFEST_DIR is not set");
                 ::commonware_conformance::futures::executor::block_on(
                     ::commonware_conformance::run_conformance_test::<#ty>(
                         concat!(module_path!(), "::", #type_name_str),
                         #n_cases,
-                        ::std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/conformance.toml")),
+                        &::std::path::Path::new(&manifest_dir).join("conformance.toml"),
                     )
                 );
             }

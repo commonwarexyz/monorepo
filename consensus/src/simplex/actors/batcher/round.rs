@@ -60,6 +60,7 @@ impl<
     R: Reporter<Activity = Activity<S, D>>,
 > Round<S, B, D, R>
 {
+    /// Creates a round that retains votes for certificate assembly.
     pub fn new(
         round: Rnd,
         scheme: Arc<S>,
@@ -67,17 +68,35 @@ impl<
         reporter: R,
         track_historical_votes: bool,
     ) -> Self {
+        let votes = VoteTracker::new(scheme.participants().len(), track_historical_votes);
+        Self::with_votes(round, scheme, blocker, reporter, votes)
+    }
+
+    /// Creates a round for a view this node skipped. Peers supply any
+    /// certificate it needs, so votes are reported and deduplicated but never
+    /// retained or assembled. Without retained votes, a sender is blocked only
+    /// for a nullify/finalize pair or for changing its relation to the
+    /// authoritative proposal, and no equivocation evidence is produced.
+    pub fn skipped(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
+        let votes = VoteTracker::skipped(scheme.participants().len());
+        Self::with_votes(round, scheme, blocker, reporter, votes)
+    }
+
+    /// Creates a round over `votes`, which decides how its votes are tracked.
+    fn with_votes(
+        round: Rnd,
+        scheme: Arc<S>,
+        blocker: B,
+        reporter: R,
+        votes: VoteTracker<S, D>,
+    ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
-        let len = scheme.participants().len();
         Self {
             blocker,
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
-
-            votes: VoteTracker::new(len, track_historical_votes),
-
+            votes,
             proposal_sent: false,
-
             span: ViewSpan::new(),
         }
     }

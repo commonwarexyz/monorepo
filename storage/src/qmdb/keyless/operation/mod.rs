@@ -1,6 +1,6 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, operation::Committable},
+    qmdb::{operation::Committable, value::ValueEncoding},
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -21,7 +21,7 @@ pub const APPEND_CONTEXT: u8 = 1;
 /// variable does not. A single blanket `impl Write for Operation<F, V>` dispatches here, while
 /// the two impls of this trait (on FixedEncoding and VariableEncoding) live on different Self
 /// types and therefore do not overlap.
-pub trait Codec: ValueEncoding + Sized {
+pub trait OperationCodec: ValueEncoding + Sized {
     type ReadCfg: Clone + Send + Sync + 'static;
 
     fn write_operation<F: Family>(op: &Operation<F, Self>, buf: &mut impl BufMut);
@@ -50,20 +50,25 @@ impl<F: Family, V: ValueEncoding> Operation<F, V> {
             Self::Commit(value, _) => value,
         }
     }
+
+    /// Returns the inactivity floor location if this is a commit operation.
+    pub const fn inactivity_floor(&self) -> Option<Location<F>> {
+        match self {
+            Self::Commit(_, loc) => Some(*loc),
+            Self::Append(_) => None,
+        }
+    }
 }
 
-impl<F: Family, V: Codec> Write for Operation<F, V> {
+impl<F: Family, V: OperationCodec> Write for Operation<F, V> {
     fn write(&self, buf: &mut impl BufMut) {
         V::write_operation(self, buf)
     }
 }
 
 impl<F: Family, V: ValueEncoding> Committable<F> for Operation<F, V> {
-    fn floor(&self) -> Option<Location<F>> {
-        match self {
-            Self::Commit(_, loc) => Some(*loc),
-            Self::Append(_) => None,
-        }
+    fn inactivity_floor(&self) -> Option<Location<F>> {
+        self.inactivity_floor()
     }
 
     fn initial_commit() -> Self {
@@ -71,8 +76,8 @@ impl<F: Family, V: ValueEncoding> Committable<F> for Operation<F, V> {
     }
 }
 
-impl<F: Family, V: Codec> Read for Operation<F, V> {
-    type Cfg = <V as Codec>::ReadCfg;
+impl<F: Family, V: OperationCodec> Read for Operation<F, V> {
+    type Cfg = <V as OperationCodec>::ReadCfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         V::read_operation(buf, cfg)
@@ -116,7 +121,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
+    use crate::{merkle::mmr, qmdb::value::VariableEncoding};
     use commonware_codec::Encode;
     use commonware_formatting::hex;
     use commonware_utils::sequence::U64;
@@ -153,7 +158,7 @@ mod tests {
         use super::Operation;
         use crate::{
             merkle::mmr,
-            qmdb::any::value::{FixedEncoding, VariableEncoding},
+            qmdb::value::{FixedEncoding, VariableEncoding},
         };
         use commonware_codec::conformance::CodecConformance;
         use commonware_utils::sequence::U64;

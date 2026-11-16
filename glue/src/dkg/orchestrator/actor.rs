@@ -21,7 +21,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, Digested, PublicKey, Signer,
+    Digest, Digested, PublicKey,
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
@@ -32,19 +32,20 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
+use commonware_utils::{
+    Acknowledgement, NonZeroDuration, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec,
+};
 use rand_core::CryptoRng;
 use std::{
-    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct Channels<S: Sender> {
     vote: MuxHandle<S>,
@@ -119,7 +120,11 @@ pub struct SimplexConfig<L> {
     pub timeout_retry: Duration,
 
     /// Time to wait for a peer to respond to a resolver request.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
+
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
+    pub fetch_retry_delay: Duration,
 
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
@@ -141,9 +146,7 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer:
-        Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
 {
     /// Network blocker shared with each epoch consensus engine.
@@ -183,9 +186,6 @@ where
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
 
-    /// Maximum number of messages to buffer in each network muxer.
-    pub muxer_size: usize,
-
     /// Maximum number of finalized-block reports to buffer.
     pub mailbox_size: NonZeroUsize,
 
@@ -195,9 +195,9 @@ where
 
 /// Runs one Simplex engine per epoch (see the
 /// [module docs](crate::dkg::orchestrator)).
-pub struct Actor<E, B, M, P, MV, DV, C, A, L, T, ACK = Exact>
+pub struct Actor<E, B, M, P, MV, DV, A, L, T, ACK = Exact>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -206,9 +206,9 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
+    MV::ApplicationBlock:
+        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -238,15 +238,13 @@ where
         <MV::ApplicationBlock as ReshareBlock>::Directory,
     >,
     blocks_per_epoch: NonZeroU64,
-    muxer_size: usize,
     partition_prefix: String,
     latest_epoch: Gauge,
-    _payload: PhantomData<C>,
 }
 
-impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
+impl<E, B, M, P, MV, DV, A, L, T, ACK> Actor<E, B, M, P, MV, DV, A, L, T, ACK>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -255,9 +253,9 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
+    MV::ApplicationBlock:
+        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -296,10 +294,8 @@ where
                 gate: config.gate,
                 state_sync: config.state_sync,
                 blocks_per_epoch: config.blocks_per_epoch,
-                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 latest_epoch,
-                _payload: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -488,7 +484,7 @@ where
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
         let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
         let commitment = MV::commitment(&boundary);
@@ -521,21 +517,16 @@ where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let (mux, vote, vote_backup) = Muxer::builder(
-            self.context.child("vote_mux"),
-            vote_sender,
-            vote_receiver,
-            self.muxer_size,
-        )
-        .with_backup()
-        .build();
+        let (mux, vote, vote_backup) =
+            Muxer::builder(self.context.child("vote_mux"), vote_sender, vote_receiver)
+                .with_backup()
+                .build();
         mux.start();
 
         let (mux, certificate, certificate_backup) = Muxer::builder(
             self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
-            self.muxer_size,
         )
         .with_backup()
         .build();
@@ -545,7 +536,6 @@ where
             self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
-            self.muxer_size,
         );
         mux.start();
 
@@ -733,6 +723,7 @@ where
                 certification_timeout: self.simplex.certification_timeout,
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
+                fetch_retry_delay: self.simplex.fetch_retry_delay,
                 view_retention: self.simplex.view_retention,
                 skip: self.simplex.skip,
                 forward: self.simplex.forward,

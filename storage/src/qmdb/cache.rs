@@ -7,7 +7,7 @@
 //! its oldest location, which tracks FIFO by age without per-entry policy state or a
 //! general-purpose hash table. Entries store the full location and key, so lookups are exact.
 
-use commonware_utils::GOLDEN_RATIO;
+use commonware_utils::{GOLDEN_RATIO, prefetch};
 use core::num::NonZeroUsize;
 
 /// Slots per set. Wide enough that oldest-in-set eviction tracks global FIFO closely, at two
@@ -53,6 +53,22 @@ impl<K> Cache<K> {
         let hash = location.wrapping_mul(GOLDEN_RATIO);
         let set = ((hash as u128 * self.sets as u128) >> 64) as usize;
         set * self.ways
+    }
+
+    /// Prefetch the slots of `location`'s set that [Self::put] scans, ahead of caching it.
+    pub(crate) fn prefetch(&self, location: u64) {
+        if !prefetch::ENABLED {
+            return;
+        }
+
+        // Address the set through a pointer, so the hint adds no bounds check.
+        prefetch::prefetch_lines(
+            self.locations
+                .as_ptr()
+                .wrapping_add(self.set_start(location)),
+            self.ways,
+            usize::MAX,
+        );
     }
 
     /// Returns the slot holding `location`, if any.

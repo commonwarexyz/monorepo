@@ -1,4 +1,5 @@
 use super::DummyMetrics;
+use commonware_bench::Inputs;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
     index::{Unordered, unordered},
@@ -9,13 +10,15 @@ use criterion::{Criterion, criterion_group};
 use rand::seq::SliceRandom;
 use std::time::{Duration, Instant};
 
-#[cfg(not(full_bench))]
-const N_ITEMS: [usize; 2] = [10_000, 50_000];
-#[cfg(full_bench)]
-const N_ITEMS: [usize; 4] = [10_000, 50_000, 100_000, 500_000];
+fn n_items() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 50_000, 100_000, 500_000],
+        _ => &[10_000, 50_000],
+    }
+}
 
 fn bench_insert_and_retain(c: &mut Criterion) {
-    for items in N_ITEMS {
+    for &items in n_items() {
         let mut rng = test_rng();
         let mut kvs = Vec::with_capacity(items);
         for i in 0..items {

@@ -73,6 +73,20 @@ enum CertifyState {
     Aborted,
 }
 
+/// Outcome of [`Round::request_verify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyRequest {
+    /// The request is claimed and must be sent to the automaton.
+    Send,
+    /// The request is claimed and must not be sent, because certification of the round was
+    /// requested. Certification judges the notarized proposal on its own. A verification verdict
+    /// could only add a notarize vote to a view that is already notarized, or cast our nullify
+    /// vote before certification concludes.
+    Withhold,
+    /// The round is not pending verification, so nothing is claimed.
+    Skip,
+}
+
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     // When the local node entered this view (see `State::enter_view`). Unset
@@ -178,7 +192,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.clear_request();
     }
 
-    /// Returns the leader info if we should verify a proposal.
+    /// Returns the leader info if the round's verification request can be claimed.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
         if self.is_signer(leader.idx)
@@ -190,22 +204,26 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    /// Returns the leader key and proposal ready for verification, without
-    /// recording the request. Resolve ancestry before calling
-    /// [`Self::request_verify`], after which this method returns `None`.
-    #[allow(clippy::type_complexity)]
+    /// Returns the leader and proposal if the round's verification request can be claimed,
+    /// without claiming it. Resolve ancestry before calling [`Self::request_verify`], after which
+    /// this method returns `None`.
     pub fn pending_verification(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;
         let proposal = self.proposal.proposal().cloned()?;
         Some((leader.clone(), proposal))
     }
 
-    /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
-    pub fn request_verify(&mut self) -> bool {
-        if self.verify_ready().is_none() {
-            return false;
+    /// Claims the round's single verification request and returns what to do with it.
+    pub fn request_verify(&mut self) -> VerifyRequest {
+        if self.verify_ready().is_none() || !self.proposal.request_verify() {
+            return VerifyRequest::Skip;
         }
-        self.proposal.request_verify()
+        match self.certify {
+            CertifyState::Ready => VerifyRequest::Send,
+            CertifyState::Outstanding(_) | CertifyState::Certified(_) | CertifyState::Aborted => {
+                VerifyRequest::Withhold
+            }
+        }
     }
 
     /// Records the ancestry view that proposal verification requested. Returns
@@ -236,10 +254,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.verifying = None;
     }
 
-    /// Attempt to certify this round's proposal.
-    ///
-    /// Returns the proposal once a notarization exists for it.
-    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
+    /// Returns the notarized proposal ready for certification, without
+    /// recording the request. Record it with [`Self::set_certify_handle`],
+    /// after which this method returns `None`.
+    pub fn pending_certification(&self) -> Option<Proposal<D>> {
         let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}
@@ -248,9 +266,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             }
         }
 
-        // The proposal must match the notarization's proposal (which
-        // is overwritten, regardless of our own initial vote, during
-        // processing).
+        // Adding a notarization replaces any conflicting slot proposal with
+        // the certificate's proposal, so the two must match.
         let proposal = self
             .proposal
             .proposal()
@@ -305,13 +322,13 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns the elected leader (if any) for this round.
-    pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
-        self.leader.clone()
+    pub const fn leader(&self) -> Option<&Leader<S::PublicKey>> {
+        self.leader.as_ref()
     }
 
     /// Returns true when the local participant controls `signer`.
     pub fn is_signer(&self, signer: Participant) -> bool {
-        self.scheme.me().is_some_and(|me| me == signer)
+        self.scheme.me().is_some_and(|m| m.signer() == Some(signer))
     }
 
     /// Sets the leader for this round using the pre-computed leader index.
@@ -449,11 +466,16 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Completes the local proposal flow after the automaton returns a payload.
+    ///
+    /// Returns `true` if the slot holds the proposal, `false` if we already broadcast nullify
+    /// or the slot holds a different proposal (e.g., a certificate for it arrived first).
     pub fn proposed(&mut self, now: SystemTime, proposal: Proposal<D>) -> bool {
         if self.decision.is_nullify() {
             return false;
         }
-        self.proposal.record_verified(proposal);
+        if !self.proposal.record_verified(proposal) {
+            return false;
+        }
         self.proposed_at = Some(now);
         true
     }
@@ -477,11 +499,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Sets a proposal received from the batcher (leader's first notarize vote).
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
-    pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
+    pub fn set_proposal(&mut self, proposal: &Proposal<D>) -> bool {
         if self.decision.is_nullify() {
             return false;
         }
-        match self.proposal.update_vote(&proposal) {
+        match self.proposal.update_vote(proposal) {
             Some(ProposalChange::New) => true,
             Some(ProposalChange::Unchanged | ProposalChange::Equivocated { .. }) | None => false,
         }
@@ -608,8 +630,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Adds a proposal recovered from a certificate (notarization or finalization).
     ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
-    pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        match self.proposal.update_certificate(&proposal) {
+    pub fn add_recovered_proposal(&mut self, proposal: &Proposal<D>) -> Option<S::PublicKey> {
+        match self.proposal.update_certificate(proposal) {
             ProposalChange::New => {
                 debug!(?proposal, "setting proposal from certificate");
                 None
@@ -619,7 +641,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
                 // view).
-                let equivocator = self.leader().map(|leader| leader.key);
+                let equivocator = self.leader().map(|leader| leader.key.clone());
                 debug!(
                     ?equivocator,
                     ?dropped,
@@ -648,7 +670,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Deadlines stay armed: the notarization is not yet certified, so the
         // round must keep timing out if certification fails.
 
-        let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
+        let equivocator = self.add_recovered_proposal(&notarization.proposal);
         self.notarization = Some(notarization);
         (true, equivocator)
     }
@@ -679,7 +701,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return (false, None);
         }
 
-        let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
+        let equivocator = self.add_recovered_proposal(&finalization.proposal);
         self.finalization = Some(finalization);
         (true, equivocator)
     }
@@ -789,7 +811,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                     "replaying notarize from another signer"
                 );
 
-                // Our journaled notarize records a locally verified proposal.
+                // Our journaled notarize is a durable local verification of its
+                // proposal, which a replayed certificate may already hold.
                 self.proposal.record_verified(notarize.proposal.clone());
                 self.broadcast_notarize = true;
             }
@@ -954,7 +977,7 @@ mod tests {
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.set_proposal(&proposal_a));
         assert!(round.verified());
 
         // Attempt to vote
@@ -1011,7 +1034,7 @@ mod tests {
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.set_proposal(&proposal_a));
         assert!(round.verified());
 
         // Attempt to vote
@@ -1080,17 +1103,17 @@ mod tests {
         let proposal_x = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
         let proposal_y = Proposal::new(round_info, View::new(0), Sha256Digest::from([2u8; 32]));
 
-        // We are participant 1; participant 0 is the equivocating leader.
+        // We are participant 1, and participant 0 is the equivocating leader.
         let mut round = Round::new(schemes[1].clone(), round_info);
         round.set_leader(Participant::new(0));
 
-        // Restart: replay our journaled notarize for the leader's first proposal.
+        // On restart, replay our journaled notarize for the leader's first proposal.
         let notarize = Notarize::sign(&schemes[1], proposal_x).expect("notarize");
         round.replay(&Artifact::Notarize(notarize));
 
         // The rebuilt batcher re-forwards the leader's notarize, now carrying
         // the conflicting proposal.
-        assert!(!round.set_proposal(proposal_y.clone()));
+        assert!(!round.set_proposal(&proposal_y));
 
         // The rest of the network (the leader and the other two honest
         // participants) finalized the conflicting proposal.
@@ -1112,8 +1135,8 @@ mod tests {
         assert_eq!(round.certified_proposal(), Some(&proposal_y));
     }
 
-    /// Same restart trace, but a notarization certificate arrives instead of
-    /// a finalization: certification must target the certificate's proposal.
+    /// Same restart trace with a notarization certificate in place of the
+    /// finalization. Certification must target the certificate's proposal.
     #[test]
     fn restart_equivocation_notarization_overrides_local_vote() {
         let mut rng = test_rng();
@@ -1128,17 +1151,17 @@ mod tests {
         let proposal_x = Proposal::new(round_info, View::new(0), Sha256Digest::from([1u8; 32]));
         let proposal_y = Proposal::new(round_info, View::new(0), Sha256Digest::from([2u8; 32]));
 
-        // We are participant 1; participant 0 is the equivocating leader.
+        // We are participant 1, and participant 0 is the equivocating leader.
         let mut round = Round::new(schemes[1].clone(), round_info);
         round.set_leader(Participant::new(0));
 
-        // Restart: replay our journaled notarize for the leader's first proposal.
+        // On restart, replay our journaled notarize for the leader's first proposal.
         let notarize = Notarize::sign(&schemes[1], proposal_x).expect("notarize");
         round.replay(&Artifact::Notarize(notarize));
 
         // The rebuilt batcher re-forwards the leader's notarize, now carrying
         // the conflicting proposal.
-        assert!(!round.set_proposal(proposal_y.clone()));
+        assert!(!round.set_proposal(&proposal_y));
 
         // The rest of the network (the leader and the other two honest
         // participants) notarized the conflicting proposal.
@@ -1157,7 +1180,9 @@ mod tests {
         assert_eq!(equivocator.unwrap(), participants[0]);
 
         // Certification must proceed on the certificate's proposal.
-        let candidate = round.try_certify().expect("certify candidate");
+        let candidate = round
+            .pending_certification()
+            .expect("notarized round must have a pending certification");
         assert_eq!(candidate, proposal_y);
 
         // Even certified, an equivocated round must not emit a finalize vote.
@@ -1182,7 +1207,7 @@ mod tests {
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
 
         // Add matching notarization certificate
         let notarization_votes: Vec<_> = schemes
@@ -1408,11 +1433,13 @@ mod tests {
         assert!(round.broadcast_notarize);
 
         // No verification request should be emitted.
-        assert!(
-            !round.request_verify(),
-            "leader-owned replay should not request verification again"
+        assert_eq!(
+            round.request_verify(),
+            VerifyRequest::Skip,
+            "leader-owned replay must not request verification again"
         );
 
+        // A notarization leaves the restored proposal pending certification.
         let notarization_votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
@@ -1427,7 +1454,9 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let candidate = round.try_certify().expect("certify candidate");
+        let candidate = round
+            .pending_certification()
+            .expect("notarized round must have a pending certification");
         assert_eq!(candidate, proposal);
     }
 
@@ -1569,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn try_certify_requires_notarization() {
+    fn pending_certification_requires_notarization() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
@@ -1580,15 +1609,15 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
-        // No notarization yet - should skip
-        assert!(round.try_certify().is_none());
+        // A verified proposal is not pending certification until the round is notarized.
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_blocked_when_already_certified() {
+    fn no_pending_certification_when_already_certified() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1601,7 +1630,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Add notarization
@@ -1618,22 +1647,24 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed.
-        let candidate = round.try_certify().expect("certify candidate");
+        // The notarized proposal awaits certification.
+        let candidate = round
+            .pending_certification()
+            .expect("notarized round must have a pending certification");
         assert_eq!(candidate, proposal);
 
-        // Set a certify handle then mark as certified
+        // Record a certification request, then complete it.
         let mut pool = AbortablePool::<()>::default();
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
         round.certified(true);
 
-        // Second try_certify should skip - already certified
-        assert!(round.try_certify().is_none());
+        // Nothing awaits certification once the round is certified.
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_marks_locally_proposed_candidate() {
+    fn pending_certification_returns_locally_proposed_candidate() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1662,12 +1693,14 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let candidate = round.try_certify().expect("certify candidate");
+        let candidate = round
+            .pending_certification()
+            .expect("notarized round must have a pending certification");
         assert_eq!(candidate, proposal);
     }
 
     #[test]
-    fn try_certify_blocked_when_handle_exists() {
+    fn no_pending_certification_when_handle_exists() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1680,7 +1713,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Add notarization
@@ -1697,8 +1730,10 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed.
-        let candidate = round.try_certify().expect("certify candidate");
+        // The notarized proposal awaits certification.
+        let candidate = round
+            .pending_certification()
+            .expect("notarized round must have a pending certification");
         assert_eq!(candidate, proposal);
 
         // Set a certify handle (simulating in-flight certification)
@@ -1706,12 +1741,12 @@ mod tests {
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
-        // Second try_certify should skip - handle exists
-        assert!(round.try_certify().is_none());
+        // Nothing awaits certification while a request is in flight.
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_blocked_after_abort() {
+    fn no_pending_certification_after_abort() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1724,7 +1759,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Add notarization
@@ -1746,18 +1781,18 @@ mod tests {
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
-        // try_certify blocked by handle
-        assert!(round.try_certify().is_none());
+        // Nothing awaits certification while a request is in flight.
+        assert!(round.pending_certification().is_none());
 
         // Abort transitions to Aborted state
         round.abort_certify();
 
-        // try_certify still blocked after abort (no re-certification allowed)
-        assert!(round.try_certify().is_none());
+        // An aborted certification is never retried.
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_returns_proposal_from_certificate() {
+    fn pending_certification_returns_proposal_from_certificate() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1770,9 +1805,9 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(1));
-        // Don't set proposal yet
 
-        // Add notarization (which includes the proposal in the certificate)
+        // Notarize a proposal the round has never seen, so the slot takes it
+        // from the certificate.
         let notarization_votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
@@ -1786,8 +1821,10 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // Has notarization and proposal came from certificate.
-        let candidate = round.try_certify().expect("certify candidate");
+        // The pending certification carries the certificate's proposal.
+        let candidate = round
+            .pending_certification()
+            .expect("notarized round must have a pending certification");
         assert_eq!(candidate, proposal);
     }
 
@@ -1805,7 +1842,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
 
         // Add notarization
         let notarization_votes: Vec<_> = schemes
@@ -1829,8 +1866,7 @@ mod tests {
         // Abort certification (simulating finalization arriving first)
         round.abort_certify();
 
-        // Certification result arrives after abort (race condition).
-        // This should not panic - the result is simply ignored.
+        // A certification result that arrives after the abort must not panic.
         round.certified(true);
     }
 
@@ -1848,7 +1884,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Construct notarize succeeds
@@ -1887,36 +1923,16 @@ mod tests {
     fn certified_recovered_proposal_allows_finalize_then_notarize() {
         let mut rng = test_rng();
         let namespace = b"ns";
-        let Fixture {
-            schemes, verifier, ..
-        } = ed25519::fixture(&mut rng, namespace, 4);
-        let local_scheme = schemes[0].clone();
-
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([3u8; 32]));
 
-        let mut round = Round::new(local_scheme, round_info);
-        round.set_leader(Participant::new(1));
-
         // Recover a peer notarization without locally verifying or voting.
-        let notarization_votes: Vec<_> = schemes
-            .iter()
-            .skip(1)
-            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-            .collect();
-        let notarization = Notarization::from_notarizes(
-            &verifier,
-            non_empty![@notarization_votes.iter()],
-            &Sequential,
-        )
-        .unwrap();
-        let (added, equivocator) = round.add_notarization(notarization);
-        assert!(added);
-        assert!(equivocator.is_none());
+        let mut round = notarized_round(&schemes, &proposal, Participant::new(1));
 
         // Recovery alone does not verify the proposal.
         assert!(round.construct_notarize().is_none());
-        assert!(round.request_verify());
+        assert_eq!(round.request_verify(), VerifyRequest::Send);
 
         // But a successful certification still allows us to help finalize.
         round.certified(true);
@@ -1925,5 +1941,133 @@ mod tests {
         // Verification can complete after our finalize vote.
         assert!(round.verified());
         assert_eq!(round.construct_notarize(), Some(&proposal));
+    }
+
+    /// Once certification is requested, `request_verify` claims the verification request and
+    /// withholds it, whether certification is outstanding, succeeded, failed, or was aborted.
+    /// The proposal stays pending verification until that claim.
+    #[test]
+    fn request_verify_withholds_once_certification_requested() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([4u8; 32]));
+
+        // Certification stays outstanding, succeeds, fails, or is aborted.
+        let outcomes: [fn(&mut Round<ed25519::Scheme, Sha256Digest>); 4] = [
+            |_| {},
+            |round| round.certified(true),
+            |round| round.certified(false),
+            |round| round.abort_certify(),
+        ];
+        for outcome in outcomes {
+            // A recovered notarization leaves its proposal unverified. Its certification is
+            // requested and reaches the outcome.
+            let mut round = notarized_round(&schemes, &proposal, Participant::new(1));
+            let mut pool = AbortablePool::<()>::default();
+            round.set_certify_handle(pool.push(futures::future::pending()));
+            outcome(&mut round);
+
+            // The proposal stays pending verification until `request_verify` claims the request
+            // without sending it. Nothing is left to claim afterwards.
+            assert!(round.pending_verification().is_some());
+            assert_eq!(round.request_verify(), VerifyRequest::Withhold);
+            assert!(round.pending_verification().is_none());
+            assert_eq!(round.request_verify(), VerifyRequest::Skip);
+        }
+    }
+
+    /// Builds a round led by `leader` that holds a notarization of `proposal`
+    /// signed by every participant but this node, so the proposal is recovered
+    /// without a local vote or verification.
+    fn notarized_round(
+        schemes: &[ed25519::Scheme],
+        proposal: &Proposal<Sha256Digest>,
+        leader: Participant,
+    ) -> Round<ed25519::Scheme, Sha256Digest> {
+        let mut round = Round::new(schemes[0].clone(), proposal.round);
+        round.set_leader(leader);
+        let votes: Vec<_> = schemes
+            .iter()
+            .skip(1)
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&schemes[0], non_empty![@votes.iter()], &Sequential)
+                .unwrap();
+        let (added, equivocator) = round.add_notarization(notarization);
+        assert!(added);
+        assert!(equivocator.is_none());
+        round
+    }
+
+    #[test]
+    fn proposed_rejects_populated_slot() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let certified = Proposal::new(round_info, View::new(0), Sha256Digest::from([5u8; 32]));
+        let built = Proposal::new(round_info, View::new(0), Sha256Digest::from([6u8; 32]));
+
+        // A certificate recovered while our build was in flight owns the slot.
+        let mut round = notarized_round(&schemes, &certified, Participant::new(0));
+        assert!(!round.proposed(std::time::UNIX_EPOCH, built));
+        assert_eq!(round.proposal.proposal(), Some(&certified));
+        assert_eq!(round.proposal.status(), ProposalStatus::Unverified);
+        assert!(round.elapsed_since_start(std::time::UNIX_EPOCH).is_none());
+    }
+
+    #[test]
+    fn proposed_confirms_held_proposal() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([5u8; 32]));
+
+        // A certificate for the proposal we rebuilt arrived while the build was in flight.
+        let mut round = notarized_round(&schemes, &proposal, Participant::new(0));
+        assert!(round.proposed(std::time::UNIX_EPOCH, proposal.clone()));
+        assert_eq!(round.proposal.proposal(), Some(&proposal));
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
+        assert!(round.elapsed_since_start(std::time::UNIX_EPOCH).is_some());
+        assert_eq!(round.request_verify(), VerifyRequest::Skip);
+    }
+
+    #[test]
+    fn replay_notarize_after_certificate_marks_proposal_verified() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([7u8; 32]));
+
+        // A recovered certificate leaves the proposal unverified.
+        let mut round = notarized_round(&schemes, &proposal, Participant::new(1));
+        assert_eq!(round.proposal.status(), ProposalStatus::Unverified);
+
+        // Replaying our own notarize for it restores the verdict without a new request.
+        let notarize = Notarize::sign(&schemes[0], proposal.clone()).expect("notarize");
+        round.replay(&Artifact::Notarize(notarize));
+        assert_eq!(round.proposal.proposal(), Some(&proposal));
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
+        assert!(round.broadcast_notarize);
+        assert_eq!(round.request_verify(), VerifyRequest::Skip);
+    }
+
+    #[test]
+    fn replay_notarize_keeps_conflicting_certificate_proposal() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let certified = Proposal::new(round_info, View::new(0), Sha256Digest::from([8u8; 32]));
+        let voted = Proposal::new(round_info, View::new(0), Sha256Digest::from([9u8; 32]));
+        let mut round = notarized_round(&schemes, &certified, Participant::new(1));
+
+        // Our notarize for a different proposal does not verify the certified one.
+        let notarize = Notarize::sign(&schemes[0], voted).expect("notarize");
+        round.replay(&Artifact::Notarize(notarize));
+        assert_eq!(round.proposal.proposal(), Some(&certified));
+        assert_eq!(round.proposal.status(), ProposalStatus::Unverified);
+        assert!(round.broadcast_notarize);
+        assert_eq!(round.request_verify(), VerifyRequest::Send);
     }
 }

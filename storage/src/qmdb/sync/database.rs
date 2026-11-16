@@ -17,7 +17,10 @@ use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
+    /// Configuration for the journal the sync engine fills before building the database.
     type JournalConfig;
+
+    /// Return the configuration for the sync journal.
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
@@ -25,7 +28,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for crate::qmdb::any::Confi
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        self.journal_config.clone()
+        self.log.clone()
     }
 }
 
@@ -51,20 +54,42 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
     fn journal_config(&self) -> Self::JournalConfig {}
 }
 
-/// A QMDB the sync engine can build.
+/// A database that [`sync`](super::sync) can build from operations fetched from a [`Source`].
+///
+/// Every authenticated QMDB variant implements this trait, and callers drive it through
+/// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
+/// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
+/// it already reaches the target, fetches and verifies the remaining operations, builds the
+/// database with [`Self::from_sync_result`], checks the root of [`Self::target`] against the
+/// target, and only then calls [`Self::persist_sync_result`].
+///
+/// [`Source`]: super::Source
 pub trait Database: Sized + Send {
+    /// The Merkle family of the operations log.
     type Family: Family;
+
+    /// The operation type stored in the log.
     type Op: Committable<Self::Family> + Encode + Send + Sync;
+
+    /// The journal the engine fills with fetched operations.
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
+
+    /// The database configuration, which also configures the sync journal.
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
+
+    /// The digest type of the database's root.
     type Digest: Digest;
+
+    /// The runtime context the database is built in.
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
+
+    /// The hasher producing [`Self::Digest`].
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
-    /// Initialize from the latest retained commit at or below `max_size`, or the latest
-    /// retained state when no bound is supplied. A zero bound is invalid.
+    /// Initialize from the latest retained commit at or below `max_size`, or the latest retained
+    /// state when no bound is supplied. A zero bound is invalid.
     fn init(
         context: Self::Context,
         config: Self::Config,
@@ -83,9 +108,22 @@ pub trait Database: Sized + Send {
 
     /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
     ///
-    /// The engine calls this only after the rebuilt root matches the requested target. Implementations
-    /// that persist everything in [`Self::from_sync_result`] must explicitly return `Ok(self)`.
+    /// The engine calls this only after the root of [`Self::target`] matches the requested target.
+    /// Implementations that persist everything in [`Self::from_sync_result`] must explicitly
+    /// return `Ok(self)`.
     fn persist_sync_result(self) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
+
+    /// Durably discard persisted state derived from the operations of the sync journal.
+    ///
+    /// The engine calls this when the sync journal it opens holds no operation of the target's
+    /// range, before it appends any fetched operation. State derived from operations the journal
+    /// held earlier would otherwise be read as describing the operations fetched in their place.
+    /// Implementations with no persisted state that would be read that way must explicitly
+    /// return `Ok(())`.
+    fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> impl Future<Output = Result<(), Error<Self::Family>>> + Send;
 
     /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.
@@ -108,11 +146,14 @@ pub trait Database: Sized + Send {
         }
     }
 
-    /// Sync target to get to this database's state.
+    /// Sync target that reaches this database's applied state.
+    ///
+    /// Its root is the operations root, which for [`current`](crate::qmdb::current) differs from
+    /// the canonical database root.
     fn target(&self) -> Target<Self::Family, Self::Digest>;
 
     /// Reject a target this database cannot sync to. The engine checks the initial target and
-    /// every adopted update; the default accepts any target.
+    /// every adopted update. The default accepts any target.
     fn validate_target(
         _target: &Target<Self::Family, Self::Digest>,
     ) -> Result<(), EngineError<Self::Family, Self::Digest>> {
@@ -120,22 +161,25 @@ pub trait Database: Sized + Send {
     }
 }
 
-/// A merkleized batch atop this database.
+/// A merkleized batch of a [`Database`].
 pub trait MerkleizedBatch {
+    /// The Merkle family of the operations log.
     type Family: Family;
+
+    /// The digest type of the batch's root.
     type Digest: Digest;
-    /// Batch rooted at this one, before merkleization.
+
+    /// A batch rooted at this one, before merkleization.
     type Unmerkleized<H: Hasher<Digest = Self::Digest>>;
 
-    /// Root the batch commits to.
+    /// The root of the database once this batch is applied.
     fn root(&self) -> Self::Digest;
 
     /// Create a batch rooted at this one.
     fn new_batch<H: Hasher<Digest = Self::Digest>>(self: &Arc<Self>) -> Self::Unmerkleized<H>;
 
-    /// Sync target reached once the batch is applied.
-    #[allow(clippy::type_complexity)]
-    fn target(&self) -> Result<Target<Self::Family, Self::Digest>, Error<Self::Family>>;
+    /// Sync target reached once this batch is applied.
+    fn target(&self) -> Target<Self::Family, Self::Digest>;
 }
 
 /// Whether a completed sync journal's `bounds` cover `range`: retained data reaches back to
@@ -145,6 +189,27 @@ pub(crate) fn journal_covers_range<F: Family>(
     range: &NonEmptyRange<Location<F>>,
 ) -> bool {
     Location::new(bounds.start) <= range.start() && Location::new(bounds.end) == range.end()
+}
+
+/// Shared body for [`Database::discard_local_state`] implementations backed by a persisted
+/// [`full::Merkle`]. Durably empties the structure that `config` names, including its pruning
+/// boundary and pins.
+pub(crate) async fn discard_local_state<F, E, H, S>(
+    context: E,
+    config: full::Config<S>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    let hasher = crate::qmdb::hasher::<H>();
+    full::Merkle::<F, _, H::Digest, S>::prepare(context, &hasher, config, full::Retain::Nothing)
+        .await?
+        .finish()
+        .await?;
+    Ok(())
 }
 
 /// Shared body for [`Database::local_pinned_nodes`] implementations backed by a persisted
@@ -202,11 +267,11 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange};
 
-    fn merkle_config(pooler: &impl BufferPooler) -> full::Config<Sequential> {
+    fn merkle_config() -> full::Config<Sequential> {
         full::Config {
             journal_partition: "local-pins-journal".into(),
             metadata_partition: "local-pins-metadata".into(),
@@ -214,7 +279,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(111), NZUsize!(5)),
+            page_cache: CacheRef::new(NZU16!(111), NZUsize!(5)),
         }
     }
 
@@ -240,7 +305,7 @@ mod tests {
     fn local_pinned_nodes_treats_reset_journal_as_unavailable() {
         deterministic::Runner::default().start(|context| async move {
             let hasher = crate::qmdb::hasher::<Sha256>();
-            let config = merkle_config(&context);
+            let config = merkle_config();
             let mut merkle = full::Merkle::<MmrFamily, _, Digest, Sequential>::init(
                 context.child("init"),
                 &hasher,

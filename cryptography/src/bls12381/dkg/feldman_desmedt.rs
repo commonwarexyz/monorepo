@@ -86,7 +86,7 @@
 //! - The final public polynomial (sum of dealer polynomials for DKG, interpolation for reshare),
 //! - The list of dealers who distributed dealings,
 //! - The list of players who received shares,
-//! - The set of players whose shares may have been revealed,
+//! - The set of players whose shares the selected dealers may have revealed,
 //! - A digest of the round's [`Info`] (including the counter, and the list of dealers and players).
 //!
 //! ## Trusted Dealing Functions
@@ -171,6 +171,17 @@
 //! shares and the revealed `f` shares. If the Byzantine adversary reveals all of their (still private) shares at this time, each of the
 //! `f + 1` honest players that were in the second partition will be able to derive the shared secret without collusion (using their private share
 //! and the `2f` revealed shares). **It will not be possible for any external observer (or a Byzantine adversary), however, to recover the shared secret.**
+//!
+//! A revealed share alone does not expose the holder's new share in the next reshare. But with
+//! `3f + 1` players, the holder deals from a degree `2f` polynomial whose constant term is the
+//! revealed share. The adversary already has the revealed share and the `f` dealings sent to
+//! Byzantine players. Once the holder reveals `f` more dealings, these `2f + 1` values fix the
+//! polynomial, so every dealing can be worked out. The adversary may now derive an honest player's
+//! new share from fewer than `f + 1` reveals. Because [`Output::revealed`] lists a player only when
+//! `f + 1` selected dealers reveal its dealing, that player may be missing from the list. Even so,
+//! the shared secret stays safe if the adversary knew at most `f` honest players' previous shares.
+//! The adversary then holds at most `2f` new shares, one short of the `2f + 1` needed to recover
+//! the shared secret.
 //!
 //! While not entirely revealed, a secret with more than `f` revealed shares may no longer be safe for some applications (like when used to
 //! form threshold certificates for consensus). Consider an equivocating leader (one of the `f` Byzantine players) that sends one block `B_1` to `f`
@@ -355,7 +366,8 @@ use crate::{
     transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode, modes,
+    Buf, Encode, EncodeSize, FixedSize, MaxEncodeSize, Mode as CodecMode, RangeCfg, Read, ReadExt,
+    Write, mode, modes,
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Ring as _},
@@ -365,7 +377,7 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
-    Faults, NZU32, Participant, TryCollect,
+    Faults, NZU32, Participant, TryCollect, Widen, max,
     ordered::{Map, Quorum, Set},
 };
 use core::num::NonZeroU32;
@@ -601,9 +613,14 @@ impl<V: Variant, P: Ord> Output<V, P> {
         &self.players
     }
 
-    /// Return the set of players whose shares may have been revealed.
+    /// Return the players whose shares the selected dealers may have revealed in this round.
     ///
-    /// These are players whose shares can be reconstructed from the selected dealer reveals.
+    /// A Byzantine player can reveal its own share outside the protocol. An adversary that knew an
+    /// honest player's share before a reshare (from a reveal or some other path) may use it with
+    /// this round's reveals to rebuild new shares of honest players who are not listed.
+    ///
+    /// See [Share Reveals](self#share-reveals) for a detailed discussion about shared secret safety
+    /// under faults.
     pub const fn revealed(&self) -> &Set<P> {
         &self.revealed
     }
@@ -616,6 +633,15 @@ impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
             + self.dealers.encode_size()
             + self.players.encode_size()
             + self.revealed.encode_size()
+    }
+}
+
+impl<V: Variant, P: PublicKey> Output<V, P> {
+    /// Returns an upper bound on the encoded size of an output whose dealer, player, and revealed
+    /// sets each hold at most `max_participants` participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()));
+        Sharing::<V>::max_encode_size(max_participants) + Summary::SIZE + set * 3
     }
 }
 
@@ -1017,6 +1043,14 @@ impl<V: Variant> EncodeSize for DealerPubMsg<V> {
     }
 }
 
+impl<V: Variant> DealerPubMsg<V> {
+    /// Returns an upper bound on the encoded size of a public dealer message for at most
+    /// `max_participants` participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))
+    }
+}
+
 impl<V: Variant> Write for DealerPubMsg<V> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.commitment.write(buf);
@@ -1061,10 +1095,8 @@ impl DealerPrivMsg {
     }
 }
 
-impl EncodeSize for DealerPrivMsg {
-    fn encode_size(&self) -> usize {
-        self.share.expose(|share| share.encode_size())
-    }
+impl FixedSize for DealerPrivMsg {
+    const SIZE: usize = Scalar::SIZE;
 }
 
 impl Write for DealerPrivMsg {
@@ -1102,10 +1134,8 @@ impl<P: PublicKey> PartialEq for PlayerAck<P> {
     }
 }
 
-impl<P: PublicKey> EncodeSize for PlayerAck<P> {
-    fn encode_size(&self) -> usize {
-        self.sig.encode_size()
-    }
+impl<P: PublicKey> FixedSize for PlayerAck<P> {
+    const SIZE: usize = P::Signature::SIZE;
 }
 
 impl<P: PublicKey> Write for PlayerAck<P> {
@@ -1163,6 +1193,15 @@ impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
             Self::Reveal(x) => x.encode_size(),
         }
     }
+}
+
+impl<P: PublicKey> MaxEncodeSize for AckOrReveal<P> {
+    // A tag and the wider of an acknowledgement and a revealed share.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            PlayerAck::<P>::MAX_ENCODE_SIZE,
+            DealerPrivMsg::MAX_ENCODE_SIZE,
+        );
 }
 
 impl<P: PublicKey> Write for AckOrReveal<P> {
@@ -1237,6 +1276,17 @@ impl<P: PublicKey> EncodeSize for DealerResult<P> {
             Self::Ok(r) => r.encode_size(),
             Self::TooManyReveals => 0,
         }
+    }
+}
+
+impl<P: PublicKey> DealerResult<P> {
+    /// Returns an upper bound on the encoded size of a dealer result for at most `max_players`
+    /// players.
+    fn max_encode_size(max_players: NonZeroU32) -> usize {
+        Map::<P, AckOrReveal<P>>::max_encode_size(
+            Widen::widen(max_players.get()),
+            AckOrReveal::<P>::MAX_ENCODE_SIZE,
+        ) + u8::SIZE
     }
 }
 
@@ -1335,6 +1385,13 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
+    /// Returns an upper bound on the encoded size of a log for at most `max_participants`
+    /// participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        DealerPubMsg::<V>::max_encode_size(max_participants)
+            + DealerResult::<P>::max_encode_size(max_participants)
+    }
+
     fn get_ack(&self, player: &P) -> Option<&PlayerAck<P>> {
         let DealerResult::Ok(results) = &self.results else {
             return None;
@@ -1431,20 +1488,31 @@ where
 /// This avoids having to trust some other party or process for knowing that a
 /// dealer actually produced a log.
 #[derive(Clone, Debug)]
-pub struct SignedDealerLog<V: Variant, S: Signer> {
-    dealer: S::PublicKey,
-    log: DealerLog<V, S::PublicKey>,
-    sig: S::Signature,
+pub struct SignedDealerLog<V: Variant, P: PublicKey> {
+    dealer: P,
+    log: DealerLog<V, P>,
+    sig: P::Signature,
 }
 
-impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> PartialEq for SignedDealerLog<V, P> {
     fn eq(&self, other: &Self) -> bool {
         self.dealer == other.dealer && self.log == other.log && self.sig == other.sig
     }
 }
 
-impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
-    fn sign(sk: &S, info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
+impl<V: Variant, P: PublicKey> SignedDealerLog<V, P> {
+    /// Returns an upper bound on the encoded size of a signed log for at most `max_participants`
+    /// participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        DealerLog::<V, P>::max_encode_size(max_participants) + P::SIZE + P::Signature::SIZE
+    }
+
+    // rustc does not infer `S::Signature == P::Signature` from `PublicKey = P` alone.
+    fn sign<S: Signer<PublicKey = P, Signature = P::Signature>>(
+        sk: &S,
+        info: &Info<V, P>,
+        log: DealerLog<V, P>,
+    ) -> Self {
         let sig = transcript_for_log(info, &log).sign(sk);
         Self {
             dealer: sk.public_key(),
@@ -1459,11 +1527,7 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     /// and the underlying log that they signed.
     ///
     /// This will return [`Option::None`] if the check fails.
-    #[allow(clippy::type_complexity)]
-    pub fn check(
-        self,
-        info: &Info<V, S::PublicKey>,
-    ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
+    pub fn check(self, info: &Info<V, P>) -> Option<(P, DealerLog<V, P>)> {
         if !transcript_for_log(info, &self.log).verify(&self.dealer, &self.sig) {
             return None;
         }
@@ -1471,13 +1535,13 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     }
 }
 
-impl<V: Variant, S: Signer> EncodeSize for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> EncodeSize for SignedDealerLog<V, P> {
     fn encode_size(&self) -> usize {
         self.dealer.encode_size() + self.log.encode_size() + self.sig.encode_size()
     }
 }
 
-impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> Write for SignedDealerLog<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.dealer.write(buf);
         self.log.write(buf);
@@ -1485,7 +1549,7 @@ impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
     }
 }
 
-impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> Read for SignedDealerLog<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -1498,11 +1562,11 @@ impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, S: Signer> arbitrary::Arbitrary<'_> for SignedDealerLog<V, S>
+impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for SignedDealerLog<V, P>
 where
-    S::PublicKey: for<'a> arbitrary::Arbitrary<'a>,
+    P: for<'a> arbitrary::Arbitrary<'a>,
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let dealer = u.arbitrary()?;
@@ -1560,19 +1624,19 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         }
     }
 
-    fn check_dealers(
+    fn check_dealers<'a>(
         rng: &mut impl CryptoRng,
         info: &Info<V, P>,
         strategy: &impl Strategy,
         transcript: &Transcript,
-        dealers: &[(&P, &DealerLog<V, P>)],
+        dealers: impl IntoIterator<Item = (&'a P, &'a DealerLog<V, P>)>,
     ) -> Vec<(P, Result<DealerLogOutcome, DealerLogError>)>
     where
         P: BatchVerifier,
     {
         let checks: Vec<_> = dealers
-            .iter()
-            .map(|&(dealer, log)| {
+            .into_iter()
+            .map(|(dealer, log)| {
                 let seed = Summary::random(&mut *rng);
                 ((*dealer).clone(), log, seed)
             })
@@ -1641,7 +1705,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         }
 
         // Verify the batch and update the known usable dealers.
-        let pending_results = Self::check_dealers(rng, &self.info, strategy, &transcript, &pending);
+        let pending_results = Self::check_dealers(rng, &self.info, strategy, &transcript, pending);
         let mut all_pending_usable = true;
         for (dealer, result) in pending_results {
             let is_usable = matches!(result, Ok(DealerLogOutcome::Available));
@@ -1659,10 +1723,8 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         // undue optimism. We instead adopt a pessimistic approach, assuming the
         // worst: that we might need to check all of the remaining dealers
         // to find the honest ones we need.
-        let remaining: Vec<_> = iter
-            .filter(|(dealer, _)| !self.known.contains_key(*dealer))
-            .collect();
-        let results = Self::check_dealers(rng, &self.info, strategy, &transcript, &remaining);
+        let remaining = iter.filter(|(dealer, _)| !self.known.contains_key(*dealer));
+        let results = Self::check_dealers(rng, &self.info, strategy, &transcript, remaining);
         for (dealer, result) in results {
             self.known.insert(dealer, result);
         }
@@ -1681,8 +1743,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     {
         self.pre_verify(rng, strategy);
         let required = self.info.required_commitments::<M>();
-        let required_count =
-            usize::try_from(required).expect("required commitments exceed usize::MAX");
+        let required_count: usize = Widen::widen(required);
         let out: Map<_, _> = self
             .logs
             .into_iter()
@@ -1842,7 +1903,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// Finalize the dealer, producing a signed log.
     ///
     /// This should be called at the point where no more acks will be processed.
-    pub fn finalize<M: Faults>(self) -> SignedDealerLog<V, S> {
+    pub fn finalize<M: Faults>(self) -> SignedDealerLog<V, S::PublicKey> {
         let reveals = self
             .results
             .values()
@@ -3315,7 +3376,7 @@ mod test {
             info,
             &Sequential,
             &transcript,
-            &[(dealer, log)],
+            [(dealer, log)],
         )
         .pop()
         .expect("one dealer should produce one check")
@@ -5063,7 +5124,7 @@ mod test {
             CodecConformance<AckOrReveal<ed25519::PublicKey>>,
             CodecConformance<DealerResult<ed25519::PublicKey>>,
             CodecConformance<DealerLog<MinPk, ed25519::PublicKey>>,
-            CodecConformance<SignedDealerLog<MinPk, ed25519::PrivateKey>>,
+            CodecConformance<SignedDealerLog<MinPk, ed25519::PublicKey>>,
         }
     }
 }
