@@ -1812,7 +1812,11 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-parallel",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-utils",
  "libfuzzer-sys",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2207,6 +2211,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-math",
  "commonware-parallel",
+ "commonware-runtime",
  "commonware-utils",
  "crc",
  "ed25519-consensus",
@@ -2216,6 +2221,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_core 0.10.1",
  "sha2 0.11.0",
+ "sha3",
  "zeroize",
 ]
 

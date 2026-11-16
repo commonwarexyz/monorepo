@@ -20,6 +20,7 @@ commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std", "arbitrary", "fuzz"] }
 commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["std", "test-utils"] }
+commonware-runtime.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 crc.workspace = true
 ed25519-consensus.workspace = true
@@ -29,6 +30,7 @@ p256 = { workspace = true, features = ["ecdsa"] }
 rand = { workspace = true, features = ["std_rng"] }
 rand_core.workspace = true
 sha2.workspace = true
+sha3.workspace = true
 zeroize.workspace = true
 
 [[bin]]
@@ -279,6 +281,13 @@ bench = false
 [[bin]]
 name = "reed_solomon_rate"
 path = "fuzz_targets/reed_solomon_rate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "keccak256"
+path = "fuzz_targets/keccak256.rs"
 test = false
 doc = false
 bench = false
