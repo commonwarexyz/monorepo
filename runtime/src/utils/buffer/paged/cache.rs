@@ -618,6 +618,106 @@ struct Cache {
 
     /// The batches in flight, so readers that miss one of their unpublished pages join them.
     batches: BatchRegistry,
+
+    /// Which slots hold each blob's pages, so eviction visits only resident pages.
+    residency: Residency,
+
+    /// The blobs whose last handle dropped while they had resident pages, oldest first. No handle
+    /// can read or cache their pages again, and each insert removes one page of the first blob
+    /// that still has one.
+    retired: VecDeque<u64>,
+}
+
+/// Marks the end of a chain in a link's `prev` or `next`. Slot indices stay below it.
+const NONE: u32 = u32::MAX;
+
+/// A cache slot's place in the chain of the blob whose page it holds. The slot's cache key names
+/// the blob.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Link {
+    prev: u32,
+    next: u32,
+}
+
+// Every cache slot carries a link, so `Link` must stay at 8 bytes.
+const _: () = assert!(size_of::<Link>() == 8);
+
+/// The link of a slot that holds no page.
+const UNLINKED: Link = Link {
+    prev: NONE,
+    next: NONE,
+};
+
+/// The resident pages of each blob, chained through the cache's slots.
+///
+/// A slot that holds a page is in the chain of that page's blob, and a slot that holds none is
+/// unlinked. Filling a slot reports the key it held before, so a page that displaces another blob's
+/// page moves the slot to its own blob's chain. Each removal unlinks the slot from the chain of the
+/// blob whose page it removes.
+struct Residency {
+    /// Each cache slot's link.
+    links: Vec<Link>,
+    /// The first slot of each blob's chain.
+    heads: AHashMap<u64, u32>,
+}
+
+impl Residency {
+    /// Residency for a cache of `capacity` slots, none holding a page yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` exceeds `u32::MAX`.
+    fn new(capacity: usize) -> Self {
+        assert!(
+            capacity <= Widen::widen(NONE),
+            "page cache capacity must keep slot indices below the chain marker"
+        );
+        Self {
+            links: vec![UNLINKED; capacity],
+            heads: AHashMap::new(),
+        }
+    }
+
+    /// Record that `slot` holds a page of `blob_id`. `prior` is the blob whose page the slot held
+    /// before, if any. An empty slot joins the head of `blob_id`'s chain, and one that held another
+    /// blob's page moves there from that blob's chain. A slot that held a page of `blob_id` keeps
+    /// its place.
+    fn link(&mut self, slot: usize, blob_id: u64, prior: Option<u64>) {
+        match prior {
+            Some(prior) if prior == blob_id => return,
+            Some(prior) => self.unlink(slot, prior),
+            None => {}
+        }
+        let index = u32::try_from(slot).expect("slot index must fit a u32");
+        let head = self.heads.insert(blob_id, index).unwrap_or(NONE);
+        if head != NONE {
+            self.links[Widen::widen(head)].prev = index;
+        }
+        self.links[slot] = Link {
+            prev: NONE,
+            next: head,
+        };
+    }
+
+    /// Record that `slot` no longer holds a page of `blob_id`.
+    fn unlink(&mut self, slot: usize, blob_id: u64) {
+        let Link { prev, next } = mem::replace(&mut self.links[slot], UNLINKED);
+        if prev != NONE {
+            self.links[Widen::widen(prev)].next = next;
+        } else if next != NONE {
+            self.heads.insert(blob_id, next);
+        } else {
+            self.heads.remove(&blob_id);
+        }
+        if next != NONE {
+            self.links[Widen::widen(next)].prev = prev;
+        }
+    }
+
+    /// The first slot of `blob_id`'s chain.
+    fn head(&self, blob_id: u64) -> Option<usize> {
+        self.heads.get(&blob_id).map(|&head| Widen::widen(head))
+    }
 }
 
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
@@ -637,7 +737,7 @@ pub struct CacheRef {
     /// format migration, not a configuration change.
     page_size: NonZeroU16,
 
-    /// The next id to assign to a blob that will be managed by this cache.
+    /// The id of the next blob to lease a page-cache identity from this cache.
     next_id: Arc<AtomicU64>,
 
     /// Shareable reference to the page cache.
@@ -655,6 +755,10 @@ impl CacheRef {
     /// Any `page_size` is accepted, but physical pages that do not align with blob pages (see the
     /// module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
     /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` exceeds `u32::MAX`.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
@@ -681,8 +785,9 @@ impl CacheRef {
         self.page_size
     }
 
-    /// Returns a unique id for the next blob that will use this page cache.
-    pub fn next_id(&self) -> u64 {
+    /// Returns a unique id for the next blob that will use this page cache. Every id must belong
+    /// to a [PageLease], so the blob is retired with the lease.
+    fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -694,18 +799,13 @@ impl CacheRef {
 
     /// Try to read the specified bytes from the page cache only. Returns the number of bytes
     /// successfully read from cache and copied to `buf` before a page fault, if any.
-    pub(super) fn read_cached(
-        &self,
-        blob_id: u64,
-        mut buf: &mut [u8],
-        mut logical_offset: u64,
-    ) -> usize {
+    fn read_cached(&self, blob_id: u64, mut buf: &mut [u8], mut logical_offset: u64) -> usize {
         let original_len = buf.len();
         let page_cache = self.cache.read();
         while !buf.is_empty() {
             let count = page_cache.read_at(blob_id, buf, logical_offset);
             if count == 0 {
-                // Cache miss - return how many bytes we successfully read
+                // Cache miss. Return how many bytes were read.
                 break;
             }
             logical_offset += count as u64;
@@ -720,7 +820,7 @@ impl CacheRef {
     /// their data written to the destination slice and are removed from `ranges`. Entries left
     /// in `ranges` keep their order and start at the first missing byte, with any cached prefix
     /// already copied into the destination and excluded from the remaining slice.
-    pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
+    fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
         let page_cache = self.cache.read();
         let page_size = page_cache.page_size;
 
@@ -775,7 +875,7 @@ impl CacheRef {
     /// Complete the unread suffix of a cache probe. The first page is rechecked under the write
     /// lock before starting or joining a fetch. Subsequent cached pages are read together until
     /// the next miss.
-    pub(super) async fn read_after_miss<B: Blob>(
+    async fn read_after_miss<B: Blob>(
         &self,
         blob: &Arc<B>,
         blob_id: u64,
@@ -815,7 +915,7 @@ impl CacheRef {
     /// a single fetch, as does a failed read of this call's own batch, or of a joined batch while
     /// this call still awaits one of its pages. Pages cached before it remain, subject to normal
     /// eviction.
-    pub(super) async fn read_after_misses<B: Blob>(
+    async fn read_after_misses<B: Blob>(
         &self,
         blob: &Arc<B>,
         blob_id: u64,
@@ -925,7 +1025,7 @@ impl CacheRef {
     /// Fetch the requested page after encountering a page fault, which may involve joining the
     /// fetch or batch already reading it, or retrieving it from `blob` & caching the result in the
     /// page cache. Returns the number of bytes read, which should always be non-zero.
-    pub(super) async fn read_after_page_fault<B: Blob>(
+    async fn read_after_page_fault<B: Blob>(
         &self,
         blob: &Arc<B>,
         blob_id: u64,
@@ -1027,13 +1127,13 @@ impl CacheRef {
     /// # Panics
     ///
     /// Panics if `offset` is not page aligned.
-    pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
+    fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
         let page_size: usize = self.page_size.widen();
         buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
     }
 
     /// Insert whole logical pages under one cache lock, returning the number of bytes cached.
-    pub(super) fn cache_pages<'a>(
+    fn cache_pages<'a>(
         &self,
         blob_id: u64,
         pages: impl Iterator<Item = &'a [u8]>,
@@ -1052,6 +1152,16 @@ impl CacheRef {
             };
         }
         cached
+    }
+
+    /// Retire `blob_id` once no handle can read the blob again. Its
+    /// resident pages are left for later inserts to remove (see [Cache::reclaim]), so the cost
+    /// of the call does not depend on how many pages the blob has resident.
+    fn retire(&self, blob_id: u64) {
+        let mut cache = self.cache.write();
+        if cache.residency.head(blob_id).is_some() {
+            cache.retired.push_back(blob_id);
+        }
     }
 
     /// Drop all cached pages while retaining the backing page buffers for reuse.
@@ -1077,6 +1187,8 @@ impl Cache {
             page_size,
             page_fetches: AHashMap::new(),
             batches: BatchRegistry::default(),
+            residency: Residency::new(capacity.get()),
+            retired: VecDeque::new(),
         }
     }
 
@@ -1115,16 +1227,46 @@ impl Cache {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the page cache and record its slot hint.
+    /// Put the given `page` into the page cache, record its slot hint, and chain its slot to the
+    /// blob's other pages. The insert first removes one page of a retired blob, if any remains.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         let page_size: usize = self.page_size.widen();
         assert_eq!(page.len(), page_size);
-        let (slot, buf) = self
+        self.reclaim();
+        let (slot, buf, prior) = self
             .cache
-            .get_or_insert_mut((blob_id, page_num), || IoBufMut::zeroed(page_size));
+            .get_or_insert_mut_with_prior_key((blob_id, page_num), || IoBufMut::zeroed(page_size));
         buf.as_mut().copy_from_slice(page);
         let hint = self.hint_index(blob_id, page_num);
         self.hints[hint] = slot;
+        self.residency
+            .link(slot, blob_id, prior.map(|(prior, _)| prior));
+    }
+
+    /// Remove one page of the oldest retired blob that still has a resident page, freeing its
+    /// slot.
+    ///
+    /// A blob id is leased once and a retired blob has no handle, so nothing reads or caches a
+    /// retired blob's pages and they only await removal. Every insert removes one before it
+    /// takes a slot, so retired pages leave at least as fast as new pages arrive, and a cache
+    /// that takes no inserts keeps them in slots nothing else needs.
+    ///
+    /// A retired blob left without a page, by this removal or by inserts that displaced its
+    /// pages, is forgotten the next time it is at the front, so each retirement adds at most one
+    /// such step to a later insert.
+    fn reclaim(&mut self) {
+        while let Some(&blob_id) = self.retired.front() {
+            let Some(slot) = self.residency.head(blob_id) else {
+                self.retired.pop_front();
+                continue;
+            };
+            assert!(
+                self.cache.remove_at(slot),
+                "a chained slot must hold a live page"
+            );
+            self.residency.unlink(slot, blob_id);
+            return;
+        }
     }
 
     /// The hint slot for `(blob_id, page_num)`: the page number offset by a per-blob salt,
@@ -1158,6 +1300,92 @@ impl Cache {
         self.cache.retain(|_, _| false);
         self.page_fetches.clear();
         self.batches = BatchRegistry::default();
+        self.residency = Residency::new(self.cache.capacity());
+    }
+}
+
+/// The page-cache identity of one blob, held by every handle that can read it through the cache.
+/// Dropping the last one retires the blob. Its cached pages,
+/// which no reader can reach again, are removed by later inserts.
+///
+/// Handles reach the cache only through their lease and an id is leased once, so every page the
+/// cache holds belongs to a blob some handle still leases or to a retired blob. Dropping takes
+/// the cache's write lock for a constant amount of work, so the cache itself must never own a
+/// lease.
+pub(super) struct PageLease {
+    cache_ref: CacheRef,
+    id: u64,
+}
+
+impl PageLease {
+    /// Lease a fresh blob id from `cache_ref`.
+    pub(super) fn new(cache_ref: CacheRef) -> Self {
+        let id = cache_ref.next_id();
+        Self { cache_ref, id }
+    }
+
+    /// The page cache this lease reads and fills.
+    pub(super) const fn cache_ref(&self) -> &CacheRef {
+        &self.cache_ref
+    }
+
+    /// The blob's page-cache id.
+    #[cfg(test)]
+    pub(super) const fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// [CacheRef::read_cached] for this blob.
+    pub(super) fn read_cached(&self, buf: &mut [u8], offset: u64) -> usize {
+        self.cache_ref.read_cached(self.id, buf, offset)
+    }
+
+    /// [CacheRef::read_cached_many] for this blob.
+    pub(super) fn read_cached_many(&self, ranges: &mut Vec<(&mut [u8], u64)>) {
+        self.cache_ref.read_cached_many(self.id, ranges);
+    }
+
+    /// [CacheRef::read_after_miss] for this blob, read from `blob`.
+    pub(super) async fn read_after_miss<B: Blob>(
+        &self,
+        blob: &Arc<B>,
+        buf: &mut [u8],
+        offset: u64,
+    ) -> Result<(), Error> {
+        self.cache_ref
+            .read_after_miss(blob, self.id, buf, offset)
+            .await
+    }
+
+    /// [CacheRef::read_after_misses] for this blob, read from `blob`.
+    pub(super) async fn read_after_misses<B: Blob>(
+        &self,
+        blob: &Arc<B>,
+        ranges: Vec<(&mut [u8], u64)>,
+    ) -> Result<(), Error> {
+        self.cache_ref
+            .read_after_misses(blob, self.id, ranges)
+            .await
+    }
+
+    /// [CacheRef::cache] for this blob.
+    pub(super) fn cache(&self, buf: &[u8], offset: u64) -> usize {
+        self.cache_ref.cache(self.id, buf, offset)
+    }
+
+    /// [CacheRef::cache_pages] for this blob.
+    pub(super) fn cache_pages<'a>(
+        &self,
+        pages: impl Iterator<Item = &'a [u8]>,
+        offset: u64,
+    ) -> usize {
+        self.cache_ref.cache_pages(self.id, pages, offset)
+    }
+}
+
+impl Drop for PageLease {
+    fn drop(&mut self) {
+        self.cache_ref.retire(self.id);
     }
 }
 
@@ -1210,7 +1438,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::{select, test_traced};
     use commonware_utils::{
-        NZU16, NZUsize,
+        NZU16, NZUsize, TestRng,
         channel::{
             mpsc::{UnboundedReceiver, unbounded_channel},
             oneshot,
@@ -1885,11 +2113,11 @@ mod tests {
             let blob = checksummed_blob(&recording, 40).await;
 
             // Fill a 20-page cache, whose probation queue holds only 2 pages, with pages 20..40.
-            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(20));
+            let lease = PageLease::new(CacheRef::new(PAGE_SIZE, NZUsize!(20)));
             for page in 20..40 {
                 let mut buf = [0u8; 1];
-                cache_ref
-                    .read_after_miss(&blob, 0, &mut buf, page * PAGE_SIZE_U64)
+                lease
+                    .read_after_miss(&blob, &mut buf, page * PAGE_SIZE_U64)
                     .await
                     .unwrap();
             }
@@ -1900,8 +2128,7 @@ mod tests {
             let size = 40 * PAGE_SIZE_U64;
             let view = View {
                 blob: &blob,
-                cache_ref: &cache_ref,
-                id: 0,
+                lease: &lease,
                 size,
                 tail_offset: size,
                 tail: Tail::Sealed(&[]),
@@ -1927,10 +2154,10 @@ mod tests {
 
             // Page 1 is resident in a 2-page cache. Caching the five other pages one item spans
             // evicts it, yet it is never read from the blob.
-            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
+            let lease = PageLease::new(CacheRef::new(PAGE_SIZE, NZUsize!(2)));
             let mut buf = [0u8; 1];
-            cache_ref
-                .read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64)
+            lease
+                .read_after_miss(&blob, &mut buf, PAGE_SIZE_U64)
                 .await
                 .unwrap();
             recordings.clear();
@@ -1938,8 +2165,7 @@ mod tests {
             let size = 6 * PAGE_SIZE_U64;
             let view = View {
                 blob: &blob,
-                cache_ref: &cache_ref,
-                id: 0,
+                lease: &lease,
                 size,
                 tail_offset: size,
                 tail: Tail::Sealed(&[]),
@@ -2187,24 +2413,22 @@ mod tests {
     }
 
     /// Read the first byte of each of `pages` (ascending) of `blob` (cache id 0) with one batched
-    /// read.
+    /// read, as a view reads the misses its cache probe leaves.
     async fn read_first_bytes<B: Blob>(
         blob: &Arc<B>,
         cache_ref: &CacheRef,
         pages: &[u64],
     ) -> Result<Vec<u8>, Error> {
-        let size = pages.last().map_or(0, |last| (last + 1) * PAGE_SIZE_U64);
-        let view = View {
-            blob,
-            cache_ref,
-            id: 0,
-            size,
-            tail_offset: size,
-            tail: Tail::Sealed(&[]),
-        };
-        let offsets: Vec<u64> = pages.iter().map(|page| page * PAGE_SIZE_U64).collect();
         let mut buf = vec![0u8; pages.len()];
-        view.read_many_into(&mut buf, &offsets, NZUsize!(1)).await?;
+        let mut ranges: Vec<_> = buf
+            .chunks_mut(1)
+            .zip(pages)
+            .map(|(byte, page)| (byte, page * PAGE_SIZE_U64))
+            .collect();
+        cache_ref.read_cached_many(0, &mut ranges);
+        if !ranges.is_empty() {
+            cache_ref.read_after_misses(blob, 0, ranges).await?;
+        }
         Ok(buf)
     }
 
@@ -3289,12 +3513,11 @@ mod tests {
             // Items straddling every page boundary of 40 pages, read through a 4-page cache
             // that evicts most pages before they are served.
             let blob = checksummed_blob(&context, 40).await;
-            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
+            let lease = PageLease::new(CacheRef::new(PAGE_SIZE, NZUsize!(4)));
             let size = 40 * PAGE_SIZE_U64;
             let view = View {
                 blob: &blob,
-                cache_ref: &cache_ref,
-                id: 0,
+                lease: &lease,
                 size,
                 tail_offset: size,
                 tail: Tail::Sealed(&[]),
@@ -3365,8 +3588,8 @@ mod tests {
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
             let cache_ref = CacheRef::new(NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
 
-            // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
-            // only).
+            // Create two pages worth of logical data without CRCs, since CacheRef::cache expects
+            // logical bytes only.
             let data = vec![1u8; MIN_PAGE_SIZE as usize * 2];
 
             // Cache pages at a high (but not max) aligned offset so we can verify both pages.
@@ -4016,6 +4239,220 @@ mod tests {
         assert!(ranges.is_empty());
         drop(ranges);
         assert_eq!(buf, vec![0x5A; page_size]);
+    }
+
+    impl CacheRef {
+        /// Whether page `page` of blob `blob_id` is cached.
+        pub(in super::super) fn is_cached(&self, blob_id: u64, page: u64) -> bool {
+            let page_size: u64 = self.page_size.widen();
+            let mut probe = vec![0u8; self.page_size.widen()];
+            self.read_cached(blob_id, &mut probe, page * page_size) == probe.len()
+        }
+
+        /// How many pages of retired blobs are still resident.
+        pub(in super::super) fn retired_pages(&self) -> usize {
+            let cache = self.cache.read();
+            cache
+                .retired
+                .iter()
+                .map(|&blob_id| cache.resident(blob_id))
+                .sum()
+        }
+    }
+
+    #[test]
+    fn test_cache_tracks_every_blob_id() {
+        // No blob id is reserved, so pages of the lowest and highest ids are cached and leave
+        // after their own blob is retired.
+        let page_size: usize = PAGE_SIZE.widen();
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
+        for blob_id in [0, u64::MAX] {
+            cache_ref.cache(blob_id, &vec![1; page_size], 0);
+            assert!(cache_ref.is_cached(blob_id, 0));
+        }
+        cache_ref.retire(0);
+        cache_ref.cache(1, &vec![1; page_size], 0);
+        assert!(!cache_ref.is_cached(0, 0) && cache_ref.is_cached(u64::MAX, 0));
+        cache_ref.retire(u64::MAX);
+        cache_ref.cache(1, &vec![1; page_size], PAGE_SIZE_U64);
+        assert!(!cache_ref.is_cached(u64::MAX, 0));
+    }
+
+    #[test]
+    fn test_dropping_last_lease_removes_no_pages() {
+        // Dropping a blob's lease retires the blob without removing a page.
+        let pages = 16;
+        let page_size: usize = PAGE_SIZE.widen();
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(pages));
+        let lease = PageLease::new(cache_ref.clone());
+        lease.cache(&vec![1; page_size * pages], 0);
+        assert_eq!(cache_ref.retired_pages(), 0);
+
+        drop(lease);
+        assert_eq!(cache_ref.retired_pages(), pages);
+        cache_ref.cache.read().check_residency();
+
+        // A blob with no resident page leaves nothing behind.
+        drop(PageLease::new(cache_ref.clone()));
+        assert_eq!(cache_ref.cache.read().retired.len(), 1);
+    }
+
+    #[test]
+    fn test_inserts_remove_retired_pages_before_taking_a_slot() {
+        // A retired blob and a live blob fill the cache.
+        let page_size: usize = PAGE_SIZE.widen();
+        let page = vec![1u8; page_size];
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+        let retired = PageLease::new(cache_ref.clone());
+        let live = PageLease::new(cache_ref.clone());
+        let (retired_id, live_id) = (retired.id(), live.id());
+        retired.cache(&vec![1; page_size * 12], 0);
+        live.cache(&vec![1; page_size * 4], 0);
+        drop(retired);
+        assert_eq!(cache_ref.retired_pages(), 12);
+
+        // Each page a new blob caches removes one retired page and takes a free slot, so the
+        // retired pages leave one per insert and no page of a leased blob is displaced.
+        let fresh = PageLease::new(cache_ref.clone());
+        assert_ne!(fresh.id(), retired_id);
+        for inserted in 1..=12u64 {
+            fresh.cache(&page, (inserted - 1) * PAGE_SIZE_U64);
+            assert_eq!(cache_ref.retired_pages(), 12 - inserted as usize);
+            assert!((0..inserted).all(|page| cache_ref.is_cached(fresh.id(), page)));
+            assert!((0..4).all(|page| cache_ref.is_cached(live_id, page)));
+            cache_ref.cache.read().check_residency();
+        }
+        assert!((0..12).all(|page| !cache_ref.is_cached(retired_id, page)));
+
+        // The next insert finds the retired blob without a page and forgets it.
+        assert_eq!(cache_ref.cache.read().retired.len(), 1);
+        live.cache(&page, 0);
+        assert!(cache_ref.cache.read().retired.is_empty());
+    }
+
+    #[test]
+    fn test_retired_blobs_are_reclaimed_oldest_first() {
+        // Two blobs retire in turn. Inserts remove the first blob's page, and the insert that
+        // finds the first blob empty goes on to remove a page of the second.
+        let page_size: usize = PAGE_SIZE.widen();
+        let page = vec![1u8; page_size];
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(8));
+        let first = PageLease::new(cache_ref.clone());
+        let second = PageLease::new(cache_ref.clone());
+        let (first_id, second_id) = (first.id(), second.id());
+        first.cache(&page, 0);
+        second.cache(&vec![1; page_size * 2], 0);
+        drop(first);
+        drop(second);
+        let resident = |blob_id| cache_ref.cache.read().resident(blob_id);
+
+        let fresh = PageLease::new(cache_ref.clone());
+        fresh.cache(&page, 0);
+        assert_eq!((resident(first_id), resident(second_id)), (0, 2));
+        fresh.cache(&page, PAGE_SIZE_U64);
+        assert_eq!((resident(first_id), resident(second_id)), (0, 1));
+        fresh.cache(&page, 2 * PAGE_SIZE_U64);
+        assert_eq!(cache_ref.retired_pages(), 0);
+        assert!((0..3).all(|page| cache_ref.is_cached(fresh.id(), page)));
+        cache_ref.cache.read().check_residency();
+    }
+
+    impl Cache {
+        /// Check that the residency chains mirror the cache. Each chain visits only live slots of
+        /// its blob and links each slot back to its predecessor. Every live slot is in exactly one
+        /// chain, and every free slot is unlinked.
+        fn check_residency(&self) {
+            let links = &self.residency.links;
+            let mut chained = vec![false; links.len()];
+            for (&blob_id, &head) in &self.residency.heads {
+                let mut prev = NONE;
+                let mut cursor = Some(Widen::widen(head));
+                while let Some(slot) = cursor {
+                    assert!(!chained[slot], "slot {slot} must be chained once");
+                    chained[slot] = true;
+                    assert!(
+                        matches!(self.cache.key_at(slot), Some(&(owner, _)) if owner == blob_id),
+                        "slot {slot} must hold blob {blob_id}"
+                    );
+                    assert_eq!(links[slot].prev, prev, "slot {slot} must link back");
+                    prev = u32::try_from(slot).unwrap();
+                    cursor = (links[slot].next != NONE).then(|| Widen::widen(links[slot].next));
+                }
+            }
+            for (slot, &link) in links.iter().enumerate() {
+                if self.cache.key_at(slot).is_some() {
+                    assert!(chained[slot], "live slot {slot} must be in a chain");
+                } else {
+                    assert_eq!(link, UNLINKED, "free slot {slot} must be unlinked");
+                }
+            }
+        }
+
+        /// How many of `blob_id`'s pages are resident.
+        fn resident(&self, blob_id: u64) -> usize {
+            (0..self.cache.capacity())
+                .filter_map(|slot| self.cache.key_at(slot))
+                .filter(|&&(owner, _)| owner == blob_id)
+                .count()
+        }
+    }
+
+    #[test]
+    fn test_residency_mirrors_cache_under_random_operations() {
+        // Random fills, hits, retirements, and clears drive Clock2Q+ through
+        // promotion, Ghost admission, and eviction at several small capacities, so pages displace
+        // each other within and across blobs. A
+        // retired blob is replaced by one with a fresh id, as a reopened blob is. The chains must
+        // mirror the cache after each operation, and a retired blob's pages only leave.
+        const BLOBS: usize = 3;
+        const PAGES: u64 = 12;
+        let page = vec![0u8; PAGE_SIZE.widen()];
+        for capacity in [1, 2, 3, 5, 8, 13] {
+            let mut rng = TestRng::new(Widen::widen(capacity));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(capacity));
+            let mut ids: Vec<u64> = (0..BLOBS).map(|_| cache_ref.next_id()).collect();
+            let mut retired: Vec<(u64, usize)> = Vec::new();
+            for _ in 0..2_000 {
+                let blob = rng.random_range(0..BLOBS);
+                let blob_id = ids[blob];
+                let page_num = rng.random_range(0..PAGES);
+                match rng.random_range(0..100) {
+                    0..45 => {
+                        cache_ref.cache(blob_id, &page, page_num * PAGE_SIZE_U64);
+                    }
+                    45..96 => {
+                        cache_ref.is_cached(blob_id, page_num);
+                    }
+                    96..99 => {
+                        cache_ref.retire(blob_id);
+                        retired.push((blob_id, capacity));
+                        ids[blob] = cache_ref.next_id();
+                    }
+                    _ => cache_ref.clear(),
+                }
+                let cache = cache_ref.cache.read();
+                cache.check_residency();
+                for (blob_id, resident) in &mut retired {
+                    let now = cache.resident(*blob_id);
+                    assert!(now <= *resident, "retired blob {blob_id} must not grow");
+                    *resident = now;
+                }
+            }
+
+            // As many inserts as the cache has slots remove every retired page, and one more
+            // forgets the retired blobs.
+            for page_num in 0..=Widen::widen(capacity) {
+                cache_ref.cache(ids[0], &page, (PAGES + page_num) * PAGE_SIZE_U64);
+            }
+            let cache = cache_ref.cache.read();
+            cache.check_residency();
+            assert!(cache.retired.is_empty());
+            assert!(
+                retired
+                    .iter()
+                    .all(|&(blob_id, _)| cache.resident(blob_id) == 0)
+            );
+        }
     }
 
     #[test_traced]
