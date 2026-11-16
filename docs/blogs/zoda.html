@@ -29,7 +29,7 @@ anything interesting with that fingerprint, like processing transactions
 or updating state, requires disseminating (a lot of) data." />
     <meta property="article:author" content="Lucas Meier" />
     <meta property="article:published_time" content="2025-11-04T00:00:00Z" />
-    <meta property="article:modified_time" content="2025-11-04T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-09-30T00:00:00Z" />
 
     <link rel="canonical" href="https://commonware.xyz/blogs/zoda" />
 
@@ -107,6 +107,9 @@ data." />
 Meier</a></div>
                         <div class="date">November 4th, 2025</div>
         </div>
+        <p><em>Update (9/30/26): ZODA is no longer provided by the
+        Commonware Library. Implementation links point to its last
+        version.</em></p>
         <p>You can come to consensus over a mere fingerprint of the
         block—a hash for example— but doing anything interesting with
         that fingerprint, like processing transactions or updating
@@ -126,7 +129,7 @@ Meier</a></div>
         requiring a trusted setup, and while being more performant, and
         having less data transmission overhead.</p>
         <p>In a future post we will cover lower-level details of <a
-        href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs">our
+        href="https://github.com/commonwarexyz/monorepo/blob/2747808cc1079fe9ce70586704fbc056076c129b/coding/src/zoda/mod.rs">our
         implementation</a>, like the field we use for Reed-Solomon
         coding, and the optimizations needed for fast fourier
         transforms, but this one will stick to an overview.</p>
@@ -234,7 +237,7 @@ Meier</a></div>
         class="math inline">d(X)</span>, whose coefficients spell out
         our message.</p>
         <p>We have an implementation of this scheme <a
-        href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon/mod.rs">here</a>.</p>
+        href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/reed_solomon.rs">here</a>.</p>
         <p>These details are not essential: what matters is that we take
         <span class="math inline">n</span> symbols, encode them into
         <span class="math inline">m</span>, such that any <span
@@ -569,7 +572,7 @@ Meier</a></div>
         the way for verifying arbitrary properties of the sharded data,
         which we’re excited about.</p>
         <p>Our initial implementation of this scheme can be found <a
-        href="https://github.com/commonwarexyz/monorepo/blob/main/coding/src/zoda.rs">in
+        href="https://github.com/commonwarexyz/monorepo/blob/2747808cc1079fe9ce70586704fbc056076c129b/coding/src/zoda/mod.rs">in
         the Commonware Library</a>.</p>
         <p>Looking to develop a better intuition for ZODA? Check out our
         <a

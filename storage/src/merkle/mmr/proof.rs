@@ -10,7 +10,7 @@ mod tests {
             Error, Family, Location, Position, StandardHasher as Standard, iterator::PeakIterator,
             mem::Mmr,
         },
-        proof::{Blueprint, nodes_required_for_multi_proof},
+        proof::{Blueprint, ElementPlan, multi_proof_positions},
     };
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 
@@ -40,7 +40,7 @@ mod tests {
             .range_proof(&hasher, Location::new(0)..mmr.leaves(), 0)
             .unwrap();
         let mut node_digests = proof
-            .verify_range_inclusion_and_extract_digests(&hasher, &elements, Location::new(0), &root)
+            .verify_range_inclusion_and_extract_digests(&hasher, Location::new(0), &elements, &root)
             .unwrap();
         assert_eq!(node_digests.len() as u64, mmr.size());
         node_digests.sort_by_key(|(pos, _)| *pos);
@@ -53,8 +53,8 @@ mod tests {
         assert!(matches!(
             proof.verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements,
                 Location::new(0),
+                &elements,
                 &wrong_root
             ),
             Err(Error::RootMismatch)
@@ -67,8 +67,8 @@ mod tests {
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -82,8 +82,8 @@ mod tests {
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -97,8 +97,8 @@ mod tests {
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -111,8 +111,8 @@ mod tests {
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -126,8 +126,8 @@ mod tests {
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
                 &hasher,
-                &elements[range.to_usize_range()],
                 range_start,
+                &elements[range.to_usize_range()],
                 &root,
             )
             .unwrap();
@@ -167,8 +167,7 @@ mod tests {
     #[test]
     fn test_max_location_multi_proof() {
         let max_loc = Family::MAX_LEAVES;
-        let result =
-            nodes_required_for_multi_proof(max_loc, 0, Bagging::ForwardFold, &[max_loc - 1]);
+        let result = multi_proof_positions(max_loc, &[max_loc - 1]);
         assert!(
             result.is_ok(),
             "Should be able to generate multi-proof for MAX_LEAVES"
@@ -176,8 +175,7 @@ mod tests {
 
         // MAX_LEAVES + 1 should be rejected.
         let invalid_loc = max_loc + 1;
-        let result_overflow =
-            nodes_required_for_multi_proof(invalid_loc, 0, Bagging::ForwardFold, &[max_loc]);
+        let result_overflow = multi_proof_positions(invalid_loc, &[max_loc]);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LEAVES in multi-proof"
@@ -237,9 +235,10 @@ mod tests {
         // Expected: 61 path siblings + 61 other peaks = 122 digests
         let leaves = Location::try_from(many_peaks_size).unwrap();
         let loc = Location::new(0);
-        let bp = Blueprint::new(leaves, 0, Bagging::ForwardFold, loc..loc + 1)
-            .expect("should compute blueprint for location 0");
-        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
+        let total_nodes = ElementPlan::new(leaves, loc)
+            .expect("should plan location 0")
+            .positions()
+            .len();
 
         assert_eq!(
             total_nodes, EXPECTED_WORST_CASE,
@@ -249,14 +248,10 @@ mod tests {
         // Test the rightmost leaf (in smallest tree of height 0, which is itself a peak)
         // Expected: 0 path siblings + 61 other peaks = 61 digests
         let last_leaf_loc = leaves - 1;
-        let bp = Blueprint::new(
-            leaves,
-            0,
-            Bagging::ForwardFold,
-            last_leaf_loc..last_leaf_loc + 1,
-        )
-        .expect("should compute blueprint for last leaf");
-        let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
+        let total_nodes = ElementPlan::new(leaves, last_leaf_loc)
+            .expect("should plan the last leaf")
+            .positions()
+            .len();
 
         let expected_last_leaf = NUM_PEAKS - 1;
         assert_eq!(
@@ -295,7 +290,7 @@ mod tests {
     /// verified against the extracted proof digests. A 3-leaf MMR with start_loc=1 has a pinned
     /// node at position 0 (L0) which is a sibling within the range peak, not a fold-prefix peak.
     #[test]
-    fn test_verify_proof_and_pinned_nodes_sibling_case() {
+    fn test_verify_range_inclusion_with_pinned_nodes_sibling_case() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Mmr::new();
         let elements: Vec<Digest> = (0..3).map(test_digest).collect();
@@ -320,17 +315,23 @@ mod tests {
 
         // Correct pinned nodes must verify.
         assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &pinned, &root),
+            proof.verify_range_inclusion_with_pinned_nodes(
+                &hasher,
+                start_loc,
+                &elements[1..],
+                &pinned,
+                &root
+            ),
             "valid pinned nodes should verify"
         );
 
         // Wrong pinned digest must fail.
         let bad_pinned = vec![test_digest(99)];
         assert!(
-            !proof.verify_proof_and_pinned_nodes(
+            !proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
-                &elements[1..],
                 start_loc,
+                &elements[1..],
                 &bad_pinned,
                 &root
             ),
@@ -340,10 +341,10 @@ mod tests {
         // Extra pinned node must fail.
         let extra_pinned = vec![pinned[0], test_digest(42)];
         assert!(
-            !proof.verify_proof_and_pinned_nodes(
+            !proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
-                &elements[1..],
                 start_loc,
+                &elements[1..],
                 &extra_pinned,
                 &root
             ),
@@ -352,14 +353,20 @@ mod tests {
 
         // Empty pinned nodes must fail (start_loc > 0 requires at least one).
         assert!(
-            !proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &[], &root),
+            !proof.verify_range_inclusion_with_pinned_nodes(
+                &hasher,
+                start_loc,
+                &elements[1..],
+                &[],
+                &root
+            ),
             "missing pinned nodes should fail"
         );
     }
 
-    /// Test verify_proof_and_pinned_nodes when pinned nodes ARE fold-prefix peaks.
+    /// Test verify_range_inclusion_with_pinned_nodes when pinned nodes ARE fold-prefix peaks.
     #[test]
-    fn test_verify_proof_and_pinned_nodes_fold_prefix_case() {
+    fn test_verify_range_inclusion_with_pinned_nodes_fold_prefix_case() {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Mmr::new();
         // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
@@ -384,16 +391,22 @@ mod tests {
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(
-            proof.verify_proof_and_pinned_nodes(&hasher, &elements[8..], start_loc, &pinned, &root),
+            proof.verify_range_inclusion_with_pinned_nodes(
+                &hasher,
+                start_loc,
+                &elements[8..],
+                &pinned,
+                &root
+            ),
             "valid fold-prefix pinned nodes should verify"
         );
 
         // Wrong digest must fail.
         assert!(
-            !proof.verify_proof_and_pinned_nodes(
+            !proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
-                &elements[8..],
                 start_loc,
+                &elements[8..],
                 &[test_digest(99)],
                 &root
             ),

@@ -2,6 +2,7 @@
 
 use crate::merkle::{Error, Family, Location, Position, mem::Mem};
 use commonware_cryptography::Digest;
+use commonware_utils::futures::try_join_all;
 use core::future::Future;
 
 /// An async trait for accessing Merkle node digests from storage.
@@ -76,7 +77,7 @@ pub trait Storage: Send + Sync {
             let nodes = Self::Family::nodes_to_pin(loc)
                 .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
                 .collect::<Vec<_>>();
-            futures::future::try_join_all(nodes).await
+            try_join_all(nodes).await
         }
     }
 }

@@ -1,10 +1,14 @@
-//! Hybrid futex/eventfd wake coordination for the io_uring loop.
+//! One worker's futex/eventfd wake source and mailbox publication sequence.
 //!
-//! This module implements the producer-to-worker mailbox wake protocol:
+//! [`Waker`] delivers signals to one worker. [`Idle`](super::idle::Idle)
+//! selects which pool worker to signal. See [`super::idle`] for the parking
+//! sequence.
+//!
+//! Mailbox producers and the worker use this wake protocol:
 //! - Producers call [`Waker::publish`] when enqueueing a new batch.
 //! - The loop calls [`Waker::park_idle`] when it is fully idle.
 //! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before
-//!   blocking in `submit_and_wait`.
+//!   blocking in the ring wait of `Driver::park`.
 //! - Producers wake only the currently armed wait target.
 //! - A dedicated "wake signalled" bit coalesces repeated wake attempts.
 //! - Producers complete requested signaling with [`Waker::wake`] after unlocking.
@@ -12,6 +16,10 @@
 //!
 //! Driver-owned permit waits use [`Waker::wake`] directly. Their readiness stays
 //! in the driver's acquisition queue and remains available after mailbox closure.
+//!
+//! A successful pool claim calls [`Waker::wake`] without publishing a mailbox
+//! message. An idle spin therefore checks [`Waker::signalled`] as well as the
+//! sequence, then clears an observed signal with [`Waker::consume_signal`].
 //!
 //! The packed atomic state combines:
 //! - bit 0: waiting on futex
@@ -54,7 +62,7 @@ pub const WAKE_USER_DATA: UserData = UserData::MAX;
 const STATE_BITS: u32 = 3;
 /// Bit used when the loop is sleeping on a futex.
 const WAITING_ON_FUTEX_BIT: u32 = 1;
-/// Bit used when the loop is blocked in `submit_and_wait` and wakeable via eventfd.
+/// Bit used when the loop is blocked in the ring wait and wakeable via eventfd.
 const WAITING_ON_EVENTFD_BIT: u32 = 1 << 1;
 /// Bit used once a wake has already been signalled for the current wait.
 const WAKE_SIGNALLED_BIT: u32 = 1 << 2;
@@ -67,7 +75,7 @@ const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
 
-/// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
+/// RAII guard returned by [`Waker::arm`] for a blocking ring wait.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
 /// wake from a producer completing its publication signal.
@@ -150,19 +158,22 @@ struct WakerInner {
     eventfd_counter: AtomicU64,
     /// Mutex pairing eventfd readiness checks with condvar parking.
     eventfd_readiness: Mutex<()>,
-    /// Condvar standing in for `submit_and_wait` waking on a wake CQE.
+    /// Condvar standing in for the ring wait returning on a wake CQE.
     eventfd_waiters: Condvar,
 }
 
-/// Internal hybrid futex/eventfd wake source for the io_uring loop.
+/// One worker's wake source, shared by its mailbox and driver.
 ///
 /// - Publish submissions from producers via [`Waker::publish`]
-/// - Complete publication signaling after unlocking via [`Waker::wake`]
+/// - Signal the worker after mailbox publication, a pool claim, or a driver
+///   permit notification via [`Waker::wake`]
 /// - Test whether published work is still pending via [`Waker::pending`]
 /// - Park in the fully-idle path via [`Waker::park_idle`]
-/// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
+/// - Arm a blocking ring wait via [`Waker::arm`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
+/// - Check for a latched wake during an idle spin and clear it via
+///   [`Waker::signalled`] and [`Waker::consume_signal`]
 ///
 /// This type intentionally separates:
 /// - sequence publication (`state` high bits)
@@ -230,8 +241,9 @@ impl Waker {
     /// Signal the current wait target, or latch a wake until the loop next arms.
     ///
     /// The first caller to set `WAKE_SIGNALLED_BIT` in the current epoch performs
-    /// the wake. Later callers do nothing until the loop disarms and clears it.
-    /// This coalesces delayed signals from previously consumed batches.
+    /// the wake. Later callers do nothing until the loop disarms and clears it,
+    /// or a spin consumes it. This coalesces delayed signals from previously
+    /// consumed batches.
     pub fn wake(&self) {
         // Claim one signal for the target observed by this atomic transition.
         let prev = self
@@ -283,6 +295,22 @@ impl Waker {
         waiting != 0 && (prev & WAKE_SIGNALLED_BIT) == 0
     }
 
+    /// Whether a wake has been signalled and not yet cleared by the end of a
+    /// wait or by [`Self::consume_signal`].
+    #[inline]
+    pub fn signalled(&self) -> bool {
+        self.inner.state.load(Ordering::Acquire) & WAKE_SIGNALLED_BIT != 0
+    }
+
+    /// Clear a signalled wake that a spin observed, so the next wait blocks
+    /// until a fresh one. A completed wait clears it with its wait state.
+    #[inline]
+    pub fn consume_signal(&self) {
+        self.inner
+            .state
+            .fetch_and(!WAKE_SIGNALLED_BIT, Ordering::Acquire);
+    }
+
     /// Return whether any published submissions are still pending relative to
     /// `processed_seq`, i.e. whether the published sequence is currently ahead
     /// of that drained sequence.
@@ -332,7 +360,7 @@ impl Waker {
         }
     }
 
-    /// Arm the blocking wake path used around `submit_and_wait`.
+    /// Arm the blocking wake path used around the ring wait.
     ///
     /// The returned guard automatically clears the current wait state on drop.
     /// Call [`ArmGuard::still_idle`] to decide whether the loop may block on
@@ -459,7 +487,7 @@ impl Waker {
     ///
     /// Keeping wait bits clear while actively running avoids redundant futex
     /// wakes and eventfd writes during bursts. This is done both after
-    /// `park_idle()` / `submit_and_wait` return and after a post-arm recheck
+    /// `park_idle()` or the ring wait returns and after a post-arm recheck
     /// decides not to block.
     #[inline]
     fn clear_wait(&self) {
@@ -470,7 +498,7 @@ impl Waker {
         self.inner.state.fetch_and(!STATE_MASK, Ordering::Acquire);
     }
 
-    /// Wake the loop while it is blocked in `submit_and_wait`.
+    /// Wake the loop while it is blocked in the ring wait.
     ///
     /// This writes to the internal `eventfd` monitored by the ring's multishot
     /// poll request. The resulting wake CQE causes the loop to leave its
@@ -514,7 +542,7 @@ impl Waker {
     ///
     /// Incrementing `eventfd_counter` preserves the durable readiness bit of a
     /// real eventfd, while notifying `eventfd_waiters` stands in for
-    /// `submit_and_wait` returning after the wake CQE becomes available.
+    /// the ring wait returning after the wake CQE becomes available.
     #[cfg(feature = "loom")]
     fn eventfd_wake(&self) {
         self.inner.eventfd_counter.fetch_add(1, Ordering::Release);
@@ -988,8 +1016,16 @@ pub mod tests {
                     Notifier::Publish => before.wrapping_add(1) & SUBMISSION_SEQ_MASK,
                 };
 
+                // Publish signals after it advances the sequence. The parker
+                // can see that change and clear its wait target first, and
+                // the late signal then latches, as publish documents.
+                let latched = match notifier {
+                    Notifier::Wake => 0,
+                    Notifier::Publish => state_bits(&waker) & WAKE_SIGNALLED_BIT,
+                };
+
                 assert_eq!(submitted_seq(&waker), expected, "{notifier:?}");
-                assert_eq!(state_bits(&waker), 0, "{notifier:?}");
+                assert_eq!(state_bits(&waker), latched, "{notifier:?}");
             }
         }
     }
@@ -1268,8 +1304,8 @@ mod loom_tests {
     //! loom-visible userspace models: the futex path uses a mutex and condvar to
     //! preserve the atomic compare-and-park property of `FUTEX_WAIT`, and the
     //! eventfd path uses a durable readiness counter plus a condvar to model
-    //! both persistent wake readiness and a blocked `submit_and_wait` returning
-    //! after a wake CQE.
+    //! both persistent wake readiness and a blocked ring wait returning after
+    //! a wake CQE.
     //!
     //! The tests keep schedules small while exercising the important races and
     //! invariants: publish versus arm-and-recheck, futex idle parking, eventfd
@@ -1325,7 +1361,7 @@ mod loom_tests {
 
     /// Wait until the modeled eventfd has durable readiness.
     ///
-    /// In production, `submit_and_wait` returns after the wake poll produces a
+    /// In production, the ring wait returns after the wake poll produces a
     /// CQE. In the loom model, `eventfd_wake()` increments `eventfd_counter` and
     /// notifies this condvar, so this helper represents only that blocking
     /// boundary.
@@ -1443,6 +1479,19 @@ mod loom_tests {
                 .collect()
         }
 
+        /// Return program `index` of the deterministic stream generated from `seed`.
+        ///
+        /// Each generated test case models one program, so a case regenerates
+        /// the stream up to its own program instead of sharing a generator.
+        fn generated_program(seed: u64, index: usize, len: usize) -> Vec<Self> {
+            let mut rng = TestRng::new(seed);
+            let mut program = Self::generate_program(&mut rng, len);
+            for _ in 0..index {
+                program = Self::generate_program(&mut rng, len);
+            }
+            program
+        }
+
         /// Execute one generated producer operation.
         fn execute(self, waker: &Waker, publishes: &AtomicU32) {
             match self {
@@ -1455,59 +1504,53 @@ mod loom_tests {
         }
     }
 
-    /// Explore generated producer programs alongside one modeled consumer.
-    fn generated_loop_programs(
-        cases: usize,
-        ops_per_program: usize,
+    /// Explore one generated producer program alongside one modeled consumer.
+    fn generated_loop_program(
         seed: u64,
+        index: usize,
+        ops_per_program: usize,
         simulate_loop_until: fn(&Waker, u32, u32) -> u32,
     ) {
-        let mut rng = TestRng::new(seed);
-        let programs = (0..cases)
-            .map(|_| ProducerOp::generate_program(&mut rng, ops_per_program))
-            .collect::<Vec<_>>();
+        let program = ProducerOp::generated_program(seed, index, ops_per_program);
+        let publish_count = program
+            .iter()
+            .filter(|op| matches!(op, ProducerOp::Publish))
+            .count() as u32;
 
-        for (iter, program) in programs.into_iter().enumerate() {
-            let publish_count = program
-                .iter()
-                .filter(|op| matches!(op, ProducerOp::Publish))
-                .count() as u32;
+        loom::model(move || {
+            let waker = Waker::new().unwrap();
+            let publishes = Arc::new(AtomicU32::new(0));
 
-            loom::model(move || {
-                let waker = Waker::new().unwrap();
-                let publishes = Arc::new(AtomicU32::new(0));
-
-                let producer = thread::spawn({
-                    let program = program.clone();
-                    let waker = waker.clone();
-                    let publishes = publishes.clone();
-                    move || {
-                        for &op in program.iter() {
-                            op.execute(&waker, &publishes);
-                        }
+            let producer = thread::spawn({
+                let program = program.clone();
+                let waker = waker.clone();
+                let publishes = publishes.clone();
+                move || {
+                    for &op in program.iter() {
+                        op.execute(&waker, &publishes);
                     }
-                });
-
-                let processed = simulate_loop_until(&waker, 0, publish_count);
-                producer.join().unwrap();
-
-                assert_eq!(
-                    processed, publish_count,
-                    "loop progress failed: iter={iter} program={program:?}",
-                );
-                assert_eq!(
-                    submitted_seq(&waker),
-                    publish_count,
-                    "publish conservation failed: iter={iter} program={program:?}",
-                );
-                assert_eq!(
-                    publishes.load(Ordering::Relaxed),
-                    publish_count,
-                    "producer accounting failed: iter={iter} program={program:?}",
-                );
-                finish_leftover_wake(&waker);
+                }
             });
-        }
+
+            let processed = simulate_loop_until(&waker, 0, publish_count);
+            producer.join().unwrap();
+
+            assert_eq!(
+                processed, publish_count,
+                "loop progress failed: seed={seed} index={index} program={program:?}",
+            );
+            assert_eq!(
+                submitted_seq(&waker),
+                publish_count,
+                "publish conservation failed: seed={seed} index={index} program={program:?}",
+            );
+            assert_eq!(
+                publishes.load(Ordering::Relaxed),
+                publish_count,
+                "producer accounting failed: seed={seed} index={index} program={program:?}",
+            );
+            finish_leftover_wake(&waker);
+        });
     }
 
     #[test]
@@ -2222,14 +2265,15 @@ mod loom_tests {
     }
 
     #[rstest]
-    #[case(8, 0)]
-    #[case(8, 1)]
-    #[case(8, 2)]
-    fn test_generated_producer_only_programs(#[case] cases: usize, #[case] seed: u64) {
-        // Generate deterministic producer-only programs before entering loom,
-        // then model each case with two concurrent producers. Each producer
-        // runs a short sequence of `publish_and_wake()` and out-of-band `wake()` calls
-        // without any loop thread consuming them.
+    fn test_generated_producer_only_programs(
+        #[values(0, 1, 2)] seed: u64,
+        #[values(0, 1, 2, 3, 4, 5, 6, 7)] index: usize,
+    ) {
+        // Generate a deterministic pair of producer-only programs before
+        // entering loom, then model the pair with two concurrent producers. Each
+        // producer runs a short sequence of `publish_and_wake()` and out-of-band
+        // `wake()` calls without any loop thread consuming them. Each case
+        // models one pair, so nextest can run the pairs in parallel.
         //
         // The invariant is producer-side conservation: every generated `Publish`
         // must be reflected in the submitted sequence exactly once, while
@@ -2239,66 +2283,63 @@ mod loom_tests {
         // may remain because there is intentionally no loop to consume it.
         const OPS_PER_PROGRAM: usize = 5;
 
-        let mut rng = TestRng::new(seed);
-        let programs = (0..cases)
-            .map(|_| {
-                [
-                    ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
-                    ProducerOp::generate_program(&mut rng, OPS_PER_PROGRAM),
-                ]
-            })
-            .collect::<Vec<_>>();
+        let programs = [
+            ProducerOp::generated_program(seed, 2 * index, OPS_PER_PROGRAM),
+            ProducerOp::generated_program(seed, 2 * index + 1, OPS_PER_PROGRAM),
+        ];
 
-        for (iter, programs) in programs.into_iter().enumerate() {
-            loom::model(move || {
-                let waker = Waker::new().unwrap();
-                let publishes = Arc::new(AtomicU32::new(0));
+        loom::model(move || {
+            let waker = Waker::new().unwrap();
+            let publishes = Arc::new(AtomicU32::new(0));
 
-                let handles = programs
-                    .iter()
-                    .map(|program| {
-                        let program = program.clone();
-                        let waker = waker.clone();
-                        let publishes = publishes.clone();
-                        thread::spawn(move || {
-                            for &op in program.iter() {
-                                op.execute(&waker, &publishes);
-                            }
-                        })
+            let handles = programs
+                .iter()
+                .map(|program| {
+                    let program = program.clone();
+                    let waker = waker.clone();
+                    let publishes = publishes.clone();
+                    thread::spawn(move || {
+                        for &op in program.iter() {
+                            op.execute(&waker, &publishes);
+                        }
                     })
-                    .collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
 
-                for handle in handles {
-                    handle.join().unwrap();
-                }
+            for handle in handles {
+                handle.join().unwrap();
+            }
 
-                let expected = publishes.load(Ordering::Relaxed);
-                let got = submitted_seq(&waker);
-                assert_eq!(
-                    got, expected,
-                    "publish conservation failed: iter={iter} programs={programs:?}",
-                );
-                assert_eq!(
-                    state_bits(&waker) & WAITING_MASK,
-                    0,
-                    "wait target remained armed: iter={iter} programs={programs:?}",
-                );
-                assert_eq!(
-                    eventfd_count(&waker),
-                    0,
-                    "eventfd readiness queued while unarmed: iter={iter} programs={programs:?}",
-                );
-            });
-        }
+            let expected = publishes.load(Ordering::Relaxed);
+            let got = submitted_seq(&waker);
+            assert_eq!(
+                got, expected,
+                "publish conservation failed: seed={seed} index={index} programs={programs:?}",
+            );
+            assert_eq!(
+                state_bits(&waker) & WAITING_MASK,
+                0,
+                "wait target remained armed: seed={seed} index={index} programs={programs:?}",
+            );
+            assert_eq!(
+                eventfd_count(&waker),
+                0,
+                "eventfd readiness queued while unarmed: seed={seed} index={index} programs={programs:?}",
+            );
+        });
     }
 
     #[rstest]
-    #[case(32, 10)]
-    #[case(32, 11)]
-    #[case(32, 12)]
-    fn test_generated_eventfd_loop_programs(#[case] cases: usize, #[case] seed: u64) {
-        // Generate deterministic single-producer programs before entering loom,
-        // then model each case with one producer and the eventfd loop simulator.
+    fn test_generated_eventfd_loop_programs(
+        #[values(10, 11, 12)] seed: u64,
+        #[values(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31
+        )]
+        index: usize,
+    ) {
+        // Generate a deterministic single-producer program before entering
+        // loom, then model it with one producer and the eventfd loop simulator.
         // The producer may interleave out-of-band `wake()` calls before,
         // between, or after its generated `publish_and_wake()` calls.
         //
@@ -2309,16 +2350,29 @@ mod loom_tests {
         // create sequence progress or disturb producer accounting.
         const OPS_PER_PROGRAM: usize = 3;
 
-        generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_eventfd_loop_until);
+        generated_loop_program(seed, index, OPS_PER_PROGRAM, simulate_eventfd_loop_until);
     }
 
     #[rstest]
-    #[case(6, 20)]
-    #[case(5, 21)]
-    #[case(5, 22)]
-    fn test_generated_futex_loop_programs(#[case] cases: usize, #[case] seed: u64) {
-        // Generate deterministic single-producer programs before entering loom,
-        // then model each case with one producer and the futex idle loop
+    #[case(20, 0)]
+    #[case(20, 1)]
+    #[case(20, 2)]
+    #[case(20, 3)]
+    #[case(20, 4)]
+    #[case(20, 5)]
+    #[case(21, 0)]
+    #[case(21, 1)]
+    #[case(21, 2)]
+    #[case(21, 3)]
+    #[case(21, 4)]
+    #[case(22, 0)]
+    #[case(22, 1)]
+    #[case(22, 2)]
+    #[case(22, 3)]
+    #[case(22, 4)]
+    fn test_generated_futex_loop_programs(#[case] seed: u64, #[case] index: usize) {
+        // Generate a deterministic single-producer program before entering
+        // loom, then model it with one producer and the futex idle loop
         // simulator. The producer may interleave out-of-band `wake()` calls
         // before, between, or after its generated `publish_and_wake()` calls.
         //
@@ -2328,6 +2382,6 @@ mod loom_tests {
         // futex wait without creating sequence progress.
         const OPS_PER_PROGRAM: usize = 3;
 
-        generated_loop_programs(cases, OPS_PER_PROGRAM, seed, simulate_futex_loop_until);
+        generated_loop_program(seed, index, OPS_PER_PROGRAM, simulate_futex_loop_until);
     }
 }

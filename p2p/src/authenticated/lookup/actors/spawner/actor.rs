@@ -11,7 +11,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::{Receiver, Sender};
@@ -19,33 +19,25 @@ use rand_core::CryptoRng;
 use std::num::NonZeroUsize;
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    Si: Sender,
-    St: Receiver,
-    C: PublicKey,
-> {
+pub struct Actor<E: Spawner + Clock + CryptoRng + Metrics, S: Sender, R: Receiver, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: NonZeroUsize,
     send_batch_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
+    max_message_size: u32,
 
-    receiver: mailbox::UnreliableReceiver<Message<Si, St, C>>,
+    receiver: mailbox::UnreliableReceiver<Message<S, R, C>>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    Si: Sender,
-    St: Receiver,
-    C: PublicKey,
-> Actor<E, Si, St, C>
+impl<E: Spawner + Clock + CryptoRng + Metrics, S: Sender, R: Receiver, C: PublicKey>
+    Actor<E, S, R, C>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<Si, St, C>>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message<S, R, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
         let rate_limited = context.family("messages_rate_limited", "messages rate limited");
@@ -57,6 +49,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 send_batch_size: cfg.send_batch_size,
                 ping_frequency: cfg.ping_frequency,
+                max_message_size: cfg.max_message_size,
                 receiver,
                 sent_messages,
                 received_messages,
@@ -101,6 +94,7 @@ impl<
                                 context,
                                 peer::Config {
                                     ping_frequency: self.ping_frequency,
+                                    max_message_size: self.max_message_size,
                                     sent_messages,
                                     received_messages,
                                     rate_limited,

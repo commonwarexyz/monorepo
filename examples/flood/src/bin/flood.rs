@@ -1,7 +1,7 @@
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
-    Signer as _,
+    ChaCha20Poly1305, Signer as _,
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
@@ -16,7 +16,10 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
@@ -130,16 +133,24 @@ fn main() {
 
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
-        let mut p2p_cfg = discovery::Config::local(
-            Handshake::new(signer.clone()),
+        let p2p_cfg = discovery::Config::local(
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: signer.clone(),
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),
             bootstrappers,
             max_peers_per_set,
             config.message_size,
+            config.mailbox_size,
         );
-        p2p_cfg.mailbox_size = config.mailbox_size;
 
         // Start p2p
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);

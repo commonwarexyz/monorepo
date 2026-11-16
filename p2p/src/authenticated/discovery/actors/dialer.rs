@@ -9,33 +9,34 @@ use crate::authenticated::{
         },
         metrics,
     },
+    stream::Config as StreamConfig,
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
-    StreamOf, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::{Config as StreamConfig, Handshake};
+use commonware_stream::Upgrader;
+use commonware_utils::SystemTimeExt;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::{sync::Arc, time::Duration};
 use tracing::debug;
 
 // Mailbox for the spawner actor.
-type SupervisorMailbox<E, H> = Mailbox<
+type SupervisorMailbox<E, U> = Mailbox<
     spawner::Message<
-        <H as Handshake>::Sender<StreamOf<E>, SinkOf<E>>,
-        <H as Handshake>::Receiver<StreamOf<E>, SinkOf<E>>,
-        <H as Handshake>::PublicKey,
+        <U as Upgrader>::Sender<StreamOf<E>, SinkOf<E>>,
+        <U as Upgrader>::Receiver<StreamOf<E>, SinkOf<E>>,
+        <U as Upgrader>::PublicKey,
     >,
 >;
 
 /// Configuration for the dialer actor.
-pub struct Config<H: Handshake> {
+pub struct Config<U: Upgrader> {
     /// Settings for authenticating and wrapping connections.
-    pub stream: Arc<StreamConfig<H>>,
+    pub stream: Arc<StreamConfig<U>>,
 
     /// Maximum duration of an outbound dial attempt.
     pub dial_timeout: Duration,
@@ -54,34 +55,30 @@ pub struct Config<H: Handshake> {
 }
 
 /// Actor responsible for dialing peers and establishing outgoing connections.
-pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, H: Handshake>
+pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, U: Upgrader>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
     context: ContextCell<E>,
 
-    // ---------- State ----------
     /// The list of peers to dial.
-    queue: Vec<H::PublicKey>,
+    queue: Vec<U::PublicKey>,
 
-    // ---------- Configuration ----------
-    stream: Arc<StreamConfig<H>>,
+    stream: Arc<StreamConfig<U>>,
     dial_timeout: Duration,
     dial_frequency: Duration,
     peer_connection_cooldown: Duration,
     allow_private_ips: bool,
 
-    // ---------- Metrics ----------
     /// The number of dial attempts made to each peer.
-    attempts: CounterFamily<metrics::Peer<H::PublicKey>>,
+    attempts: CounterFamily<metrics::Peer<U::PublicKey>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + Resolver + CryptoRng + Metrics, H: Handshake>
-    Actor<E, H>
+impl<E: Spawner + Clock + Network + Resolver + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
-    pub fn new(context: E, cfg: Config<H>) -> Self {
+    pub fn new(context: E, cfg: Config<U>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
         Self {
             context: ContextCell::new(context),
@@ -98,8 +95,8 @@ where
     /// Dial a peer for which we have a reservation.
     fn dial_peer(
         &mut self,
-        reservation: Reservation<H::PublicKey>,
-        supervisor: &mut SupervisorMailbox<E, H>,
+        reservation: Reservation<U::PublicKey>,
+        supervisor: &mut SupervisorMailbox<E, U>,
     ) {
         // Extract metadata from the reservation
         let Metadata::Dialer(peer, ingress) = reservation.metadata().clone() else {
@@ -167,16 +164,16 @@ where
     /// Start the dialer actor.
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
-        supervisor: SupervisorMailbox<E, H>,
+        tracker: tracker::Mailbox<U::PublicKey>,
+        supervisor: SupervisorMailbox<E, U>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
     }
 
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
-        mut supervisor: SupervisorMailbox<E, H>,
+        tracker: tracker::Mailbox<U::PublicKey>,
+        mut supervisor: SupervisorMailbox<E, U>,
     ) {
         let mut dial_deadline = self.context.current();
         select_loop! {
@@ -198,7 +195,9 @@ where
                 // Set next deadline.
                 dial_deadline = if self.queue.is_empty() {
                     let min = now + self.dial_frequency;
-                    let max = (now + self.peer_connection_cooldown).max(min);
+                    let max = now
+                        .saturating_add_ext(self.peer_connection_cooldown)
+                        .max(min);
                     next_query_at.unwrap_or(max).clamp(min, max)
                 } else {
                     now + self.dial_frequency
@@ -228,12 +227,16 @@ mod tests {
     };
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_stream::{encrypted::Handshake as StreamHandshake, utils::Timeout};
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+        utils::Timeout,
+    };
     use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -250,7 +253,7 @@ mod tests {
             let dial_timeout = Duration::from_millis(100);
 
             // The deterministic network completes the transport dial immediately, but retaining
-            // the listener without accepting leaves the encrypted handshake pending.
+            // the listener without accepting leaves the handshake pending.
             let _listener = context
                 .bind(address)
                 .await
@@ -259,7 +262,18 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            Cups::<_, ChaCha20Poly1305>::new(
+                                Sake {
+                                    signer,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                    version: sake::Version::V1,
+                                },
+                                cups::Version::V1,
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),
@@ -314,7 +328,18 @@ mod tests {
 
             let dialer_cfg = Config {
                 stream: Arc::new(StreamConfig::new(
-                    Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                    Timeout::new(
+                        Cups::<_, ChaCha20Poly1305>::new(
+                            Sake {
+                                signer,
+                                synchrony_bound: Duration::from_secs(5),
+                                max_handshake_age: Duration::from_secs(10),
+                                version: sake::Version::V1,
+                            },
+                            cups::Version::V1,
+                        ),
+                        Duration::from_secs(5),
+                    ),
                     b"test",
                     1024,
                 )),
@@ -404,7 +429,18 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            Cups::<_, ChaCha20Poly1305>::new(
+                                Sake {
+                                    signer,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                    version: sake::Version::V1,
+                                },
+                                cups::Version::V1,
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),
@@ -468,7 +504,18 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            Cups::<_, ChaCha20Poly1305>::new(
+                                Sake {
+                                    signer,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                    version: sake::Version::V1,
+                                },
+                                cups::Version::V1,
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),
@@ -551,7 +598,18 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(
+                            Cups::<_, ChaCha20Poly1305>::new(
+                                Sake {
+                                    signer,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                    version: sake::Version::V1,
+                                },
+                                cups::Version::V1,
+                            ),
+                            Duration::from_secs(5),
+                        ),
                         b"test",
                         1024,
                     )),
@@ -598,6 +656,77 @@ mod tests {
                 "expected 2 refreshes at dial_frequency without panicking, got {}",
                 refresh_count
             );
+        });
+    }
+
+    #[test]
+    fn test_dialer_does_not_panic_with_unbounded_peer_connection_cooldown() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(50);
+            let query_interval = Duration::from_millis(100);
+
+            let dialer = Actor::new(
+                context.child("dialer"),
+                Config {
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(
+                            Cups::<_, ChaCha20Poly1305>::new(
+                                Sake {
+                                    signer,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                    version: sake::Version::V1,
+                                },
+                                cups::Version::V1,
+                            ),
+                            Duration::from_secs(5),
+                        ),
+                        b"test",
+                        1024,
+                    )),
+                    dial_timeout: Duration::from_secs(15),
+                    dial_frequency,
+                    peer_connection_cooldown: Duration::MAX,
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
+            context
+                .child("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
+
+            // An effectively unbounded cooldown only caps the idle query interval, so the
+            // tracker's next query deadline must still drive refreshes.
+            let mut refresh_count = 0;
+            let deadline = context.current() + Duration::from_millis(350);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => {
+                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                            refresh_count += 1;
+                            let _ = responder.send(Dialable {
+                                peers: Vec::new(),
+                                next_query_at: Some(context.current() + query_interval),
+                            });
+                        }
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(refresh_count, 4);
         });
     }
 }

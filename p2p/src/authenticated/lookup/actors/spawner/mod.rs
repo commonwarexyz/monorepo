@@ -12,4 +12,6 @@ pub struct Config {
     pub send_batch_size: NonZeroUsize,
     /// The frequency at which a peer pings its peers to check connectivity.
     pub ping_frequency: std::time::Duration,
+    /// Maximum application payload size accepted from a peer.
+    pub max_message_size: u32,
 }

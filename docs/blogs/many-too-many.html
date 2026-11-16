@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Many Too Many</title>
+    <meta name="description" content="Taming SIMD backends with a new
+crate. Large algorithms can now be built up from modular components, and
+many operations are write-once, run-everywhere.">
+    <meta name="author" content="Lucas Meier">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/many-too-many" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/many-too-many.png" />
+    <meta property="og:title" content="Many Too Many" />
+    <meta property="og:description" content="Taming SIMD backends with a
+new crate. Large algorithms can now be built up from modular components,
+and many operations are write-once, run-everywhere." />
+    <meta property="article:author" content="Lucas Meier" />
+    <meta property="article:published_time" content="2026-10-16T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-10-16T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/many-too-many" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/many-too-many" />
+    <meta property="twitter:title" content="Many Too Many" />
+    <meta property="twitter:description" content="Taming SIMD backends
+with a new crate. Large algorithms can now be built up from modular
+components, and many operations are write-once, run-everywhere." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/many-too-many.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+        <meta property="twitter:creator" content="https://x.com/cronokirby" />
+    
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Many Too Many</h1>
+        <div class="meta">
+
+                        <div class="author">By <a href="https://x.com/cronokirby">Lucas
+Meier</a></div>
+                        <div class="date">October 16th, 2026</div>
+        </div>
+        <p>To get the most performance out of modern CPUs, you need to
+        use their SIMD instructions. CPU designers have realized that
+        while they can’t make the CPU run more instructions per second,
+        they can just have those instructions process more data at the
+        same time. If your code looks like doing the same thing on a lot
+        of data, you can use these instructions to speed up your code by
+        2, 4, or even 8 times!</p>
+        <p>We’ve taken advantage of these specialized instructions in
+        several of our performance-sensitive crates. For example, our <a
+        href="https://github.com/commonwarexyz/monorepo/tree/main/cryptography/curve25519">curve25519
+        crate</a> uses SIMD instructions to verify a batch of signatures
+        as fast as possible, we take advantage of these instructions to
+        accelerate SHA-256 and BLAKE3 hashing of multiple messages, and
+        we use them to accelerate Reed-Solomon coding, among other
+        possibilities.</p>
+        <p>Unfortunately, SIMD remains a bit of a dusty corner of Rust.
+        One nice thing about this language is that we can write normal,
+        readable code, and get something pretty fast. Sometimes it will
+        even generate SIMD for us, but really only in the simplest of
+        cases. The path offered to you on stable Rust to access SIMD
+        instructions is a bit crummy: you can either use unsafe
+        intrinsic functions, or write assembly yourself. <a
+        href="https://blog.rust-lang.org/2025/08/07/Rust-1.89.0/">Only
+        recently</a> did Rust add AVX-512 intrinsics, the state of the
+        art on x86-64, whereas Arm <a
+        href="https://github.com/rust-lang/rust/issues/145052">doesn’t
+        even have SVE2 intrinsics yet</a>, so you’re stuck with assembly
+        to get state of the art performance there.</p>
+        <p>While there are crates that provide abstractions to make
+        writing SIMD easier, including <a
+        href="https://doc.rust-lang.org/nightly/std/simd/index.html">a
+        prototype</a> in the nightly Rust standard library, we weren’t
+        satisfied with any of them, so our approach to using SIMD has
+        involved writing assembly or intrinsics for each platform we
+        cared about. In some cases, we literally had to write large
+        routines for each platform, while in other cases, we used a
+        trick inspired from the <a
+        href="https://docs.rs/fearless_simd"><code>fearless_simd</code></a>
+        crate, wherein we defined a trait with a few critical operations
+        that benefited from using SIMD, allowing the rest of the higher
+        level code to remain generic. Even so, we were having to choose
+        between the best performance, and more readable and reusable
+        code, and needing to spend a lot of CI time running tests for
+        many crates across many different platforms, because of all
+        these different code paths.</p>
+        <p>We were not happy with this situation, and so decided to take
+        our own stab at implementing SIMD abstractions. We’re quite
+        happy with it, and here are some reasons why:</p>
+        <ul>
+        <li>SIMD code no longer needs to involve intrinsics or
+        assembly.</li>
+        <li>SIMD code can use platform-specific instructions.</li>
+        <li>This allows matching or exceeding the performance of our
+        hand-written kernels.</li>
+        <li>Code outside of our SIMD crate does not need to be tested on
+        different platforms, despite being able to specialize to each of
+        the platforms. Your MacBook can test that your algorithm works
+        on your AVX-512 accelerated server, and vice versa.</li>
+        </ul>
+        <p>If these points are exciting to you, have a look at the <a
+        href="https://github.com/commonwarexyz/monorepo/pull/5204"><code>commonware-simd</code></a>
+        crate, it’s pretty small, well documented, and your agent can
+        probably give you a nice interactive explanation. For the
+        remaining readers, let’s walk through how our crate tackles the
+        pain points of writing SIMD in comparison to other crates.</p>
+        <h1 id="sharing-code">Sharing code</h1>
+        <p>Most SIMD code looks like scalar code, just operating over a
+        vector of things at once, rather than each item one-by-one.</p>
+        <p>The simplest way to try and take advantage of SIMD is to just
+        write scalar code, and hope for the best. Through LLVM, Rust has
+        a decent auto-vectorizer, and for simple loops, it can actually
+        transform them into SIMD code.</p>
+        <style>
+          .mtm-loop-autovec {
+            aspect-ratio: 1024 / 290;
+            margin: 28px 0 6px;
+          }
+
+          .mtm-loop-spill {
+            aspect-ratio: 1024 / 310;
+            margin: 28px 0 6px;
+          }
+
+          .mtm-loop-compose {
+            aspect-ratio: 1024 / 372;
+            margin: 28px 0 6px;
+          }
+
+          .mtm-loop-tree {
+            aspect-ratio: 1024 / 340;
+            margin: 28px 0 6px;
+          }
+
+          .mtm-loop-soup {
+            aspect-ratio: 1024 / 240;
+            margin: 28px 0 6px;
+          }
+        </style>
+        <noscript>
+        <style>
+            .mtm-loop {
+              aspect-ratio: auto;
+              border-left: 2px solid #d9251c;
+              color: gray;
+              margin: 28px 0 6px;
+              padding-left: 12px;
+            }
+          </style>
+        </noscript>
+        <div id="mtm-fig-autovec" class="mtm-loop mtm-loop-autovec"
+        role="img"
+        aria-label="Two rows of sixteen numbered cells represent the same loop, out[i] = a[i] + b[i], compiled two ways. In the top row, labeled Scalar loop, a cursor moves across one cell at a time and fills each cell red, so the instruction counter beside it climbs from 0 to 16. In the bottom row, labeled Auto-vectorized with four lanes, a cursor four cells wide fills four cells blue with each instruction on the same clock, so the row finishes after only 4 instructions and then waits while the scalar row keeps going. When both rows are full, the counters read 16 and 4, showing that the vectorized loop needs four times fewer instructions when LLVM manages to vectorize it.">
+        <p><noscript>This figure animates the same 16-element loop
+        processed one element per instruction, taking 16 instructions,
+        and four elements per instruction, taking 4.</noscript></p>
+        </div>
+        <script type="module" src="many-too-many.js"></script>
+        <div class="image-caption">
+        <p>Figure 1: The same loop, run one element per instruction and
+        four elements per instruction. The vectorized version needs four
+        times fewer instructions, when LLVM manages to produce it.</p>
+        </div>
+        <p>The problem with this is that it’s unreliable. It works ok
+        for simple loops, but you get no guarantee, and it doesn’t scale
+        well beyond that.</p>
+        <p>For anything else, you need to invoke intrinsics, or
+        assembly, and a variety of approaches have sprung up.</p>
+        <p>The first problem that pops up is how to represent SIMD
+        vectors. Different platforms have different vector sizes. In
+        normal Rust, a <code>u64</code> is a <code>u64</code>,
+        regardless of if you’re compiling to x86-64 or Arm. But now a
+        vector of <code>u64</code> might mean 2 of these on Arm’s NEON
+        instruction set, 4 on x86’s AVX, or even 8 on AVX-512.</p>
+        <p>One approach is to define types for each possible vector
+        width, and then to write code against them. If you use the
+        largest width, operations may require multiple instructions on
+        certain platforms, but this is, hopefully, not a huge
+        performance hindrance. Some crates using this include <a
+        href="https://docs.rs/wide"><code>wide</code></a>, and the <a
+        href="https://doc.rust-lang.org/nightly/std/simd/index.html"><code>std::simd</code></a>
+        prototype on nightly, which give you types like
+        <code>u64x4</code> or <code>Simd&lt;u64, 4&gt;</code> whose
+        width is fixed regardless of what platform you compile for. Our
+        curve25519 crate uses this approach actually: the operations
+        each platform need to implement are designed to always take in 8
+        field or group elements at once, matching the size that AVX-512
+        can support.</p>
+        <p>The downside, which we can see through this example, is that
+        things might perform best on a particular platform, and that you
+        might have to spill items onto the stack. In other words,
+        because you have a platform-independent Rust type representing
+        your vector, the generated code might involve a lot of glue
+        moving things from CPU registers holding SIMD vectors to Rust
+        types on the stack.</p>
+        <div id="mtm-fig-spill" class="mtm-loop mtm-loop-spill"
+        role="img"
+        aria-label="Two Rust values, a and b, each an array of eight 64-bit integers, sit side by side in a stack panel at the top. Below them is a panel of eight 128-bit registers, v0 through v7, each holding two lanes and each placed directly under the pair of stack elements it receives. For the line a = a + b, the four pairs of a drop one at a time into v0 to v3 and the four pairs of b drop into v4 to v7. Then each pair of registers flashes red under an add label, which is the only useful work. Then the four result pairs rise back into a on the stack. The registers are cleared, and the whole cycle repeats for the next line, a = a ^ b, with an xor. A counter in the bottom right tracks glue instructions against work instructions and ends at 24 glue to 8 work. The closing message says that most instructions just move data.">
+        <p><noscript>This figure animates a u64x8 value on the stack
+        being loaded into 128-bit registers two lanes at a time,
+        operated on, and stored back, for each of two operations. Most
+        of the instructions move data rather than
+        compute.</noscript></p>
+        </div>
+        <div class="image-caption">
+        <p>Figure 2: When a fixed-width <code>u64x8</code> value lives
+        on the stack and the hardware registers hold only two lanes,
+        each operation becomes a series of loads and stores around a few
+        useful instructions.</p>
+        </div>
+        <p>To get around this, you often need to make sure that the
+        operation that gets dispatched to different platform-specific
+        operations has a lot of work to do, to amortize this overhead.
+        This means wrapping more code than you might ideally want in
+        platform-specific code, increasing duplication. It also makes
+        code less composable. Because of this overhead, you can’t write
+        a bit of SIMD code for operation A, a bit of SIMD code for
+        operation B, and then compose them together: you need to fuse
+        the two to be able to keep things in registers. Contrast this
+        with normal Rust, where you can freely move things into small
+        sub-functions for readability, while being pretty confident that
+        the compiler can figure out how to inline functions, and keep
+        values in registers for the best performance across a big
+        operation.</p>
+        <div id="mtm-fig-compose" class="mtm-loop mtm-loop-compose"
+        role="img"
+        aria-label="Two pipelines compared on the same clock. In the top one, labeled composed across a platform boundary, a value leaves the registers, passes through operation A, is stored down to a stack box, loaded back up, passes through operation B, and only then returns to the registers; the store and load detour is drawn as a long dashed path. In the bottom one, labeled inlined, the value goes straight from A to B and back to the registers, arriving in little more than half the time. A time bar beside each title shows the difference.">
+        <p><noscript>This figure animates a value passing through
+        operations A and B. Composed across a platform boundary, it is
+        stored to the stack and loaded again between them. Inlined, it
+        goes straight from A to B in a register.</noscript></p>
+        </div>
+        <div class="image-caption">
+        <p>Figure 3: Composing two operations across a platform boundary
+        round-trips the intermediate value through the stack. Inlined,
+        it never leaves a register.</p>
+        </div>
+        <h1 id="not-that-kind-of-token">Not that kind of token</h1>
+        <p>When writing assembly, you might think that it’s a matter of
+        slapping a <code>#[cfg]</code> on a particular piece of code,
+        and writing one version for each architecture. Unfortunately,
+        SIMD throws another curveball at us, in that the instructions
+        available to us depend on the particular CPU, not just the
+        architecture. You thus need <em>runtime</em> feature detection
+        to know what instructions are available.</p>
+        <p>If you omit this check, you get a panic, which is not what we
+        want. Instead, we’d like to fall back to a different version of
+        the code if an instruction is missing. We also want to minimize
+        the number of checks we need, to avoid querying the CPU
+        repeatedly in a hot loop.</p>
+        <p>An approach to solve this is to tie SIMD operations to a
+        token.</p>
+        <p>Here’s what that looks like with our crate:</p>
+        <div class="sourceCode" id="cb1"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware_simd::</span>Simd<span class="op">;</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>inline<span class="at">(</span>always<span class="at">)]</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> mix<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span>(simd<span class="op">:</span> S<span class="op">,</span> a<span class="op">:</span> <span class="pp">S::</span>U64<span class="op">,</span> b<span class="op">:</span> <span class="pp">S::</span>U64<span class="op">,</span> c<span class="op">:</span> <span class="pp">S::</span>U64) <span class="op">-&gt;</span> <span class="pp">S::</span>U64 <span class="op">{</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    simd<span class="op">.</span>u64_add(simd<span class="op">.</span>u64_xor(a<span class="op">,</span> b)<span class="op">,</span> c)</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="co">// Assumes the slices have a length which is a multiple of S::U64_LANES.</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>inline<span class="at">(</span>always<span class="at">)]</span></span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> mix_slices<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span>(simd<span class="op">:</span> S<span class="op">,</span> a<span class="op">:</span> <span class="op">&amp;</span>[<span class="dt">u64</span>]<span class="op">,</span> b<span class="op">:</span> <span class="op">&amp;</span>[<span class="dt">u64</span>]<span class="op">,</span> c<span class="op">:</span> <span class="op">&amp;</span>[<span class="dt">u64</span>]<span class="op">,</span> out<span class="op">:</span> <span class="op">&amp;</span><span class="kw">mut</span> [<span class="dt">u64</span>]) <span class="op">{</span></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> (<span class="dv">0</span><span class="op">..</span>out<span class="op">.</span>len())<span class="op">.</span>step_by(<span class="pp">S::</span>U64_LANES) <span class="op">{</span></span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> a <span class="op">=</span> simd<span class="op">.</span>u64_load(<span class="op">&amp;</span>a[i<span class="op">..</span>])<span class="op">;</span></span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> b <span class="op">=</span> simd<span class="op">.</span>u64_load(<span class="op">&amp;</span>b[i<span class="op">..</span>])<span class="op">;</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> c <span class="op">=</span> simd<span class="op">.</span>u64_load(<span class="op">&amp;</span>c[i<span class="op">..</span>])<span class="op">;</span></span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>        simd<span class="op">.</span>u64_store(mix(simd<span class="op">,</span> a<span class="op">,</span> b<span class="op">,</span> c)<span class="op">,</span> <span class="op">&amp;</span><span class="kw">mut</span> out[i<span class="op">..</span>])<span class="op">;</span></span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p><code>S</code> is a backend, and <code>simd</code> is a token
+        for that backend. <code>S::U64</code> is whatever that backend
+        uses to hold <code>S::U64_LANES</code> values of type
+        <code>u64</code>: a 128-bit register holding 2 lanes on Arm, a
+        512-bit register holding 8 with AVX-512, or a plain
+        <code>[u64; 1]</code> for the scalar fallback. Every instruction
+        is a method on the token, so there’s no way to emit one without
+        having a token in hand, and the token is what makes this
+        safe.</p>
+        <p>The native tokens have a private field, so the only way to
+        get one is through a constructor like
+        <code>NativeX86V4C::new()</code>, which returns an
+        <code>Option</code>. That constructor runs the CPU feature
+        detection for the whole bundle of instructions that backend
+        needs, and refuses to hand you a token if any are missing. If
+        you hold a token, that’s proof that the CPU can run every
+        instruction the backend offers. Inside the crate, each safe
+        method calls an <code>unsafe</code> function annotated with
+        <code>#[target_feature]</code>, and the justification for that
+        <code>unsafe</code> block is always the same: the token exists,
+        so the feature does too.</p>
+        <p>This also solves the “don’t check in a hot loop” problem. The
+        check happens exactly once, when you obtain the token. After
+        that, the token is a zero-sized <code>Copy</code> type, so
+        passing it into every helper costs nothing, and none of those
+        helpers need to ask the CPU anything. And because the
+        constructor returns <code>None</code> rather than panicking, you
+        can fall back to a different backend when the fancy one isn’t
+        available, which is what <code>dispatch</code> does, as we’ll
+        see later.</p>
+        <h1 id="the-need-for-specialization">The need for
+        specialization</h1>
+        <p>You can get a lot of mileage out of just writing SIMD against
+        a common set of instructions that are widely available. One
+        advantage of an abstraction representing some notion of
+        “portable SIMD” rather than just fallback scalar code is that
+        your algorithm can generalize to new backends. One exciting
+        example is WASM, which could benefit from acceleration for free,
+        without having to expend more effort on our end to support
+        it.</p>
+        <p>In many cases, we care about going the extra mile to get the
+        best possible performance on a particular architecture, and we
+        get really excited to use the fanciest instructions to eke out
+        everything we can.</p>
+        <p>In that case, you need instructions that might not be
+        available everywhere.</p>
+        <p>Our approach is to pick a few targets that we care
+        particularly about being performant, and to model what
+        instructions they have that could be useful to us.</p>
+        <p>The alternative would be to track every subset and iteration
+        of every instruction set: SSE4, AVX2, AVX-512 with or without
+        each of its extensions, NEON with or without the crypto
+        extensions, and so on. Each combination is another path to
+        write, test, and benchmark, and most of them aren’t ones we’d
+        ever deploy on. So instead we picked “frontier” targets:
+        platforms that are widely available, and have all the gadgets we
+        might want. We settled on three:</p>
+        <ul>
+        <li><strong>x86v4c</strong>: x86-64-v4 (AVX-512) plus crypto
+        instructions: AVX-512IFMA, GFNI, and SHA-NI. This is the server
+        profile. AVX-512 gives us the widest vectors around, and the
+        extensions are each there for a reason: GFNI multiplies bytes in
+        GF(2^8) for Reed-Solomon coding, IFMA does 52-bit multiply-adds
+        for the field arithmetic in Curve25519, and SHA-NI does what it
+        says on the tin. Intel has shipped this bundle since Ice Lake in
+        2019, and AMD since Zen 4.</li>
+        <li><strong>NEON</strong>: AArch64 with NEON and SHA2. This is
+        every Apple silicon machine, which is to say, our laptops, and
+        also older Arm servers like Graviton 2 and 3. Vectors are only
+        128 bits wide, but the SHA2 extension gives us hardware SHA-256
+        rounds, which matters a lot for merkle trees.</li>
+        <li><strong>Armv9</strong>: AArch64 with NEON, SHA2, SVE, and
+        SVE2. This is the newer Arm server profile, like Graviton 4. It
+        has everything NEON has, plus SVE2 instructions like
+        <code>XAR</code> (xor then rotate), which is handy for hashing.
+        Apple silicon doesn’t have SVE2, which is why NEON is its own
+        profile rather than the fallback.</li>
+        </ul>
+        <p>Anything that isn’t one of these, like an x86-64 machine with
+        only AVX2, gets the scalar fallback. That’s a real cost, which
+        we’ll come back to in the caveats, but it’s the right trade for
+        the hardware we actually run on.</p>
+        <p>The names are a bit of a shorthand. “x86v4c” is the x86-64-v4
+        level, which is where AVX-512 comes in, plus a “c” for the
+        crypto instructions. What we’re really targeting is Ice Lake and
+        Zen 4 and later. Today the backend only checks for AVX-512F,
+        AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI, but we might use more
+        of what those generations have in the future.</p>
+        <p>Each profile is a trait extending <code>Simd</code>, which
+        adds the instructions we care about on that platform:</p>
+        <div class="sourceCode" id="cb2"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">trait</span> X86V4C<span class="op">:</span> Simd <span class="op">{</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">/// Two SHA-256 rounds (SHA256RNDS2).</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> sha256_rounds2(<span class="kw">self</span><span class="op">,</span> a<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32x4<span class="op">,</span> b<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32x4<span class="op">,</span> k<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32x4) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>U32x4<span class="op">;</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    <span class="co">/// Arbitrary three-input bitwise logic (VPTERNLOGD).</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> u32_ternary<span class="op">&lt;</span><span class="kw">const</span> MASK<span class="op">:</span> <span class="dt">i32</span><span class="op">&gt;</span>(<span class="kw">self</span><span class="op">,</span> a<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32<span class="op">,</span> b<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32<span class="op">,</span> c<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>U32<span class="op">;</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    <span class="co">/// Multiply-add on 52-bit limbs (VPMADD52LUQ).</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> u64_madd52lo(<span class="kw">self</span><span class="op">,</span> acc<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U64<span class="op">,</span> a<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U64<span class="op">,</span> b<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U64) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>U64<span class="op">;</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    <span class="co">// ...</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">trait</span> Neon<span class="op">:</span> Simd <span class="op">{</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    <span class="co">/// Four SHA-256 rounds (SHA256H).</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> sha256_h(<span class="kw">self</span><span class="op">,</span> abcd<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32x4<span class="op">,</span> efgh<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32x4<span class="op">,</span> wk<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32x4) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>U32x4<span class="op">;</span></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>    <span class="co">// ...</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">trait</span> ArmV9<span class="op">:</span> Neon <span class="op">{</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>    <span class="co">/// Xor, then rotate (SVE2 XAR).</span></span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> u32_xor_rotate_right<span class="op">&lt;</span><span class="kw">const</span> N<span class="op">:</span> <span class="dt">u32</span><span class="op">&gt;</span>(<span class="kw">self</span><span class="op">,</span> a<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32<span class="op">,</span> b<span class="op">:</span> <span class="dt">Self</span><span class="pp">::</span>U32) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>U32<span class="op">;</span></span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>The important thing to notice is that these traits add
+        operations, not types. <code>u32_ternary</code> takes and
+        returns <code>Self::U32</code>, the exact same register type
+        that <code>Simd::u32_xor</code> uses. (NEON does add a couple of
+        half-width helper types for its narrowing and widening
+        multiplies, but the registers you pass around between functions
+        are still the ones <code>Simd</code> defines.) A specialized
+        instruction is just another method on the same token, operating
+        on the same registers, so a function with <code>S: X86V4C</code>
+        can mix portable and x86v4c instructions freely, without
+        converting anything.</p>
+        <p>What we don’t want is to have to write an entire function
+        over again just because one small part needs
+        <code>S: Neon</code> or <code>S: X86V4C</code>. What we want is
+        a way to have a function using <code>S: Simd</code> know how to
+        invoke the right specialized branch as needed, letting us keep
+        the code composable.</p>
+        <p>We introduce the notion of an <code>Operation</code> for
+        this. An <code>Operation</code> knows how to execute itself
+        against each of the privileged targets we have:</p>
+        <div class="sourceCode" id="cb3"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">trait</span> Operation<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;:</span> <span class="bu">Sized</span> <span class="op">{</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">type</span> Output<span class="op">;</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> portable(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>Output<span class="op">;</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> x86_v4c(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>Output</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">where</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>        S<span class="op">:</span> X86V4C<span class="op">,</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    <span class="op">{</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>        <span class="kw">self</span><span class="op">.</span>portable(simd)</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> neon(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>Output</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>    <span class="kw">where</span></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>        S<span class="op">:</span> Neon<span class="op">,</span></span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>    <span class="op">{</span></span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>        <span class="kw">self</span><span class="op">.</span>portable(simd)</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> arm_v9(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>Output</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>    <span class="kw">where</span></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>        S<span class="op">:</span> ArmV9<span class="op">,</span></span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>    <span class="op">{</span></span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>        <span class="kw">self</span><span class="op">.</span>neon(simd)</span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>Only <code>portable</code> is required. Each specialized
+        method has a <code>where</code> clause narrowing <code>S</code>
+        to the matching profile, which is what lets its body call that
+        profile’s instructions. The defaults chain downwards: Armv9
+        falls back to NEON, and everything else falls back to portable,
+        so you only write the paths that actually have something to
+        gain. And because <code>S</code> is a parameter of the trait
+        rather than the method, an operation can capture registers of
+        type <code>S::U32</code> and return them too.</p>
+        <p>To write an <code>Operation</code>, the idiomatic way is to
+        return an opaque impl:</p>
+        <div class="sourceCode" id="cb4"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware_simd::</span><span class="op">{</span>ArmV9<span class="op">,</span> Operation<span class="op">,</span> Simd<span class="op">,</span> X86V4C<span class="op">};</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>inline<span class="at">(</span>always<span class="at">)]</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> xor_rotate<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span>(a<span class="op">:</span> <span class="pp">S::</span>U32<span class="op">,</span> b<span class="op">:</span> <span class="pp">S::</span>U32) <span class="op">-&gt;</span> <span class="kw">impl</span> Operation<span class="op">&lt;</span>S<span class="op">,</span> Output <span class="op">=</span> <span class="pp">S::</span>U32<span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">struct</span> XorRotate<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span>(<span class="pp">S::</span>U32<span class="op">,</span> <span class="pp">S::</span>U32)<span class="op">;</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">impl</span><span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span> Operation<span class="op">&lt;</span>S<span class="op">&gt;</span> <span class="cf">for</span> XorRotate<span class="op">&lt;</span>S<span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>        <span class="kw">type</span> Output <span class="op">=</span> <span class="pp">S::</span>U32<span class="op">;</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>        <span class="at">#[</span>inline<span class="at">(</span>always<span class="at">)]</span></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>        <span class="kw">fn</span> portable(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="pp">S::</span>U32 <span class="op">{</span></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>            simd<span class="op">.</span><span class="pp">u32_rotate_right::</span><span class="op">&lt;</span><span class="dv">7</span><span class="op">&gt;</span>(simd<span class="op">.</span>u32_xor(<span class="kw">self</span><span class="op">.</span><span class="dv">0</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">1</span>))</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>        <span class="at">#[</span>inline<span class="at">(</span>always<span class="at">)]</span></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a>        <span class="kw">fn</span> arm_v9(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="pp">S::</span>U32</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>        <span class="kw">where</span></span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a>            S<span class="op">:</span> ArmV9<span class="op">,</span></span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a>        <span class="op">{</span></span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a>            <span class="co">// SVE2 has a single instruction for this.</span></span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a>            simd<span class="op">.</span><span class="pp">u32_xor_rotate_right::</span><span class="op">&lt;</span><span class="dv">7</span><span class="op">&gt;</span>(<span class="kw">self</span><span class="op">.</span><span class="dv">0</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">1</span>)</span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a>    <span class="pp">XorRotate::</span><span class="op">&lt;</span>S<span class="op">&gt;</span>(a<span class="op">,</span> b)</span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>The struct holds the inputs, which here are registers
+        belonging to <code>S</code>, and the trait impl holds one body
+        per path. x86v4c and NEON don’t appear at all, and get the
+        portable version through the defaults.</p>
+        <p>Then, within a normal generic SIMD function, you can call
+        <code>execute</code> to invoke that operation:</p>
+        <div class="sourceCode" id="cb5"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>inline<span class="at">(</span>always<span class="at">)]</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> step<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span>(simd<span class="op">:</span> S<span class="op">,</span> state<span class="op">:</span> <span class="pp">S::</span>U32<span class="op">,</span> key<span class="op">:</span> <span class="pp">S::</span>U32) <span class="op">-&gt;</span> <span class="pp">S::</span>U32 <span class="op">{</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> mixed <span class="op">=</span> simd<span class="op">.</span>execute(<span class="pp">xor_rotate::</span><span class="op">&lt;</span>S<span class="op">&gt;</span>(state<span class="op">,</span> key))<span class="op">;</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    simd<span class="op">.</span>u32_add(mixed<span class="op">,</span> simd<span class="op">.</span>u32_splat(<span class="dv">0x9e37_79b9</span>))</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p><code>step</code> only knows that <code>S: Simd</code>, and
+        never mentions SVE2. But <code>execute</code> is a method on the
+        token, and each backend’s token knows which path is its own: an
+        Armv9 token runs <code>arm_v9</code>, an x86v4c token runs
+        <code>x86_v4c</code>, and so on. Once <code>step</code> is
+        monomorphized for a concrete backend, the right branch is
+        selected at compile time, and the register produced by the leaf
+        flows straight into the <code>u32_add</code> without touching
+        memory.</p>
+        <p>This lets you freely compose specialized and generic code
+        together, minimizing code duplication, and maximizing
+        modularity!</p>
+        <div id="mtm-fig-tree" class="mtm-loop mtm-loop-tree" role="img"
+        aria-label="A call tree for a generic hash function. The root node hash calls three generic nodes named load, compress, and finish, all drawn as black-outlined boxes. Load calls the leaf operation initialize, and compress calls the leaf operations rounds4 and schedule4. Each leaf is split into four colored stripes for its equivalent paths: gray for portable, blue for x86_v4c, green for neon, and red for arm_v9, as shown in a legend on the right. At first the label reads S = ?. Then the label becomes S = NativeX86V4C, and every leaf shrinks its other stripes away until it is solid blue. The leaves spring back to four colors and the same happens for S = NativeNeon, turning them green, S = NativeArmV9, turning them red, and S = EmulatedScalar, turning them gray. Throughout, the generic nodes and the edges between them never change.">
+        <p><noscript>This figure shows a call tree whose generic nodes
+        stay fixed while each leaf operation, drawn with one stripe per
+        backend path, resolves to a single color as S is set to each
+        backend in turn.</noscript></p>
+        </div>
+        <div class="image-caption">
+        <p>Figure 4: Generic code is shared across backends, and
+        choosing the backend <code>S</code> at compile time resolves
+        every multi-path leaf operation to a single implementation.</p>
+        </div>
+        <p>How do other libraries handle this? Looking around, we found
+        three patterns.</p>
+        <p>The first is to put the specialized operation into the shared
+        trait, and make every backend implement it somehow. <a
+        href="https://docs.rs/pulp"><code>pulp</code></a>’s
+        <code>Simd</code> trait and <a
+        href="https://github.com/BurntSushi/memchr"><code>memchr</code></a>’s
+        internal <code>Vector</code> trait work this way, and <a
+        href="https://github.com/google/highway">Highway</a> will
+        emulate an AES round on targets that lack AES instructions. This
+        works, but only the library can add a fast path, and every
+        backend has to implement every operation, even when that means a
+        slow emulation of an instruction that only makes sense on one
+        platform.</p>
+        <p>The second is to specialize whole kernels: write one SHA-NI
+        function, one Arm SHA2 function, and one portable function, then
+        pick between them at dispatch time. <a
+        href="https://github.com/RustCrypto/hashes">RustCrypto’s
+        <code>sha2</code></a> and <a
+        href="https://github.com/dalek-cryptography/curve25519-dalek"><code>curve25519-dalek</code></a>
+        do this, and so does <code>pulp</code> if you write against a
+        concrete token like <code>V4</code>. This gets you full
+        performance, at the cost of duplicating everything
+        <em>around</em> the specialized instruction, which is exactly
+        how we ended up with a pile of assembly files.</p>
+        <p>The third is to downcast inside generic code. <a
+        href="https://docs.rs/fearless_simd"><code>fearless_simd</code></a>
+        lets you ask a token for its level and get a concrete NEON token
+        back, <a
+        href="https://docs.rs/archmage"><code>archmage</code></a> has a
+        similar conversion, and Highway does it with
+        <code>#if HWY_TARGET</code>. This is the closest to what we do,
+        but the specialized branch ends up behind a
+        <code>cfg(target_arch)</code>, the fallback is a convention
+        rather than something the type system checks, and the
+        specialized branch can only run on a machine that has the
+        hardware.</p>
+        <p>With <code>Operation</code>, the specialized paths are
+        methods bounded by a profile trait, over the same register
+        types: there’s no conversion, no <code>cfg</code>, the fallback
+        is type-checked, and, as we’ll see next, every path runs under
+        emulation.</p>
+        <h1 id="checking-specialized-paths">Checking specialized
+        paths</h1>
+        <p>As soon as you introduce different algorithms for different
+        backends, you need to make sure that they do the same thing
+        regardless of the backend. Previously our approach involved
+        writing a scalar backend, and then running tests on every
+        platform to ensure that the native code on that platform matched
+        the scalar backend.</p>
+        <p>The SIMD crate instead lets you check that your algorithm is
+        correct on <em>any</em> platform, regardless of which platform
+        you run your CI on. It does this by implementing emulated
+        backends for each privileged target, that can run anywhere.</p>
+        <p>Alongside <code>NativeX86V4C</code>, there’s
+        <code>EmulatedX86V4C</code>, which implements the same
+        <code>X86V4C</code> trait with plain arrays and ordinary integer
+        arithmetic. It has the same 16 <code>u32</code> lanes, and it
+        runs the same <code>x86_v4c</code> path of every operation, so
+        you can run your AVX-512 algorithm, specialized branches and
+        all, on a MacBook. There’s an <code>EmulatedNeon</code>, an
+        <code>EmulatedArmV9</code>, and an <code>EmulatedScalar</code>
+        with one lane per vector.</p>
+        <p><code>check_consistent</code> takes a function producing an
+        operation, and runs it on every emulated backend, asserting that
+        they agree with the scalar result. Returning to our
+        <code>xor_rotate</code> example, here’s an operation which mixes
+        a whole buffer:</p>
+        <div class="sourceCode" id="cb6"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware_simd::</span><span class="op">{</span>Operation<span class="op">,</span> Simd<span class="op">};</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> Mix <span class="op">{</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    state<span class="op">:</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">u32</span><span class="op">&gt;,</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    key<span class="op">:</span> <span class="dt">u32</span><span class="op">,</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a><span class="kw">impl</span><span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span> Operation<span class="op">&lt;</span>S<span class="op">&gt;</span> <span class="cf">for</span> Mix <span class="op">{</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">type</span> Output <span class="op">=</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">u32</span><span class="op">&gt;;</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> portable(<span class="kw">mut</span> <span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">u32</span><span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>        simd<span class="op">.</span>execute(<span class="at">#[</span>inline<span class="at">(</span>always<span class="at">)]</span> <span class="op">|</span>simd<span class="op">:</span> S<span class="op">|</span> <span class="op">{</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> key <span class="op">=</span> simd<span class="op">.</span>u32_splat(<span class="kw">self</span><span class="op">.</span>key)<span class="op">;</span></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>            <span class="co">// (Handling the remainder is left out for brevity.)</span></span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> chunk <span class="kw">in</span> <span class="kw">self</span><span class="op">.</span>state<span class="op">.</span>chunks_exact_mut(<span class="pp">S::</span>U32_LANES) <span class="op">{</span></span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>                <span class="kw">let</span> value <span class="op">=</span> step(simd<span class="op">,</span> simd<span class="op">.</span>u32_load(chunk)<span class="op">,</span> key)<span class="op">;</span></span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a>                simd<span class="op">.</span>u32_store(value<span class="op">,</span> chunk)<span class="op">;</span></span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>            <span class="op">}</span></span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span>)<span class="op">;</span></span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a>        <span class="kw">self</span><span class="op">.</span>state</span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>Notice that <code>Mix</code> only implements
+        <code>portable</code>. It doesn’t need specialized paths of its
+        own, because the specialization happens in
+        <code>xor_rotate</code>, which <code>step</code> calls. Testing
+        it is a one-liner inside a fuzz loop:</p>
+        <div class="sourceCode" id="cb7"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware_invariants::</span>minifuzz<span class="op">;</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware_simd::</span><span class="op">{</span>check_consistent<span class="op">,</span> test_dispatch<span class="op">};</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>test<span class="at">]</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> mix_is_consistent() <span class="op">{</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>    <span class="pp">minifuzz::</span>test(<span class="op">|</span>u<span class="op">|</span> <span class="op">{</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> state<span class="op">:</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">u32</span><span class="op">&gt;</span> <span class="op">=</span> u<span class="op">.</span>arbitrary()<span class="op">?;</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> key<span class="op">:</span> <span class="dt">u32</span> <span class="op">=</span> u<span class="op">.</span>arbitrary()<span class="op">?;</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>        check_consistent(<span class="op">||</span> Mix <span class="op">{</span> state<span class="op">:</span> state<span class="op">.</span>clone()<span class="op">,</span> key <span class="op">}</span>)<span class="op">;</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>        <span class="co">// reference_mix is a plain scalar implementation.</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>        <span class="pp">assert_eq!</span>(test_dispatch(Mix <span class="op">{</span> state<span class="op">:</span> state<span class="op">.</span>clone()<span class="op">,</span> key <span class="op">}</span>)<span class="op">,</span> reference_mix(<span class="op">&amp;</span>state<span class="op">,</span> key))<span class="op">;</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>        <span class="cn">Ok</span>(())</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span>)<span class="op">;</span></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>The factory closure is called once per backend, since
+        executing an operation consumes it. This single test exercises
+        1-, 4-, and 16-lane versions of the loop, along with the SVE2
+        <code>XAR</code> branch, none of which require the corresponding
+        hardware. The second assertion uses <code>test_dispatch</code>,
+        which always runs the scalar backend, to compare against an
+        independent reference. That matters because agreement between
+        backends only tells you that the paths match each other, not
+        that any of them are right.</p>
+        <p>Of course, the emulated backends might be buggy. This is why
+        we fuzz them against the real platforms. These fuzz tests need
+        to run on each platform we provide, but only these tests need to
+        do so: other crates that use SIMD can bootstrap off of these
+        results to just use the emulated backends.</p>
+        <h1 id="dispatch">Dispatch</h1>
+        <p>Through this walkthrough, we’ve seen how to write and test
+        the consistency of operations, but not how to actually run them
+        to get a result. That’s what <code>dispatch</code> is for.
+        <code>Mix</code> from above is already in the right shape, so
+        running it on whatever the current CPU supports is just:</p>
+        <div class="sourceCode" id="cb8"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">commonware_simd::</span>dispatch<span class="op">;</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> mix(state<span class="op">:</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">u32</span><span class="op">&gt;,</span> key<span class="op">:</span> <span class="dt">u32</span>) <span class="op">-&gt;</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">u32</span><span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    dispatch(Mix <span class="op">{</span> state<span class="op">,</span> key <span class="op">}</span>)</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>On x86-64, <code>dispatch</code> tries
+        <code>NativeX86V4C::new()</code>. On AArch64, it tries
+        <code>NativeArmV9::new()</code>, then
+        <code>NativeNeon::new()</code>. If none of these produce a
+        token, it falls back to <code>EmulatedScalar</code>. Whichever
+        token it gets, it calls <code>execute</code> on it, and from
+        there on the backend is baked into the type <code>S</code>, so
+        every nested <code>execute</code>, including the one that picks
+        the <code>arm_v9</code> branch of <code>xor_rotate</code>, is
+        resolved at compile time. The feature detection happens once per
+        call to <code>dispatch</code>, so you call it once around the
+        whole computation rather than inside a loop.</p>
+        <p>The signature of <code>dispatch</code> requires the operation
+        to implement <code>Operation</code> for every candidate backend,
+        all with the same <code>Output</code>. This is why
+        <code>Mix</code> is a struct with a blanket
+        <code>impl&lt;S: Simd&gt;</code>: a closure can’t be generic
+        over <code>S</code>. It’s also why <code>Mix</code> returns a
+        <code>Vec&lt;u32&gt;</code> rather than a register. Different
+        backends have different register types, so backend-specific
+        values are normalized at this boundary, and only at this
+        boundary.</p>
+        <p>There’s one more thing <code>execute</code> does on a native
+        backend, which deserves mentioning, since it’s the reason for
+        all of the <code>#[inline(always)]</code> annotations. Rust
+        needs a function to be marked with
+        <code>#[target_feature]</code> for LLVM to emit AVX-512
+        instructions inside of it, and the token on its own doesn’t
+        grant that to functions you write. So the native
+        <code>execute</code> is a trampoline:</p>
+        <div class="sourceCode" id="cb9"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>inline<span class="at">]</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>target_feature<span class="at">(</span>enable <span class="op">=</span> <span class="st">&quot;avx512f,avx512bw,gfni,avx512ifma,sha&quot;</span><span class="at">)]</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a><span class="kw">unsafe</span> <span class="kw">fn</span> execute_x86_v4c<span class="op">&lt;</span>O<span class="op">:</span> Operation<span class="op">&lt;</span><span class="dt">Self</span><span class="op">&gt;&gt;</span>(<span class="kw">self</span><span class="op">,</span> operation<span class="op">:</span> O) <span class="op">-&gt;</span> <span class="pp">O::</span>Output <span class="op">{</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    operation<span class="op">.</span>x86_v4c(<span class="kw">self</span>)</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>Everything inlined into this function gets compiled with
+        those features enabled, which is what you want. Anything that
+        <em>doesn’t</em> get inlined is compiled without them, and
+        becomes a function call per instruction, which is very much not
+        what you want. Hence the rule: enter a kernel through
+        <code>execute</code>, and mark the kernel body and its hot
+        helpers <code>#[inline(always)]</code>. A nested
+        <code>execute</code> costs nothing, because its trampoline
+        inlines into a caller that already has the features.</p>
+        <p>One nice feature of having the <code>Simd</code> trait
+        contain generic types is that when these functions are actually
+        monomorphized into a concrete backend, all the vector types
+        become intrinsic types corresponding to registers.</p>
+        <p>Thus, you can write a large kernel composed of small modular
+        parts, but then still have a coherent soup of registers that
+        LLVM is free to rearrange and optimize as needed:</p>
+        <div id="mtm-fig-soup" class="mtm-loop mtm-loop-soup" role="img"
+        aria-label="Four small gray boxes labeled load, rounds4, schedule4, and add_state sit side by side. Each holds a few colored instruction bars: blue for the left message, green for the right message, and gray for a shared constant. Each box also carries the generic vector type S::U32x4. That label fades to __m128i to show monomorphization into x86v4c registers. The four boxes then slide together, their names fade, and they merge into one wide box titled hash::&lt;NativeX86V4C&gt;, noted as one function with every value in a register. The bars still sit in source order, grouped by helper. Finally the bars lift into separate lanes and move sideways. The two gray constants move to the front, and the blue and green bars settle into one row that alternates blue and green. This shows LLVM interleaving the two independent chains.">
+        <p><noscript>This figure shows four small generic helpers
+        monomorphizing to a concrete backend, inlining into one
+        function, and having their instructions interleaved by
+        LLVM.</noscript></p>
+        </div>
+        <div class="image-caption">
+        <p>Figure 5: Generic helpers written against
+        <code>S::U32x4</code> monomorphize to <code>__m128i</code>,
+        inline into a single <code>hash::&lt;NativeX86V4C&gt;</code>
+        function, and become one pool of registers that LLVM reorders to
+        interleave the two independent message chains.</p>
+        </div>
+        <h1 id="example-sha2">Example: SHA2</h1>
+        <p>Our first real consumer is SHA-256. We hash a lot of merkle
+        tree nodes, and to do that quickly we had hand-written assembly
+        for interleaving two independent compressions on both x86-64
+        (SHA-NI) and AArch64 (SHA2), plus a 16-lane AVX-512 kernel for
+        hashing batches of equal-length messages. <a
+        href="https://github.com/commonwarexyz/monorepo/pull/5203">The
+        migration to <code>commonware-simd</code></a> replaces all of
+        that with one generic implementation.</p>
+        <p>The nicest part is how small the specialized bits become. The
+        entire platform-specific surface of the pair hashing kernel is
+        two leaves. Here’s the one computing four rounds, for both
+        messages at once:</p>
+        <div class="sourceCode" id="cb10"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="kw">fn</span> rounds4<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span>(</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    state<span class="op">:</span> State<span class="op">&lt;</span>S<span class="op">&gt;,</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>    left<span class="op">:</span> <span class="pp">S::</span>U32x4<span class="op">,</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    right<span class="op">:</span> <span class="pp">S::</span>U32x4<span class="op">,</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> <span class="kw">impl</span> Operation<span class="op">&lt;</span>S<span class="op">,</span> Output <span class="op">=</span> State<span class="op">&lt;</span>S<span class="op">&gt;&gt;</span> <span class="op">{</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">struct</span> Rounds<span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span>(State<span class="op">&lt;</span>S<span class="op">&gt;,</span> <span class="pp">S::</span>U32x4<span class="op">,</span> <span class="pp">S::</span>U32x4)<span class="op">;</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>    <span class="kw">impl</span><span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span> Operation<span class="op">&lt;</span>S<span class="op">&gt;</span> <span class="cf">for</span> Rounds<span class="op">&lt;</span>S<span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>        <span class="kw">type</span> Output <span class="op">=</span> State<span class="op">&lt;</span>S<span class="op">&gt;;</span></span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a>        <span class="kw">fn</span> portable(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>Output <span class="op">{</span></span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a>            <span class="co">// Extract the lanes, and do the rounds in scalar code.</span></span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-15"><a href="#cb10-15" aria-hidden="true" tabindex="-1"></a>        <span class="kw">fn</span> x86_v4c(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>Output</span>
+<span id="cb10-16"><a href="#cb10-16" aria-hidden="true" tabindex="-1"></a>        <span class="kw">where</span></span>
+<span id="cb10-17"><a href="#cb10-17" aria-hidden="true" tabindex="-1"></a>            S<span class="op">:</span> X86V4C<span class="op">,</span></span>
+<span id="cb10-18"><a href="#cb10-18" aria-hidden="true" tabindex="-1"></a>        <span class="op">{</span></span>
+<span id="cb10-19"><a href="#cb10-19" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> (a<span class="op">,</span> b<span class="op">,</span> c<span class="op">,</span> d) <span class="op">=</span> <span class="kw">self</span><span class="op">.</span><span class="dv">0</span><span class="op">;</span></span>
+<span id="cb10-20"><a href="#cb10-20" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> b <span class="op">=</span> simd<span class="op">.</span>sha256_rounds2(b<span class="op">,</span> a<span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">1</span>)<span class="op">;</span></span>
+<span id="cb10-21"><a href="#cb10-21" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> d <span class="op">=</span> simd<span class="op">.</span>sha256_rounds2(d<span class="op">,</span> c<span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">2</span>)<span class="op">;</span></span>
+<span id="cb10-22"><a href="#cb10-22" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> a <span class="op">=</span> simd<span class="op">.</span>sha256_rounds2(a<span class="op">,</span> b<span class="op">,</span> simd<span class="op">.</span><span class="pp">u32x4_shuffle::</span><span class="op">&lt;</span><span class="dv">0xee</span><span class="op">&gt;</span>(<span class="kw">self</span><span class="op">.</span><span class="dv">1</span>))<span class="op">;</span></span>
+<span id="cb10-23"><a href="#cb10-23" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> c <span class="op">=</span> simd<span class="op">.</span>sha256_rounds2(c<span class="op">,</span> d<span class="op">,</span> simd<span class="op">.</span><span class="pp">u32x4_shuffle::</span><span class="op">&lt;</span><span class="dv">0xee</span><span class="op">&gt;</span>(<span class="kw">self</span><span class="op">.</span><span class="dv">2</span>))<span class="op">;</span></span>
+<span id="cb10-24"><a href="#cb10-24" aria-hidden="true" tabindex="-1"></a>            (a<span class="op">,</span> b<span class="op">,</span> c<span class="op">,</span> d)</span>
+<span id="cb10-25"><a href="#cb10-25" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb10-26"><a href="#cb10-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-27"><a href="#cb10-27" aria-hidden="true" tabindex="-1"></a>        <span class="kw">fn</span> neon(<span class="kw">self</span><span class="op">,</span> simd<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">Self</span><span class="pp">::</span>Output</span>
+<span id="cb10-28"><a href="#cb10-28" aria-hidden="true" tabindex="-1"></a>        <span class="kw">where</span></span>
+<span id="cb10-29"><a href="#cb10-29" aria-hidden="true" tabindex="-1"></a>            S<span class="op">:</span> Neon<span class="op">,</span></span>
+<span id="cb10-30"><a href="#cb10-30" aria-hidden="true" tabindex="-1"></a>        <span class="op">{</span></span>
+<span id="cb10-31"><a href="#cb10-31" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> (a<span class="op">,</span> b<span class="op">,</span> c<span class="op">,</span> d) <span class="op">=</span> <span class="kw">self</span><span class="op">.</span><span class="dv">0</span><span class="op">;</span></span>
+<span id="cb10-32"><a href="#cb10-32" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> next_a <span class="op">=</span> simd<span class="op">.</span>sha256_h(a<span class="op">,</span> b<span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">1</span>)<span class="op">;</span></span>
+<span id="cb10-33"><a href="#cb10-33" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> next_c <span class="op">=</span> simd<span class="op">.</span>sha256_h(c<span class="op">,</span> d<span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">2</span>)<span class="op">;</span></span>
+<span id="cb10-34"><a href="#cb10-34" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> b <span class="op">=</span> simd<span class="op">.</span>sha256_h2(b<span class="op">,</span> a<span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">1</span>)<span class="op">;</span></span>
+<span id="cb10-35"><a href="#cb10-35" aria-hidden="true" tabindex="-1"></a>            <span class="kw">let</span> d <span class="op">=</span> simd<span class="op">.</span>sha256_h2(d<span class="op">,</span> c<span class="op">,</span> <span class="kw">self</span><span class="op">.</span><span class="dv">2</span>)<span class="op">;</span></span>
+<span id="cb10-36"><a href="#cb10-36" aria-hidden="true" tabindex="-1"></a>            (next_a<span class="op">,</span> b<span class="op">,</span> next_c<span class="op">,</span> d)</span>
+<span id="cb10-37"><a href="#cb10-37" aria-hidden="true" tabindex="-1"></a>        <span class="op">}</span></span>
+<span id="cb10-38"><a href="#cb10-38" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb10-39"><a href="#cb10-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-40"><a href="#cb10-40" aria-hidden="true" tabindex="-1"></a>    <span class="pp">Rounds::</span><span class="op">&lt;</span>S<span class="op">&gt;</span>(state<span class="op">,</span> left<span class="op">,</span> right)</span>
+<span id="cb10-41"><a href="#cb10-41" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <p>The other leaf is the message schedule, and looks the same.
+        Everything else, which is to say loading the nodes, padding, the
+        round constants, the interleaving of the two messages, and the
+        final byte swapping, is written once, against
+        <code>S: Simd</code>.</p>
+        <p>A subtler win comes from the operations carrying registers of
+        <code>S</code>. SHA-NI wants the hash state in a strange
+        <code>[F, E, B, A]</code> lane order, whereas the Arm
+        instructions and our scalar code want <code>[A, B, C, D]</code>.
+        Rather than shuffling in and out of a canonical order at every
+        leaf, the initialization leaf loads the state in whichever
+        layout its backend prefers, and that layout then flows through
+        all 16 round groups untouched, with the conversion happening
+        once at the very end. The type system makes this safe: an
+        operation holding an x86v4c register can’t be executed by a NEON
+        token, so the layouts can never get mixed up.</p>
+        <p>Finally, the tuning decisions moved into the profiles too.
+        Software SHA always benefits from filling all 16 lanes of the
+        batch kernel, but on a CPU with SHA-NI a single message already
+        hashes quickly, so batching only pays off for runs of at least 7
+        messages. This used to be a <code>cfg(target_arch)</code> plus a
+        runtime check; now it’s an <code>Operation</code> returning a
+        <code>usize</code>, with an <code>x86_v4c</code> override:</p>
+        <div class="sourceCode" id="cb11"><pre
+        class="sourceCode rust"><code class="sourceCode rust"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> BatchLanes<span class="op">;</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a><span class="kw">impl</span><span class="op">&lt;</span>S<span class="op">:</span> Simd<span class="op">&gt;</span> Operation<span class="op">&lt;</span>S<span class="op">&gt;</span> <span class="cf">for</span> BatchLanes <span class="op">{</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">type</span> Output <span class="op">=</span> <span class="dt">usize</span><span class="op">;</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> portable(<span class="kw">self</span><span class="op">,</span> _<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">usize</span> <span class="op">{</span></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="pp">S::</span>U32_LANES <span class="op">&gt;=</span> <span class="dv">16</span> <span class="op">{</span> <span class="dv">16</span> <span class="op">}</span> <span class="cf">else</span> <span class="op">{</span> <span class="dv">1</span> <span class="op">}</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> x86_v4c(<span class="kw">self</span><span class="op">,</span> _<span class="op">:</span> S) <span class="op">-&gt;</span> <span class="dt">usize</span></span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">where</span></span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a>        S<span class="op">:</span> X86V4C<span class="op">,</span></span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a>    <span class="op">{</span></span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true" tabindex="-1"></a>        <span class="dv">1</span></span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+        <ul>
+        <li>Before: 14 <code>.asm</code> files, <code>unsafe</code>
+        wrappers around <code>asm!</code>, and
+        <code>cfg(target_arch)</code> throughout
+        <code>sha256/mod.rs</code> and <code>simd/mod.rs</code>.</li>
+        <li>After: no <code>asm</code> and no <code>unsafe</code>. The
+        migration commit deletes 1,381 lines and adds 1,259.</li>
+        <li>There are no <code>cfg(target_arch)</code> checks left in
+        the SHA-256 code at all. The last one, deciding when to batch,
+        became the <code>BatchLanes</code> operation above.</li>
+        </ul>
+        <h1 id="caveats">Caveats</h1>
+        <p>We’re happy with the crate, but it’s worth being upfront
+        about what you give up.</p>
+        <p><strong>We need to have thought of the instruction you want
+        to use.</strong> Consumers never touch intrinsics, which is what
+        makes their code safe, but it also means there’s no escape
+        hatch. If an algorithm needs an instruction we haven’t modeled,
+        it has to be added to the crate, along with an emulated version
+        and fuzz coverage against the native one. We think of this as a
+        feature, since it keeps the set of instructions small and
+        audited, but it does mean that the crate grows with its
+        consumers, and that you can’t just reach for
+        <code>_mm512_whatever</code> in a pinch.</p>
+        <p><strong>We target specific platforms.</strong> Three profiles
+        is a deliberately short list. If you’re running on an x86-64
+        machine with AVX2 but not AVX-512, you get the scalar fallback,
+        not a 256-bit version of your algorithm. This is the right
+        trade-off for us, since the servers we care about do have
+        AVX-512, but it’s not the right one for everybody. You can
+        implement <code>Simd</code> for a backend of your own, and get
+        the portable subset of every algorithm for free, but
+        <code>dispatch</code> won’t know about it, and neither will the
+        specialized paths.</p>
+        <p><strong>You need to be careful to use <code>execute</code> or
+        inline.</strong> A token proves the features exist, but it
+        doesn’t turn them on for the functions you write. Forgetting an
+        <code>#[inline(always)]</code> doesn’t produce a compile error,
+        or a test failure. It produces correct code that’s slow, and the
+        only way to notice is to read the assembly. The <a
+        href="https://internals.rust-lang.org/t/pre-rfc-struct-target-feature/17761">struct
+        target feature pre-RFC</a> describes the language feature that
+        would make this go away, by letting the token itself carry the
+        features into any function that receives it.</p>
+        <p><strong>Agreement isn’t correctness.</strong>
+        <code>check_consistent</code> tells you that every path computes
+        the same thing, not that the thing is right. Pair it with
+        <code>test_dispatch</code> and an independent reference
+        implementation.</p>
+        <p><strong>The guarantee is only as good as the
+        emulators.</strong> Running your specialized branch under
+        <code>EmulatedX86V4C</code> proves it correct on real hardware
+        only insofar as the emulator matches the hardware. We fuzz each
+        native backend against its emulator on the corresponding
+        platform to keep this honest, but that’s a property of the
+        crate’s CI, not a proof.</p>
+        <p><strong>A profile says what you can run, not what’s
+        fastest.</strong> Knowing that SHA-NI exists doesn’t tell you
+        its throughput relative to the 16-lane software kernel. The
+        batching threshold in the SHA-256 example is exactly this kind
+        of decision, and it had to be measured, not derived.</p>
+        <p><strong>Code size and compile time grow with one compiled
+        copy per backend.</strong> Every kernel is monomorphized once
+        for each backend that <code>dispatch</code> might select, plus
+        once more for each emulated backend your tests use.</p>
+        <p><strong>Only the common vector types can cross leaf
+        boundaries.</strong> An operation’s <code>Output</code> is a
+        single type for all of its paths, so it can only be built from
+        types that every backend has, like <code>S::U32</code>.
+        Profile-only types, such as the 16-bit vectors NEON uses for
+        carry-less multiplication, have to stay inside one path.</p>
+        <h1 id="conclusion">Conclusion</h1>
+        <p>Very little of this is new on its own. Passing a token into
+        generic code and re-entering a feature scope through a
+        trampoline comes from <a
+        href="https://docs.rs/pulp"><code>pulp</code></a> and <a
+        href="https://docs.rs/fearless_simd"><code>fearless_simd</code></a>,
+        grouping instructions into a few frontier bundles is how <a
+        href="https://github.com/google/highway">Highway</a> has always
+        worked, and checking platform implementations against a portable
+        one is what <a
+        href="https://github.com/BLAKE3-team/BLAKE3">BLAKE3</a> does in
+        its tests. What we think is new is the combination: specialized
+        paths as methods on an <code>Operation</code> with sensible
+        defaults, operations which carry a backend’s registers, and an
+        emulator for every profile, so that the whole thing can be
+        tested on any machine.</p>
+        <p>There’s a natural next step for those emulators. Since
+        they’re plain integer code, they’re amenable to tools like <a
+        href="https://github.com/model-checking/kani">Kani</a>, or an
+        SMT backend, which would let us prove that the specialized paths
+        agree with the portable one for <em>all</em> inputs, rather than
+        the ones a fuzzer happened to find.</p>
+        <p>The crate is ALPHA, and we’d love to hear about what
+        instructions you’d want to see. <a
+        href="https://github.com/commonwarexyz/monorepo/pull/5204">Give
+        it a try</a>.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>

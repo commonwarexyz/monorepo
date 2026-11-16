@@ -32,6 +32,7 @@ use core::num::NonZeroUsize;
 use futures::{Sink, Stream, stream::FusedStream};
 use std::{
     collections::VecDeque,
+    mem,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
@@ -54,8 +55,12 @@ pub enum TryRecvError {
     Disconnected,
 }
 
+/// State shared by the senders and the receiver of a channel.
+///
+/// Never drop items or run waker callbacks while holding the mutex protecting this state.
+/// They can drop a [Sender], which tries to take the same lock and deadlocks.
 #[derive(Debug)]
-struct Shared<T: Send + Sync> {
+struct Shared<T> {
     buffer: VecDeque<T>,
     capacity: usize,
     receiver_waker: Option<Waker>,
@@ -71,11 +76,11 @@ struct Shared<T: Send + Sync> {
 /// This type can be cloned to create multiple producers for the same channel.
 /// The channel remains open until all senders are dropped.
 #[derive(Debug)]
-pub struct Sender<T: Send + Sync> {
+pub struct Sender<T> {
     shared: Arc<Mutex<Shared<T>>>,
 }
 
-impl<T: Send + Sync> Sender<T> {
+impl<T> Sender<T> {
     /// Returns whether the receiver has been dropped.
     ///
     /// If this returns `true`, subsequent sends will fail with [`ChannelClosed`].
@@ -108,7 +113,7 @@ impl<T: Send + Sync> Sender<T> {
         let waker = shared.receiver_waker.take();
         drop(shared);
 
-        // Drop the old item after the lock is released to avoid potential mutex poisoning
+        // Drop the old item after the lock is released.
         drop(old_item);
 
         // Wake a receiver parked on an empty buffer.
@@ -120,7 +125,7 @@ impl<T: Send + Sync> Sender<T> {
     }
 }
 
-impl<T: Send + Sync> Clone for Sender<T> {
+impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         let mut shared = self.shared.lock();
         shared.sender_count += 1;
@@ -132,7 +137,7 @@ impl<T: Send + Sync> Clone for Sender<T> {
     }
 }
 
-impl<T: Send + Sync> Drop for Sender<T> {
+impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut shared = self.shared.lock();
         shared.sender_count -= 1;
@@ -149,7 +154,7 @@ impl<T: Send + Sync> Drop for Sender<T> {
     }
 }
 
-impl<T: Send + Sync> Sink<T> for Sender<T> {
+impl<T> Sink<T> for Sender<T> {
     type Error = ChannelClosed;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -184,11 +189,11 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
 /// The stream terminates (returns `None`) when all senders have been dropped
 /// and all buffered items have been consumed.
 #[derive(Debug)]
-pub struct Receiver<T: Send + Sync> {
+pub struct Receiver<T> {
     shared: Arc<Mutex<Shared<T>>>,
 }
 
-impl<T: Send + Sync> Receiver<T> {
+impl<T> Receiver<T> {
     /// Receives the next item from the channel.
     pub async fn recv(&mut self) -> Option<T> {
         futures::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
@@ -207,42 +212,50 @@ impl<T: Send + Sync> Receiver<T> {
     }
 }
 
-impl<T: Send + Sync> Stream for Receiver<T> {
+impl<T> Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut shared = self.shared.lock();
+        // Cloning a waker runs its callback, so clone before taking the lock.
+        let waker = cx.waker().clone();
 
+        // Deliver the oldest buffered item, or end the stream once every sender is gone.
+        let mut shared = self.shared.lock();
         if let Some(item) = shared.buffer.pop_front() {
             return Poll::Ready(Some(item));
         }
-
         if shared.sender_count == 0 {
             return Poll::Ready(None);
         }
 
-        if !shared
-            .receiver_waker
-            .as_ref()
-            .is_some_and(|w| w.will_wake(cx.waker()))
-        {
-            shared.receiver_waker = Some(cx.waker().clone());
-        }
+        // Register under the same lock that found the channel empty and open, so the next send or
+        // the last sender's drop wakes this task. The replaced waker is destroyed after unlocking.
+        let replaced = shared.receiver_waker.replace(waker);
+        drop(shared);
+        drop(replaced);
         Poll::Pending
     }
 }
 
-impl<T: Send + Sync> FusedStream for Receiver<T> {
+impl<T> FusedStream for Receiver<T> {
     fn is_terminated(&self) -> bool {
         let shared = self.shared.lock();
         shared.sender_count == 0 && shared.buffer.is_empty()
     }
 }
 
-impl<T: Send + Sync> Drop for Receiver<T> {
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let mut shared = self.shared.lock();
         shared.receiver_dropped = true;
+
+        // Nothing reads the unread items or the waker once the receiver is gone, and a sender owned
+        // by either one keeps the channel open until they are released.
+        let buffer = mem::take(&mut shared.buffer);
+        let waker = shared.receiver_waker.take();
+        drop(shared);
+        drop(buffer);
+        drop(waker);
     }
 }
 
@@ -250,7 +263,7 @@ impl<T: Send + Sync> Drop for Receiver<T> {
 ///
 /// Returns a ([`Sender`], [`Receiver`]) pair. The sender can be cloned to create
 /// multiple producers.
-pub fn channel<T: Send + Sync>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+pub fn channel<T>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Mutex::new(Shared {
         buffer: VecDeque::with_capacity(capacity.get()),
         capacity: capacity.get(),
@@ -272,6 +285,7 @@ mod tests {
     use super::*;
     use crate::NZUsize;
     use futures::{SinkExt, StreamExt, executor::block_on};
+    use std::{sync::Weak, task::Wake};
 
     #[test]
     fn test_basic_send_recv() {
@@ -442,5 +456,113 @@ mod tests {
             drop(receiver);
             assert!(sender.is_closed());
         });
+    }
+
+    /// A value that owns a sender, as a task waiting on the receiver might. While the channel holds
+    /// a probe as a buffered item or as the receiver's waker, the probe's sender keeps the channel
+    /// open, so only dropping the receiver can release it.
+    ///
+    /// A probe dropped while the channel lock is held fails the test.
+    struct Probe(Option<Sender<Arc<Self>>>);
+
+    impl Probe {
+        fn new(sender: &Sender<Arc<Self>>) -> Arc<Self> {
+            Arc::new(Self(Some(sender.clone())))
+        }
+    }
+
+    #[expect(clippy::manual_noop_waker, reason = "a probe waker must own a sender")]
+    impl Wake for Probe {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            // The sender's destructor takes the channel lock. A probe that finds the lock held
+            // leaks its sender and fails, since dropping the sender would deadlock.
+            let sender = self.0.take().expect("a probe must still own its sender");
+            if sender.shared.try_lock().is_none() {
+                mem::forget(sender);
+                panic!("senders must be dropped outside the channel lock");
+            }
+        }
+    }
+
+    /// Parks `receiver` on a fresh [Probe] waker that only the channel holds, and returns a handle
+    /// that upgrades until the channel releases the waker.
+    fn register(sender: &Sender<Arc<Probe>>, receiver: &mut Receiver<Arc<Probe>>) -> Weak<Probe> {
+        let probe = Probe::new(sender);
+        let weak = Arc::downgrade(&probe);
+        let waker = Waker::from(probe);
+        assert!(
+            receiver
+                .poll_next_unpin(&mut Context::from_waker(&waker))
+                .is_pending(),
+            "an empty open channel must be pending"
+        );
+        drop(waker);
+        assert!(
+            weak.upgrade().is_some(),
+            "a pending receiver must register its waker"
+        );
+        weak
+    }
+
+    #[test]
+    fn test_receiver_drop_releases_unread_items() {
+        let (sender, receiver) = channel(NZUsize!(1));
+        let item = Probe::new(&sender);
+        let weak = Arc::downgrade(&item);
+        assert!(sender.send_lossy(item));
+
+        drop(receiver);
+        assert!(
+            weak.upgrade().is_none(),
+            "receiver drop must release unread items"
+        );
+    }
+
+    #[test]
+    fn test_receiver_drop_releases_waker() {
+        let (sender, mut receiver) = channel(NZUsize!(1));
+        let shared = Arc::downgrade(&sender.shared);
+        let waker = register(&sender, &mut receiver);
+
+        drop(receiver);
+        assert!(
+            waker.upgrade().is_none(),
+            "receiver drop must release its waker"
+        );
+
+        // With the waker's sender gone, dropping the last sender frees the channel.
+        drop(sender);
+        assert!(
+            shared.upgrade().is_none(),
+            "the channel must not outlive its handles"
+        );
+    }
+
+    #[test]
+    fn test_replaced_waker_dropped_outside_lock() {
+        let (sender, mut receiver) = channel(NZUsize!(1));
+        let first = register(&sender, &mut receiver);
+
+        // Registering a second waker destroys the first.
+        let second = register(&sender, &mut receiver);
+        assert!(
+            first.upgrade().is_none(),
+            "a replaced waker must be released"
+        );
+
+        // The send wakes the second waker, consuming it outside the lock, and buffers the item.
+        assert!(sender.send_lossy(Probe::new(&sender)));
+        assert!(
+            second.upgrade().is_none(),
+            "a send must consume the registered waker"
+        );
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the channel must deliver after its waker is replaced"
+        );
     }
 }

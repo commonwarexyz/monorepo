@@ -77,7 +77,7 @@ pub fn powers<R: Ring>(shift: R, base: &R) -> impl Iterator<Item = R> + '_ {
 /// 3. `&T != &T`.
 ///
 /// In other words, being clonable, and comparable for equality.
-pub trait Object: Clone + Debug + PartialEq + Eq + Send + Sync {}
+pub trait Object: Clone + Debug + Eq + Send + Sync {}
 
 /// A type that supports addition, subtraction, and negation.
 ///

@@ -1,5 +1,5 @@
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
         Generation, Pending, Sender, Tracker,
         hold::{Held, Hold},
@@ -12,9 +12,11 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, MutexGuard},
 };
+use futures::{StreamExt as _, stream};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
+    alloc,
     fs::File,
     io::IoSlice,
     ops::Deref,
@@ -29,6 +31,9 @@ use tokio::task;
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
+
+#[cfg(target_os = "linux")]
+mod aio;
 
 /// Page-cache policy for one positioned I/O request.
 enum Cache {
@@ -81,6 +86,12 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
+    /// Read-only `O_DIRECT` descriptor on the same inode, opened through
+    /// [crate::storage::open_direct] by the first uncached read that needs it and kept for the life
+    /// of the open. `None` once the filesystem has rejected direct I/O on this file, and empty
+    /// until an open succeeds or is rejected.
+    #[cfg(target_os = "linux")]
+    direct: once_cell::sync::OnceCell<Option<File>>,
     #[cfg(test)]
     test: Hooks,
 }
@@ -96,6 +107,9 @@ struct Hooks {
     after_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next start_sync worker after publishing its completion.
     after_start_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+    /// Ranges batched reads served from their direct reads rather than a positioned fallback.
+    #[cfg(target_os = "linux")]
+    direct_reads: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -209,7 +223,6 @@ pub struct Blob {
     shared: Arc<Shared>,
     /// The logical open's namespace identity.
     generation: Arc<Generation>,
-    pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
 }
@@ -255,7 +268,6 @@ impl Blob {
 
     pub(crate) fn new(
         file: File,
-        pool: BufferPool,
         data_offset: u64,
         hold: Arc<Hold>,
         generation: Arc<Generation>,
@@ -268,13 +280,14 @@ impl Blob {
             key: generation.key.clone(),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
+            #[cfg(target_os = "linux")]
+            direct: once_cell::sync::OnceCell::new(),
             #[cfg(test)]
             test: Hooks::default(),
         });
         Self {
             shared,
             generation,
-            pool,
             data_offset,
         }
     }
@@ -436,6 +449,13 @@ impl Blob {
     }
 }
 
+/// Return the physical offset of the `len` logical bytes at `offset` in a blob whose data starts at
+/// `data_offset`, or `None` when that offset overflows or no buffer can hold `len` bytes.
+fn physical_offset(data_offset: u64, offset: u64, len: usize) -> Option<u64> {
+    alloc::Layout::array::<u8>(len).ok()?;
+    offset.checked_add(data_offset)
+}
+
 impl crate::Blob for Blob {
     async fn read_at(
         &self,
@@ -443,7 +463,35 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+        // Reject a length no buffer can hold before allocating.
+        alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
+
+        // An uncached read first tries a direct read of the range's aligned superset and hands out
+        // the aligned allocation narrowed to the range without copying it.
+        #[cfg(target_os = "linux")]
+        if options.contains(ReadOptions::DONT_CACHE) && len > 0 {
+            let offset = offset
+                .checked_add(self.data_offset)
+                .ok_or(Error::OffsetOverflow)?;
+            let file = self.shared.clone();
+            return task::spawn_blocking(move || {
+                if let Some(buf) = aio::read_direct(&file, offset, len) {
+                    return Ok(buf.into());
+                }
+
+                // Otherwise read the range through the page cache into a new buffer, with the
+                // RWF_DONTCACHE hint until the kernel or filesystem rejects it.
+                let mut buf = IoBufMut::with_capacity(len);
+                // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
+                unsafe { buf.set_len(len) };
+                Self::read_exact_at(Cache::Disabled, &file, buf.as_mut(), offset)?;
+                Ok(buf.into())
+            })
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+        }
+
+        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
             .await
     }
 
@@ -455,7 +503,7 @@ impl crate::Blob for Blob {
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
-        // SAFETY: `len` bytes are filled via read_exact below.
+        // SAFETY: `len` bytes are filled below before the buffers are returned.
         unsafe { bufs.set_len(len) };
         let offset = offset
             .checked_add(self.data_offset)
@@ -464,20 +512,31 @@ impl crate::Blob for Blob {
             return Ok(bufs);
         }
         let file = self.shared.clone();
-        let pool = self.pool.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled
         } else {
             Cache::Enabled
         };
         task::spawn_blocking(move || {
+            // An uncached read first tries a direct read of the range's aligned superset, then
+            // copies the range into the caller's buffers.
+            #[cfg(target_os = "linux")]
+            if matches!(cache, Cache::Disabled)
+                && let Some(buf) = aio::read_direct(&file, offset, len)
+            {
+                bufs.copy_from_slice(buf.as_ref());
+                return Ok(bufs);
+            }
+
+            // Otherwise read the range through the page cache.
             if let Some(buf) = bufs.as_single_mut() {
                 // Read directly into the single buffer (zero-copy).
                 Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
             } else {
                 // Read into a temporary contiguous buffer and copy back to preserve structure.
+                let mut temp = IoBufMut::with_capacity(len);
                 // SAFETY: `len` bytes are filled via read_exact_at below.
-                let mut temp = unsafe { pool.alloc_len(len) };
+                unsafe { temp.set_len(len) };
                 Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
                 bufs.copy_from_slice(temp.as_ref());
             }
@@ -485,6 +544,80 @@ impl crate::Blob for Blob {
         })
         .await
         .map_err(|_| Error::ReadFailed)?
+    }
+
+    fn read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+        // Uncached reads use direct I/O where they can, submitted together so the device sees them
+        // all at once.
+        #[cfg(target_os = "linux")]
+        if options.contains(ReadOptions::DONT_CACHE) {
+            return aio::read_many(&self.shared, self.data_offset, ranges);
+        }
+
+        // Other reads run one per blocking task. Every range is checked before any read starts, so
+        // a batch with a bad range yields only its error.
+        if ranges
+            .iter()
+            .any(|&(offset, len)| physical_offset(self.data_offset, offset, len).is_none())
+        {
+            return stream::iter([Err(Error::OffsetOverflow)]).boxed();
+        }
+
+        crate::read_each(self, ranges, options).boxed()
+    }
+
+    async fn start_read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Handle<Vec<IoBufsMut>> {
+        // Reads the page cache need not retain bypass it with direct I/O, submitted together.
+        #[cfg(target_os = "linux")]
+        if options.contains(ReadOptions::DONT_CACHE) {
+            let reads = aio::read_many(&self.shared, self.data_offset, ranges);
+            return Handle::from_future(crate::collect_reads(reads, ranges.len()));
+        }
+
+        // Reads it should retain go through it, one blocking task per read as read_at does.
+        // Every range is checked before any read starts, so a bad range leaves none behind.
+        let mut offsets = Vec::with_capacity(ranges.len());
+        for &(offset, len) in ranges {
+            let Some(offset) = physical_offset(self.data_offset, offset, len) else {
+                return Handle::ready(Err(Error::OffsetOverflow));
+            };
+            offsets.push((offset, len));
+        }
+        let reads = offsets
+            .into_iter()
+            .map(|(offset, len)| {
+                let mut bufs: IoBufsMut = IoBufMut::with_capacity(len).into();
+                // SAFETY: `len` bytes are filled via read_exact_at before the buffers are exposed.
+                unsafe { bufs.set_len(len) };
+                if len == 0 {
+                    return Handle::ready(Ok(bufs));
+                }
+                let cache = if options.contains(ReadOptions::DONT_CACHE) {
+                    Cache::Disabled
+                } else {
+                    Cache::Enabled
+                };
+                let (tx, rx) = oneshot::channel();
+                let file = self.shared.clone();
+                task::spawn_blocking(move || {
+                    let buf = bufs
+                        .as_single_mut()
+                        .expect("the read destination must hold exactly one buffer");
+                    let result = Self::read_exact_at(cache, &file, buf.as_mut(), offset);
+                    let _ = tx.send(result.map(|()| bufs));
+                });
+                Handle::from_receiver(rx)
+            })
+            .collect();
+        crate::join_reads(reads)
     }
 
     async fn write_at(
@@ -666,24 +799,33 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BlobVersion, BufferPoolConfig, Storage as _,
+        Blob as _, BlobVersion, Storage as _,
         storage::{
             Layout,
             tokio::{Config, Storage},
         },
-        telemetry::metrics::Registry,
     };
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, TryStreamExt as _};
     use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc};
+    #[cfg(target_os = "linux")]
+    use std::{os::unix::fs::OpenOptionsExt as _, path::Path};
 
     fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
         let directory = env::temp_dir().join(format!("storage_tokio_{label}_{}", process::id()));
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         (
-            Storage::new(Config::new(directory.clone(), layouts), pool),
+            Storage::new(Config::new(directory.clone(), layouts)),
             directory,
         )
+    }
+
+    /// Open `path` read only with `O_DIRECT`.
+    #[cfg(target_os = "linux")]
+    fn open_direct(path: &Path) -> File {
+        File::options()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(path)
+            .expect("temporary directory must support O_DIRECT")
     }
 
     #[tokio::test]
@@ -1160,6 +1302,637 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_many_indexes_every_range() {
+        let (storage, directory) = storage_for_reopen_test("read_many", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // 64 blocks of 4096 bytes, each filled with its index.
+        const BLOCK: usize = 4096;
+        const BLOCKS: u64 = 64;
+        let data: Vec<u8> = (0..BLOCKS)
+            .flat_map(|i| std::iter::repeat_n(i as u8, BLOCK))
+            .collect();
+        blob.write_at(0, data, WriteOptions::default())
+            .await
+            .unwrap();
+
+        // Whole aligned blocks, small unaligned ranges inside and across blocks (read through an
+        // aligned superset), and an empty range, all out of offset order.
+        let mut ranges: Vec<(u64, usize)> = Vec::new();
+        for i in (0..BLOCKS).rev() {
+            ranges.push((i * BLOCK as u64, BLOCK));
+            ranges.push((i * BLOCK as u64 + 7, 10));
+            if i > 0 {
+                ranges.push((i * BLOCK as u64 - 3, 6));
+            }
+            ranges.push((i * BLOCK as u64, 0));
+            if i + 2 <= BLOCKS {
+                ranges.push((i * BLOCK as u64 + 100, 2 * BLOCK - 200));
+            }
+        }
+        let mut bufs: Vec<(usize, IoBufsMut)> = blob
+            .read_many(&ranges, ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), ranges.len());
+        bufs.sort_by_key(|(index, _)| *index);
+        for (i, ((offset, len), (index, bufs))) in ranges.iter().zip(bufs).enumerate() {
+            assert_eq!(index, i);
+            let expected: Vec<u8> = (*offset..*offset + *len as u64)
+                .map(|o| (o / BLOCK as u64) as u8)
+                .collect();
+            assert_eq!(bufs.coalesce().as_ref(), expected.as_slice(), "range {i}");
+        }
+
+        // A range past the end fails the batch.
+        assert!(
+            blob.read_many(
+                &[(0, BLOCK), (BLOCKS * BLOCK as u64 - 1, 2)],
+                ReadOptions::DONT_CACHE,
+            )
+            .try_collect::<Vec<_>>()
+            .await
+            .is_err()
+        );
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_read_many_retired_runtime_reports_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (storage, directory) = storage_for_reopen_test("read_many_retired", Layout::ALL);
+        let blob = runtime.block_on(async {
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
+            blob
+        });
+        if aio::direct(&blob.shared).is_none() {
+            drop(blob);
+            runtime.block_on(storage.remove("partition", None)).unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let entered = handle.enter();
+        let result = futures::executor::block_on(
+            blob.read_many(&[(0, 4)], ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>(),
+        );
+        assert!(matches!(result, Err(Error::ReadFailed)));
+        drop(entered);
+        drop(blob);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_at_signed_limit() {
+        let (storage, directory) =
+            storage_for_reopen_test("read_many_signed_limit", Layout::V1..=Layout::V1);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+        // Only some filesystems (such as tmpfs) hold a file this large and serve direct I/O.
+        let len = i64::MAX as u64 - blob.data_offset;
+        if blob.resize(len).await.is_err() || aio::direct(&blob.shared).is_none() {
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+        let offset = len - 1;
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            assert_eq!(
+                blob.read_at(offset, 1, options)
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                &[0]
+            );
+        }
+
+        // The block-aligned superset of this byte ends beyond the largest signed file offset,
+        // so the kernel rejects its direct read at submission.
+        let bufs: Vec<_> = blob
+            .read_many(&[(offset, 1)], ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), 1);
+        let (index, buf) = bufs.into_iter().next().unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(buf.coalesce().as_ref(), &[0]);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "allocates more than 4 GiB"]
+    async fn test_read_many_beyond_single_read_limit() {
+        let (storage, directory) = storage_for_reopen_test("read_many_large", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        assert!(
+            aio::direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        // Linux returns at most just under 2 GiB from one read, so the direct read of this
+        // range completes short.
+        const LEN: usize = 1 << 31;
+        blob.write_at(LEN as u64 - 1, vec![1], WriteOptions::default())
+            .await
+            .unwrap();
+        let bufs: Vec<_> = blob
+            .read_many(&[(0, LEN)], ReadOptions::DONT_CACHE)
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(bufs.len(), 1);
+        let (index, buf) = bufs.into_iter().next().unwrap();
+        assert_eq!(index, 0);
+        let buf = buf.coalesce();
+        assert_eq!(buf.len(), LEN);
+        assert_eq!(buf.as_ref()[LEN - 1], 1);
+        drop(buf);
+
+        // A single direct read of the range also completes short at a blob page and continues from
+        // there. This open's own file is empty and its direct descriptor reads the blob above, so
+        // only a continued direct read can return the range.
+        let (single, _) = storage.open("partition", b"single").await.unwrap();
+        let path = directory.join("partition").join(hex(b"blob"));
+        assert!(single.shared.direct.set(Some(open_direct(&path))).is_ok());
+        let buf = single
+            .read_at(0, LEN, ReadOptions::DONT_CACHE)
+            .await
+            .unwrap()
+            .coalesce();
+        assert_eq!(buf.len(), LEN);
+        assert_eq!(buf.as_ref()[LEN - 1], 1);
+
+        drop(single);
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Ranges that are not block-aligned, under a layout whose data offset is not block-aligned
+    /// either, are served by direct reads of their aligned superset, including a superset that
+    /// ends past the unaligned end of the blob. A range past the end fails as read_at does.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_serves_unaligned_ranges_directly() {
+        const BLOCK: usize = 4096;
+        const LEN: usize = BLOCK + 1000;
+        let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        for layout in [Layout::V0, Layout::V1] {
+            let (storage, directory) = storage_for_reopen_test(
+                &format!("read_many_unaligned_{layout:?}"),
+                layout..=layout,
+            );
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            assert!(
+                aio::direct(&blob.shared).is_some(),
+                "temporary directory must support O_DIRECT"
+            );
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Within a block, across a block boundary, up to the end, and the whole blob.
+            let ranges = [
+                (100u64, 50usize),
+                (BLOCK as u64 - 3, 6),
+                (BLOCK as u64 + 500, 500),
+                (LEN as u64 - 1, 1),
+                (0, LEN),
+            ];
+            let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
+            let bufs: Vec<(usize, IoBufsMut)> = blob
+                .read_many(&ranges, ReadOptions::DONT_CACHE)
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(
+                blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
+                ranges.len()
+            );
+            assert_eq!(bufs.len(), ranges.len());
+            for (index, bufs) in bufs {
+                let (offset, len) = ranges[index];
+                let offset = usize::try_from(offset).unwrap();
+                assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
+            }
+
+            // A range ending one byte past the end fails as read_at does.
+            let result = blob
+                .read_many(&[(LEN as u64 - 100, 101)], ReadOptions::DONT_CACHE)
+                .try_collect::<Vec<_>>()
+                .await;
+            assert!(matches!(
+                result,
+                Err(Error::Io(ref err)) if err.kind() == std::io::ErrorKind::UnexpectedEof
+            ));
+
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// A batched direct read goes through its own open file description, and the kernel writes
+    /// the range's dirty pages back before a direct read, so the batch sees every buffered write
+    /// that completed before it, synced or not.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_sees_unsynced_buffered_writes() {
+        let (storage, directory) = storage_for_reopen_test("read_many_coherent", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        assert!(
+            aio::direct(&blob.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+
+        const BLOCK: usize = 4096;
+        const RANGES: [(u64, usize); 3] =
+            [(0, BLOCK), (BLOCK as u64, BLOCK), (BLOCK as u64 + 100, 300)];
+        async fn read_all(blob: &Blob) -> Vec<Vec<u8>> {
+            let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
+            let mut bufs: Vec<(usize, IoBufsMut)> = blob
+                .read_many(&RANGES, ReadOptions::DONT_CACHE)
+                .try_collect()
+                .await
+                .unwrap();
+
+            // Every range was served by its direct read rather than a positioned fallback.
+            assert_eq!(
+                blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
+                RANGES.len()
+            );
+            bufs.sort_by_key(|(index, _)| *index);
+            bufs.into_iter()
+                .map(|(_, bufs)| bufs.coalesce().as_ref().to_vec())
+                .collect()
+        }
+
+        // Two buffered, unsynced generations of the same blocks. Each batched read sees the
+        // latest one.
+        for generation in [0x11u8, 0x22] {
+            let data = vec![generation; 2 * BLOCK];
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+            let bufs = read_all(&blob).await;
+            for ((offset, len), buf) in RANGES.iter().zip(bufs) {
+                let offset = *offset as usize;
+                assert_eq!(
+                    buf,
+                    &data[offset..offset + len],
+                    "generation {generation:#x}"
+                );
+            }
+        }
+
+        // A partial buffered overwrite inside the second block is seen too.
+        blob.write_at(BLOCK as u64 + 150, vec![0x33; 100], WriteOptions::default())
+            .await
+            .unwrap();
+        let bufs = read_all(&blob).await;
+        assert_eq!(&bufs[2][..50], &[0x22; 50]);
+        assert_eq!(&bufs[2][50..150], &[0x33; 100]);
+        assert_eq!(&bufs[2][150..], &[0x22; 150]);
+
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A range whose length no buffer can hold fails a batch or a single read with
+    /// OffsetOverflow, cached or not, and whether or not the open can read directly.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_many_reports_unservable_range() {
+        let (storage, directory) = storage_for_reopen_test("read_many_unservable", Layout::ALL);
+
+        // One open has a direct descriptor and the other has none, as after a rejected open. Their
+        // uncached batches would read through native AIO and positioned reads respectively.
+        let (with_direct, _) = storage.open("partition", b"direct").await.unwrap();
+        assert!(
+            aio::direct(&with_direct.shared).is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+        let (without_direct, _) = storage.open("partition", b"buffered").await.unwrap();
+        assert!(without_direct.shared.direct.set(None).is_ok());
+
+        for blob in [&with_direct, &without_direct] {
+            blob.write_at(0, vec![0u8; 4096], WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Both lengths are larger than any allocation, one just below usize::MAX and one just
+            // past isize::MAX. A batch with such a range fails as a whole before any read starts,
+            // even when a valid range comes first, so its stream yields the error as its only item.
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
+                    for ranges in [vec![(0, len)], vec![(0, 4096), (0, len)]] {
+                        let results: Vec<_> = blob.read_many(&ranges, options).collect().await;
+                        assert!(
+                            matches!(results.as_slice(), [Err(Error::OffsetOverflow)]),
+                            "{ranges:?} {options:?}"
+                        );
+
+                        let result = blob.start_read_many(&ranges, options).await.await;
+                        assert!(
+                            matches!(result, Err(Error::OffsetOverflow)),
+                            "{ranges:?} {options:?}"
+                        );
+                    }
+
+                    // A single read of such a range fails the same way.
+                    assert!(
+                        matches!(
+                            blob.read_at(0, len, options).await,
+                            Err(Error::OffsetOverflow)
+                        ),
+                        "{len} {options:?}"
+                    );
+                }
+            }
+        }
+
+        drop(with_direct);
+        drop(without_direct);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Uncached reads under either layout are direct reads of their aligned supersets, including a
+    /// superset that ends past the unaligned end of the blob. read_at hands out the aligned
+    /// allocation narrowed to the range and read_at_buf copies into the caller's buffers, while
+    /// cached reads stay on the blob's own file. A range past the end fails as a buffered read
+    /// does, and direct reads see completed unsynced writes.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_at_serves_uncached_reads_directly() {
+        const BLOCK: usize = 4096;
+        const LEN: usize = 2 * BLOCK + 1000;
+        let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        let other: Vec<u8> = (0..LEN).map(|i| (i % 241) as u8).collect();
+        for layout in [Layout::V0, Layout::V1] {
+            let (storage, directory) =
+                storage_for_reopen_test(&format!("read_at_direct_{layout:?}"), layout..=layout);
+
+            // The blob holds `data` and its direct descriptor reads a second blob holding `other`,
+            // so only a direct read returns `other`. Neither blob is synced.
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+            let (source, _) = storage.open("partition", b"source").await.unwrap();
+            source
+                .write_at(0, other.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+            let path = directory.join("partition").join(hex(b"source"));
+            assert!(blob.shared.direct.set(Some(open_direct(&path))).is_ok());
+
+            // The ranges are block-aligned, within a block, across a block boundary, longer than a
+            // block, up to the unaligned end, and the whole blob.
+            for (offset, len) in [
+                (0u64, BLOCK),
+                (100, 50),
+                (BLOCK as u64 - 3, 6),
+                (500, BLOCK + 1000),
+                (LEN as u64 - 300, 300),
+                (LEN as u64 - 1, 1),
+                (0, LEN),
+            ] {
+                let range = offset as usize..offset as usize + len;
+
+                // Cached reads go through the blob's own file.
+                let cached = blob
+                    .read_at(offset, len, ReadOptions::default())
+                    .await
+                    .unwrap();
+                assert_eq!(cached.coalesce().as_ref(), &data[range.clone()]);
+
+                // A cached read_at_buf reads the blob's own file into the caller's buffer.
+                let single = IoBufMut::with_capacity(len);
+                let ptr = single.as_ref().as_ptr();
+                let cached = blob
+                    .read_at_buf(offset, len, single, ReadOptions::default())
+                    .await
+                    .unwrap();
+                let buf = cached.as_single().unwrap();
+                assert_eq!(buf.as_ref().as_ptr(), ptr);
+                assert_eq!(buf.as_ref(), &data[range.clone()]);
+
+                // read_at hands out the aligned allocation narrowed to the range.
+                let read = blob
+                    .read_at(offset, len, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                let buf = read.as_single().unwrap();
+                assert_eq!(buf.as_ref(), &other[range.clone()]);
+                let physical = offset + blob.data_offset;
+                assert_eq!(
+                    buf.as_ref().as_ptr().addr() % BLOCK,
+                    physical as usize % BLOCK
+                );
+
+                // read_at_buf copies the range into the caller's buffer.
+                let single = IoBufMut::with_capacity(len);
+                let ptr = single.as_ref().as_ptr();
+                let read = blob
+                    .read_at_buf(offset, len, single, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                let buf = read.as_single().unwrap();
+                assert_eq!(buf.as_ref().as_ptr(), ptr);
+                assert_eq!(buf.as_ref(), &other[range.clone()]);
+
+                // Across chunks, the first chunk gets one byte and the second the rest, each in
+                // place.
+                let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
+                let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
+                let mut read = blob
+                    .read_at_buf(
+                        offset,
+                        len,
+                        IoBufsMut::from(chunks),
+                        ReadOptions::DONT_CACHE,
+                    )
+                    .await
+                    .unwrap();
+                assert!(!read.is_single());
+                assert_eq!(read.chunk().as_ptr(), ptrs[0]);
+                assert_eq!(read.chunk(), &other[range.start..range.start + 1]);
+                read.advance(1);
+                if len > 1 {
+                    assert_eq!(read.chunk().as_ptr(), ptrs[1]);
+                }
+                assert_eq!(read.chunk(), &other[range.start + 1..range.end]);
+            }
+
+            // A range past the end fails as the buffered read does.
+            for (offset, len) in [(LEN as u64 - 100, 101), (LEN as u64 + 5000, 10)] {
+                for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                    assert!(
+                        matches!(
+                            blob.read_at(offset, len, options).await,
+                            Err(Error::Io(ref err))
+                                if err.kind() == std::io::ErrorKind::UnexpectedEof
+                        ),
+                        "({offset}, {len}) {options:?}"
+                    );
+                }
+            }
+
+            // The next direct read sees later unsynced writes to the second blob: a partial
+            // overwrite inside a block and an extension past the blob's end.
+            source
+                .write_at(BLOCK as u64 + 150, vec![0x33; 100], WriteOptions::default())
+                .await
+                .unwrap();
+            source
+                .write_at(LEN as u64, vec![0x44; 10], WriteOptions::default())
+                .await
+                .unwrap();
+            let mut expected = other[BLOCK..].to_vec();
+            expected[150..250].fill(0x33);
+            expected.extend([0x44; 10]);
+            let read = blob
+                .read_at(BLOCK as u64, expected.len(), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert_eq!(read.coalesce().as_ref(), expected.as_slice());
+
+            drop(blob);
+            drop(source);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// An uncached read falls back to a buffered read in the same call when its open has no direct
+    /// descriptor or its direct read fails, reads nothing, ends short of the range at a length that
+    /// is not a multiple of a blob page, or ends at a blob page and then reads nothing. A failed
+    /// direct read leaves later reads direct, and an empty read opens no descriptor.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_read_at_falls_back_to_buffered_reads() {
+        const BLOCK: usize = 4096;
+        const OFFSET: u64 = 100;
+        let data: Vec<u8> = (0..3 * BLOCK).map(|i| (i % 251) as u8).collect();
+        let expected = &data[OFFSET as usize..OFFSET as usize + BLOCK];
+        let (storage, directory) =
+            storage_for_reopen_test("read_at_fallback", Layout::V1..=Layout::V1);
+
+        // The range's superset is the two blocks after the header. The first open has no direct
+        // descriptor, as after a rejected open. The others are write-only or read files that are
+        // empty, end inside the range at an unaligned length, or end at the block boundary inside
+        // it. None of these files holds the blob's bytes, so only a buffered read returns them.
+        let header = Layout::V1.data_offset() as usize;
+        let path = |name: &str| directory.join(name);
+        std::fs::write(path("empty"), b"").unwrap();
+        std::fs::write(path("short"), vec![0xEE; header + 150]).unwrap();
+        std::fs::write(path("boundary"), vec![0xEE; header + BLOCK]).unwrap();
+        let unreadable = File::options()
+            .write(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(path("empty"))
+            .expect("temporary directory must support O_DIRECT");
+        let cases = [
+            ("rejected", None, false),
+            ("unreadable", Some(unreadable), false),
+            ("empty", Some(open_direct(&path("empty"))), false),
+            ("short", Some(open_direct(&path("short"))), true),
+            ("boundary", Some(open_direct(&path("boundary"))), true),
+        ];
+
+        for (label, direct, holds_prefix) in cases {
+            let (blob, _) = storage.open("partition", label.as_bytes()).await.unwrap();
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Empty uncached reads succeed without opening the direct descriptor, so the cell is
+            // still empty for the case's descriptor.
+            let read = blob
+                .read_at(OFFSET, 0, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(read.is_empty());
+            let read = blob
+                .read_at_buf(
+                    OFFSET,
+                    0,
+                    IoBufMut::with_capacity(1),
+                    ReadOptions::DONT_CACHE,
+                )
+                .await
+                .unwrap();
+            assert!(read.is_empty());
+            assert!(blob.shared.direct.set(direct).is_ok());
+
+            // read_at and read_at_buf return the open's own bytes, in the caller's buffer for
+            // read_at_buf.
+            let read = blob
+                .read_at(OFFSET, BLOCK, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert_eq!(read.coalesce().as_ref(), expected, "{label}");
+            let buf = IoBufMut::with_capacity(BLOCK);
+            let ptr = buf.as_ref().as_ptr();
+            let read = blob
+                .read_at_buf(OFFSET, BLOCK, buf, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            let buf = read.as_single().unwrap();
+            assert_eq!(buf.as_ref().as_ptr(), ptr, "{label}");
+            assert_eq!(buf.as_ref(), expected, "{label}");
+
+            // The fallback left direct reads enabled, so a range the descriptor's file covers is
+            // read directly.
+            if holds_prefix {
+                let read = blob
+                    .read_at(OFFSET, 50, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                assert_eq!(read.coalesce().as_ref(), &[0xEE; 50], "{label}");
+            }
+
+            drop(blob);
+        }
+
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_oversized_missing_header_is_not_recreated() {
         let (storage, directory) = storage_for_reopen_test("oversized_header", Layout::ALL);
         let parent = directory.join("partition");
@@ -1205,7 +1978,6 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         let blob = Blob::new(
             File::options().read(true).open(&path).unwrap(),
-            storage.pool.clone(),
             0,
             storage.hold.clone(),
             storage
@@ -1323,9 +2095,7 @@ mod tests {
         // fallback path after bytes reach the file but before its full-file flush.
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_owner_panic_{}", process::id()));
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let (entered, entering) = oneshot::channel();
         let (release, released) = mpsc::channel();

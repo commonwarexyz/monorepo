@@ -2,13 +2,14 @@
 
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
+    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
 };
 use commonware_consensus::{
     marshal::core::{ExpectedCommitment, Variant},
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
+use commonware_parallel::Strategy;
 
 /// First byte of a DKG probe message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,6 +170,23 @@ where
     }
 }
 
+impl<S, V> Message<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
+    /// Returns an upper bound on the encoded size of a message for committees of at most
+    /// `participants` and application blocks of at most `application` encoded bytes.
+    pub fn max_encode_size(participants: u32, application: usize) -> usize {
+        // After its tag, a boundary or block request carries an epoch, a latest request nothing, a
+        // boundary or latest response a finalization, and a block response an epoch and a backfill
+        // block.
+        let finalization = Finalization::<S, V::Commitment>::max_encode_size(participants);
+        let block = Epoch::MAX_ENCODE_SIZE + V::max_backfill_block_size(application);
+        Tag::SIZE + Epoch::MAX_ENCODE_SIZE.max(finalization).max(block)
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<S, V> arbitrary::Arbitrary<'_> for Message<S, V>
 where
@@ -234,18 +252,24 @@ where
     }
 }
 
-/// Decodes a block response body against `commitment`, the payload of a verified
+/// Decodes a block response body and binds it to `commitment`, the payload of a verified
 /// finalization.
-pub(crate) fn read_block<V>(
+pub(crate) async fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+    strategy: &impl Strategy,
 ) -> Result<V::Block, Error>
 where
     V: Variant,
 {
-    let block_cfg = V::block_cfg(block_codec_config, ExpectedCommitment::Trusted(commitment));
-    V::Block::decode_cfg(reader, &block_cfg)
+    V::decode_block(
+        reader,
+        block_codec_config,
+        ExpectedCommitment::Trusted(commitment),
+        strategy,
+    )
+    .await
 }
 
 #[cfg(all(test, feature = "arbitrary"))]

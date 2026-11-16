@@ -1,0 +1,15 @@
+["commonware_stream::sake::conformance::CupsV0"]
+n_cases = 256
+hash = "b17c25f55663c938bf57c2142f28e820e8cb8ebd61ec36c619a965ec7021f83e"
+
+["commonware_stream::sake::conformance::CupsV1"]
+n_cases = 256
+hash = "57af17fc4f7395d880ad6ca37f96c631d52686dc1424c496dea70292818a4a6b"
+
+["commonware_stream::sake::conformance::SakeV0CupsV1"]
+n_cases = 256
+hash = "7bde2bb15485121462b64166f2cc35466a912f2f5494de57fd5169662b39db7d"
+
+["commonware_stream::sake::conformance::SakeV1CupsV0"]
+n_cases = 256
+hash = "46ada4282fe948c6eab39e36f9b7c757473bb2486141e66748301535cc0cacd4"

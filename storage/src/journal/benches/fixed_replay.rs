@@ -24,16 +24,18 @@ async fn bench_run(
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let stream = reader
-        .replay(0, NZUsize!(buffer), read_options)
+        .replay(reader.bounds(), NZUsize!(buffer), read_options)
         .await
         .expect("failed to replay journal");
     pin_mut!(stream);
     while let Some(result) = stream.next().await {
         match result {
-            Ok(item) => {
-                black_box(item);
+            Ok(batch) => {
+                for item in batch {
+                    black_box(item);
+                }
             }
-            Err(err) => panic!("Failed to read item: {err}"),
+            Err(err) => panic!("Failed to read batch: {err}"),
         }
     }
     journal

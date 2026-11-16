@@ -11,7 +11,8 @@
 //! - `setup` is responsible for loading the epoch's [`EpochInfo`], registering
 //!   its scheme, and restoring this node's dealer and player state.
 //! - `dealing` is responsible for exchanging private dealings and
-//!   acknowledgements during the first half of the epoch.
+//!   acknowledgements during the first half of the epoch, and for holding
+//!   final-block requests until `inclusion` can answer them.
 //! - `inclusion` is responsible for offering this node's dealer log, recording
 //!   finalized logs, and deriving the next [`EpochInfo`].
 //! - `follower` is responsible for following the chain without participating
@@ -29,30 +30,28 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
 use commonware_consensus::{
-    Heightable as _,
+    Block as _, Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
     },
-    certificate::Scheme,
 };
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef, spawn_cell,
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
 use std::{
-    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    ops::ControlFlow,
 };
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
@@ -71,7 +70,8 @@ mod inclusion;
 mod setup;
 #[cfg(test)]
 mod utils;
-use setup::{Setup, StateSyncStart, startup};
+use inclusion::ArtifactRequests;
+use setup::{PreparedEpoch, Setup, StateSyncStart, startup};
 
 /// Configuration for the one-shot DKG mode used by [`bootstrap`](crate::dkg::bootstrap).
 pub(crate) struct DkgConfig<V, P, D>
@@ -103,14 +103,13 @@ where
 }
 
 /// Configuration for [`Actor`].
-pub struct Config<C, M, X, P, SS, T, BV, S, MV, R>
+pub struct Config<C, M, X, P, SS, T, S, MV, R>
 where
     C: Signer,
     X: Blocker<PublicKey = C::PublicKey>,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = C::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = C::PublicKey>,
     R: Registrar<PublicKey = C::PublicKey>,
 {
     /// Signer for player acknowledgements and dealer logs.
@@ -134,7 +133,7 @@ where
     /// Parallel strategy for cryptographic verification.
     pub strategy: T,
 
-    /// Receives each epoch's signer or verifier scheme.
+    /// Receives the material for each epoch's signer, member, or verifier scheme.
     pub registrar: R,
 
     /// Marshal mailbox used to read finalized blocks.
@@ -163,9 +162,6 @@ where
     /// Actor mailbox capacity.
     pub mailbox_size: NonZeroUsize,
 
-    /// Maximum number of messages to buffer in the dealing channel muxer.
-    pub muxer_size: usize,
-
     /// Prefix of the recovery journal's storage partition.
     pub partition_prefix: String,
 
@@ -183,19 +179,20 @@ where
     pub max_participants: NonZeroU32,
 
     /// Epoch schedule used to interpret finalized block heights.
+    ///
+    /// The second half of each epoch is the inclusion window. It must give enough
+    /// dealers a turn to propose for ceremonies to succeed (see
+    /// [Liveness](crate::dkg::reshare#liveness)).
     pub blocks_per_epoch: NonZeroU64,
-
-    /// Batch verifier used to verify dealer logs.
-    pub batch_verifier: PhantomData<BV>,
 }
 
 /// Reshare actor for one node.
 ///
 /// See the [module docs](crate::dkg::reshare) for the protocol it runs.
-pub struct Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A = Exact>
+pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -203,8 +200,7 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -224,24 +220,21 @@ where
     namespace: &'static [u8],
     sharing_mode: SharingMode,
     reveal: Reveal,
-    muxer_size: usize,
     partition_prefix: String,
     page_cache: CacheRef,
     write_buffer: NonZeroUsize,
     replay_buffer: NonZeroUsize,
     max_participants: NonZeroU32,
-    blocks_per_epoch: NonZeroU64,
     epocher: FixedEpocher,
     metrics: ReshareMetrics<C::PublicKey>,
     mode: Mode<V, C::PublicKey, B::Directory>,
     tip: Option<FinalizedTip<B::Digest>>,
-    batch_verifier: PhantomData<BV>,
 }
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -249,8 +242,8 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
@@ -258,7 +251,7 @@ where
     /// Creates an actor from `config` and returns it with its [`Mailbox`].
     pub fn new(
         context: E,
-        config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
+        config: Config<C, M, X, P, SS, T, S, MV, R>,
     ) -> (Self, Mailbox<B, V, C, A>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -280,18 +273,15 @@ where
                 namespace: config.namespace,
                 sharing_mode: config.sharing_mode,
                 reveal: config.reveal,
-                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 page_cache: config.page_cache,
                 write_buffer: config.write_buffer,
                 replay_buffer: config.replay_buffer,
                 max_participants: config.max_participants,
-                blocks_per_epoch: config.blocks_per_epoch,
                 epocher,
                 metrics,
                 mode: Mode::Reshare,
                 tip: None,
-                batch_verifier: config.batch_verifier,
             },
             Mailbox::new(sender),
         )
@@ -299,7 +289,7 @@ where
 
     pub(crate) fn new_dkg(
         context: E,
-        config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
+        config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
     ) -> (Self, Mailbox<B, V, C, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
@@ -345,8 +335,7 @@ where
         )
         .await;
 
-        let (mux, mut dealing_mux) =
-            Muxer::new(self.context.child("mux"), sender, receiver, self.muxer_size);
+        let (mux, mut dealing_mux) = Muxer::new(self.context.child("mux"), sender, receiver);
         mux.start();
 
         // Plan resolution and the startup tip read one processed position. A
@@ -394,10 +383,8 @@ where
         }
 
         loop {
-            let Some(prepared) = self.setup(&mut store, state_sync.take()).await else {
-                return;
-            };
-            let Setup::Participate(prepared) = prepared else {
+            let Setup::Participate(prepared) = self.setup(&mut store, state_sync.take()).await
+            else {
                 if self.follow(&mut store).await.is_break() {
                     return;
                 }
@@ -409,32 +396,52 @@ where
                 .register(prepared.epoch.get())
                 .await
                 .expect("failed to register reshare epoch channel");
-
-            if prepared.phase == EpochPhase::Early {
-                let dealer = prepared.dealer.as_mut();
-                let player = prepared.player.as_mut();
-                if self
-                    .dealing(prepared.epoch, &mut store, dealer, player, chan)
-                    .await
-                    .is_break()
-                {
-                    return;
-                }
-            }
-
             if self
-                .inclusion(
-                    prepared.epoch,
-                    &prepared.info,
-                    &mut store,
-                    prepared.dealer.as_mut(),
-                )
+                .participate(&mut store, &mut prepared, chan)
                 .await
                 .is_break()
             {
                 return;
             }
         }
+    }
+
+    /// Runs the inclusion window of the prepared epoch, preceded by its dealing
+    /// window when the actor enters the epoch in its early phase. Inclusion
+    /// answers the final-block requests held through dealing.
+    ///
+    /// Returns `Continue` once the epoch's final block is applied and `Break`
+    /// when either window returns `Break`.
+    async fn participate<SE, RE>(
+        &mut self,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        prepared: &mut PreparedEpoch<V, C>,
+        chan: (SE, RE),
+    ) -> ControlFlow<()>
+    where
+        SE: Sender<PublicKey = C::PublicKey>,
+        RE: Receiver<PublicKey = C::PublicKey>,
+    {
+        let requests = if prepared.phase == EpochPhase::Early {
+            self.dealing(
+                prepared.epoch,
+                store,
+                prepared.dealer.as_mut(),
+                prepared.player.as_mut(),
+                chan,
+            )
+            .await?
+        } else {
+            ArtifactRequests::default()
+        };
+        self.inclusion(
+            prepared.epoch,
+            &prepared.info,
+            store,
+            prepared.dealer.as_mut(),
+            requests,
+        )
+        .await
     }
 
     /// Returns whether the actor has already applied `block`, either at startup
@@ -449,7 +456,7 @@ where
     /// Panics if `block` conflicts with the tip at the same height, skips
     /// heights above the tip, or is at the next height without the tip as its
     /// parent.
-    fn covered(&self, block: &B) -> bool {
+    fn covered(&self, block: &Digested<B>) -> bool {
         self.tip.is_some_and(|tip| {
             if block.height() == tip.height {
                 assert_eq!(block.digest(), tip.digest, "conflicting finalized block");
@@ -474,7 +481,7 @@ where
     /// # Panics
     ///
     /// Panics if `block` is not above the tip.
-    fn advance(&mut self, block: &B) {
+    fn advance(&mut self, block: &Digested<B>) {
         assert!(
             self.tip.is_none_or(|tip| block.height() > tip.height),
             "completed block must advance the tip"

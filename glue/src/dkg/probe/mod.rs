@@ -120,6 +120,55 @@
 //!
 //! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
 //! request when marshal has no finalization yet.
+//!
+//! # Message Sizes
+//!
+//! The [`Actor`] sends every request and response below on the channel given to [`Actor::start`].
+//! `S` and `V` are the scheme and marshal variant given to [`max_payload_size`]:
+//!
+//! ```text
+//! On a Muxer subchannel, every message is prefixed by:
+//! +---------------------------+
+//! | subchannel (varint, 1-10) |
+//! +---------------------------+
+//!
+//! Boundary finalization request (tag 0) and boundary block request (tag 2):
+//! +---------+----------------------+
+//! | tag (1) | epoch (varint, 1-10) |
+//! +---------+----------------------+
+//!
+//! Latest finalization request (tag 4):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Boundary finalization response (tag 1) and latest finalization response (tag 5):
+//! +---------+--------------+
+//! | tag (1) | finalization |
+//! +---------+--------------+
+//!
+//! Boundary block response (tag 3):
+//! +---------+----------------------+----------------+
+//! | tag (1) | epoch (varint, 1-10) | backfill block |
+//! +---------+----------------------+----------------+
+//!
+//! Finalization:
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
+//! +----------------------------------+---------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] bounds every request and response above, with every varint at its widest,
+//! every certificate at `S::max_certificate_size` for the given committee size, and every block at
+//! the backfill block for the application block bound of the given codec configuration.
+//!
+//! The actor serves the finalizations and blocks marshal holds, so compute [`max_payload_size`]
+//! with the committee size and block codec configuration given to marshal's
+//! [`max_payload_size`][marshal].
+//!
+//! [marshal]: commonware_consensus::marshal::max_payload_size
 
 use crate::dkg::{
     ReshareBlock,
@@ -138,6 +187,9 @@ use commonware_utils::sequence::Unit;
 
 mod actor;
 pub use actor::{Actor, Config};
+
+mod limits;
+pub use limits::max_payload_size;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -216,7 +268,7 @@ mod tests {
         types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
-        Digest as _, Digestible as _, Hasher as _,
+        Digest as _, Digested, Digestible as _, Hasher as _,
         bls12381::{
             dkg::feldman_desmedt::deal,
             primitives::sharing::{Mode, Sharing},
@@ -246,8 +298,9 @@ mod tests {
 
     const BACKFILL_CHANNEL: u64 = 0;
     const BOUNDARY_CHANNEL: u64 = 1;
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
+
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
@@ -541,7 +594,7 @@ mod tests {
     ) -> (mocks::TestMarshalMailbox, Handle<()>) {
         let public_key = participants[index].clone();
         let partition_prefix = format!("probe-node-{index}");
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
         let control = oracle.control(public_key.clone());
         let backfill = control
             .register(BACKFILL_CHANNEL, TEST_QUOTA)
@@ -554,8 +607,8 @@ mod tests {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(16),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -585,6 +638,7 @@ mod tests {
         .await
         .expect("failed to initialize finalized blocks archive");
 
+        let genesis = mocks::genesis_block(public_key);
         let (marshal_actor, mut marshal, _) = marshal::core::Actor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -592,7 +646,7 @@ mod tests {
             marshal::Config {
                 provider: mocks::TestProvider::new(schemes[index].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: Start::Genesis(mocks::genesis_block(public_key).into()),
+                start: Start::Genesis(Digested::precomputed(genesis.clone(), genesis.digest())),
                 partition_prefix,
                 mailbox_size: NZUsize!(16),
                 view_retention: ViewDelta::new(8),
@@ -611,7 +665,14 @@ mod tests {
         let handle = marshal_actor.start_unbuffered(mocks::MarshalApplication::default(), resolver);
 
         for (block, finalization) in boundaries {
-            assert!(marshal.certified(block.context().round, block).await);
+            assert!(
+                marshal
+                    .certified(
+                        block.context().round,
+                        Digested::precomputed(block.clone(), block.digest())
+                    )
+                    .await
+            );
             assert_eq!(
                 marshal.report(Activity::Finalization(finalization)),
                 Feedback::Ok
@@ -682,7 +743,7 @@ mod tests {
         .expect("failed to create test DKG output");
         let sharing = output.public().clone();
         let block = mocks::TestBlock::new::<Sha256>(context, parent, height, epoch.get())
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
             NZU32!(16),
             Payload::EpochInfo(EpochInfo {
                 outcome: EpochOutcome::Success,
@@ -1125,7 +1186,10 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone().into(),
+                    block: Digested::precomputed(
+                        harness.boundary.clone(),
+                        harness.boundary.digest(),
+                    ),
                 }
                 .encode()
                 .to_vec(),
@@ -1192,7 +1256,10 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone().into(),
+                    block: Digested::precomputed(
+                        harness.boundary.clone(),
+                        harness.boundary.digest(),
+                    ),
                 }
                 .encode()
                 .to_vec(),
@@ -1263,7 +1330,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: wrong_block.into(),
+                    block: Digested::precomputed(wrong_block.clone(), wrong_block.digest()),
                 }
                 .encode()
                 .to_vec(),
@@ -1283,7 +1350,10 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone().into(),
+                    block: Digested::precomputed(
+                        harness.boundary.clone(),
+                        harness.boundary.digest(),
+                    ),
                 }
                 .encode()
                 .to_vec(),
@@ -1521,8 +1591,10 @@ mod tests {
                 panic!("expected block response");
             };
             assert_eq!(epoch, Epoch::new(1));
-            let block = wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &())
-                .expect("boundary block decoded");
+            let block =
+                wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &(), &Sequential)
+                    .await
+                    .expect("boundary block decoded");
 
             assert_eq!(block.digest(), harness.boundary.digest());
             assert_eq!(block.height(), Height::new(1));

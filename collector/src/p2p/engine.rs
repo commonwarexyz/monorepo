@@ -9,7 +9,7 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender, utils::codec::wrap};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{channel::oneshot, futures::Pool};
@@ -19,7 +19,7 @@ use tracing::{debug, error};
 /// Engine that will disperse messages and collect responses.
 pub struct Engine<E, B, Rq, Rs, P, M, H>
 where
-    E: BufferPooler + Clock + Spawner,
+    E: Clock + Spawner,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -51,7 +51,7 @@ where
 
 impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
 where
-    E: BufferPooler + Clock + Spawner + Metrics,
+    E: Clock + Spawner + Metrics,
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     Rq: Committable + Digestible + Codec,
@@ -109,18 +109,8 @@ where
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
         // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(
-            self.request_codec,
-            self.context.network_buffer_pool().clone(),
-            requests.0,
-            requests.1,
-        );
-        let (mut res_tx, mut res_rx) = wrap(
-            self.response_codec,
-            self.context.network_buffer_pool().clone(),
-            responses.0,
-            responses.1,
-        );
+        let (mut req_tx, mut req_rx) = wrap(self.request_codec, requests.0, requests.1);
+        let (mut res_tx, mut res_rx) = wrap(self.response_codec, responses.0, responses.1);
 
         // Create futures pool
         let mut processed: Pool<'_, Result<(P, Rs), oneshot::error::RecvError>> = Pool::default();
@@ -130,7 +120,10 @@ where
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            Some(command) = self.mailbox.recv() else continue => match command {
+            Some(command) = self.mailbox.recv() else {
+                debug!("mailbox closed, stopping engine");
+                break;
+            } => match command {
                 Message::Send {
                     request,
                     recipients,

@@ -105,7 +105,7 @@ fn fuzz(input: FuzzInput) {
                                 .await
                                 .expect("failed to put value into store"),
                         );
-                        expected_data.insert(*index, value);
+                        expected_data.entry(*index).or_insert(value);
                     }
                 }
 
@@ -212,7 +212,7 @@ fn fuzz(input: FuzzInput) {
                                 .put(index, value.clone())
                                 .await
                                 .expect("failed to put value into store");
-                            expected_data.insert(index, value);
+                            expected_data.entry(index).or_insert(value);
                         }
 
                         // Sync after batch operation to test persistence
@@ -240,7 +240,7 @@ fn fuzz(input: FuzzInput) {
                                 .put(index, value.clone())
                                 .await
                                 .expect("failed to put value into store");
-                            expected_data.insert(index, value);
+                            expected_data.entry(index).or_insert(value);
                         }
 
                         // Sync after large batch to test buffer flushing

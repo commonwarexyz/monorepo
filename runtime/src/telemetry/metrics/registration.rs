@@ -1,9 +1,5 @@
-use commonware_utils::sync::Mutex;
+use commonware_utils::sync::Exclusive;
 use std::sync::Arc;
-
-// Wrap arbitrary `Send` guards so `Registration` can store them behind
-// `Arc<dyn Send + Sync>` while still dropping the guard on last handle release.
-struct GuardHolder<G>(Mutex<G>);
 
 /// A shared lifecycle token for a [`Registered`](super::Registered) metric handle.
 ///
@@ -23,8 +19,9 @@ impl Registration {
     where
         G: Send + 'static,
     {
+        // Exclusive access is all the holder ever needs: the guard is dropped, never read.
         Self {
-            _guard: Arc::new(GuardHolder(Mutex::new(guard))),
+            _guard: Arc::new(Exclusive::new(guard)),
         }
     }
 }

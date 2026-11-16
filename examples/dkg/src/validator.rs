@@ -7,10 +7,9 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, IO_BUFFER_SIZE, ITEMS_PER_SECTION,
-        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
-        QMDB_CHANNEL, RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, Secrets,
-        VOTE_CHANNEL,
+        LogReporter, MAILBOX_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
+        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition, QMDB_CHANNEL, RESOLVER_CHANNEL,
+        REVEAL, Registrar, SHARING_MODE, Scheme, Secrets, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -30,14 +29,16 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256};
+use commonware_cryptography::{
+    ChaCha20Poly1305, Digested, bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256,
+};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
         fence::Fence,
         orchestrator, probe, reshare,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
-        types::EpochInfo,
+        types::{EpochInfo, SchemeInfo},
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
@@ -52,10 +53,13 @@ use commonware_p2p::authenticated::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Spawner, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_stream::encrypted::Handshake;
-use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
+use commonware_utils::{NZDuration, NZUsize, sequence::Unit};
 use rand_core::CryptoRng;
-use std::{marker::PhantomData, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tracing::error;
 
 /// Start a validator node.
@@ -91,20 +95,29 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
     let partition_prefix = "validator";
-    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
-    let mut p2p_config = discovery::Config::local(
-        Handshake::new(node.signer.clone()),
+    let p2p_config = discovery::Config::local(
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: node.signer.clone(),
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        types::max_message_size(),
+        MAILBOX_SIZE,
     );
-    p2p_config.mailbox_size = MAILBOX_SIZE;
+
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
     // Channel rates are enforced independently per peer. The network derives each shared inbound
@@ -121,27 +134,16 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let provider = DynamicProvider::default();
     let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
-    if let Some(share) = store.get_share(Epoch::zero()).await {
-        provider.register(
-            Epoch::zero(),
-            Scheme::signer(
-                NAMESPACE,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-                share,
-            )
-            .expect("epoch-0 share must match genesis"),
-        );
-    } else {
-        provider.register(
-            Epoch::zero(),
-            Scheme::verifier(
-                NAMESPACE,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-            ),
-        );
-    }
+    let share = store.get_share(Epoch::zero()).await;
+    provider.register(
+        Epoch::zero(),
+        types::scheme(SchemeInfo::new(
+            &local,
+            genesis_info.output.players().clone(),
+            genesis_info.output.public().clone(),
+            share,
+        )),
+    );
 
     let resolver = marshal_resolver::init(
         context.child("marshal_resolver"),
@@ -150,8 +152,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
             mailbox_size: MAILBOX_SIZE,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         },
@@ -167,6 +169,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
             priority: false,
             codec_config: (),
             peer_provider: oracle.clone(),
+            blocker: oracle.clone(),
+            strategy: Sequential,
         },
     );
     let broadcast_handle = broadcast_engine.start(broadcast_network);
@@ -186,11 +190,15 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let genesis_target =
         <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
-    let genesis = Block::genesis(
-        network.participants[0].clone(),
-        genesis_info.clone(),
-        genesis_target,
-    );
+    let genesis = Digested::compute(
+        Block::genesis(
+            network.participants[0].clone(),
+            genesis_info.clone(),
+            genesis_target,
+        ),
+        &Sequential,
+    )
+    .await;
     let stateful_startup = context.child("stateful_startup");
     let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
     let (probe_actor, probe_mailbox) = probe::Actor::new(probe_config(
@@ -206,11 +214,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
             artifact.info.epoch,
-            Scheme::verifier(
-                NAMESPACE,
+            types::scheme(SchemeInfo::new(
+                &local,
                 artifact.info.output.players().clone(),
                 artifact.info.output.public().clone(),
-            ),
+                None,
+            )),
         );
         plan = plan.set_floor(artifact.floor.clone()).await;
         Some(artifact)
@@ -225,7 +234,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: plan.marshal_start(genesis.clone().into()),
+            start: plan.marshal_start(genesis.clone()),
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),
@@ -250,18 +259,15 @@ pub async fn run(context: tokio::Context, args: Validator) {
             database: None,
             mailbox_size: MAILBOX_SIZE,
             me: Some(local.clone()),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            max_serve_ops: NZU64!(16),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
+            max_serve_ops: types::SYNC_BATCH_SIZE,
             priority_requests: false,
             priority_responses: false,
         },
     );
     let qmdb_handle = qmdb_actor.start(qmdb_network);
 
-    let fence_epoch = probe_artifact
-        .as_ref()
-        .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
     let state_sync = probe_artifact.map(|artifact| {
         let floor = plan
             .floor()
@@ -283,7 +289,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
     )
     .await;
 
-    let (fence, gate) = Fence::new(fence_epoch);
+    // The orchestrator enters an epoch only once the reshare actor registers
+    // the epoch's scheme and marks the fence, so it never starts an engine from
+    // the state-sync verifier registered above for marshal.
+    let (fence, gate) = Fence::new();
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
@@ -301,14 +310,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
             sharing_mode: SHARING_MODE,
             reveal: REVEAL,
             mailbox_size: MAILBOX_SIZE,
-            muxer_size: MUXER_SIZE,
             partition_prefix: format!("{partition_prefix}-reshare"),
             page_cache: page_cache.clone(),
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             max_participants: MAX_PARTICIPANTS,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
-            batch_verifier: PhantomData::<ed25519::Batch>,
         },
     );
     let reshare_handle = reshare_actor.start(dkg_network);
@@ -316,7 +323,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (stateful_actor, stateful_mailbox) = Stateful::new(
         context.child("stateful"),
         StatefulConfig {
-            application: App::new(genesis.clone()),
+            application: App::new(genesis.inner().clone()),
             db_config: types::db_config(partition_prefix, page_cache.clone()),
             provider: (),
             marshal: (marshal.clone(), floor),
@@ -325,6 +332,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             resolvers: qmdb_sync_resolver,
             sync_config: types::sync_config(),
             prune_config: None,
+            strategy: Sequential,
         },
     );
 
@@ -357,7 +365,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_millis(500),
-                fetch_timeout: Duration::from_secs(2),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: ViewDelta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(5),
@@ -369,7 +378,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             gate,
             state_sync,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
-            muxer_size: MUXER_SIZE,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-orchestrator"),
         },
@@ -469,7 +477,9 @@ mod tests {
         simplex::types::{Finalization, Finalize, Proposal},
         types::{Round, View},
     };
-    use commonware_cryptography::{Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal};
+    use commonware_cryptography::{
+        ChaCha20Poly1305, Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal,
+    };
     use commonware_glue::dkg::types::EpochOutcome;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{N3f1, TestRng, non_empty, ordered::Set};
@@ -582,18 +592,25 @@ mod tests {
 
             // The probe carries the persisted floor.
             let address = SocketAddr::from(([127, 0, 0, 1], 3000));
-            let (_, oracle) = discovery::Network::new(
-                context.child("network"),
-                discovery::Config::local(
-                    Handshake::new(signers[0].clone()),
-                    NAMESPACE,
-                    address,
-                    address,
-                    Vec::new(),
-                    NZUsize!(signers.len()),
-                    MAX_MESSAGE_SIZE,
+            let p2p_config = discovery::Config::local(
+                Cups::<_, ChaCha20Poly1305>::new(
+                    Sake {
+                        signer: signers[0].clone(),
+                        synchrony_bound: Duration::from_secs(5),
+                        max_handshake_age: Duration::from_secs(10),
+                        version: sake::Version::V1,
+                    },
+                    cups::Version::V1,
                 ),
+                NAMESPACE,
+                address,
+                address,
+                Vec::new(),
+                NZUsize!(signers.len()),
+                types::max_message_size(),
+                MAILBOX_SIZE,
             );
+            let (_, oracle) = discovery::Network::new(context.child("network"), p2p_config);
             let config = probe_config(context.child("probe"), oracle, &genesis, &plan);
             assert_eq!(config.floor, Some(floor));
         });

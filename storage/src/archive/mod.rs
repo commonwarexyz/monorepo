@@ -52,9 +52,7 @@ impl From<crate::journal::Error> for Error {
 /// A write-once key-value store addressed by both an index and a key.
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
-/// dropped future) destroys the handle. Pruning implementations satisfy puts below the prune
-/// floor without storing: pruning declared that range obsolete, so nothing is mutated and
-/// nothing below the floor is ever readable.
+/// dropped future) destroys the handle.
 pub trait Archive: Send + Sized {
     /// The type of the key.
     type Key: Array;
@@ -68,8 +66,6 @@ pub trait Archive: Send + Sized {
     /// indices can be stored via [MultiArchive::put_multi]. Keys need not be unique: the same key
     /// may be stored at multiple indices, and a subsequent [Archive::get] or [Archive::has] call
     /// with an [Identifier::Key] identifier may return any of the values associated with that key.
-    ///
-    /// A put below the prune floor is satisfied without storing (see the trait docs).
     fn put(
         self,
         index: u64,
@@ -192,8 +188,6 @@ pub trait MultiArchive: Archive {
     /// Multiple items may share the same `index`. If the same key is stored at
     /// multiple indices, any associated value may be returned when queried with
     /// [Identifier::Key].
-    ///
-    /// A put below the prune floor is satisfied without storing (see the trait docs).
     fn put_multi(
         self,
         index: u64,
@@ -259,7 +253,7 @@ mod tests {
             translator: TwoCap,
             metadata_partition: "test-metadata".into(),
             key_partition: "test-key".into(),
-            key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: "test-value".into(),
             compression,
             codec_config: (),
@@ -282,7 +276,7 @@ mod tests {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
             freezer_key_partition: "test-freezer-key".into(),
-            freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             freezer_value_partition: "test-freezer-value".into(),
             freezer_value_target_size: 1024 * 1024,
             freezer_value_compression: compression,
@@ -1233,10 +1227,11 @@ mod tests {
     // but the last needs its own key, so clippy's per-path analysis flags
     // the clones as redundant.
     #[allow(dead_code)]
-    fn assert_archive_futures_are_send<T: super::Archive>(archive: T, key: T::Key, value: T::Value)
-    where
-        T::Key: Clone,
-    {
+    fn assert_archive_futures_are_send<T: super::Archive>(
+        archive: T,
+        key: T::Key,
+        value: T::Value,
+    ) {
         assert_send(archive.get(Identifier::Index(1)));
         assert_send(archive.get(Identifier::Key(&key)));
         assert_send(archive.has(Identifier::Index(1)));
@@ -1257,9 +1252,7 @@ mod tests {
         archive: T,
         key: T::Key,
         value: T::Value,
-    ) where
-        T::Key: Clone,
-    {
+    ) {
         assert_send(archive.get_all(1));
         #[allow(clippy::redundant_clone)]
         match 0u8 {

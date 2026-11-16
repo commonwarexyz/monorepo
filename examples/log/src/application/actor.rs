@@ -18,7 +18,6 @@ pub struct Application<R: Rng + Spawner + Metrics, H: Hasher> {
 
 impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
     /// Create a new application actor.
-    #[allow(clippy::type_complexity)]
     pub fn new(
         context: R,
         config: Config,

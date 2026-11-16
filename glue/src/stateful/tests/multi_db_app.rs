@@ -1,23 +1,26 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
+        probe::{self, Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
+    Write,
+};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -39,7 +42,10 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
-use commonware_p2p::utils::mux::Muxer;
+use commonware_p2p::{
+    max_message_size,
+    utils::mux::{Muxer, prefixed},
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -50,18 +56,17 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
-        any::{FixedConfig, unordered::fixed},
+        any::unordered::fixed,
         immutable,
         sync::{CompactTarget, Target},
     },
     translator::TwoCap,
 };
 use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
+    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
 use futures::StreamExt;
-use rand_core::Rng;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 /// The full (journaled) QMDB used as DB-A in the multi-db e2e tests.
 type QmdbA<E> =
@@ -83,11 +88,11 @@ pub(super) fn qmdb_config(
     prefix: &str,
     page_cache: CacheRef,
 ) -> (
-    FixedConfig<TwoCap, Sequential>,
+    fixed::Config<TwoCap, Sequential>,
     immutable::fixed::CompactConfig<Sequential>,
 ) {
-    let db_a = FixedConfig {
-        merkle_config: MmrJournalConfig {
+    let db_a = fixed::Config {
+        merkle: MmrJournalConfig {
             journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             items_per_blob: NZU64!(11),
@@ -96,7 +101,7 @@ pub(super) fn qmdb_config(
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache: page_cache.clone(),
@@ -121,7 +126,6 @@ pub(super) fn qmdb_config(
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
         },
-        commit_codec_config: (),
     };
     (db_a, db_b)
 }
@@ -206,6 +210,18 @@ impl CertifiableBlock for Block {
     }
 }
 
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+    }
+}
+
 impl Block {
     pub(super) fn genesis(
         root_a: sha256::Digest,
@@ -244,7 +260,7 @@ impl App {
     }
 
     /// Execute a block against two databases.
-    pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
+    pub(super) async fn execute<E: Spawner + StorageContext>(
         height: Height,
         batches: (
             <DbA<E> as DatabaseSet<E>>::Unmerkleized,
@@ -282,7 +298,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + StorageContext> Application<E> for App {
+impl<E: Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -323,34 +339,24 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
-        let bounds_a = merkleized_a.bounds();
+        let block = ancestry.peek()?.inner();
+        let (height, range_b) = (block.height(), block.range_b.clone());
+        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
+
+        // Database B's sync target covers its root and size but not its inactivity floor, so the
+        // floor is checked here.
         let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == tip.root_a
-            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size) == tip.range_a;
-        let matches_b = merkleized_b.root() == tip.root_b
-            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) == tip.range_b;
-        if !matches_a || !matches_b {
+        if non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) != range_b {
             return None;
         }
         Some((merkleized_a, merkleized_b))
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
     }
 
     async fn capture(
@@ -373,7 +379,10 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
-            Target::new(block.root_a, block.range_a.clone()),
+            Target {
+                root: block.root_a,
+                range: block.range_a.clone(),
+            },
             CompactTarget {
                 root: block.root_b,
                 size: block.range_b.end(),
@@ -390,8 +399,6 @@ pub(crate) struct MultiDbEngine {
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
     retained_marshal_blocks: usize,
-    sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
-    sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
 
 impl MultiDbEngine {
@@ -408,15 +415,11 @@ impl MultiDbEngine {
             schemes,
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
-                fetch_batch_size: NZU64!(16),
+                fetch_batch_size: SYNC_BATCH_SIZE,
                 apply_batch_size: NZU64!(64),
-                max_outstanding_requests: 8,
-                update_channel_size: NZUsize!(256),
-                max_retained_roots: 32,
+                max_outstanding_requests: NZUsize!(8),
             },
             retained_marshal_blocks: 10,
-            sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
-            sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -430,9 +433,7 @@ impl MultiDbEngine {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            max_outstanding_requests: 1,
-            update_channel_size: NZUsize!(4),
-            max_retained_roots: 32,
+            max_outstanding_requests: NZUsize!(1),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
@@ -460,6 +461,30 @@ impl EngineDefinition for MultiDbEngine {
         ]
     }
 
+    fn max_message_size(&self) -> u32 {
+        let participants = u32::try_from(self.schemes.len()).unwrap();
+
+        // Both QMDB sync actors share one muxed channel, so its payload bound is the sync bound for
+        // the wider of the two operations plus the subchannel prefix.
+        let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE
+            .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
+        let qmdb =
+            qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
+        max_message_size([
+            simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
+                participants,
+            ),
+            marshal::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+                &(),
+            ),
+            probe::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+            ),
+            prefixed(qmdb),
+        ])
+    }
+
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
         let InitContext {
             context,
@@ -475,7 +500,7 @@ impl EngineDefinition for MultiDbEngine {
         let scheme = self.schemes[index].clone();
 
         let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let db_config = qmdb_config(&partition_prefix, page_cache.clone());
 
@@ -494,7 +519,6 @@ impl EngineDefinition for MultiDbEngine {
             context.child("qmdb_mux"),
             qmdb_resolver_network.0,
             qmdb_resolver_network.1,
-            100,
         );
         mux.start();
         let qmdb_a_resolver_network = mux_handle.register(0).await.unwrap();
@@ -506,8 +530,8 @@ impl EngineDefinition for MultiDbEngine {
             peer_provider: oracle.manager(),
             blocker: oracle.control(public_key.clone()),
             mailbox_size: NZUsize!(100),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -525,6 +549,8 @@ impl EngineDefinition for MultiDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(public_key.clone()),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -559,9 +585,13 @@ impl EngineDefinition for MultiDbEngine {
             partition_prefix.clone(),
         )
         .await;
-        let should_state_sync = plan.should_sync(self.enable_state_sync && delayed);
-        let provider = ConstantProvider::new(scheme.clone());
+        let requested = self.enable_state_sync && delayed;
+        let should_state_sync = plan.should_sync(requested);
 
+        // A floor persisted by an earlier startup means its state sync was interrupted.
+        let state_sync_resumed = plan.floor().is_some();
+
+        let provider = ConstantProvider::new(scheme.clone());
         let (probe, probe_mailbox) = Probe::new(ProbeConfig {
             context: context.child("probe"),
             provider: provider.clone(),
@@ -576,8 +606,10 @@ impl EngineDefinition for MultiDbEngine {
             let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
             plan = plan.set_floor(finalization).await;
             None
+        } else if requested {
+            plan.completed().map(|height| height.get())
         } else {
-            self.sync_heights.lock().get(public_key).copied()
+            None
         };
 
         // Marshal actor
@@ -585,7 +617,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -619,9 +651,9 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -637,9 +669,9 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -664,6 +696,7 @@ impl EngineDefinition for MultiDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 
@@ -703,16 +736,7 @@ impl EngineDefinition for MultiDbEngine {
                 .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
                 .await
                 .expect("sync floor block must be available");
-            let height = block.height();
-            *self
-                .sync_entries
-                .lock()
-                .entry(public_key.clone())
-                .or_insert(0) += 1;
-            self.sync_heights
-                .lock()
-                .insert(public_key.clone(), height.get());
-            state_sync_height = Some(height.get());
+            state_sync_height = Some(block.height().get());
         }
 
         // Initialize stateful from marshal's processed frontier.
@@ -724,8 +748,8 @@ impl EngineDefinition for MultiDbEngine {
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
-            relay: deferred,
-            reporter: marshal_mailbox.clone(),
+            relay: deferred.clone(),
+            reporter: deferred,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: NZUsize!(100),
@@ -742,7 +766,8 @@ impl EngineDefinition for MultiDbEngine {
                 timeout: Duration::from_secs(5),
                 budget: simplex::SkipBudget::Participants,
             },
-            fetch_timeout: Duration::from_secs(2),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_secs(2),
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         };
@@ -754,12 +779,7 @@ impl EngineDefinition for MultiDbEngine {
             handle,
             MockValidatorState {
                 marshal: marshal_mailbox,
-                state_sync_entries: self
-                    .sync_entries
-                    .lock()
-                    .get(public_key)
-                    .copied()
-                    .unwrap_or(0),
+                state_sync_resumed,
                 state_sync_height,
                 oldest_retained,
             },

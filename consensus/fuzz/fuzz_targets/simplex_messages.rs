@@ -54,9 +54,7 @@ fn roundtrip_vote<S: Scheme<sha256::Digest>>(data: &[u8]) {
 fn roundtrip_certificate<S: Scheme<sha256::Digest>>(
     data: &[u8],
     cfg: &<S::Certificate as Read>::Cfg,
-) where
-    S::Certificate: Read,
-{
+) {
     if let Ok(cert) = Certificate::<S, sha256::Digest>::decode_cfg(Copying(data), cfg) {
         let encoded = cert.encode();
         assert_eq!(data, encoded.as_ref());

@@ -62,6 +62,7 @@ mod common;
 use common::{
     AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     Runner as _, Spawner as _, Supervisor as _,
@@ -77,15 +78,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 /// Items per blob for the generated database. Much larger than the shared bench default (50k) so a
 /// multi-GB database is split across far fewer blob files, which keeps the partition-directory scan
 /// on reopen cheap. Note this only reduces the file count, not the on-disk byte growth.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
-/// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
-/// (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top of a
-/// realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
+/// Page cache size, realistic for a multi-GB database rather than the shared bench default of
+/// 2 MiB (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top
+/// of a realistic page cache instead of an unrealistically tiny one. 262144 * 4 KiB = 1 GiB.
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(262144);
 
 /// Page cache size for the get modes when `cache_pages` is not given: small enough that
 /// uniform-random reads at benchmark scale virtually never hit it, so cold reads reach the
@@ -278,7 +282,7 @@ fn generate(
     /// Time the build itself (updates + prune + sync). Opening the empty db is done by the
     /// caller and is cheap.
     #[commonware_macros::boxed]
-    async fn populate<M: DbAny<Mmr, Key = Digest, Value = Digest>>(
+    async fn populate<M: DbAny<Family = Mmr, Key = Digest, Value = Digest>>(
         db: M,
         keyspace: u64,
         num_updates: u64,
@@ -354,7 +358,6 @@ fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind)
 /// reader count drop the OS page cache and run a cold pass of `num_gets` gets, followed by a warm
 /// pass over the same keys as a control. With `batch`, each reader issues its gets in `batch`-key
 /// `get_many` calls.
-#[allow(clippy::too_many_arguments)]
 fn get_bench(
     folder: &str,
     keyspace: u64,
@@ -431,7 +434,7 @@ fn get_bench(
 }
 
 /// Run the cold/warm read passes for each reader count against an opened database.
-async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_reads<D: DbAny<Family = Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     opened: Duration,
@@ -470,7 +473,7 @@ async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
 /// deterministic key stream (so a repeat pass replays the same keys). With a `batch` size, each
 /// reader issues its gets in `batch`-key `get_many` calls instead of point gets. Returns the
 /// elapsed time, the number of gets issued, and how many found a value.
-async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_gets<D: DbAny<Family = Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     keyspace: u64,
@@ -508,8 +511,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
                                     Sha256::hash(&[&index.to_be_bytes()])
                                 })
                                 .collect();
-                            let refs: Vec<_> = keys.iter().collect();
-                            let values = db.get_many(&refs).await.unwrap();
+                            let values = db.get_many(&keys).await.unwrap();
                             found += values.iter().flatten().count() as u64;
                             remaining -= n;
                         }
@@ -564,13 +566,13 @@ fn time_init(
     index: IndexKind,
 ) -> (Duration, u64) {
     /// The elapsed time since `start` and the db's replay-region size.
-    fn measure<M: DbAny<Mmr, Key = Digest, Value = Digest>>(
+    fn measure<M: DbAny<Family = Mmr, Key = Digest, Value = Digest>>(
         db: &M,
         start: Instant,
     ) -> (Duration, u64) {
         let elapsed = start.elapsed();
         let end: u64 = *db.bounds().end;
-        let floor: u64 = *db.inactivity_floor_loc();
+        let floor: u64 = *db.inactivity_floor();
         (elapsed, end.saturating_sub(floor))
     }
 

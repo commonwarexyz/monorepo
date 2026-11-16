@@ -1,17 +1,14 @@
 use crate::{
     merkle::Family,
     qmdb::{
-        any::{
-            VariableValue,
-            operation::{
-                COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
-                update,
-            },
-            value::VariableEncoding,
+        any::operation::{
+            COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
+            update,
         },
         operation::{
             Key, commit_variable_payload_size, read_commit_variable, write_commit_variable,
         },
+        value::{VariableEncoding, VariableValue},
     },
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -20,7 +17,6 @@ use commonware_runtime::BufMut;
 impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>
 where
     F: Family,
-    S::Key: Write + Read,
     V: VariableValue,
     S: Update<Value = V, ValueEncoding = Self>
         + Write
@@ -38,7 +34,7 @@ where
                 UPDATE_CONTEXT.write(buf);
                 p.write(buf);
             }
-            Operation::CommitFloor(metadata, floor_loc) => {
+            Operation::Commit(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 write_commit_variable(metadata, *floor_loc, buf);
             }
@@ -60,7 +56,7 @@ where
             }
             COMMIT_CONTEXT => {
                 let (metadata, floor_loc) = read_commit_variable(buf, &cfg.1)?;
-                Ok(Operation::CommitFloor(metadata, floor_loc))
+                Ok(Operation::Commit(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }
@@ -71,7 +67,7 @@ where
 impl<F, K, V> EncodeSize for Operation<F, update::Ordered<K, VariableEncoding<V>>>
 where
     F: Family,
-    K: Key + EncodeSize,
+    K: Key,
     V: VariableValue,
     update::Ordered<K, VariableEncoding<V>>: EncodeSize,
 {
@@ -79,7 +75,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
+            Self::Commit(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }
@@ -88,7 +84,7 @@ where
 impl<F, K, V> EncodeSize for Operation<F, update::Unordered<K, VariableEncoding<V>>>
 where
     F: Family,
-    K: Key + EncodeSize,
+    K: Key,
     V: VariableValue,
     update::Unordered<K, VariableEncoding<V>>: EncodeSize,
 {
@@ -96,7 +92,7 @@ where
         1 + match self {
             Self::Delete(k) => k.encode_size(),
             Self::Update(p) => p.encode_size(),
-            Self::CommitFloor(v, floor) => commit_variable_payload_size(v, *floor),
+            Self::Commit(v, floor) => commit_variable_payload_size(v, *floor),
         }
     }
 }

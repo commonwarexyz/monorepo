@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [reads] [read_chunks] [updates] [threads] [page_cache] [policy]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -23,27 +23,50 @@
 //! - threads: strategy pool threads (default 8)
 //! - page_cache: page cache capacity in 4096-byte pages (default 131,072 = 512MiB, enough
 //!   to hold the default working set; shrink it to measure miss-heavy regimes)
+//! - policy: the floor policy of the timed merkleize (default "proportional"). "fixed" keeps
+//!   up to one update per distinct key the timed batch writes, plus one, with unlimited skips.
+//!   That is exactly the entry allowance a proportional walk has for the batch (every written
+//!   key exists and nothing is deleted), so it moves the same updates through the fixed-limit
+//!   decision path and reproduces the proportional roots. "fixed-bounded" keeps the same
+//!   entries but passes at most updates inactive locations. Seeding, churn, and the pending
+//!   ancestors always use the proportional policy.
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    Runner as _, Strategizer as _, Supervisor as _,
-    buffer::paged::CacheRef,
+    BLOB_PAGE_SIZE, Runner as _, Strategizer as _, Supervisor as _,
+    buffer::paged::{CacheRef, page_size},
     tokio::{Config as RConfig, Context, Runner},
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
-    qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
+    qmdb::{
+        any::{
+            batch::Slot,
+            ordered::fixed::Config as AnyOrderedConfig,
+            unordered::{fixed::Config as AnyConfig, variable::Config as AnyVarConfig},
+        },
+        current::{
+            ordered::fixed::Config as CurrentOrderedConfig,
+            unordered::fixed::Config as CurrentConfig,
+        },
+        floor::Bounded,
+    },
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZU64, NZUsize, TestRng};
 use rand::Rng;
 use std::{
+    collections::HashSet,
     hint::black_box,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Instant,
 };
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 type Digest = DigestOf<Sha256>;
 const CHUNK_SIZE: usize = 32;
@@ -138,7 +161,7 @@ type AnyVarMerkleized = std::sync::Arc<
     >,
 >;
 
-const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
@@ -152,6 +175,54 @@ struct Args {
     num_updates: u64,
     num_reads: u64,
     read_chunks: usize,
+    policy: PolicyKind,
+}
+
+/// The floor policy of the timed merkleize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyKind {
+    Proportional,
+    Fixed,
+    FixedBounded,
+}
+
+impl PolicyKind {
+    const NAMES: &str = "proportional|fixed|fixed-bounded";
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "proportional" => Some(Self::Proportional),
+            "fixed" => Some(Self::Fixed),
+            "fixed-bounded" => Some(Self::FixedBounded),
+            _ => None,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Proportional => "proportional",
+            Self::Fixed => "fixed",
+            Self::FixedBounded => "fixed-bounded",
+        }
+    }
+
+    /// The fixed limits for a batch that writes `distinct_keys` existing keys out of `updates`
+    /// slots, or `None` for the proportional policy. The entries match the proportional walk's
+    /// allowance for that batch: one per superseded update and one for the previous commit.
+    const fn fixed(self, distinct_keys: usize, updates: u64) -> Option<Bounded> {
+        let entries = distinct_keys + 1;
+        match self {
+            Self::Proportional => None,
+            Self::Fixed => Some(Bounded {
+                entries,
+                skips: u64::MAX,
+            }),
+            Self::FixedBounded => Some(Bounded {
+                entries,
+                skips: updates,
+            }),
+        }
+    }
 }
 
 fn key(i: u64) -> Digest {
@@ -172,11 +243,12 @@ fn report(db: &str, args: &Args, mut times_ms: Vec<f64>) {
     let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
     let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
     println!(
-        "RESULT db={db} depth={} reads={} read_chunks={} updates={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        "RESULT db={db} depth={} reads={} read_chunks={} updates={} policy={} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
         args.depth,
         args.num_reads,
         args.read_chunks,
         args.num_updates,
+        args.policy.name(),
         p(0.1),
         p(0.5),
         mean,
@@ -198,8 +270,8 @@ macro_rules! run_pipeline {
         for i in 0..args.num_keys {
             batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let mut db = db.commit().await.unwrap();
 
         // Churn: overwrite batches so inactive ops accumulate above the floor.
@@ -208,8 +280,8 @@ macro_rules! run_pipeline {
             for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
@@ -229,47 +301,55 @@ macro_rules! run_pipeline {
                 for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                     b = b.write(k, Some(v));
                 }
-                chain.push(b.merkleize(&db, None).await.unwrap());
+                chain.push(b.merkleize(&db).await.unwrap());
             }
 
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
             let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
-            let mut slots: Vec<_> = (0..reads.len()).collect();
+            let mut indices: Vec<_> = (0..reads.len()).collect();
             for i in 0..args.num_updates as usize {
-                let j = i + (rng.next_u64() as usize % (slots.len() - i));
-                slots.swap(i, j);
+                let j = i + (rng.next_u64() as usize % (indices.len() - i));
+                indices.swap(i, j);
             }
-            let updates: Vec<_> = slots[..args.num_updates as usize]
+            let updated = &indices[..args.num_updates as usize];
+            let mut slots = vec![Slot::Keep; reads.len()];
+            for &slot in updated {
+                slots[slot] = Slot::Put(reads[slot].1);
+            }
+            let distinct_keys = updated
                 .iter()
-                .map(|&idx| (idx, Some(reads[idx].1)))
-                .collect();
+                .map(|&slot| reads[slot].0)
+                .collect::<HashSet<_>>()
+                .len();
             let new_batch = || {
                 chain
                     .last()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, merkleize selected updates, read root. The
-            // load returns a staged batch that consumes `(read_index, value)` pairs after the
-            // caller has computed them.
+            // Timed: load all touched keys, merkleize the selected updates, and read the root. The
+            // slots are computed before the timer starts.
             let start = Instant::now();
             let b = new_batch();
             let read_chunks = args.read_chunks.min(keys.len()).max(1);
             let chunk_len = keys.len().div_ceil(read_chunks);
             let mut chunks = keys.chunks(chunk_len);
             let first = chunks.next().expect("reads must be non-empty");
-            let (mut values, mut staged) = b.stage(first, &db).await.unwrap();
+            let (mut staged, mut values) = b.stage(first, &db).await.unwrap();
             for chunk in chunks {
-                let (_, more, next) = staged.expand(chunk, &db).await.unwrap();
+                let (next, _, more) = staged.expand(chunk, &db).await.unwrap();
                 values.extend(more);
                 staged = next;
             }
             black_box(&values);
             let t_load = start.elapsed();
-            let merkleized = staged
-                .merkleize(updates, Vec::new(), None, &db)
-                .await
-                .unwrap();
+            let merkleized = match args.policy.fixed(distinct_keys, args.num_updates) {
+                None => staged.merkleize(slots, Vec::new(), &db).await.unwrap(),
+                Some(mut bounded) => staged
+                    .merkleize_with(slots, Vec::new(), &db, &mut bounded)
+                    .await
+                    .unwrap(),
+            };
             let root = merkleized.root();
             let elapsed = start.elapsed();
 
@@ -305,6 +385,9 @@ fn main() {
         num_reads: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
         read_chunks: raw.get(6).and_then(|s| s.parse().ok()).unwrap_or(1),
         num_updates: raw.get(7).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+        policy: raw.get(10).map_or(PolicyKind::Proportional, |name| {
+            PolicyKind::parse(name).unwrap_or_else(|| panic!("policy: {}", PolicyKind::NAMES))
+        }),
     };
     let threads: NonZeroUsize = raw
         .get(8)
@@ -335,12 +418,18 @@ fn main() {
     assert!(args.read_chunks > 0, "read_chunks must be non-zero");
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache}",
-        args.depth, args.iters, args.num_keys, args.num_reads, args.read_chunks, args.num_updates
+        "constantinople db={db_kind} depth={} iters={} keys={} reads={} read_chunks={} updates={} threads={threads} page_cache={page_cache} policy={}",
+        args.depth,
+        args.iters,
+        args.num_keys,
+        args.num_reads,
+        args.read_chunks,
+        args.num_updates,
+        args.policy.name()
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
+        let pc = CacheRef::new(PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),
@@ -360,9 +449,9 @@ fn main() {
         };
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
-                let cfg = CurrentFixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = CurrentConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
@@ -378,9 +467,9 @@ fn main() {
                 )
             }
             "current::ordered::fixed::mmb" => {
-                let cfg = CurrentFixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = CurrentOrderedConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
@@ -398,9 +487,9 @@ fn main() {
                 )
             }
             "any::ordered::fixed::mmb" => {
-                let cfg = FixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = AnyOrderedConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
@@ -412,9 +501,9 @@ fn main() {
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
             "any::unordered::variable::mmb" => {
-                let cfg = commonware_storage::qmdb::any::VariableConfig {
-                    merkle_config,
-                    journal_config: VConfig {
+                let cfg = AnyVarConfig {
+                    merkle: merkle_config,
+                    log: VConfig {
                         partition: "constantinople-var-log".into(),
                         items_per_section: ITEMS_PER_BLOB,
                         compression: None,
@@ -432,9 +521,9 @@ fn main() {
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
-                let cfg = FixedConfig {
-                    merkle_config,
-                    journal_config,
+                let cfg = AnyConfig {
+                    merkle: merkle_config,
+                    log: journal_config,
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),

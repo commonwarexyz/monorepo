@@ -11,7 +11,6 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::FixedEpocher,
 };
-use commonware_cryptography::Signer;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
@@ -33,8 +32,7 @@ where
         >,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
@@ -59,7 +57,7 @@ where
         S::PublicKey,
         <V::ApplicationBlock as ReshareBlock>::Directory,
     >,
-    /// Strategy for certificate verification.
+    /// Strategy for certificate verification and block decoding.
     pub strategy: T,
     /// Blocker used to block peers that send invalid bootstrap data.
     pub blocker: B,
@@ -84,8 +82,7 @@ where
         >,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
@@ -116,8 +113,7 @@ where
         >,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {

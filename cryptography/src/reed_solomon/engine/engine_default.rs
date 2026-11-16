@@ -1,7 +1,7 @@
 #[cfg(target_arch = "aarch64")]
 use crate::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use crate::reed_solomon::engine::{Avx2, Avx512, Ssse3};
+use crate::reed_solomon::engine::{Avx2, Avx512};
 use crate::reed_solomon::engine::{
     Engine, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, Scalar, ShardsRefMut,
 };
@@ -17,8 +17,7 @@ impl DefaultEngine {
     /// On x86(-64) the engine is chosen in the following order of preference:
     /// 1. `Avx512` (requires GFNI)
     /// 2. `Avx2`
-    /// 3. `Ssse3`
-    /// 4. [`Scalar`]
+    /// 3. [`Scalar`]
     ///
     /// On `AArch64` the engine is chosen in the following order of preference:
     /// 1. `Neon`
@@ -32,10 +31,6 @@ impl DefaultEngine {
 
             if super::cpu_features::avx2() {
                 return Self(Box::new(Avx2::new()));
-            }
-
-            if super::cpu_features::ssse3() {
-                return Self(Box::new(Ssse3::new()));
             }
         }
 
@@ -92,10 +87,6 @@ impl Engine for DefaultEngine {
 
             if super::cpu_features::avx2() {
                 return Avx2::eval_poly(erasures, truncated_size);
-            }
-
-            if super::cpu_features::ssse3() {
-                return Ssse3::eval_poly(erasures, truncated_size);
             }
         }
 

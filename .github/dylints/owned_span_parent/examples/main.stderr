@@ -1,0 +1,75 @@
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:32:1
+   |
+LL | #[tracing::instrument(skip_all, follows_from = causes)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+   = note: `#[deny(owned_span_parent)]` on by default
+
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:41:23
+   |
+LL |     span.follows_from(cause.clone());
+   |                       ^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:42:31
+   |
+LL |     Span::follows_from(&span, cause.clone());
+   |                               ^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:44:25
+   |
+LL |     follows_from(&span, cause.clone());
+   |                         ^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:45:27
+   |
+LL |     let _id: Option<Id> = cause.clone().into();
+   |                           ^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:46:34
+   |
+LL |     let _id = Option::<Id>::from(cause.clone());
+   |                                  ^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:47:22
+   |
+LL |     let _kept = keep(cause.clone(), cause.clone());
+   |                      ^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:57:39
+   |
+LL |     let _process = info_span!(parent: span, "component.process");
+   |                                       ^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: aborting due to 8 previous errors
+

@@ -5,7 +5,6 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
 use commonware_utils::{channel::ring, sync::Mutex};
-use futures::{FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer snapshots for resolving [`Recipients::All`].
@@ -106,7 +105,7 @@ where
     ) -> Result<CheckedSender<'_, S>, SystemTime> {
         let mut state = self.state.lock();
         if matches!(&recipients, Recipients::All)
-            && let Some(peers) = state.peer_subscription.next().now_or_never().flatten()
+            && let Some(peers) = state.peer_subscription.try_recv().ok()
         {
             state.known_peers = peers;
             state.rate_limit.retain_recent();
@@ -392,7 +391,7 @@ mod tests {
             let checked = limited.check(Recipients::One(peer1.clone())).unwrap();
             checked.send(IoBuf::from(b"limit"), false);
 
-            // Now check with all three peers - peer1 should be filtered out
+            // Check all three peers and expect peer1 to be filtered out
             let expected = vec![peer2.clone(), peer3.clone()];
             let checked = limited
                 .check(Recipients::Some(vec![peer1, peer2, peer3]))
@@ -423,7 +422,7 @@ mod tests {
                 .unwrap()
                 .send(IoBuf::from(b"limit2"), false);
 
-            // Now both are rate limited - should return error with retry time
+            // With both peers rate limited, check should return an error with a retry time
             assert!(limited.check(Recipients::Some(vec![peer1, peer2])).is_err());
         });
     }

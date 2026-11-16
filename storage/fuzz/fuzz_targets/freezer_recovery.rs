@@ -18,7 +18,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _,
+    Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic::{self, PartialWriteMode, WriteConfig},
 };
@@ -64,13 +64,13 @@ struct FuzzInput {
 }
 
 /// Build the deterministic Freezer configuration used by the recovery scenario.
-fn config(pooler: &impl BufferPooler) -> Config<()> {
+fn config() -> Config<()> {
     Config {
         key_partition: "freezer-recovery-index".into(),
         key_write_buffer: NZUsize!(1),
         // A page size that no key-record size divides, so terminal boundary entries straddle
         // pages and restore exercises the multi-page tail read.
-        key_page_cache: CacheRef::from_pooler(pooler, NZU16!(72), NZUsize!(4)),
+        key_page_cache: CacheRef::new(NZU16!(72), NZUsize!(4)),
         value_partition: "freezer-recovery-values".into(),
         value_compression: None,
         value_write_buffer: NZUsize!(1),
@@ -143,7 +143,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             // Build a checkpointed baseline. The resize case deliberately leaves a bounded resize
             // in progress so the next sync writes both the old and new table regions.
             let mut freezer =
-                Freezer::<_, Key, i32>::init(context.child("freezer"), config(&context), None)
+                Freezer::<_, Key, i32>::init(context.child("freezer"), config(), None)
                     .await
                     .expect("initial freezer init failed");
             let mut baseline = Vec::new();
@@ -270,7 +270,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
     let runtime_checkpoint = faulted_recovery(runtime_checkpoint, move |context| async move {
         Freezer::<_, Key, i32>::init(
             context.child("faulted_recovery"),
-            config(&context),
+            config(),
             Some(freezer_checkpoint),
         )
         .await
@@ -283,7 +283,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         // table epochs, and an interrupted resize back to exactly the checkpointed logical state.
         let mut freezer = Freezer::<_, Key, i32>::init(
             context.child("recovered"),
-            config(&context),
+            config(),
             Some(freezer_checkpoint),
         )
         .await
@@ -311,13 +311,10 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         (freezer, checkpoint) = freezer.sync().await.expect("post-recovery sync failed");
         drop(freezer);
 
-        let freezer = Freezer::<_, Key, i32>::init(
-            context.child("reopened"),
-            config(&context),
-            Some(checkpoint),
-        )
-        .await
-        .expect("post-recovery reopen failed");
+        let freezer =
+            Freezer::<_, Key, i32>::init(context.child("reopened"), config(), Some(checkpoint))
+                .await
+                .expect("post-recovery reopen must succeed");
         assert_values(&freezer, &expected).await;
         freezer.destroy().await.expect("freezer destroy failed");
     });

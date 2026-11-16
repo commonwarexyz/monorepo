@@ -14,8 +14,8 @@
 //!
 //! ## Authentication
 //!
-//! [`Config`] and [`Network`] are generic over [`commonware_stream::Handshake`], which
-//! authenticates peers and supplies their message streams. The handshake defines the
+//! [`Config`] and [`Network`] are generic over [`commonware_stream::Upgrader`], which
+//! authenticates peers and supplies their message streams. The upgrader defines the
 //! public key type and supplies the local identity.
 //!
 //! ## Discovery
@@ -121,11 +121,11 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::encrypted::Handshake;
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Sake}};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
-//! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+//! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
 //! // Configure context
 //! let runtime_cfg = deterministic::Config::default();
@@ -159,11 +159,20 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     Handshake::new(signer.clone()),
+//!     Cups::<_, ChaCha20Poly1305>::new(
+//!         Sake {
+//!             signer: signer.clone(),
+//!             synchrony_bound: Duration::from_secs(5),
+//!             max_handshake_age: Duration::from_secs(10),
+//!             version: sake::Version::V1,
+//!         },
+//!         cups::Version::V1,
+//!     ),
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
 //!     MAX_MESSAGE_SIZE,
+//!     NZUsize!(1_000), // Internal actor mailbox capacity
 //! );
 //!
 //! // Start context
@@ -224,17 +233,18 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::{Signer, ed25519};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, IoBuf, IoBufs, Metrics, Network as RNetwork, Quota, Resolver, Runner,
-        Sink, Spawner, Stream, Supervisor as _, deterministic,
+        Clock, IoBuf, IoBufs, Metrics, Network as RNetwork, Quota, Resolver, Runner, Sink, Spawner,
+        Stream, Supervisor as _, deterministic,
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
     use commonware_stream::{
-        Handshake, Receiver as StreamReceiver, Sender as StreamSender,
-        encrypted::{self, Handshake as StreamHandshake},
+        Receiver as StreamReceiver, SakeCups, Sender as StreamSender, Upgrader,
+        cups::{self, Cups},
+        sake::{self, Sake},
     };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
@@ -328,7 +338,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
+        context: impl Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics,
         max_message_size: u32,
         base_port: u16,
         n: usize,
@@ -387,10 +397,8 @@ mod tests {
                         }
                         complete_sender.send(()).await.unwrap();
 
-                        // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
-                        loop {
-                            receiver.recv().await.unwrap();
-                        }
+                        // Drain messages until the network closes (or else sender loops could get stuck as a peer may drop)
+                        while receiver.recv().await.is_ok() {}
                     });
 
                     // Send identity to all peers
@@ -653,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_max_message_size_stream_boundary() {
-        let limit = max_size::<StreamHandshake<ed25519::PrivateKey>>();
+        let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
         for size in [0, limit] {
             deterministic::Runner::default().start(|context| async move {
                 let config = Config::test(
@@ -670,7 +678,7 @@ mod tests {
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_stream_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let limit = max_size::<StreamHandshake<ed25519::PrivateKey>>();
+            let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
             let config = Config::test(
                 ed25519::PrivateKey::from_seed(0),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -973,7 +981,7 @@ mod tests {
                 );
             }
 
-            // All peers are connected - now trigger graceful shutdown
+            // All peers are connected, so trigger graceful shutdown
             context.child("shutdown").spawn(move |context| async move {
                 // Trigger graceful shutdown
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;
@@ -1176,9 +1184,7 @@ mod tests {
                             }
                             complete_sender.send(()).await.unwrap();
 
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         // Send identity to all peers
@@ -1253,7 +1259,7 @@ mod tests {
                 context.resolver_register(format!("peer-{i}.local"), Some(vec![socket.ip()]));
             }
 
-            // Create peer addresses - peers 0,1 use Symmetric, peers 2,3 use DNS Asymmetric
+            // Peers 0 and 1 use Symmetric addresses, and peers 2 and 3 use DNS Asymmetric.
             let peers: Vec<(_, Address)> = nodes
                 .iter()
                 .enumerate()
@@ -1309,9 +1315,7 @@ mod tests {
                             }
                             complete_sender.send(()).await.unwrap();
 
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         // Send identity to all peers
@@ -1425,7 +1429,7 @@ mod tests {
             // Wait for a period during which peer 1 would normally connect
             context.sleep(Duration::from_secs(5)).await;
 
-            // Try to send from peer 1 - should not reach anyone since private IPs are blocked
+            // Sending from peer 1 should reach no one, since private IPs are blocked
             let sent = sender1.send(
                 Recipients::All,
                 signer1.public_key().as_ref().to_vec(),
@@ -1483,7 +1487,7 @@ mod tests {
                 all_ips1.push(good_ip);
                 context.resolver_register("peer-1.local", Some(all_ips1));
 
-                // Create peer addresses - both peers use DNS with mixed IPs
+                // Create peer addresses. Both peers use DNS with mixed IPs.
                 let peers: Vec<(_, Address)> = vec![
                     (
                         signer0.public_key(),
@@ -2220,7 +2224,7 @@ mod tests {
             };
             let (router, mailbox) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
-            let messenger = RouterMessenger::unbound(context.network_buffer_pool().clone());
+            let messenger = RouterMessenger::unbound();
             messenger.bind(mailbox.clone());
 
             let channels =
@@ -2273,12 +2277,12 @@ mod tests {
         failures: AtomicUsize,
     }
 
-    struct TestSender<O: Sink> {
-        inner: encrypted::Sender<O>,
+    struct TestSender<T> {
+        inner: T,
     }
 
-    impl<O: Sink> StreamSender for TestSender<O> {
-        type Error = encrypted::Error;
+    impl<T: StreamSender> StreamSender for TestSender<T> {
+        type Error = T::Error;
 
         fn send(
             &mut self,
@@ -2297,12 +2301,12 @@ mod tests {
         }
     }
 
-    struct TestReceiver<I: Stream> {
-        inner: encrypted::Receiver<I>,
+    struct TestReceiver<T> {
+        inner: T,
     }
 
-    impl<I: Stream> StreamReceiver for TestReceiver<I> {
-        type Error = encrypted::Error;
+    impl<T: StreamReceiver> StreamReceiver for TestReceiver<T> {
+        type Error = T::Error;
 
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send {
             self.inner.recv()
@@ -2319,8 +2323,8 @@ mod tests {
 
     #[derive(Debug, Error)]
     enum TestHandshakeError {
-        #[error("encrypted handshake failed: {0}")]
-        Encrypted(#[from] encrypted::Error),
+        #[error("sake handshake failed: {0}")]
+        Sake(#[from] sake::Error),
         #[error("unknown application identity")]
         UnknownApplicationIdentity,
         #[error("authentication failed")]
@@ -2342,13 +2346,16 @@ mod tests {
         }
     }
 
-    impl<const MAX_SIZE: u32> Handshake for TestHandshake<MAX_SIZE> {
+    impl<const MAX_SIZE: u32> Upgrader for TestHandshake<MAX_SIZE> {
         const MAX_SIZE: u32 = MAX_SIZE;
 
         type PublicKey = ed25519::PublicKey;
         type Error = TestHandshakeError;
-        type Sender<I: Stream, O: Sink> = TestSender<O>;
-        type Receiver<I: Stream, O: Sink> = TestReceiver<I>;
+        type Sender<I: Stream, O: Sink> =
+            TestSender<<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305> as Upgrader>::Sender<I, O>>;
+        type Receiver<I: Stream, O: Sink> = TestReceiver<
+            <SakeCups<ed25519::PrivateKey, ChaCha20Poly1305> as Upgrader>::Receiver<I, O>,
+        >;
 
         fn public_key(&self) -> Self::PublicKey {
             self.application_key.clone()
@@ -2364,7 +2371,7 @@ mod tests {
             sink: O,
         ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
         where
-            C: BufferPooler + Clock + CryptoRng,
+            C: Clock + CryptoRng,
             I: Stream,
             O: Sink,
         {
@@ -2381,16 +2388,24 @@ mod tests {
                 .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
-            let (sender, receiver) = StreamHandshake::new(self.transport_signer)
-                .dial(
-                    context,
-                    namespace,
-                    max_message_size,
-                    transport_peer,
-                    stream,
-                    sink,
-                )
-                .await?;
+            let (sender, receiver) = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: self.transport_signer,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            )
+            .dial(
+                context,
+                namespace,
+                max_message_size,
+                transport_peer,
+                stream,
+                sink,
+            )
+            .await?;
 
             Ok((
                 TestSender { inner: sender },
@@ -2408,7 +2423,7 @@ mod tests {
             sink: O,
         ) -> Result<(ed25519::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
         where
-            C: BufferPooler + Clock + CryptoRng,
+            C: Clock + CryptoRng,
             I: Stream,
             O: Sink,
             B: FnOnce(ed25519::PublicKey) -> F + Send,
@@ -2419,38 +2434,45 @@ mod tests {
                 "maximum message size exceeds stream limit"
             );
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
-            let handshake = &self;
-            let (transport_peer, sender, receiver) =
-                StreamHandshake::new(self.transport_signer.clone())
-                    .listen(
-                        context,
-                        namespace,
-                        max_message_size,
-                        |transport_peer| async move {
-                            let Some(application_peer) =
-                                handshake.transport_to_application.get(&transport_peer)
-                            else {
-                                return false;
-                            };
-                            let acceptable = bouncer(application_peer.clone()).await;
-                            if !acceptable
-                                || handshake
-                                    .observations
-                                    .reject_inbound
-                                    .load(Ordering::Relaxed)
-                            {
-                                handshake
-                                    .observations
-                                    .rejections
-                                    .fetch_add(1, Ordering::Relaxed);
-                                return false;
-                            }
-                            handshake.authenticate().await.is_ok()
-                        },
-                        stream,
-                        sink,
-                    )
-                    .await?;
+            let handshake = self.clone();
+            let (transport_peer, sender, receiver) = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: self.transport_signer.clone(),
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            )
+            .listen(
+                context,
+                namespace,
+                max_message_size,
+                move |transport_peer| async move {
+                    let Some(application_peer) =
+                        handshake.transport_to_application.get(&transport_peer)
+                    else {
+                        return false;
+                    };
+                    let acceptable = bouncer(application_peer.clone()).await;
+                    if !acceptable
+                        || handshake
+                            .observations
+                            .reject_inbound
+                            .load(Ordering::Relaxed)
+                    {
+                        handshake
+                            .observations
+                            .rejections
+                            .fetch_add(1, Ordering::Relaxed);
+                        return false;
+                    }
+                    handshake.authenticate().await.is_ok()
+                },
+                stream,
+                sink,
+            )
+            .await?;
 
             // Observe every authenticated identity, including sessions p2p discards before delivery.
             let application_peer = self.transport_to_application[&transport_peer].clone();
@@ -2539,6 +2561,7 @@ mod tests {
             listen,
             NZUsize!(2),
             max_message_size,
+            NZUsize!(1_000),
         )
     }
 

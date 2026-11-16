@@ -150,7 +150,7 @@ fn fuzz(input: FuzzInput) {
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(MAX_WRITE_BUF),
             replay_buffer: NZUsize!(MAX_WRITE_BUF),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut journal = Journal::init(context.child("storage"), cfg.clone())
@@ -262,12 +262,17 @@ fn fuzz(input: FuzzInput) {
                     let bounds = journal.bounds();
                     let start_pos = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
                     match journal
-                        .replay(start_pos, NZUsize!(*buffer), ReadOptions::default())
+                        .replay(
+                            start_pos..bounds.end,
+                            NZUsize!(*buffer),
+                            ReadOptions::default(),
+                        )
                         .await
                     {
                         Ok(stream) => {
                             pin_mut!(stream);
-                            // Consume first few items to test stream - panic on stream errors
+                            // Consume the first few batches to test the stream, panicking on
+                            // stream errors.
                             for _ in 0..3 {
                                 match stream.next().await {
                                     Some(result) => {

@@ -1,6 +1,9 @@
-use commonware_cryptography::{BatchVerifier, Signer as _, ed25519};
+use commonware_cryptography::{
+    BatchEntry, BatchVerifier, Signer as _,
+    ed25519::{PrivateKey, PublicKey},
+};
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, TestRng, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
@@ -12,7 +15,8 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
     let namespace = b"namespace";
     for n_messages in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
-            let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
+            let rayon = (concurrency > 1)
+                .then(|| Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap());
             let mut msgs = Vec::with_capacity(n_messages);
             for _ in 0..n_messages {
                 let mut msg = [0u8; 32];
@@ -29,20 +33,39 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let mut batch = ed25519::Batch::new(n_messages);
-                            let signer = ed25519::PrivateKey::random(&mut rng);
-                            for msg in msgs.iter() {
-                                let sig = signer.sign(namespace, msg);
-                                assert!(batch.add(namespace, msg, &signer.public_key(), &sig));
-                            }
-                            batch
+                            let signer = PrivateKey::random(&mut rng);
+                            let public_key = signer.public_key();
+                            let signatures = msgs
+                                .iter()
+                                .map(|msg| (msg, signer.sign(namespace, msg)))
+                                .collect::<Vec<_>>();
+                            (public_key, signatures)
                         },
-                        |batch| {
-                            #[allow(clippy::option_if_let_else)]
+                        |(public_key, signatures)| {
                             if let Some(rayon) = rayon.as_ref() {
-                                black_box(batch.verify(&mut verify_rng, rayon))
+                                black_box(PublicKey::verify_batch(
+                                    &mut verify_rng,
+                                    &signatures,
+                                    |_, (msg, signature)| BatchEntry {
+                                        namespace,
+                                        message: msg.as_slice(),
+                                        public_key: &public_key,
+                                        signature,
+                                    },
+                                    rayon,
+                                ))
                             } else {
-                                black_box(batch.verify(&mut verify_rng, &Sequential))
+                                black_box(PublicKey::verify_batch(
+                                    &mut verify_rng,
+                                    &signatures,
+                                    |_, (msg, signature)| BatchEntry {
+                                        namespace,
+                                        message: msg.as_slice(),
+                                        public_key: &public_key,
+                                        signature,
+                                    },
+                                    &Sequential,
+                                ))
                             }
                         },
                         BatchSize::SmallInput,

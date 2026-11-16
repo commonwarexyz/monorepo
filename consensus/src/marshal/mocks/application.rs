@@ -1,4 +1,4 @@
-use crate::{Block, Reporter, marshal::Update, types::Height};
+use crate::{Block, Heightable, Reporter, marshal::Update, types::Height};
 use commonware_actor::Feedback;
 use commonware_utils::{
     Acknowledgement,
@@ -86,7 +86,7 @@ impl<B: Block> Reporter for Application<B> {
         match activity {
             Update::Block(block, ack_tx) => {
                 let height = block.height();
-                self.blocks.lock().insert(height, block);
+                self.blocks.lock().insert(height, block.into());
                 if self.auto_ack {
                     ack_tx.acknowledge();
                 } else {

@@ -30,7 +30,7 @@ impl StorageWorkload for CacheWorkload {
             items_per_blob: NZU64!(16),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+            page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
         };
         let mut cache = Cache::<_, Vec<u8>>::init(context.child("cache"), cfg).await?;
 

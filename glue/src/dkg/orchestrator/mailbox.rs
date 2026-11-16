@@ -8,8 +8,9 @@ use commonware_actor::{
     mailbox::{Policy, Sender},
 };
 use commonware_consensus::{Reporter, marshal::Update};
+use commonware_cryptography::Digested;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
-use std::{collections::VecDeque, sync::Arc};
+use std::collections::VecDeque;
 
 /// Messages that can be sent to the orchestrator.
 pub enum Message<B, A = Exact>
@@ -22,7 +23,10 @@ where
     /// The orchestrator acknowledges the final block of the active epoch only after
     /// entering the next epoch, and every earlier block immediately. It panics on
     /// a later block, which means marshal skipped the final block.
-    Finalized { block: Arc<B>, acknowledgement: A },
+    Finalized {
+        block: Digested<B>,
+        acknowledgement: A,
+    },
 }
 
 impl<B, A> Policy for Message<B, A>

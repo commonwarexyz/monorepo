@@ -126,9 +126,49 @@
 //!
 //! The actor retains one reply per peer per request round and skips later messages from that peer
 //! before decoding or verifying them. The p2p channel bounds message size and rate.
+//!
+//! # Message Sizes
+//!
+//! The [`Probe`] sends every request and response below on the channel given to [`Probe::start`].
+//! `S` and `V` are the scheme and marshal variant given to [`max_payload_size`]:
+//!
+//! ```text
+//! On a Muxer subchannel, every message is prefixed by:
+//! +---------------------------+
+//! | subchannel (varint, 1-10) |
+//! +---------------------------+
+//!
+//! Request (tag 0):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Response (tag 1):
+//! +---------+--------------+
+//! | tag (1) | finalization |
+//! +---------+--------------+
+//!
+//! Finalization:
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
+//! +----------------------------------+---------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] bounds the request and response above, with every varint at its widest
+//! and every certificate at `S::max_certificate_size` for the given committee size.
+//!
+//! The probe serves the finalizations marshal holds, so compute [`max_payload_size`] with the
+//! committee size given to marshal's [`max_payload_size`][marshal].
+//!
+//! [marshal]: commonware_consensus::marshal::max_payload_size
 
 mod actor;
 pub use actor::{Config, Probe};
+
+mod limits;
+pub use limits::max_payload_size;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -140,6 +180,7 @@ mod wire;
 #[cfg(test)]
 mod test {
     use super::{Config, Mailbox, Probe, wire};
+    use crate::stateful::tests::mocks::digested;
     use bytes::BufMut;
     use commonware_actor::Feedback;
     use commonware_codec::{
@@ -180,19 +221,15 @@ mod test {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
+        Acknowledgement, NZDuration, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration, TestRng,
         channel::oneshot, iter::NonEmpty, non_empty, probability, sync::Mutex, test_rng,
     };
-    use std::{
-        collections::BTreeMap,
-        num::{NonZeroU32, NonZeroU64},
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::Duration};
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_PROBE_TEST";
     const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
@@ -398,6 +435,10 @@ mod test {
             Scheme::is_batchable()
         }
 
+        fn max_certificate_size(participants: u32) -> usize {
+            Scheme::max_certificate_size(participants)
+        }
+
         fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
             self.inner.certificate_codec_config()
         }
@@ -411,7 +452,7 @@ mod test {
     impl certificate::Scheme for MaybeEnumerableScheme {
         type Signature = <Scheme as certificate::Scheme>::Signature;
 
-        fn me(&self) -> Option<commonware_utils::Participant> {
+        fn me(&self) -> Option<certificate::Membership> {
             self.inner.me()
         }
 
@@ -631,7 +672,7 @@ mod test {
                 let scheme = schemes[index].clone();
                 let node_ctx = context.child("node").with_attribute("index", index);
                 let partition_prefix = format!("node-{index}");
-                let page_cache = CacheRef::from_pooler(&node_ctx, NZU16!(1024), NZUsize!(10));
+                let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
                 let control = oracle.control(public_key.clone());
 
                 // Marshal backfill resolver.
@@ -646,8 +687,8 @@ mod test {
                         peer_provider: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         mailbox_size: NZUsize!(100),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(100),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         priority_requests: false,
                         priority_responses: false,
                     },
@@ -672,7 +713,7 @@ mod test {
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: Start::Genesis(genesis.clone().into()),
+                    start: Start::Genesis(digested(genesis.clone())),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
@@ -771,7 +812,7 @@ mod test {
         ) {
             let mut marshal = self.nodes[index].marshal.clone();
             let round = finalization.proposal.round;
-            assert!(marshal.verified(round, block).await);
+            assert!(marshal.verified(round, digested(block)).await);
             let _ = marshal.report(Activity::Finalization(finalization));
         }
 

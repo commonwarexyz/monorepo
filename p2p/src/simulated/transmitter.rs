@@ -93,18 +93,20 @@ struct Status<P: PublicKey> {
 /// Deterministic scheduler responsible for simulating link bandwidth and delivery ordering.
 ///
 /// Orchestration overview:
-/// - `enqueue` is the public entry point for sending; it records the request, then immediately
+/// - `enqueue` is the public entry point for sending. It records the request, then immediately
 ///   calls `launch`, which may start a new flow. When a flow is created, `begin` installs it and
 ///   invokes `rebalance` so the bandwidth planner can recompute rates.
 /// - The runtime drives progression with `next`/`advance`. `next` reports the earlier of the
-///   next bandwidth event or transmission-ready time. `advance(now)` first `wake`s transmissions
-///   whose start time has arrived, then keeps draining events occurring at `now`. Inside this loop
-///   `rebalance` advances active flows and calls `finish` on completions, while another `wake`
-///   handles newly eligible queued work.
+///   next bandwidth event or transmission-ready time. `advance(now)` drains the events due by
+///   `now` in time order. For a bandwidth event, `rebalance` advances active flows and hands
+///   the finished ones to `finish`. For a transmission-ready event, `wake` starts queued
+///   transmissions whose start time has arrived. A final `wake` at `now` starts anything
+///   eligible by then.
 /// - `finish` produces `Completion`s (via `stash` + `drain`) and immediately tries to `launch` the
 ///   next queued message for that peer pair, allowing back-to-back transmissions without waiting
-///   for another outer tick. `schedule` keeps track of the earliest queued start time so `next`
-///   always reflects both bandwidth expiries and queue readiness.
+///   for another outer tick. Flows that finish as a result are finalized in the same pass.
+///   `schedule` keeps track of the earliest queued start time so `next` always reflects both
+///   bandwidth expiries and queue readiness.
 pub struct State<P: PublicKey> {
     bandwidth_caps: BTreeMap<P, Bandwidth>,
     next_flow_id: u64,
@@ -159,7 +161,8 @@ impl<P: PublicKey> State<P> {
             self.schedule(now);
             return Vec::new();
         }
-        self.rebalance(now)
+        let completed = self.rebalance(now);
+        self.finish(completed, now)
     }
 
     /// Returns the egress bandwidth limit for `peer`.
@@ -199,7 +202,8 @@ impl<P: PublicKey> State<P> {
                 (Some(band), Some(ready)) => {
                     if band <= ready {
                         self.next_bandwidth_event = None;
-                        completions.extend(self.rebalance(band));
+                        let completed = self.rebalance(band);
+                        completions.extend(self.finish(completed, band));
                     } else {
                         self.next_transmission_ready = None;
                         completions.extend(self.wake(ready));
@@ -207,7 +211,8 @@ impl<P: PublicKey> State<P> {
                 }
                 (Some(band), None) => {
                     self.next_bandwidth_event = None;
-                    completions.extend(self.rebalance(band));
+                    let completed = self.rebalance(band);
+                    completions.extend(self.finish(completed, band));
                 }
                 (None, Some(ready)) => {
                     self.next_transmission_ready = None;
@@ -257,10 +262,8 @@ impl<P: PublicKey> State<P> {
 
         self.queued.entry(key).or_default().push_back(entry);
 
-        let completions = self.launch(origin, recipient, now);
-        self.schedule(now);
-
-        completions
+        let completed = self.launch(origin, recipient, now);
+        self.finish(completed, now)
     }
 
     /// Completes a transmission immediately when no bandwidth constraints are registered.
@@ -363,44 +366,50 @@ impl<P: PublicKey> State<P> {
         // Launch any queued transmissions that have become ready to send at `now`
         let mut completions = Vec::new();
         for (origin, recipient) in ready_pairs {
-            completions.extend(self.launch(origin, recipient, now));
+            let completed = self.launch(origin, recipient, now);
+            completions.extend(self.finish(completed, now));
         }
         self.schedule(now);
 
         completions
     }
 
-    /// Recomputes bandwidth allocations and collects any flows that finished in the interval.
-    fn rebalance(&mut self, now: SystemTime) -> Vec<Completion<P>> {
-        let mut completed = Vec::new();
+    /// Recomputes bandwidth allocations and removes the flows that finished in the interval,
+    /// returning them for `finish`.
+    fn rebalance(&mut self, now: SystemTime) -> Vec<(u64, Status<P>)> {
         let mut active: Vec<Flow<P>> = Vec::new();
-        for (&flow_id, meta) in self.all_flows.iter_mut() {
-            // Account for bytes already in flight since the last tick
-            if !meta.remaining.is_zero() {
-                let elapsed = now
-                    .duration_since(meta.last_update)
-                    .unwrap_or(Duration::ZERO);
-                if !elapsed.is_zero() {
-                    meta.remaining =
-                        bandwidth::transfer(&meta.rate, elapsed, meta.remaining.clone());
+        let mut finished: Vec<(u64, Status<P>)> = self
+            .all_flows
+            .extract_if(.., |&flow_id, meta| {
+                // Account for bytes already in flight since the last tick
+                if !meta.remaining.is_zero() {
+                    let elapsed = now
+                        .duration_since(meta.last_update)
+                        .unwrap_or(Duration::ZERO);
+                    if !elapsed.is_zero() {
+                        meta.remaining =
+                            bandwidth::transfer(&meta.rate, elapsed, meta.remaining.clone());
+                    }
                 }
-            }
+                meta.last_update = now;
 
-            meta.last_update = now;
-            if meta.remaining.is_zero() {
-                completed.push(flow_id);
-            } else {
+                // A flow whose transfer is complete leaves the map for `finish`. The rest stay
+                // tracked and take part in the allocation.
+                if meta.remaining.is_zero() {
+                    return true;
+                }
                 active.push(Flow {
                     id: flow_id,
                     origin: meta.origin.clone(),
                     recipient: meta.recipient.clone(),
                     delivered: meta.sequence.is_some(),
                 });
-            }
-        }
+                false
+            })
+            .collect();
         if active.is_empty() {
             self.next_bandwidth_event = None;
-            return self.finish(completed, now);
+            return finished;
         }
 
         let mut egress_cap = |pk: &P| self.egress_cap(pk);
@@ -408,49 +417,51 @@ impl<P: PublicKey> State<P> {
         let allocations = bandwidth::allocate(&active, &mut egress_cap, &mut ingress_cap);
         let mut earliest: Option<Duration> = None;
         for (flow_id, rate) in allocations {
-            if let Some(meta) = self.all_flows.get_mut(&flow_id) {
-                meta.rate = rate.clone();
-                meta.last_update = now;
+            let Entry::Occupied(mut entry) = self.all_flows.entry(flow_id) else {
+                continue;
+            };
 
-                if matches!(meta.rate, Rate::Unlimited) {
-                    if !meta.remaining.is_zero() {
-                        meta.remaining = BigRational::zero();
-                        completed.push(flow_id);
-                    }
-                    continue;
-                }
+            // An unlimited flow finishes at once.
+            if matches!(rate, Rate::Unlimited) {
+                finished.push(entry.remove_entry());
+                continue;
+            }
 
-                if let Some(duration) = bandwidth::duration(&meta.rate, &meta.remaining) {
-                    // Ensure the scheduled event advances by at least the platform precision so
-                    // `SystemTime` actually moves forward on coarse clocks.
-                    let duration = if duration.is_zero() {
-                        Duration::ZERO
-                    } else {
-                        duration.max(SYSTEM_TIME_PRECISION)
-                    };
-                    earliest =
-                        earliest.map_or(Some(duration), |current| Some(current.min(duration)));
-                }
+            // A finite rate applies from `now`, and the time it needs to drain the remaining bytes
+            // is a candidate for the next bandwidth event.
+            let meta = entry.get_mut();
+            meta.rate = rate;
+            meta.last_update = now;
+            if let Some(duration) = bandwidth::duration(&meta.rate, &meta.remaining) {
+                // Ensure the scheduled event advances by at least the platform precision so
+                // `SystemTime` actually moves forward on coarse clocks.
+                let duration = if duration.is_zero() {
+                    Duration::ZERO
+                } else {
+                    duration.max(SYSTEM_TIME_PRECISION)
+                };
+                earliest = earliest.map_or(Some(duration), |current| Some(current.min(duration)));
             }
         }
-        completed.sort();
 
         // Record the next time at which a bandwidth event should fire.
         self.next_bandwidth_event = earliest.map(|duration| now.saturating_add_ext(duration));
 
-        self.finish(completed, now)
+        finished
     }
 
-    /// Finalizes completed flows and opportunistically starts follow-on work.
-    fn finish(&mut self, completed: Vec<u64>, now: SystemTime) -> Vec<Completion<P>> {
+    /// Finalizes finished flows and starts follow-on work.
+    fn finish(
+        &mut self,
+        mut finished: Vec<(u64, Status<P>)>,
+        now: SystemTime,
+    ) -> Vec<Completion<P>> {
+        // Flows that finish at one instant are finalized in the order they started, which is
+        // ascending flow id.
+        finished.sort_unstable_by_key(|(flow_id, _)| *flow_id);
+        let mut pending = VecDeque::from(finished);
         let mut outcomes = Vec::new();
-
-        for flow_id in completed {
-            // Skip any flows that have already been removed
-            let Some(meta) = self.all_flows.remove(&flow_id) else {
-                continue;
-            };
-
+        while let Some((_, meta)) = pending.pop_front() {
             let Status {
                 origin,
                 recipient,
@@ -480,7 +491,10 @@ impl<P: PublicKey> State<P> {
                 sequence,
             ));
 
-            outcomes.extend(self.launch(origin, recipient, now));
+            // Existing flows have already advanced to `now`, and the caps stay fixed here. Any
+            // flow finished by this launch must be the new one. Its id exceeds every pending id,
+            // so appending preserves finalization order.
+            pending.extend(self.launch(origin, recipient, now));
         }
         self.schedule(now);
 
@@ -488,7 +502,6 @@ impl<P: PublicKey> State<P> {
     }
 
     /// Records the outcome of a transmission, handling sequencing and delivery bookkeeping.
-    #[allow(clippy::too_many_arguments)]
     fn register_completion(
         &mut self,
         origin: P,
@@ -592,8 +605,9 @@ impl<P: PublicKey> State<P> {
         self.next_transmission_ready = next_ready;
     }
 
-    /// Attempts to start a new flow for the pair, optionally refreshing scheduling metadata.
-    fn launch(&mut self, origin: P, recipient: P, now: SystemTime) -> Vec<Completion<P>> {
+    /// Attempts to start a new flow for the pair, returning the flows that finished in the
+    /// rebalance this triggers.
+    fn launch(&mut self, origin: P, recipient: P, now: SystemTime) -> Vec<(u64, Status<P>)> {
         let key = (origin.clone(), recipient.clone());
         if self.active_flows.contains_key(&key) {
             return Vec::new();
@@ -632,7 +646,7 @@ impl<P: PublicKey> State<P> {
         Vec::new()
     }
 
-    /// Materializes a flow record and triggers a bandwidth rebalance.
+    /// Materializes a flow record and rebalances, returning the flows that finished.
     fn begin(
         &mut self,
         origin: P,
@@ -640,7 +654,7 @@ impl<P: PublicKey> State<P> {
         flow_id: u64,
         entry: Queued,
         now: SystemTime,
-    ) -> Vec<Completion<P>> {
+    ) -> Vec<(u64, Status<P>)> {
         let Queued {
             channel,
             message,
@@ -680,9 +694,7 @@ impl<P: PublicKey> State<P> {
             "sending message",
         );
 
-        let completions = self.rebalance(now);
-        self.schedule(now);
-        completions
+        self.rebalance(now)
     }
 
     /// Returns the next sequence identifier used to preserve FIFO delivery per link.
@@ -1373,6 +1385,189 @@ mod tests {
         );
         delivered.sort();
         assert_eq!(delivered, vec![1, 10_000]);
+        assert!(state.next().is_none());
+    }
+
+    #[test]
+    fn completions_at_one_instant_finish_in_flow_order() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(70);
+        let recipient_b = key(71);
+        let recipient_c = key(72);
+
+        let completions = state.limit(now, &origin, Some(1_000), None);
+        assert!(completions.is_empty());
+
+        // Each pair has followers waiting behind its active transfer.
+        for (recipient, len) in [
+            (&recipient_b, 100),
+            (&recipient_b, 0),
+            (&recipient_b, 50),
+            (&recipient_c, 100),
+            (&recipient_c, 50),
+        ] {
+            let completions = state.enqueue(
+                now,
+                origin.clone(),
+                recipient.clone(),
+                CHANNEL,
+                IoBuf::from(vec![0u8; len]),
+                Duration::ZERO,
+                true,
+            );
+            assert!(completions.is_empty());
+        }
+
+        // Lifting the cap completes both transfers at once, and each queued message then
+        // completes as soon as it starts. Completions are reported in flow order, so a follow-on
+        // comes after every earlier flow that completed at the same instant.
+        let completions = state.limit(now, &origin, None, None);
+        let order: Vec<_> = completions
+            .iter()
+            .map(|c| (c.recipient.clone(), c.message.len()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (recipient_b.clone(), 100),
+                (recipient_c.clone(), 100),
+                (recipient_b.clone(), 0),
+                (recipient_c, 50),
+                (recipient_b, 50),
+            ]
+        );
+        assert!(state.next().is_none());
+    }
+
+    #[test]
+    fn rebalance_returns_finished_flows_without_finalizing() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(80);
+        let recipient_b = key(81);
+        let recipient_c = key(82);
+
+        let completions = state.limit(now, &origin, Some(1_000), None);
+        assert!(completions.is_empty());
+
+        // Two transfers share the cap, with a follower queued behind the first.
+        for recipient in [&recipient_b, &recipient_c, &recipient_b] {
+            let completions = state.enqueue(
+                now,
+                origin.clone(),
+                recipient.clone(),
+                CHANNEL,
+                IoBuf::from(vec![0u8; 100]),
+                Duration::ZERO,
+                true,
+            );
+            assert!(completions.is_empty());
+        }
+        let finish = state.next().expect("completion scheduled");
+        assert_eq!(finish, now + Duration::from_millis(200));
+
+        // Rebalancing removes the finished flows but emits nothing and keeps their pairs busy.
+        let finished = state.rebalance(finish);
+        assert_eq!(
+            finished.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert!(state.all_flows.is_empty());
+        assert_eq!(state.active_flows.len(), 2);
+
+        // Finalizing emits the completions in flow order and starts the follower.
+        let completions = state.finish(finished, finish);
+        let delivered: Vec<_> = completions
+            .iter()
+            .map(|c| (c.recipient.clone(), c.deliver_at))
+            .collect();
+        assert_eq!(
+            delivered,
+            vec![
+                (recipient_b.clone(), Some(finish)),
+                (recipient_c, Some(finish))
+            ]
+        );
+        assert_eq!(state.all_flows.keys().copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(state.active_flows.get(&(origin, recipient_b)), Some(&2));
+        assert_eq!(state.next(), Some(finish + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn followers_launched_at_finish_complete_together() {
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(90);
+        let recipients = [key(91), key(92), key(93)];
+
+        let completions = state.limit(now, &origin, Some(3_000), None); // 3 KB/s egress
+        assert!(completions.is_empty());
+
+        // Each active transfer has one queued follower.
+        for recipient in &recipients {
+            for _ in 0..2 {
+                let completions = state.enqueue(
+                    now,
+                    origin.clone(),
+                    recipient.clone(),
+                    CHANNEL,
+                    IoBuf::from(vec![0u8; 1_000]),
+                    Duration::ZERO,
+                    true,
+                );
+                assert!(completions.is_empty());
+            }
+        }
+
+        // The first transfers share the cap and finish together, and finalizing each one starts
+        // its follower. The followers then share the cap in turn.
+        let first = state.next().expect("completion scheduled");
+        assert_eq!(first, now + Duration::from_secs(1));
+        let completions = state.advance(first);
+        assert_eq!(completions.len(), recipients.len());
+        assert!(completions.iter().all(|c| c.deliver_at == Some(first)));
+
+        let second = state.next().expect("followers scheduled");
+        assert_eq!(second, first + Duration::from_secs(1));
+        let completions = state.advance(second);
+        assert_eq!(completions.len(), recipients.len());
+        assert!(completions.iter().all(|c| c.deliver_at == Some(second)));
+        assert!(state.next().is_none());
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5229
+    ///
+    /// A long queue drains at unlimited rate in one call with constant stack usage.
+    #[test]
+    fn issue_5229_regression() {
+        const QUEUED: usize = 2_000;
+
+        let mut state = State::new();
+        let now = SystemTime::UNIX_EPOCH;
+        let origin = key(100);
+        let recipient = key(101);
+
+        let completions = state.limit(now, &origin, Some(1_000), None);
+        assert!(completions.is_empty());
+
+        for _ in 0..=QUEUED {
+            let completions = state.enqueue(
+                now,
+                origin.clone(),
+                recipient.clone(),
+                CHANNEL,
+                IoBuf::from(vec![0u8; 100]),
+                Duration::ZERO,
+                true,
+            );
+            assert!(completions.is_empty());
+        }
+
+        // Lifting the cap completes the transfer and then every queued message in turn.
+        let completions = state.limit(now, &origin, None, None);
+        assert_eq!(completions.len(), QUEUED + 1);
+        assert!(completions.iter().all(|c| c.deliver_at == Some(now)));
         assert!(state.next().is_none());
     }
 }

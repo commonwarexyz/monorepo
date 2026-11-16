@@ -572,12 +572,12 @@ function buildRolloverMinimal(mount) {
     'stroke-width': 1.2,
     'stroke-dasharray': '5 5',
   });
-  s.label(205, 490, 'epoch e+1 registered', {
+  s.label(205, 490, 'payments begin in e+1', {
     'text-anchor': 'middle',
     'font-size': 11.5,
     fill: GRAY,
   });
-  s.label(383, 215, 'admitted balance for e', {
+  s.label(383, 215, 'closing balance for e', {
     'text-anchor': 'end',
     'font-size': 13,
     'font-weight': 700,

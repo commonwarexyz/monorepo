@@ -5,6 +5,7 @@ use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{
+    cmp::Ordering,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
@@ -105,10 +106,30 @@ impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
 }
 
 /// Internal Secp256r1 Public Key storage.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, FixedArray)]
 pub struct PublicKeyInner {
     raw: [u8; PUBLIC_KEY_LENGTH],
     pub key: VerifyingKey,
+}
+
+impl PartialEq for PublicKeyInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Ord for PublicKeyInner {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for PublicKeyInner {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl PublicKeyInner {

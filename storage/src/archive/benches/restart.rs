@@ -1,4 +1,5 @@
 use super::utils::{Archive, Variant, append_random};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner, Supervisor as _,
     benchmarks::{context, tokio},
@@ -8,16 +9,19 @@ use commonware_storage::archive::Archive as _;
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
-#[cfg(not(full_bench))]
-const ITEMS: [u64; 1] = [10_000];
-#[cfg(full_bench)]
-const ITEMS: [u64; 4] = [10_000, 50_000, 100_000, 500_000];
+fn n_items() -> &'static [u64] {
+    match Inputs::current() {
+        Inputs::Smoke => &[1_000],
+        Inputs::Standard => &[10_000],
+        Inputs::Full => &[10_000, 50_000, 100_000, 500_000],
+    }
+}
 
 fn bench_restart(c: &mut Criterion) {
     let cfg = Config::default();
     for variant in [Variant::Prunable, Variant::Immutable] {
         for compression in [None, Some(3)] {
-            for items in ITEMS {
+            for &items in n_items() {
                 let mut initialized = false;
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(

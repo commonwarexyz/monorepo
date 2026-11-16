@@ -1,6 +1,6 @@
 use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{Signer, ed25519};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519};
 use commonware_p2p::{
     Address, AddressableManager as _, Blocker, Channel, Manager as _, Receiver, Recipients, Sender,
     authenticated::{
@@ -12,7 +12,10 @@ use commonware_runtime::{
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
     deterministic::{self, Context},
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
@@ -164,20 +167,20 @@ pub struct Peer<S, R, O> {
 /// a common interface for network creation and peer registration.
 pub trait NetworkScheme: Send + 'static {
     /// The sender type for this network implementation.
-    type Sender: Sender<PublicKey = ed25519::PublicKey> + Send;
+    type Sender: Sender<PublicKey = ed25519::PublicKey>;
 
     /// The receiver type for this network implementation.
-    type Receiver: Receiver<PublicKey = ed25519::PublicKey> + Send;
+    type Receiver: Receiver<PublicKey = ed25519::PublicKey>;
 
     /// The oracle type for this network implementation.
-    type Oracle: Blocker<PublicKey = ed25519::PublicKey> + Send;
+    type Oracle: Blocker<PublicKey = ed25519::PublicKey>;
 
     /// Creates and initializes a network instance for a single peer.
     ///
     /// # Parameters
     ///
-    /// * `context` - The deterministic runtime context for this peer
-    /// * `peer` - Per-peer view including ID, info, and shared topology
+    /// * `context`: The deterministic runtime context for this peer
+    /// * `peer`: Per-peer view including ID, info, and shared topology
     ///
     /// # Returns
     ///
@@ -191,10 +194,10 @@ pub trait NetworkScheme: Send + 'static {
     ///
     /// # Parameters
     ///
-    /// * `oracle` - The network oracle to register peers with
-    /// * `index` - The index to register this peer set under
-    /// * `topo` - The shared topology
-    /// * `peer_ids` - The peer IDs to register
+    /// * `oracle`: The network oracle to register peers with
+    /// * `index`: The index to register this peer set under
+    /// * `topo`: The shared topology
+    /// * `peer_ids`: The peer IDs to register
     fn register_peers<'a>(
         oracle: &'a mut Self::Oracle,
         index: u64,
@@ -235,7 +238,15 @@ impl NetworkScheme for Discovery {
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             b"fuzz_namespace",
             peer.info.address,
             peer.info.address,
@@ -246,9 +257,9 @@ impl NetworkScheme for Discovery {
                 .try_into()
                 .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
+            NZUsize!(100), // Small mailbox to encourage backpressure
         );
         // Override some settings for fuzzing environment
-        config.mailbox_size = NZUsize!(100); // Small mailbox to encourage backpressure
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = peer.topo.tracked_peer_sets;
 
@@ -311,9 +322,17 @@ impl NetworkScheme for Lookup {
         mut context: Context,
         peer: &PeerCtx,
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
-        // Create lookup config - no bootstrappers needed since we register addresses directly
+        // Create the lookup config without bootstrappers, since addresses are registered directly
         let mut config = lookup::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: peer.info.signer.clone(),
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             b"fuzz_namespace",
             peer.info.address,
             peer.topo
@@ -322,6 +341,7 @@ impl NetworkScheme for Lookup {
                 .try_into()
                 .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
+            NZUsize!(1_000),
         );
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets.get());
@@ -400,11 +420,11 @@ impl NetworkScheme for Lookup {
 ///
 /// # Type Parameters
 ///
-/// * `N` - The network scheme to test ([Discovery] or [Lookup])
+/// * `N`: The network scheme to test ([Discovery] or [Lookup])
 ///
 /// # Parameters
 ///
-/// * `input` - The fuzz input containing the seed, number of peers, and operations to execute
+/// * `input`: The fuzz input containing the seed, number of peers, and operations to execute
 ///
 /// # Behavior
 ///
@@ -599,7 +619,7 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
                                 }
                             },
                             _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
-                                continue; // Timeout - message may not have arrived yet
+                                continue; // The message may not have arrived yet
                             },
                         }
                     }

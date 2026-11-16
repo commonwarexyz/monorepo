@@ -206,7 +206,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
     /// @dev Leaf, positioned parent, peak fold, and leaf-count root calls all enforce raw response framing.
     function test_RawPlainHashFailuresByStage() public {
         BatchCase memory c = operationsCase(13, sequence(0, 1), ProofKind.Range);
-        uint256[4] memory stages = [uint256(12), 72, 64, 40];
+        uint256[4] memory stages = [uint256(12), 72, 64, 42];
         for (uint256 facadeIndex; facadeIndex <= uint256(PlainFacade.Immutable); ++facadeIndex) {
             PlainFacade facade = PlainFacade(facadeIndex);
             bytes memory input = singletonCall(c, facade, _hasher());
@@ -228,7 +228,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
     function test_RawCurrentHashFailuresByStage() public {
         QMDBCase memory c = currentBuilder.build(33, 0, hex"010203", true, 2);
         bytes memory input = abi.encodeCall(this.singleCurrentMembership, (c, _hasher()));
-        uint256[5] memory stages = [uint256(11), 72, 34, 40, 104 + (c.proof.pending == 0 ? 0 : 32)];
+        uint256[5] memory stages = [uint256(11), 72, 34, 42, 104 + (c.proof.pending == 0 ? 0 : 32)];
         for (uint256 stage; stage < stages.length; ++stage) {
             assertStageFailures(input, stages[stage]);
         }

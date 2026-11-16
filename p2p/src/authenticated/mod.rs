@@ -19,4 +19,5 @@ mod mailbox;
 pub use mailbox::Mailbox;
 mod relay;
 mod router;
+mod stream;
 mod throttle;

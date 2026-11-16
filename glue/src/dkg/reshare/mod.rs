@@ -12,8 +12,8 @@
 //! reshare their shares to the epoch's _players_. A participating node in
 //! neither role _observes_ the ceremony and derives the same public outcome.
 //!
-//! - [`Actor`]: Runs the protocol for one node and registers each epoch's signer
-//!   or verifier scheme through the application's
+//! - [`Actor`]: Runs the protocol for one node and registers each epoch's signer,
+//!   member, or verifier scheme through the application's
 //!   [`Registrar`](crate::dkg::Registrar).
 //! - [`Mailbox`]: Supplies reshare payloads for proposals and verification, and
 //!   receives finalized blocks from marshal.
@@ -52,10 +52,11 @@
 //! 2. **Dealing** runs in the first half of the epoch. Dealers send private
 //!    dealings directly to players, and players verify them and return signed
 //!    acknowledgements.
-//! 3. **Inclusion** runs from the midpoint through the final block. Dealers
-//!    publish signed dealer logs, the application includes them in blocks, and
-//!    the final block carries the next epoch's
-//!    [`EpochInfo`](crate::dkg::types::EpochInfo).
+//! 3. **Inclusion** runs from the midpoint through the final block. Each dealer
+//!    publishes its signed dealer log in a block it proposes, and the final
+//!    block carries the next epoch's
+//!    [`EpochInfo`](crate::dkg::types::EpochInfo). See [Liveness](#liveness)
+//!    for what this requires of leader election.
 //!
 //! ```text
 //! boundary EpochInfo(E)
@@ -82,8 +83,8 @@
 //!   excludes non-dealers and unusable logs.
 //! - Upon the finalized final block of an epoch, commit its
 //!   [`EpochInfo`](crate::dkg::types::EpochInfo) and register the next epoch's
-//!   signer or verifier scheme. A participating node keeps the share it derived
-//!   only if its locally derived artifact matches the finalized one.
+//!   signer, member, or verifier scheme. A participating node keeps the share it
+//!   derived only if its locally derived artifact matches the finalized one.
 //!
 //! # Application Contract
 //!
@@ -95,28 +96,57 @@
 //! - Before the midpoint, blocks carry no payload, and verifiers reject a block
 //!   that carries one.
 //! - From the midpoint until the final block, proposers call
-//!   [`Mailbox::next_log`], include the returned dealer log (if any), and call
-//!   [`LogReservation::included`] only after a block is built with it.
+//!   [`Mailbox::next_log`], include the returned dealer log (this node's own,
+//!   if any), and call [`LogReservation::included`] only after a block is built
+//!   with it.
 //!   Verifiers reject a block that carries a payload other than a dealer log but
 //!   do not check dealer logs: an invalid dealer log in a finalized block is
 //!   ignored.
 //! - At the final block, proposers call [`Mailbox::epoch_info`], include the
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
-//!   payload differs. [`Application`] also rejects on
-//!   [`EpochInfoResponse::Unavailable`] and leaves verification unresolved on
-//!   [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`].
+//!   payload differs. [`Application`] rejects a mismatched payload and leaves
+//!   verification unresolved on [`EpochInfoResponse::Unavailable`].
 //!
-//! The final-block call receives the unfinalized ancestry between the finalized
-//! tip and the block under construction or verification. Dealer logs in that
-//! ancestry count toward the derived [`EpochInfo`](crate::dkg::types::EpochInfo),
-//! but they become durable only when their blocks finalize.
+//! The final-block call receives the blocks between the last finalized block the
+//! actor has applied and the block under construction or verification. Dealer
+//! logs in those blocks count toward the derived
+//! [`EpochInfo`](crate::dkg::types::EpochInfo), but they become durable only
+//! when their blocks finalize. A participating actor answers once it has applied
+//! every block before the midpoint, so a call from a node still replaying the
+//! dealing window waits for that point.
 //!
 //! Marshal must report finalized blocks to [`Mailbox`], which implements
 //! [`Reporter`](commonware_consensus::Reporter). The actor acknowledges a
 //! finalized block only after any protocol state, secret state, registrar
 //! update, and epoch [`Fence`](crate::dkg::fence::Fence) update required by that
 //! block is complete.
+//!
+//! # Liveness
+//!
+//! Each dealer posts its log in a block it proposes itself
+//! ([`Mailbox::next_log`] returns only this node's log). A ceremony needs logs
+//! from a quorum of dealers, so a quorum of dealers must each propose a block
+//! that finalizes during the inclusion window. If the maximum number of dealers
+//! are faulty, every honest dealer has to.
+//!
+//! Whether that happens depends on the consensus configuration, not only on the
+//! epoch length. The window must contain enough distinct leader turns (roughly
+//! its block count divided by the leader term length), and the elector must give
+//! enough dealers at least one of them:
+//!
+//! - A round-robin elector needs at least as many turns as dealers, with margin
+//!   for turns that time out.
+//! - A random elector needs comfortably more than `n * ln(n)` turns for `n`
+//!   dealers before it reaches every dealer with high probability.
+//! - An elector that weights or skips leaders, for example by stake or
+//!   reputation, may never give some dealers a turn.
+//!
+//! When too few logs land, the ceremony fails and the next epoch keeps the
+//! previous threshold output, so committee changes and share refreshes stall
+//! until the configuration changes. The reshare actor does not check this
+//! requirement: it depends on the elector and term configuration, which the
+//! actor cannot see.
 //!
 //! # Secret Material
 //!
@@ -162,6 +192,12 @@
 //! [`EpochInfo`](crate::dkg::types::EpochInfo) needed to propose or complete
 //! verification of the final block. It learns that outcome from external
 //! finalization instead.
+//!
+//! A validator that holds a share for the current epoch takes part in its
+//! ceremony and must stay online for the whole epoch. If it follows the epoch,
+//! it counts as a faulty validator at the final block until the block finalizes
+//! without it. The actor logs a warning when state sync makes such a validator
+//! follow the epoch.
 //!
 //! A `player` that missed private dealings may need public reveals to reconstruct
 //! its share, but a revealed share is no longer private. Announcing a node as a
@@ -221,7 +257,7 @@
 //! block of a reshare-enabled chain. Once it reports the ceremony's outcome,
 //! the actor acknowledges each further finalized block of that chain without
 //! effects or checks and answers each final-block request with
-//! [`EpochInfoResponse::Following`].
+//! [`EpochInfoResponse::Unavailable`].
 
 mod mailbox;
 pub use mailbox::{EpochInfoResponse, LogReservation, Mailbox, Message};

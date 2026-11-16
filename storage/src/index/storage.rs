@@ -25,7 +25,7 @@ pub type Overflow<K, V, S> = HashMap<K, Vec<V>, S>;
 /// keep the hot (vacant or collision-free) insert path small.
 #[cold]
 #[inline(never)]
-pub(super) fn push_displaced<K: Hash + Eq + Copy, V, S: BuildHasher>(
+pub(super) fn push_displaced<K: Hash + Eq, V, S: BuildHasher>(
     overflow: &mut Overflow<K, V, S>,
     key: K,
     old: V,

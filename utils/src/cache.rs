@@ -27,7 +27,7 @@
 //! Slots grow lazily to capacity and are then reused in place. [Cache::remove]
 //! and [Cache::retain] keep detached values available for later insertion.
 //! [Cache::get_or_insert_mut] returns the selected slot and its existing value
-//! so pooled buffers can be overwritten without reallocating. [Cache::prefill]
+//! so buffer values can be overwritten without reallocating. [Cache::prefill]
 //! can allocate every value during construction. Value-returning methods such
 //! as [Cache::put] replace and drop displaced values as usual.
 //!
@@ -267,11 +267,11 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// reusing an existing allocation where possible.
     ///
     /// On a hit, records use and returns the current value. On a miss into a
-    /// reused slot (a freed slot or an eviction victim), the returned reference
-    /// is the reused slot's stale value, which the caller is expected to
-    /// overwrite. Only when the cache grows is `make` called to produce a fresh
-    /// value. This lets callers holding pooled buffers overwrite in place
-    /// rather than allocating on every insert.
+    /// reused slot (a freed slot or an eviction victim), returns the reused
+    /// slot's stale value for the caller to overwrite. Only when the cache
+    /// grows is `make` called to produce a fresh value. This lets callers whose
+    /// values are buffers overwrite them in place without allocating on every
+    /// insert.
     ///
     /// The slot index identifies the entry until it is evicted or removed, so
     /// callers can record it in an external index and resolve later reads with

@@ -1,22 +1,25 @@
 use crate::{
     Error,
     telemetry::metrics::raw::Gauge,
-    utils::{extract_panic_message, supervision::Tree},
+    utils::{
+        abort::{AbortHandle, Abortable, Aborted},
+        extract_panic_message,
+        supervision::Tree,
+    },
 };
 use commonware_utils::{
     channel::oneshot,
-    sync::{Mutex, Once},
+    sync::{Exclusive, Mutex, Once},
 };
 use futures::{
-    FutureExt as _,
     future::{Either, poll_fn, select},
     pin_mut,
-    stream::{AbortHandle, Abortable, Aborted},
 };
 use std::{
     any::Any,
+    cell::UnsafeCell,
     future::Future,
-    panic::{AssertUnwindSafe, resume_unwind},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -35,6 +38,9 @@ where
 {
     state: HandleState<T>,
 }
+
+/// A boxed future that completes a handle.
+type BoxedCompletion<T> = Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>;
 
 /// Distinguishes handles that own spawned work from handles that only wait on completion.
 enum HandleState<T>
@@ -131,7 +137,8 @@ where
     T: Send + 'static,
 {
     Receiver(oneshot::Receiver<Result<T, Error>>),
-    Future(Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>),
+    /// The future is polled only through exclusive access, so the handle stays `Sync`.
+    Future(Exclusive<BoxedCompletion<T>>),
 }
 
 impl<T> Unpin for Completion<T> where T: Send + 'static {}
@@ -147,8 +154,30 @@ where
             Self::Receiver(receiver) => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.unwrap_or(Err(Error::Closed))),
-            Self::Future(future) => future.as_mut().poll(cx),
+            Self::Future(future) => future.get_mut().as_mut().poll(cx),
         }
+    }
+}
+
+/// Polls a task's future, catching any panic it raises.
+///
+/// The future lives in an [`UnsafeCell`], which has the same layout as `F`, so the shared
+/// reference [`Abortable`] takes to check for cancellation does not invalidate borrows the future
+/// holds into its own state. Catching panics here spares a task separate wrappers for that, each
+/// of which would add a stack slot the size of the future to every poll in unoptimized builds.
+// Miri treats creating a shared reference as a read of everything outside an `UnsafeCell`, which
+// conflicts with a suspended future's borrows of itself (rust-lang/rust#137750) until coroutines
+// are built on `UnsafePinned` (rust-lang/rust#125735).
+struct FutureCell<F>(UnsafeCell<F>);
+
+impl<F: Future> Future for FutureCell<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: The future is structurally pinned: `FutureCell` has no `Drop` impl, is `Unpin`
+        // only when `F` is, and reaches the future only through this pinned projection.
+        let future = unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) };
+        catch_unwind(AssertUnwindSafe(|| future.poll(cx)))?.map(Ok)
     }
 }
 
@@ -156,6 +185,10 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
+    /// Wraps `f` as a task supervised by `tree`.
+    ///
+    /// The task's cancellation is registered on `tree` before this returns, so a closed `tree`
+    /// cancels the task before `f` can be polled.
     #[inline(always)]
     pub(crate) fn init<F>(
         f: F,
@@ -169,6 +202,9 @@ where
         // Initialize channels to handle result/abort
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
+
+        // Attach cancellation before the caller can publish the task.
+        tree.register(Aborter::new(abort_handle.clone(), metric.clone()));
 
         // Install cleanup before the first poll so rejected tasks also close
         // supervision and finish their metrics when the future is dropped.
@@ -187,9 +223,10 @@ where
             // its supervision subtree even if that destruction unwinds.
             let _guard = guard;
 
-            // Run future with panic catching and abort support
-            let result =
-                Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
+            // Only this task's wakers poll this block, so the wrapper can skip re-registering
+            // an unchanged one. `f` is dropped at the end of this statement, before its result
+            // is sent.
+            let result = Abortable::task(FutureCell(UnsafeCell::new(f)), abort_registration).await;
 
             // Handle result
             match result {
@@ -235,7 +272,10 @@ where
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Self {
             state: HandleState::Completion {
-                future: Abortable::new(Completion::Future(Box::pin(future)), abort_registration),
+                future: Abortable::new(
+                    Completion::Future(Exclusive::new(Box::pin(future))),
+                    abort_registration,
+                ),
                 abort_handle,
             },
         }
@@ -337,6 +377,7 @@ where
     }
 
     /// Returns a helper that aborts the task and updates metrics consistently.
+    #[cfg(test)]
     pub(crate) fn aborter(&self) -> Option<Aborter> {
         match &self.state {
             HandleState::Task {
@@ -559,11 +600,21 @@ impl Panicked {
                 // and return the output
                 Err(_) => task.await,
             },
-            Either::Right((output, _)) => {
-                // Return the output
+            Either::Right((output, mut panicked)) => {
+                // A panic sent while the task completed wins over its output
+                if let Ok(panic) = panicked.try_recv() {
+                    resume_unwind(panic);
+                }
                 output
             }
         }
+    }
+
+    /// Take a panic sent and not yet observed.
+    #[cfg(target_os = "linux")]
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn try_take(&mut self) -> Option<Panic> {
+        self.receiver.try_recv().ok()
     }
 }
 
@@ -591,12 +642,22 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::{AbortOnDrop, Handle};
-    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
+    use super::{AbortOnDrop, Handle, MetricHandle, Panicker};
+    use crate::{
+        Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
+        telemetry::metrics::raw::Gauge,
+        utils::{abort::AbortHandle, extract_panic_message, reschedule, supervision::Tree},
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
-    use futures::{FutureExt as _, future, poll, stream::AbortHandle};
+    use futures::{FutureExt as _, future, poll};
     use rstest::rstest;
-    use std::sync::Arc;
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
@@ -754,6 +815,122 @@ mod tests {
 
             assert!(sender.send(Ok(())).is_ok());
             assert!(matches!(handle.await, Err(Error::Aborted)));
+        });
+    }
+
+    /// Aborting a task that has been polled (and so registered its waker) drops its future and
+    /// closes its handle.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn abort_polled_task_drops_future() {
+        deterministic::Runner::default().start(|context| async move {
+            let (held, released) = oneshot::channel::<()>();
+            let (started, polled) = oneshot::channel::<()>();
+            let handle = context.child("pending").spawn(move |_| async move {
+                let _held = held;
+                started.send(()).unwrap();
+                future::pending::<()>().await;
+            });
+            polled.await.unwrap();
+            handle.abort();
+            assert!(released.await.is_err());
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        });
+    }
+
+    /// Aborting a task after it completed leaves its output in the handle.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn abort_after_completion_keeps_output() {
+        deterministic::Runner::default().start(|context| async move {
+            let (done, completed) = oneshot::channel::<()>();
+            let handle = context.child("done").spawn(move |_| async move {
+                done.send(()).unwrap();
+                7
+            });
+            completed.await.unwrap();
+            handle.abort();
+            assert_eq!(handle.await.unwrap(), 7);
+        });
+    }
+
+    /// Aborting an idle task that was polled more than once still wakes it, drops its future and
+    /// closes its handle. Tokio and io_uring poll a task with one waker, so its later pending
+    /// polls skipped registering it, while the deterministic runtime registers a new waker on
+    /// every pending poll.
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
+    fn abort_idle_task_after_skipped_registration<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let (held, released) = oneshot::channel::<()>();
+            let (started, polled) = oneshot::channel::<()>();
+            let handle = context.child("pending").spawn(move |_| async move {
+                let _held = held;
+                // The first pending poll registers the task's waker. Its wake re-polls the
+                // task, whose second pending poll finds that waker already registered on the
+                // runtimes that reuse it.
+                reschedule().await;
+                started.send(()).unwrap();
+                future::pending::<()>().await;
+            });
+            polled.await.unwrap();
+            handle.abort();
+            assert!(released.await.is_err());
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        });
+    }
+
+    /// Aborts race polls of tasks that keep rescheduling themselves on other workers, every
+    /// task still observes its abort, drops its future and closes its handle.
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::new(
+        crate::tokio::Config::default().with_worker_threads(4)
+    ))]
+    #[cfg_attr(
+        target_os = "linux",
+        case::iouring(crate::iouring::Runner::new(
+            crate::iouring::Config::default().with_worker_threads(4)
+        ))
+    )]
+    fn abort_races_polls<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            for _ in 0..50 {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let mut handles = Vec::new();
+                let mut releases = Vec::new();
+                for _ in 0..16 {
+                    let (held, released) = oneshot::channel::<()>();
+                    let polls = polls.clone();
+                    handles.push(context.child("spinner").spawn(move |_| async move {
+                        let _held = held;
+                        loop {
+                            polls.fetch_add(1, Ordering::Relaxed);
+                            reschedule().await;
+                        }
+                    }));
+                    releases.push(released);
+                }
+                while polls.load(Ordering::Relaxed) < 64 {
+                    reschedule().await;
+                }
+                for handle in &handles {
+                    handle.abort();
+                }
+                for handle in handles {
+                    assert!(matches!(handle.await, Err(Error::Closed)));
+                }
+                for released in releases {
+                    assert!(released.await.is_err());
+                }
+            }
         });
     }
 
@@ -950,6 +1127,66 @@ mod tests {
                 Some(0),
                 "expected tasks_running gauge to return to 0 after abort: {metrics}",
             );
+        });
+    }
+
+    /// A panic published during the task's completing poll wins over its output.
+    #[test]
+    fn interrupt_observes_panic_sent_while_completing() {
+        let (panicker, panicked) = Panicker::new(false);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            panicked
+                .interrupt(async move {
+                    panicker.notify(Box::new("late"));
+                    7
+                })
+                .now_or_never()
+        }));
+        let panic = result.expect_err("panic sent while completing was dropped");
+        assert_eq!(extract_panic_message(&*panic), "late");
+    }
+
+    /// A task whose supervisor closed before initialization is cancelled before its future can
+    /// be polled.
+    #[test]
+    fn init_registers_before_publication() {
+        // Close the supervisor, as when it aborts while the task factory runs.
+        let tree = Tree::root();
+        tree.abort();
+
+        // Initialization registers the task, which the closed supervisor cancels at once.
+        let (panicker, _panicked) = Panicker::new(false);
+        let gauge = Gauge::default();
+        let polled = Arc::new(AtomicBool::new(false));
+        let observed = polled.clone();
+        let (task, handle) = Handle::init(
+            async move { observed.store(true, Ordering::SeqCst) },
+            MetricHandle::new(gauge.clone()),
+            panicker,
+            tree,
+        );
+        assert_eq!(gauge.get(), 0);
+
+        // The first poll completes without polling the user future.
+        assert_eq!(task.now_or_never(), Some(()));
+        assert!(!polled.load(Ordering::SeqCst));
+        assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+    }
+
+    /// A task can write through a borrow of its own state after suspending (checked by Miri).
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn task_keeps_self_borrow_across_suspension() {
+        deterministic::Runner::default().start(|context| async move {
+            let handle = context.child("task").spawn(|_| async move {
+                let mut value = 0u8;
+                let borrow = &mut value;
+                *borrow += 1;
+                reschedule().await;
+                *borrow += 1;
+                value
+            });
+            assert_eq!(handle.await.unwrap(), 2);
         });
     }
 }

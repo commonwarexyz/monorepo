@@ -13,7 +13,9 @@
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, MaxEncodeSize, RangeCfg, Read, Write,
+};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
@@ -36,10 +38,13 @@ use thiserror::Error;
 /// [`EpochInfo`](crate::dkg::types::EpochInfo) rejects a directory for which
 /// [`matches`](Self::matches) returns `false`.
 pub trait Directory<P: PublicKey>:
-    Clone + Debug + PartialEq + Eq + Send + Sync + 'static + Read + Write + EncodeSize
+    Clone + Debug + Eq + Send + Sync + 'static + Read + Write + EncodeSize
 {
     /// Derives codec configuration for a directory containing exactly `peers`.
     fn codec_config(peers: &Set<P>) -> Self::Cfg;
+
+    /// Returns an upper bound on the encoded size of a directory containing at most `peers` peers.
+    fn max_encode_size(peers: usize) -> usize;
 
     /// Returns whether the directory contains exactly `peers`.
     fn matches(&self, peers: &Set<P>) -> bool;
@@ -48,6 +53,10 @@ pub trait Directory<P: PublicKey>:
 /// Key-only directory for transports that dial by public key alone.
 impl<P: PublicKey> Directory<P> for Unit {
     fn codec_config(_: &Set<P>) -> Self::Cfg {}
+
+    fn max_encode_size(_: usize) -> usize {
+        Self::MAX_ENCODE_SIZE
+    }
 
     fn matches(&self, _: &Set<P>) -> bool {
         true
@@ -109,6 +118,10 @@ impl<P: PublicKey> Read for Addresses<P> {
 impl<P: PublicKey> Directory<P> for Addresses<P> {
     fn codec_config(peers: &Set<P>) -> Self::Cfg {
         RangeCfg::exact(peers.len())
+    }
+
+    fn max_encode_size(peers: usize) -> usize {
+        Map::<P, Address>::max_encode_size(peers, Address::MAX_ENCODE_SIZE)
     }
 
     fn matches(&self, peers: &Set<P>) -> bool {
@@ -246,7 +259,7 @@ fn resolve<P: PublicKey>(
 mod tests {
     use super::*;
     use commonware_actor::Feedback;
-    use commonware_cryptography::{Signer as _, ed25519};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519};
     use commonware_macros::test_traced;
     use commonware_p2p::{
         PeerSetSubscription, Receiver as _, Recipients, Sender as _, authenticated::lookup,
@@ -254,11 +267,15 @@ mod tests {
     use commonware_runtime::{
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use commonware_stream::encrypted::Handshake;
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+    };
     use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::Arc,
+        time::Duration,
     };
 
     type PublicKey = ed25519::PublicKey;
@@ -479,21 +496,39 @@ mod tests {
             let (mut dealer_network, dealer_oracle) = lookup::Network::new(
                 context.child("dealer"),
                 lookup::Config::local(
-                    Handshake::new(dealer_signer),
+                    Cups::<_, ChaCha20Poly1305>::new(
+                        Sake {
+                            signer: dealer_signer,
+                            synchrony_bound: Duration::from_secs(5),
+                            max_handshake_age: Duration::from_secs(10),
+                            version: sake::Version::V1,
+                        },
+                        cups::Version::V1,
+                    ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     dealer_socket,
                     NZUsize!(2),
                     1024,
+                    NZUsize!(1_000),
                 ),
             );
             let (mut participant_network, participant_oracle) = lookup::Network::new(
                 context.child("participant"),
                 lookup::Config::local(
-                    Handshake::new(participant_signer),
+                    Cups::<_, ChaCha20Poly1305>::new(
+                        Sake {
+                            signer: participant_signer,
+                            synchrony_bound: Duration::from_secs(5),
+                            max_handshake_age: Duration::from_secs(10),
+                            version: sake::Version::V1,
+                        },
+                        cups::Version::V1,
+                    ),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     participant_socket,
                     NZUsize!(2),
                     1024,
+                    NZUsize!(1_000),
                 ),
             );
             let (mut dealer_sender, mut dealer_receiver) =

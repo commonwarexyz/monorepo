@@ -1,4 +1,23 @@
 //! Implementation of a [commonware_p2p]-optimized `collector`.
+//!
+//! # Message Sizes
+//!
+//! ```text
+//! Request, sent on the requests channel:
+//! +------------------------+
+//! | request (encoded size) |
+//! +------------------------+
+//!
+//! Response, sent on the responses channel:
+//! +-------------------------+
+//! | response (encoded size) |
+//! +-------------------------+
+//! ```
+//!
+//! Each payload the engine sends is the encoding of one request from its [Mailbox] or one response
+//! from its [Handler]. The engine adds no framing, so each request and each response must fit the
+//! configured `max_message_size` of the network that carries its channel, less the subchannel
+//! prefix on a [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
 
 use crate::{Handler, Monitor};
 
@@ -941,7 +960,7 @@ mod tests {
                 "at least one peer engine task should be running"
             );
 
-            // Verify network is functional - send a request and expect a response
+            // Verify the network is functional by sending a request and expecting a response
             let request = Request { id: 1, data: 1 };
             assert_eq!(
                 mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone()),
@@ -968,5 +987,41 @@ mod tests {
         for seed in 0..25 {
             clean_shutdown(seed);
         }
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5153.
+    ///
+    /// Every `Mailbox` can be dropped while the engine runs. The engine must then
+    /// stop instead of polling its closed mailbox forever.
+    #[test_traced]
+    fn pr_5153_regression() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (oracle, schemes, _, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            let public_key = schemes[0].public_key();
+            let conn = connections.into_iter().next().unwrap();
+            let (engine, mailbox) = Engine::new(
+                context
+                    .child("engine")
+                    .with_attribute("public_key", &public_key),
+                Config {
+                    blocker: oracle.control(public_key),
+                    monitor: MockMonitor::dummy(),
+                    handler: MockHandler::dummy(),
+                    mailbox_size: MAILBOX_SIZE,
+                    priority_request: false,
+                    request_codec: (),
+                    priority_response: false,
+                    response_codec: (),
+                },
+            );
+            let handle = engine.start(conn.0, conn.1);
+
+            drop(mailbox);
+            handle
+                .await
+                .expect("engine should stop once every mailbox is dropped");
+        });
     }
 }

@@ -3,11 +3,11 @@ use crate::{Context, SyncCompletion};
 use commonware_codec::{Codec, Copying, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
+    BLOB_PAGE_SIZE, Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Span;
-use futures::{FutureExt as _, future::try_join_all};
+use commonware_utils::{Span, Widen, futures::try_join_all};
+use futures::FutureExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 
@@ -104,8 +104,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Find latest blob (check which includes a hash of the other). Syncs alternate copies
         // and drain the previous sync first, so at most one copy is ever mid-write: both copies
         // failing validation is corruption, and adopting a fresh store would mask it.
-        let left = Self::load(&context, &cfg.codec_config, 0, left_blob, left_len).await?;
-        let right = Self::load(&context, &cfg.codec_config, 1, right_blob, right_len).await?;
+        let left = Self::load(&cfg.codec_config, 0, left_blob, left_len).await?;
+        let right = Self::load(&cfg.codec_config, 1, right_blob, right_len).await?;
         if matches!((&left, &right), (Loaded::Invalid(_), Loaded::Invalid(_))) {
             return Err(Error::Corruption(
                 "both metadata copies failed validation".into(),
@@ -156,7 +156,6 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
     }
 
     async fn load(
-        context: &E,
         codec_config: &V::Cfg,
         index: usize,
         blob: E::Blob,
@@ -168,13 +167,13 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             return Ok(Loaded::Valid(BTreeMap::new(), Wrapper::empty(blob)));
         }
 
-        // The full encoded blob remains in the in-memory mirror after decoding, so request that
-        // pages brought in by this read need not remain in the OS page cache.
+        // The encoded buffer is retained after decoding, so pages read here need not remain
+        // in the OS page cache.
         let len: usize = len.try_into().expect("blob too large for platform");
         let buf = blob
             .read_at(0, len, ReadOptions::DONT_CACHE)
             .await?
-            .coalesce_with_pool(context.storage_buffer_pool());
+            .coalesce();
 
         // Verify integrity.
         //
@@ -401,7 +400,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let target = &mut self.state.blobs[target_cursor];
 
         // Determine if we can overwrite existing data in place, updating the
-        // in-memory mirror for equal-size values as we go. If any value changes
+        // encoded buffer for equal-size values as we go. If any value changes
         // encoded length, subsequent offsets shift and the blob must be rebuilt.
         let mut overwrite = true;
         if key_order_changed < past_version {
@@ -435,39 +434,55 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             let checksum = Crc32::checksum(&target.data.as_ref()[..checksum_index]);
             (&mut target.data.as_mut()[checksum_index..]).put_u32(checksum);
 
-            // Freeze the mirror so async writes can hold zero-copy slices, then recover the
-            // mutable mirror after all writes complete. Since the mirror remains authoritative,
+            // Freeze the encoded buffer so async writes can share it without copying, then recover
+            // the mutable buffer after all writes complete. Since we retain the buffer in memory,
             // every write requests cache bypass.
             let data = std::mem::take(&mut target.data).freeze();
 
-            // Write each modified value from the frozen mirror, followed by the
-            // version and checksum.
-            let writes = target
-                .modified
-                .iter()
-                .map(|key| {
-                    let info = target.lengths.get(key).expect("key must exist");
-                    let start = info.start;
-                    let end = start + info.length;
-                    target.blob.write_at(
-                        start as u64,
-                        data.slice(start..end),
-                        WriteOptions::DONT_CACHE,
-                    )
-                })
-                .chain([
-                    target
-                        .blob
-                        .write_at(0, data.slice(0..u64::SIZE), WriteOptions::DONT_CACHE),
-                    target.blob.write_at(
-                        checksum_index as u64,
-                        data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
-                        WriteOptions::DONT_CACHE,
-                    ),
-                ]);
-            try_join_all(writes).await?;
+            // A store no larger than one blob page is written whole: its changed values, version,
+            // and checksum share that page, so one write replaces several.
+            let full_write = data.len() <= Widen::widen(BLOB_PAGE_SIZE);
+            if full_write {
+                // This write includes every changed byte, so a non-pipelined sync can request
+                // durability with it.
+                let options = if pipelined {
+                    WriteOptions::DONT_CACHE
+                } else {
+                    WriteOptions::SYNC | WriteOptions::DONT_CACHE
+                };
+                target.blob.write_at(0, data.clone(), options).await?;
+            } else {
+                // Larger metadata stores write only modified values, the version, and the checksum.
+                let writes = target
+                    .modified
+                    .iter()
+                    .map(|key| {
+                        let info = target.lengths.get(key).expect("key must exist");
+                        let start = info.start;
+                        let end = start + info.length;
+                        target.blob.write_at(
+                            Widen::widen(start),
+                            data.slice(start..end),
+                            WriteOptions::DONT_CACHE,
+                        )
+                    })
+                    .chain([
+                        target
+                            .blob
+                            .write_at(0, data.slice(0..u64::SIZE), WriteOptions::DONT_CACHE),
+                        target.blob.write_at(
+                            Widen::widen(checksum_index),
+                            data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
+                            WriteOptions::DONT_CACHE,
+                        ),
+                    ]);
+                try_join_all(writes).await?;
+            }
             let sync = if pipelined {
                 Some(target.blob.start_sync().await)
+            } else if full_write {
+                // The full write above already persisted the store.
+                None
             } else {
                 target.blob.sync().await?;
                 None
@@ -478,7 +493,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
             // Update state
             target.version = next_version;
-            target.data = data.into_mut_with_pool(self.context.storage_buffer_pool());
+            target.data = IoBufMut::from(data);
             self.sync_overwrites.inc();
             return Ok(self.record_pending(sync));
         }
@@ -487,7 +502,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         target.modified.clear();
 
         // Since we can't overwrite in place, we rewrite the entire blob.
-        // Pooled buffers do not grow, so compute the final encoded length before
+        // `IoBufMut` does not grow, so compute the final encoded length before
         // selecting a destination buffer.
         let mut lengths = HashMap::with_capacity(self.map.len());
         let mut next_data_len = u64::SIZE + crc32::Digest::SIZE;
@@ -501,13 +516,13 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // rewrites still resize the persisted blob.
         let target_data_len = target.data.len();
 
-        // Reuse the existing blob mirror when its allocation is already large enough.
+        // Reuse the encoded buffer when its allocation is already large enough.
         let mut next_data = if target.data.capacity() >= next_data_len {
             let mut data = std::mem::take(&mut target.data);
             data.clear();
             data
         } else {
-            self.context.storage_buffer_pool().alloc(next_data_len)
+            IoBufMut::with_capacity(next_data_len)
         };
         next_data.put_u64(next_version);
 
@@ -524,8 +539,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let next_data = next_data.freeze();
         let shrinking = next_data.len() < target_data_len;
 
-        // The encoded blob becomes the authoritative in-memory mirror below, so every write
-        // requests cache bypass.
+        // We retain the encoded buffer in memory below, so every write requests cache bypass.
         let sync = if pipelined {
             target
                 .blob
@@ -560,7 +574,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Update blob state
         target.version = next_version;
         target.lengths = lengths;
-        target.data = next_data.into_mut_with_pool(self.context.storage_buffer_pool());
+        target.data = IoBufMut::from(next_data);
 
         self.sync_rewrites.inc();
         Ok(self.record_pending(sync))
@@ -579,12 +593,15 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
-        if let Some(pending) = self.state.pending.take() {
-            let _ = pending.await;
-        }
-        let state = self.state;
-        for (i, wrapper) in state.blobs.into_iter().enumerate() {
-            drop(wrapper.blob);
+        // The removal order below relies on the cursor naming the newest durable copy, which a
+        // failed started sync breaks, so that failure is surfaced before anything is removed.
+        self.wait_for_pending().await?;
+
+        // Remove the older copy first. A reopen after an interrupted destroy then finds the
+        // newest generation or an empty store, never a superseded generation.
+        let State { cursor, blobs, .. } = self.state;
+        drop(blobs);
+        for i in [1 - cursor, cursor] {
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;
@@ -707,7 +724,17 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         Ok((self, handle))
     }
 
+    /// Wait for a sync started by [Self::start_sync] to complete, surfacing its failure without
+    /// writing anything.
+    pub(crate) async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        Ok(self.0.wait_for_pending().await?)
+    }
+
     /// Remove the underlying blobs for this [Metadata].
+    ///
+    /// The older copy is removed first, so a reopen after an interrupted destroy finds either the
+    /// newest generation or an empty store, never a superseded generation. A started sync that
+    /// failed is reported before either copy is removed.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

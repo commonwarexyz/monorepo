@@ -12,7 +12,6 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher},
 };
-use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
@@ -28,8 +27,7 @@ where
     E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     B: Blocker<PublicKey = S::PublicKey>,
 {
     pub(super) context: ContextCell<E>,
@@ -45,8 +43,7 @@ where
     E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     B: Blocker<PublicKey = S::PublicKey>,
 {
     /// Runs the serving loop until the actor shuts down.

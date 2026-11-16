@@ -2,18 +2,22 @@
 //!
 //! The generic field kernels stay entirely in NEON. A scalar-plus-NEON design only becomes useful
 //! when independent operations are scheduled across a complete point formula; dividing one
-//! [`super::FVec`] operation between both domains adds setup and synchronization costs on Apple
-//! M-series CPUs. Products split radix-`2^51` limbs into digits at alternating 26/25-bit offsets
-//! only while multiplying. Loose input digits can each occupy 26 bits. The surrounding group
-//! formulas keep their compact five-limb representation.
+//! [`super::FVec`] operation between both domains adds setup and synchronization costs. Products
+//! split radix-`2^51` limbs into digits at alternating 26/25-bit offsets only while multiplying.
+//! Loose input digits can each occupy 26 bits. The surrounding group formulas keep their compact
+//! five-limb representation.
 
+use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, msm};
+#[cfg(test)]
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES,
-    MASK_51, msm,
+    portable,
+    test::{MASK_52, assert_g_same},
 };
-#[cfg(not(feature = "std"))]
-use alloc::vec;
 use core::arch::aarch64::*;
+
+// Single-point operations with paired products on a NEON tile, for single-signature verification
+// and fixed-base multiplication.
+mod single;
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
 const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
@@ -29,7 +33,7 @@ type Regs = [uint64x2_t; 5];
 
 /// The NEON backend token.
 #[derive(Clone, Copy)]
-pub(super) struct Backend;
+pub struct Backend;
 
 /// Loads one two-lane tile from each of the five limb rows.
 #[inline(always)]
@@ -63,7 +67,7 @@ fn store(regs: Regs, limbs: &mut [[u64; LANES]; 5], tile: usize) {
 ///
 /// The explicit instruction sequence prevents LLVM from recognizing a packed `u64` multiplication
 /// and scalarizing it through general-purpose registers. NEON has no packed `u64` multiply, while
-/// these shifts and additions stay in vector registers and measured better on Apple M-series CPUs.
+/// these shifts and additions stay in vector registers.
 #[inline(always)]
 fn mul19(z: uint64x2_t) -> uint64x2_t {
     #[cfg(miri)]
@@ -350,8 +354,8 @@ fn square_column_mac<const COLUMN: usize, const SCALE: u32, const DOUBLE: bool>(
 /// general-multiplication column, at worst `267 * (2^26 - 1)^2 < 2^61`.
 ///
 /// Keeping the 55 products explicit is deliberate: coefficients are applied while digits are
-/// still `u32`, avoiding packed-`u64` constant multiplications that LLVM scalarizes on Apple
-/// targets, while the independent columns expose enough instruction-level parallelism.
+/// still `u32`, avoiding packed-`u64` multiplications, for which NEON has no instruction, while
+/// the independent columns expose enough instruction-level parallelism.
 #[inline(always)]
 fn square_regs(a: Regs) -> Regs {
     let pairs = split_pairs(a);
@@ -531,6 +535,29 @@ impl FBackend for Backend {
     fn square(self, a: FVec) -> FVec {
         map_f(a, square_regs)
     }
+
+    /// Loads the vector's register tiles once and squares each `k` times in place, rather than
+    /// going through [`map_f`] once per squaring.
+    #[inline(always)]
+    fn pow2k(self, mut a: FVec, k: u32) -> FVec {
+        let mut tiles: [Regs; TILES] = [
+            load(&a.limbs, 0),
+            load(&a.limbs, 1),
+            load(&a.limbs, 2),
+            load(&a.limbs, 3),
+        ];
+
+        // The tiles hold disjoint pairs of lanes, so each round squares all four independently.
+        for _ in 0..k {
+            for tile in &mut tiles {
+                *tile = square_regs(*tile);
+            }
+        }
+        for (tile, regs) in tiles.into_iter().enumerate() {
+            store(regs, &mut a.limbs, tile);
+        }
+        a
+    }
 }
 
 /// Packs two independent field elements into register lanes.
@@ -551,6 +578,89 @@ fn unpack_pair(regs: Regs) -> [F; 2] {
             F(regs.map(|reg| vgetq_lane_u64(reg, 0))),
             F(regs.map(|reg| vgetq_lane_u64(reg, 1))),
         ]
+    }
+}
+
+/// One extended point per lane of a register tile, as `[x, y, t, z]`.
+type Point = [Regs; 4];
+
+/// The identity point in both lanes of a register tile.
+#[inline(always)]
+fn identity_regs() -> Point {
+    // SAFETY: AArch64 targets provide NEON.
+    unsafe {
+        let zero = [vdupq_n_u64(0); 5];
+        let mut one = zero;
+        one[0] = vdupq_n_u64(1);
+        [zero, one, zero, one]
+    }
+}
+
+/// Applies the complete addition formula to two independent register lanes.
+#[inline(always)]
+fn add_regs([x1, y1, t1, z1]: Point, [x2, y2, t2, z2]: Point) -> Point {
+    // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
+    //
+    //   A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
+    //   B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
+    //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
+    //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
+    let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+    let b = mul_regs(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+    let c = mul_regs(mul_regs(t1, t2), load(&EDWARDS_D2.limbs, 0));
+    let zz = mul_regs(z1, z2);
+    let d = add_raw(zz, zz);
+    let e = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(d, c));
+    let g = reduce_regs(add_raw(d, c));
+    let h = reduce_regs(add_raw(b, a));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
+}
+
+/// Applies the dedicated `dbl-2008-hwcd` doubling formula to two independent register lanes.
+#[inline(always)]
+fn double_regs([x, y, _, z]: Point) -> Point {
+    // `dbl-2008-hwcd` for curve parameter `a = -1`, which folds `D = a*A` into `G` and `H`:
+    //
+    //   A = X1^2        E = (X1 + Y1)^2 - A - B        X3 = E*F
+    //   B = Y1^2        G = B - A                      Y3 = G*H
+    //   C = 2*Z1^2      F = G - C                      T3 = E*H
+    //                   H = -A - B                     Z3 = F*G
+    let a = square_regs(x);
+    let b = square_regs(y);
+    let c0 = square_regs(z);
+    let c = reduce_regs(add_raw(c0, c0));
+    let xy2 = square_regs(reduce_regs(add_raw(x, y)));
+    let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
+    let g = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(g, c));
+    // SAFETY: AArch64 targets provide NEON.
+    let zero = unsafe { [vdupq_n_u64(0); 5] };
+    let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
+}
+
+/// Negates the lanes whose mask is all ones, with reduced output.
+#[inline(always)]
+fn neg_lanes(value: Regs, mask: uint64x2_t) -> Regs {
+    // SAFETY: AArch64 targets provide NEON.
+    unsafe {
+        let negated = reduce_regs(sub_raw([vdupq_n_u64(0); 5], value));
+        let mut result = value;
+        for limb in 0..5 {
+            result[limb] = vbslq_u64(mask, negated[limb], value[limb]);
+        }
+        result
     }
 }
 
@@ -577,118 +687,26 @@ fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
     ]
 }
 
-impl GBackend for Backend {
-    /// Fused point addition, processed two lanes at a time to keep the working set in registers.
-    #[inline(always)]
-    fn g_add(self, mut p: GVec, q: GVec) -> GVec {
-        for tile in 0..TILES {
-            // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
-            //
-            //   A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
-            //   B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
-            //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
-            //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
-            let x1 = load(&p.x.limbs, tile);
-            let y1 = load(&p.y.limbs, tile);
-            let x2 = load(&q.x.limbs, tile);
-            let y2 = load(&q.y.limbs, tile);
-            let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
-            let b = mul_regs(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
-            let c = mul_regs(
-                mul_regs(load(&p.t.limbs, tile), load(&q.t.limbs, tile)),
-                load(&EDWARDS_D2.limbs, tile),
-            );
-            let zz = mul_regs(load(&p.z.limbs, tile), load(&q.z.limbs, tile));
-            let d = add_raw(zz, zz);
-            let e = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(d, c));
-            let g = reduce_regs(add_raw(d, c));
-            let h = reduce_regs(add_raw(b, a));
-
-            store(mul_regs(e, f), &mut p.x.limbs, tile);
-            store(mul_regs(g, h), &mut p.y.limbs, tile);
-            store(mul_regs(e, h), &mut p.t.limbs, tile);
-            store(mul_regs(f, g), &mut p.z.limbs, tile);
-        }
-        p
-    }
-
-    /// Fused mixed point addition, processed two lanes at a time.
-    #[inline(always)]
-    fn g_add_mixed(self, mut p: GVec, q: GAffineVec) -> GVec {
-        for tile in 0..TILES {
-            let [x, y, t, z] = add_mixed_regs(
-                [
-                    load(&p.x.limbs, tile),
-                    load(&p.y.limbs, tile),
-                    load(&p.t.limbs, tile),
-                    load(&p.z.limbs, tile),
-                ],
-                [
-                    load(&q.x.limbs, tile),
-                    load(&q.y.limbs, tile),
-                    load(&q.t2d.limbs, tile),
-                ],
-            );
-            store(x, &mut p.x.limbs, tile);
-            store(y, &mut p.y.limbs, tile);
-            store(t, &mut p.t.limbs, tile);
-            store(z, &mut p.z.limbs, tile);
-        }
-        p
-    }
-
-    /// Fused point doubling using the dedicated `dbl-2008-hwcd` formula.
-    #[inline(always)]
-    fn g_double(self, mut p: GVec) -> GVec {
-        for tile in 0..TILES {
-            let x = load(&p.x.limbs, tile);
-            let y = load(&p.y.limbs, tile);
-            let z = load(&p.z.limbs, tile);
-
-            let a = square_regs(x);
-            let b = square_regs(y);
-            let c0 = square_regs(z);
-            let c = reduce_regs(add_raw(c0, c0));
-            let xy2 = square_regs(reduce_regs(add_raw(x, y)));
-            let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
-            let g = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(g, c));
-            // SAFETY: AArch64 targets provide NEON.
-            let zero = unsafe { [vdupq_n_u64(0); 5] };
-            let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
-
-            store(mul_regs(e, f), &mut p.x.limbs, tile);
-            store(mul_regs(g, h), &mut p.y.limbs, tile);
-            store(mul_regs(e, h), &mut p.t.limbs, tile);
-            store(mul_regs(f, g), &mut p.z.limbs, tile);
-        }
-        p
-    }
-}
-
-impl super::Backend for Backend {}
-
 /// Adds a signed affine point to each of two extended points.
 ///
 /// Each result is `p[i] + q[i]` or `p[i] - q[i]` according to `negative[i]`.
 /// Variable-time, so the signs must be public.
 #[inline(always)]
 fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
+    // Subtracting `q[i]` adds its negation, which negates `x` and `t2d` but keeps `y`. The
+    // negation is skipped entirely when both signs are positive.
     let mut x2 = pack_pair(q.map(|point| point.x));
     let mut t2d = pack_pair(q.map(|point| point.t2d));
     if negative.iter().any(|&sign| sign) {
+        let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
         // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.
-        unsafe {
-            let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
-            let mask = vld1q_u64(masks.as_ptr());
-            let zero = [vdupq_n_u64(0); 5];
-            let neg_x = reduce_regs(sub_raw(zero, x2));
-            let neg_t2d = reduce_regs(sub_raw(zero, t2d));
-            x2 = core::array::from_fn(|i| vbslq_u64(mask, neg_x[i], x2[i]));
-            t2d = core::array::from_fn(|i| vbslq_u64(mask, neg_t2d[i], t2d[i]));
-        }
+        let mask = unsafe { vld1q_u64(masks.as_ptr()) };
+        x2 = neg_lanes(x2, mask);
+        t2d = neg_lanes(t2d, mask);
     }
+
+    // Lane `i` of every register holds `p[i]` and the signed `q[i]`, so one mixed addition
+    // updates both points before each lane is unpacked into its result.
     let [x, y, t, z] = add_mixed_regs(
         [
             pack_pair(p.map(|point| point.x)),
@@ -711,93 +729,25 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
 }
 
 impl Backend {
-    pub(super) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self
-    }
-
-    /// Returns lanes whose sum is the weighted sum of all bucket stripes.
-    ///
-    /// Let `B[k, lane]` sum the stripes at bucket index `k*LANES + lane`. The descending pass
-    /// builds `sum[lane] = sum_k B[k, lane]` and `rows[lane] = sum_k k*B[k, lane]`.
-    /// Final weighting gives `LANES*rows[lane] + (lane + 1)*sum[lane]`, assigning each bucket
-    /// its index-plus-one weight. The lane count is a power of two.
-    fn fold_buckets_lanes(self, buckets: &[G], nb: usize, used: usize) -> GVec {
-        // A single used bucket has weight one, so return the stripes without weighting.
-        if used == 1 {
-            return GVec::transpose(core::array::from_fn(|lane| {
-                if lane < <Self as msm::Backend>::STRIPES {
-                    buckets[lane * nb]
-                } else {
-                    G::IDENTITY
-                }
-            }));
-        }
-        let mut sum = GVec::identity();
-        let mut rows = GVec::identity();
-        for block in (0..used.div_ceil(LANES)).rev() {
-            let gather = |stripe: usize| {
-                GVec::transpose(core::array::from_fn(|lane| {
-                    let digit = block * LANES + lane;
-                    if digit < used {
-                        buckets[stripe * nb + digit]
-                    } else {
-                        G::IDENTITY
-                    }
-                }))
-            };
-            let mut combined = gather(0);
-            for stripe in 1..<Self as msm::Backend>::STRIPES {
-                combined = self.g_add(combined, gather(stripe));
-            }
-            rows = self.g_add(rows, sum);
-            sum = self.g_add(sum, combined);
-        }
-
-        // Seed the row weight and the high bit of lane + 1. Doubling shifts both together.
-        let lanes = sum.untranspose();
-        let mut weighted = self.g_add(
-            rows,
-            GVec::transpose(core::array::from_fn(|lane| {
-                if lane == LANES - 1 {
-                    lanes[lane]
-                } else {
-                    G::IDENTITY
-                }
-            })),
-        );
-        for bit in (0..LANES.ilog2()).rev() {
-            weighted = self.g_double(weighted);
-            let selected = core::array::from_fn(|lane| {
-                if (lane + 1) & (1 << bit) != 0 {
-                    lanes[lane]
-                } else {
-                    G::IDENTITY
-                }
-            });
-            weighted = self.g_add(weighted, GVec::transpose(selected));
-        }
-        weighted
     }
 }
 
 impl msm::Backend for Backend {
-    // One stripe per physical mixed-addition lane keeps wave updates independent. Folds retain
-    // LANES independent bucket indices.
+    // One stripe per physical mixed-addition lane keeps wave updates independent.
     const STRIPES: usize = WIDTH;
+    const STRAUS_TERM_CUTOFF: usize = 152;
+    const PARALLEL_STRAUS_TERM_CUTOFF: usize = 256;
 
     fn fill_buckets<T>(
         self,
         buckets: &mut [G],
         nb: usize,
         terms: &[T],
-        term: impl Fn(&T) -> (GAffine, i16),
+        term: impl Fn(&T) -> (&GAffine, i16),
     ) {
         msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
-    }
-
-    #[inline(always)]
-    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> G {
-        self.fold_buckets_lanes(buckets, nb, used).sum_lanes(self)
     }
 
     /// Scalar recombination computes each point once, avoiding duplicate SIMD lanes.
@@ -807,34 +757,139 @@ impl msm::Backend for Backend {
         windows: usize,
         width: u32,
     ) -> G {
-        let mut window_sums = vec![G::IDENTITY; windows];
-        for (window, partial) in partials {
-            window_sums[window] = window_sums[window].add(partial);
-        }
-        let mut result = G::IDENTITY;
-        for window in window_sums.iter().rev() {
-            for _ in 0..width {
-                result = result.double();
+        msm::combine_windows(G::IDENTITY, G::add, G::double, partials, windows, width)
+    }
+
+    fn with_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
+        computation.call::<Self, WIDTH>(self)
+    }
+}
+
+impl msm::Lanes<WIDTH> for Backend {
+    type Point = Point;
+    type Affine = [Regs; 3];
+
+    // Two-term groups with only zero digits, such as pairs of padding terms, are common enough
+    // to skip.
+    const SKIP_ZERO_GROUPS: bool = true;
+
+    #[inline(always)]
+    fn identity(self) -> Point {
+        identity_regs()
+    }
+
+    #[inline(always)]
+    fn load(self, points: [&GAffine; WIDTH]) -> Self::Affine {
+        // Each limb row packs the two terms into independent NEON lanes. A missing term
+        // supplies the affine identity, so the tile always has two complete points.
+        [
+            pack_pair([points[0].x, points[1].x]),
+            pack_pair([points[0].y, points[1].y]),
+            pack_pair([points[0].t2d, points[1].t2d]),
+        ]
+    }
+
+    #[inline(always)]
+    fn load_extended(self, points: [&G; WIDTH]) -> Point {
+        [
+            pack_pair([points[0].x, points[1].x]),
+            pack_pair([points[0].y, points[1].y]),
+            pack_pair([points[0].t, points[1].t]),
+            pack_pair([points[0].z, points[1].z]),
+        ]
+    }
+
+    #[inline(always)]
+    fn store(self, [x, y, t, z]: Point) -> [G; WIDTH] {
+        let [x, y, t, z] = [x, y, t, z].map(unpack_pair);
+        core::array::from_fn(|lane| G {
+            x: x[lane],
+            y: y[lane],
+            t: t[lane],
+            z: z[lane],
+        })
+    }
+
+    #[inline(always)]
+    fn add_mixed(self, point: Point, affine: Self::Affine) -> Point {
+        add_mixed_regs(point, affine)
+    }
+
+    #[inline(always)]
+    fn add(self, a: Point, b: Point) -> Point {
+        add_regs(a, b)
+    }
+
+    #[inline(always)]
+    fn double(self, point: Point) -> Point {
+        double_regs(point)
+    }
+
+    #[inline(always)]
+    fn add_signed(self, point: Point, table: &[Point], digits: [i16; WIDTH]) -> Point {
+        let low = &table[usize::from(digits[0].unsigned_abs())];
+        let high = &table[usize::from(digits[1].unsigned_abs())];
+        let mut selected = *low;
+
+        // The two digit magnitudes may select different table entries. Keep lane zero from
+        // the low entry and copy lane one from the high entry into every coordinate's limb rows.
+        // SAFETY: AArch64 targets provide NEON, and both lane indices are within the register.
+        unsafe {
+            for (selected, high) in selected.iter_mut().zip(high) {
+                for (selected, high) in selected.iter_mut().zip(high) {
+                    *selected = vcopyq_laneq_u64::<1, 1>(*selected, *high);
+                }
             }
-            result = result.add(*window);
         }
-        result
+
+        // Lanes with negative digits subtract their entry by negating its `X` and `T`.
+        let [x, y, t, z] = selected;
+        let masks = [
+            0u64.wrapping_sub(u64::from(digits[0] < 0)),
+            0u64.wrapping_sub(u64::from(digits[1] < 0)),
+        ];
+        // SAFETY: AArch64 targets provide NEON, and the mask array has two lanes.
+        let mask = unsafe { vld1q_u64(masks.as_ptr()) };
+        add_regs(point, [neg_lanes(x, mask), y, neg_lanes(t, mask), z])
+    }
+
+    #[inline(always)]
+    fn select(self, point: Point, keep: [bool; WIDTH]) -> Point {
+        // Kept lanes get an all-ones mask, so the bitwise select takes `point`'s limbs there and
+        // the identity's limbs elsewhere.
+        let masks = keep.map(|keep| 0u64.wrapping_sub(u64::from(keep)));
+        let identity = identity_regs();
+        // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.
+        unsafe {
+            let mask = vld1q_u64(masks.as_ptr());
+            core::array::from_fn(|coordinate| {
+                core::array::from_fn(|limb| {
+                    vbslq_u64(mask, point[coordinate][limb], identity[coordinate][limb])
+                })
+            })
+        }
+    }
+
+    #[inline(always)]
+    fn sum(self, point: Point) -> G {
+        // Unpack both lanes once and combine them with scalar addition.
+        let [first, second] = self.store(point);
+        first.add(second)
     }
 }
 
 #[test]
-fn mixed_pair_matches_full_width() {
-    let reference = super::portable::Backend::new();
+fn mixed_pair_matches_scalar() {
     let torsion = GAffine::decompress(&[0; 32]).unwrap();
     let mixed = GAffine::decompress(
         &GAffine::BASEPOINT
             .to_extended()
             .add(torsion.to_extended())
-            .to_bytes(),
+            .compress(),
     )
     .unwrap();
     let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
-    let max = F([super::test::MASK_52; 5]);
+    let max = F([MASK_52; 5]);
     let loose = G {
         x: max,
         y: max,
@@ -864,36 +919,18 @@ fn mixed_pair_matches_full_width() {
                 ([loose, current[1]], [loose_affine, incoming[1]]),
             ] {
                 for negative in [[false, false], [false, true], [true, false], [true, true]] {
-                    let mut packed_current = [G::IDENTITY; LANES];
-                    let mut packed_incoming = [GAffine::IDENTITY; LANES];
-                    let mut packed_negative = [false; LANES];
-                    packed_current[..WIDTH].copy_from_slice(&current);
-                    packed_incoming[..WIDTH].copy_from_slice(&incoming);
-                    packed_negative[..WIDTH].copy_from_slice(&negative);
-                    let expected = reference
-                        .g_add_mixed(
-                            GVec::transpose(packed_current),
-                            GAffineVec::from_signed_lanes(
-                                reference,
-                                &packed_incoming,
-                                &packed_negative,
-                            ),
-                        )
-                        .untranspose();
                     let actual = g_add_mixed_pair(current, incoming, negative);
-                    for lane in 0..2 {
-                        for (actual, expected) in [
-                            (actual[lane].x, expected[lane].x),
-                            (actual[lane].y, expected[lane].y),
-                            (actual[lane].t, expected[lane].t),
-                            (actual[lane].z, expected[lane].z),
-                        ] {
-                            super::test::assert_f_eq(
-                                FVec::splat(actual),
-                                FVec::splat(expected),
-                                "mixed pair coordinate",
-                            );
+                    for lane in 0..WIDTH {
+                        // The scalar reference negates `x` and `t2d` of a subtracted point before
+                        // its mixed addition.
+                        let mut point = incoming[lane];
+                        if negative[lane] {
+                            point.x = point.x.neg();
+                            point.t2d = point.t2d.neg();
                         }
+                        let expected =
+                            msm::Lanes::add_mixed(portable::Backend::new(), current[lane], point);
+                        assert_g_same(actual[lane], expected, "mixed pair");
                     }
                 }
             }

@@ -12,17 +12,18 @@ pub(crate) mod variable;
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        any::ValueEncoding,
-        operation::{Floored, Key, Operation as OperationTrait},
+        operation::{Committable, Floored, Key},
+        value::ValueEncoding,
     },
 };
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use core::fmt::Display;
 
-// Context byte prefixes for identifying the operation type.
-pub(crate) const SET_CONTEXT: u8 = 0;
-pub(crate) const COMMIT_CONTEXT: u8 = 1;
+/// Wire tag for [Operation::Set].
+pub const SET_CONTEXT: u8 = 0;
+/// Wire tag for [Operation::Commit].
+pub const COMMIT_CONTEXT: u8 = 1;
 
 /// An operation applied to an immutable authenticated database.
 ///
@@ -30,7 +31,7 @@ pub(crate) const COMMIT_CONTEXT: u8 = 1;
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<F: Family, K: Key, V: ValueEncoding> {
-    /// Set a key to a value. The key must not already exist.
+    /// Set a key to a value. The key must be set at most once across the database history.
     Set(K, V::Value),
 
     /// Commit with optional metadata and the inactivity floor location.
@@ -53,7 +54,7 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
     }
 
     /// Returns the inactivity floor location if this is a commit operation.
-    pub const fn has_floor(&self) -> Option<Location<F>> {
+    pub const fn inactivity_floor(&self) -> Option<Location<F>> {
         match self {
             Self::Commit(_, loc) => Some(*loc),
             Self::Set(_, _) => None,
@@ -61,40 +62,19 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
     }
 }
 
-impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, V> {
-    type Key = K;
-
-    fn key(&self) -> Option<&Self::Key> {
-        self.key()
-    }
-
-    fn into_key(self) -> Option<Self::Key> {
-        match self {
-            Self::Set(key, _) => Some(key),
-            Self::Commit(_, _) => None,
-        }
-    }
-
-    fn is_delete(&self) -> bool {
-        // Immutable databases don't support deletion
-        false
-    }
-
-    fn is_update(&self) -> bool {
-        matches!(self, Self::Set(_, _))
-    }
-}
-
 impl<F: Family, K: Key, V: ValueEncoding> Floored<F> for Operation<F, K, V> {
-    fn has_floor(&self) -> Option<Location<F>> {
-        self.has_floor()
+    fn inactivity_floor(&self) -> Option<Location<F>> {
+        self.inactivity_floor()
     }
 }
 
-impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V>
-where
-    V::Value: Encode,
-{
+impl<F: Family, K: Key, V: ValueEncoding> Committable for Operation<F, K, V> {
+    fn is_commit(&self) -> bool {
+        self.is_commit()
+    }
+}
+
+impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => {
@@ -139,7 +119,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
+    use crate::{merkle::mmr, qmdb::value::VariableEncoding};
     use commonware_codec::Encode;
     use commonware_utils::sequence::U64;
 
@@ -176,22 +156,25 @@ mod tests {
     }
 
     #[test]
-    fn test_operation_has_floor() {
+    fn test_operation_inactivity_floor() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
         let set_op = VarOp::Set(key, value.clone());
-        assert_eq!(<VarOp as Floored<mmr::Family>>::has_floor(&set_op), None);
+        assert_eq!(
+            <VarOp as Floored<mmr::Family>>::inactivity_floor(&set_op),
+            None
+        );
 
         let commit_op = VarOp::Commit(Some(value), Location::new(42));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::has_floor(&commit_op),
+            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op),
             Some(Location::new(42))
         );
 
         let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::has_floor(&commit_op_none),
+            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op_none),
             Some(Location::new(0))
         );
     }
