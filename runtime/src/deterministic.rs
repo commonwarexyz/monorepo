@@ -1142,14 +1142,14 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
 
-        // Track supervision before resetting configuration
-        let parent = Arc::clone(&self.tree);
+        // The task takes over this context's node, and its factory receives the
+        // context at a new child of that node.
         self.execution = Execution::default();
-        let (child, aborted) = Tree::child(&parent);
+        let (child, aborted) = Tree::child(&self.tree);
         if aborted {
             return Handle::closed(metric);
         }
-        self.tree = child;
+        let parent = replace(&mut self.tree, child);
 
         // Spawn the task (we don't care about Model)
         let guard = FactoryGuard::new(&parent, metric);

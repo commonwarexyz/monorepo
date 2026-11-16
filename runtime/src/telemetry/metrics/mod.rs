@@ -970,13 +970,11 @@ mod tests {
                 "no tasks with 'other' prefix"
             );
 
-            // Spawn a nested task (worker_child)
-            let handle2 = context
-                .child("worker")
-                .child("child")
-                .spawn(|_| async move {
-                    future::pending::<()>().await;
-                });
+            // Spawn a nested task (worker_child), keeping its parent context open
+            let worker = context.child("worker");
+            let handle2 = worker.child("child").spawn(|_| async move {
+                future::pending::<()>().await;
+            });
 
             // Count should include both parent and nested tasks
             let count = count_running_tasks(&context, "worker");

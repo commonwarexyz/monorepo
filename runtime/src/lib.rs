@@ -254,6 +254,9 @@ stability_scope!(BETA {
         /// When this function returns, all spawned tasks will be canceled. If clean
         /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
         /// [Spawner::stopped] to coordinate clean shutdown.
+        ///
+        /// `f` receives the root context. Like any other context, dropping it aborts every
+        /// task spawned from it (see [Mandatory Supervision](Spawner#mandatory-supervision)).
         fn start<F, Fut>(self, f: F) -> Fut::Output
         where
             F: FnOnce(Self::Context) -> Fut,
@@ -280,6 +283,15 @@ stability_scope!(BETA {
         /// child in the supervision tree. Use static role names like
         /// `"engine"`, `"worker"`, or `"resolver"`. Dynamic values belong in
         /// [`Supervisor::with_attribute`] so metric names remain bounded.
+        ///
+        /// The child is supervised by this context from the moment it is created:
+        /// dropping this context, or ending the task it is spawned into, closes the
+        /// child and aborts every task spawned from it (see
+        /// [Mandatory Supervision](Spawner#mandatory-supervision)). Keep this context
+        /// alive for as long as work started from the child should run. A temporary
+        /// parent does not live past its statement, so
+        /// `context.child("a").child("b").spawn(f)` aborts the task it spawns as soon
+        /// as the statement ends.
         ///
         /// Labels must start with `[a-zA-Z]` and contain only
         /// `[a-zA-Z0-9_]`. Runtime-reserved metric prefixes must not be used.
@@ -383,10 +395,13 @@ stability_scope!(BETA {
         ///
         /// # Mandatory Supervision
         ///
-        /// All tasks are supervised. When a parent task finishes or is aborted, all its descendants are aborted.
-        ///
-        /// Spawn consumes the current context and runs the task at a new child node. Additional supervised
-        /// children are created explicitly with [`Supervisor::child`].
+        /// All tasks are supervised. Every context owns a node in the supervision tree,
+        /// and closing a node aborts every task below it. A context's node closes when
+        /// the context is dropped. Spawning hands the node to the new task instead: the
+        /// task owns it until the task finishes or is aborted, and `f` receives a context
+        /// at a fresh child node. Dropping that context does not affect the task.
+        /// Additional supervised children are created explicitly with
+        /// [`Supervisor::child`].
         ///
         /// ```txt
         /// ctx_a
@@ -400,7 +415,47 @@ stability_scope!(BETA {
         ///                              +-- spawn() ---> Task B (ctx_e)
         ///
         /// Task A finishes or aborts --> Task B and Task C are aborted
+        /// ctx_a dropped instead of spawned --> Task C is aborted
         /// ```
+        ///
+        /// A spawn that cannot start, because the context's node already closed or the
+        /// runtime is shutting down, returns a handle that resolves to [`Error::Closed`]
+        /// without calling `f`, and closes the context's node.
+        ///
+        /// # Components
+        ///
+        /// A component that keeps its context in a field starts its task from a child of
+        /// that context, so the field never changes:
+        ///
+        /// ```
+        /// use commonware_runtime::{deterministic, Handle, Runner, Spawner, Supervisor};
+        ///
+        /// struct Actor<E: Spawner> {
+        ///     context: E,
+        /// }
+        ///
+        /// impl<E: Spawner> Actor<E> {
+        ///     fn start(self) -> Handle<()> {
+        ///         self.context.child("run").spawn(move |_| self.run())
+        ///     }
+        ///
+        ///     async fn run(self) {
+        ///         // Supervised by the actor's context, like work started before `start`.
+        ///         let _ = self.context.child("worker").spawn(|_| async {});
+        ///     }
+        /// }
+        ///
+        /// deterministic::Runner::default().start(|context| async move {
+        ///     let actor = Actor {
+        ///         context: context.child("actor"),
+        ///     };
+        ///     actor.start().await.unwrap();
+        /// });
+        /// ```
+        ///
+        /// The task owns the actor and the actor owns its context, so everything started
+        /// from that context, before or after `start`, ends when the task ends. Dropping
+        /// an actor that never started ends that work too.
         ///
         /// # Spawn Configuration
         ///
@@ -2490,6 +2545,91 @@ mod tests {
             // Child task should resolve with error since its parent has completed
             let child_handle = child_handle.lock().take().unwrap();
             assert!(matches!(child_handle.await, Err(Error::Closed)));
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_dropped_context_closes_its_children<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            // A context that is never spawned, with a running task below it.
+            let parent = context.child("parent");
+            let (started_tx, started_rx) = oneshot::channel();
+            let running = parent.child("running").spawn(move |_| async move {
+                started_tx.send(()).unwrap();
+                pending::<()>().await;
+            });
+            started_rx.await.unwrap();
+            let retained = parent.child("retained");
+
+            // Dropping it aborts the task and closes the child that outlives it.
+            drop(parent);
+            assert!(matches!(running.await, Err(Error::Closed)));
+            let called = Arc::new(AtomicU32::new(0));
+            let late = retained.spawn({
+                let called = called.clone();
+                move |_| {
+                    called.fetch_add(1, Ordering::Relaxed);
+                    async {}
+                }
+            });
+            assert!(matches!(late.await, Err(Error::Closed)));
+            assert_eq!(called.load(Ordering::Relaxed), 0);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_component_owns_its_scope<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        /// A component that keeps its context and starts its task from a child of it.
+        struct Actor<E: Spawner> {
+            context: E,
+            late: oneshot::Sender<Handle<()>>,
+        }
+
+        impl<E: Spawner> Actor<E> {
+            fn new(context: E, late: oneshot::Sender<Handle<()>>) -> (Self, Handle<()>) {
+                let early = context.child("early").spawn(|_| pending::<()>());
+                (Self { context, late }, early)
+            }
+
+            fn start(self) -> Handle<()> {
+                self.context.child("run").spawn(move |_| self.run())
+            }
+
+            async fn run(self) {
+                let late = self.context.child("late").spawn(|_| pending::<()>());
+                let _ = self.late.send(late);
+                pending::<()>().await;
+            }
+        }
+
+        runner.start(|context| async move {
+            // Dropping a component that never started ends what it started in `new`.
+            let (late, _) = oneshot::channel();
+            let (actor, early) = Actor::new(context.child("unstarted"), late);
+            drop(actor);
+            assert!(matches!(early.await, Err(Error::Closed)));
+
+            // Aborting a started component ends what it started before and after `start`.
+            let (late, late_rx) = oneshot::channel();
+            let (actor, early) = Actor::new(context.child("started"), late);
+            let handle = actor.start();
+            let late = late_rx.await.unwrap();
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(matches!(early.await, Err(Error::Closed)));
+            assert!(matches!(late.await, Err(Error::Closed)));
         });
     }
 

@@ -196,7 +196,11 @@ use crate::{
         CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
         raw, task::Label, validate_label,
     },
-    utils::{self, FactoryGuard, MetricHandle, Panicker, signal::Stopper, supervision::Tree},
+    utils::{
+        self, FactoryGuard, MetricHandle, Panicker,
+        signal::Stopper,
+        supervision::Tree,
+    },
 };
 use commonware_macros::select;
 use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
@@ -745,7 +749,8 @@ pub struct Context {
     attributes: Vec<(String, String)>,
     /// Shared services and runner-wide lifecycle state.
     shared: Arc<Shared>,
-    /// This context's node in the mandatory supervision tree.
+    /// This context's node in the mandatory supervision tree, closed when the
+    /// context is dropped unless a spawn took it over.
     tree: Arc<Tree>,
     /// Placement requested for the next consumed spawn.
     execution: Execution,
@@ -776,22 +781,22 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         let (_, metric) = spawn_metrics!(self);
-        let parent = self.tree.clone();
         let execution = self.execution;
 
         // Placement applies to this spawn. Children start with ordinary placement.
+        // The task takes over this context's node, and its factory receives the
+        // context at a new child of that node.
         self.execution = Execution::default();
-        let (child, aborted) = Tree::child(&parent);
+        let (child, aborted) = Tree::child(&self.tree);
         if aborted {
             return Handle::closed(metric);
         }
-
-        self.tree = child;
         let shared = self.shared.clone();
 
         // Dedicated and blocking spawns reserve a dedicated worker before the
         // factory runs, so shutdown waits for them. Ordinary spawns only check
-        // that the task set still accepts tasks.
+        // that the task set still accepts tasks. A rejected spawn drops this
+        // context, which closes its node.
         let reservation = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
             let Some(reservation) = shared.workers.reserve() else {
                 return Handle::closed(metric);
@@ -803,6 +808,7 @@ impl crate::Spawner for Context {
             }
             None
         };
+        let parent = mem::replace(&mut self.tree, child);
 
         // User construction runs on the caller with no runtime borrow or lock.
         // A reserved dedicated worker remains counted through construction and
@@ -2373,9 +2379,11 @@ impl crate::Runner for Runner {
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
 
         let metric = MetricHandle::new(shared.metrics.tasks_running.get_or_create(&label).clone());
-        let tree = Tree::root();
+        // The root context owns the root node, so the runner only keeps a weak
+        // link to abort whatever is left once the root returns.
+        let context_tree = Tree::root();
+        let tree = Arc::downgrade(&context_tree);
         let context_shared = shared.clone();
-        let context_tree = tree.clone();
 
         // A pool worker that fails interrupts the root even when task panics
         // are caught, since the pool cannot run without it. The worker wakes
@@ -2424,7 +2432,11 @@ impl crate::Runner for Runner {
             // dedicated, and blocking tasks, then clean up this worker, which
             // stops the other pool workers and waits for them to drain the
             // task set.
-            worker.panics.run(|| tree.abort());
+            worker.panics.run(|| {
+                if let Some(tree) = tree.upgrade() {
+                    tree.abort();
+                }
+            });
             worker.cleanup();
             worker.panics.run(|| threads.join());
             if let Some(panic) = pool_failures.try_take() {

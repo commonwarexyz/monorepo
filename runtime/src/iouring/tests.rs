@@ -602,20 +602,21 @@ where
 /// its predecessor polls, so each waits in the global queue alone. Each records
 /// `polls` when it starts, and the last sends the records through `done`.
 fn chain_foreign_spawns(
-    context: Context,
+    context: Arc<Context>,
     polls: Arc<AtomicUsize>,
     mut records: Vec<usize>,
     left: usize,
     done: oneshot::Sender<Vec<usize>>,
 ) {
     thread::spawn(move || {
-        let next = context.child("chain");
+        // Each task keeps the chain's context, so dropping one task's share
+        // does not close the scope its successors run in.
         context.child("foreign").spawn(move |_| async move {
             records.push(polls.load(Ordering::Relaxed));
             if left == 1 {
                 let _ = done.send(records);
             } else {
-                chain_foreign_spawns(next, polls, records, left - 1, done);
+                chain_foreign_spawns(context, polls, records, left - 1, done);
             }
         });
     })
@@ -1291,7 +1292,6 @@ fn test_root_destruction_can_spawn_work_before_shutdown() {
         let drops = Arc::new(AtomicUsize::new(0));
 
         Runner::new(config()).start(|context| {
-            let context = context.child("root_drop");
             Root {
                 context: Some(if dedicated {
                     context.dedicated()
@@ -4199,7 +4199,7 @@ fn test_busy_worker_checks_the_global_queue_every_interval() {
             });
 
             let (done, records) = oneshot::channel();
-            chain_foreign_spawns(context.child("chain"), polls, Vec::new(), CHAIN, done);
+            chain_foreign_spawns(Arc::new(context.child("chain")), polls, Vec::new(), CHAIN, done);
             let records = records.await.unwrap();
             stop.store(true, Ordering::Relaxed);
             yielder.await.unwrap();
@@ -5038,7 +5038,8 @@ fn test_root_poll_returns_an_inherited_count() {
             let context = context.child("foreign");
             let foreign_ran = foreign_ran.clone();
             move || {
-                thread::spawn({
+                // Keep the spawning context until the spawned tasks have run.
+                let _context = thread::spawn({
                     let foreign_ran = foreign_ran.clone();
                     move || {
                         for _ in 0..2 {
@@ -5047,6 +5048,7 @@ fn test_root_poll_returns_an_inherited_count() {
                                 foreign_ran.fetch_add(1, Ordering::SeqCst);
                             });
                         }
+                        context
                     }
                 })
                 .join()

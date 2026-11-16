@@ -4,7 +4,7 @@ use super::{
     Context,
     tracing::{Config, export},
 };
-use crate::{Metrics as _, Spawner, Supervisor as _};
+use crate::{Metrics as _, Spawner};
 use axum::{
     Extension, Router,
     body::Body,
@@ -85,9 +85,10 @@ pub fn init(context: Context, logs: Logs, metrics: Option<SocketAddr>, traces: O
     // Set the global subscriber
     tracing::subscriber::set_global_default(registry).expect("Failed to set subscriber");
 
-    // Expose metrics over HTTP
+    // Expose metrics over HTTP. The server task takes over the context, so it
+    // runs until the caller's supervisor shuts it down.
     if let Some(cfg) = metrics {
-        context.child("metrics").spawn(move |context| async move {
+        context.spawn(move |context| async move {
             // Create a tokio listener for the metrics server.
             //
             // We explicitly avoid using a runtime `Listener` because
