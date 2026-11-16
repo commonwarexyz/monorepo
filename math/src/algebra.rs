@@ -4,6 +4,8 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use commonware_parallel::Strategy;
 use core::{
     fmt::Debug,
@@ -429,6 +431,89 @@ pub trait HashToGroup: CryptoGroup {
     }
 }
 
+/// A [`CryptoGroup`] with a pairing.
+///
+/// A pairing `o : (G1, G2) -> GT` takes an element of `G1` and an element of
+/// `G2`, and returns an element of `GT`. This trait writes `GT` additively, so a
+/// pairing is written `A o X` rather than the more familiar `e(A, X)`.
+/// The implementor is `G1`, [`Self::Twin`] is `G2`, and [`Self::Target`] is
+/// `GT`.
+///
+/// The pairing is bilinear:
+///
+///   - `0 o X = 0 = A o 0`,
+///   - `(A + B) o X = A o X + B o X`,
+///   - `A o (X + Y) = A o X + A o Y`.
+///
+/// [`Self::pairing`] computes one pairing. [`Self::pairings`] computes several,
+/// and [`Self::multi_pairing`] computes their sum. Both have default
+/// implementations, which an implementation can override to share work across
+/// pairs, such as the single final exponentiation that a sum of Tate pairings
+/// needs.
+pub trait PairingGroup: CryptoGroup {
+    /// The group that this group pairs with.
+    type Twin: CryptoGroup<Scalar = Self::Scalar>;
+
+    /// The target group `GT` of the pairing.
+    type Target: CryptoGroup<Scalar = Self::Scalar>;
+
+    /// Returns `self o other`.
+    fn pairing(&self, other: &Self::Twin) -> Self::Target;
+
+    /// Writes `A o X` to `outputs[i]` for each pair `(A, X)` at `pairs[i]`.
+    ///
+    /// The default computes each pairing with [`Self::pairing`] on `strategy`. An
+    /// override can use batch instructions, which raise throughput even on one
+    /// thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pairs` and `outputs` differ in length.
+    fn pairings(
+        pairs: &[(Self, Self::Twin)],
+        outputs: &mut [Self::Target],
+        strategy: &impl Strategy,
+    ) {
+        assert_eq!(
+            pairs.len(),
+            outputs.len(),
+            "pairs and outputs must have the same length"
+        );
+        // `Strategy` has no for-each operation, so this `fold` carries a `()`
+        // accumulator and only writes outputs. The zip gives each pair its own
+        // output slot: a task writes its pairing in place, however the strategy
+        // splits the items.
+        strategy.fold(
+            pairs.iter().zip(outputs),
+            || (),
+            |(), ((p, q), out)| *out = p.pairing(q),
+            |(), ()| (),
+        );
+    }
+
+    /// Returns the sum of `A o X` over each pair `(A, X)` in `pairs`, or zero if
+    /// `pairs` is empty.
+    ///
+    /// The default sums the outputs of [`Self::pairings`], so an override of that
+    /// method also speeds up this one.
+    fn multi_pairing(pairs: &[(Self, Self::Twin)], strategy: &impl Strategy) -> Self::Target {
+        let mut outputs = vec![Self::Target::zero(); pairs.len()];
+        Self::pairings(pairs, &mut outputs, strategy);
+        strategy.fold(
+            &outputs,
+            Self::Target::zero,
+            |mut acc, out| {
+                acc += out;
+                acc
+            },
+            |mut a, b| {
+                a += &b;
+                a
+            },
+        )
+    }
+}
+
 /// A trait for objects that can be randomly sampled.
 ///
 /// The only stipulation about this sampling process is that the result
@@ -627,13 +712,7 @@ pub mod test_suites {
         check_scale_distributes(a.clone(), b, x);
         let c: R = u.arbitrary()?;
         check_scale_assign(a, c);
-        let len: usize = u.int_in_range(0..=16)?;
-        let points: Vec<K> = (0..len)
-            .map(|_| u.arbitrary())
-            .collect::<arbitrary::Result<_>>()?;
-        let scalars: Vec<R> = (0..len)
-            .map(|_| u.arbitrary())
-            .collect::<arbitrary::Result<_>>()?;
+        let (points, scalars): (Vec<K>, Vec<R>) = u.arbitrary::<Vec<(K, R)>>()?.into_iter().unzip();
         check_msm_eq_naive(&points, &scalars);
         Ok(())
     }
@@ -716,6 +795,89 @@ pub mod test_suites {
     pub fn fuzz_hash_to_group<G: HashToGroup>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let data: [[u8; 4]; 4] = u.arbitrary()?;
         check_hash_to_group::<G>(data);
+        Ok(())
+    }
+
+    fn check_pairing_zero<G: PairingGroup>(a: G, x: G::Twin) {
+        assert_eq!(G::zero().pairing(&x), G::Target::zero(), "0 o X != 0");
+        assert_eq!(a.pairing(&G::Twin::zero()), G::Target::zero(), "A o 0 != 0");
+    }
+
+    fn check_pairing_linear_left<G: PairingGroup>(a: G, b: G, x: G::Twin) {
+        assert_eq!(
+            (a.clone() + &b).pairing(&x),
+            a.pairing(&x) + &b.pairing(&x),
+            "(A + B) o X != A o X + B o X"
+        );
+    }
+
+    fn check_pairing_linear_right<G: PairingGroup>(a: G, x: G::Twin, y: G::Twin) {
+        assert_eq!(
+            a.pairing(&(x.clone() + &y)),
+            a.pairing(&x) + &a.pairing(&y),
+            "A o (X + Y) != A o X + A o Y"
+        );
+    }
+
+    fn check_pairing_scalar<G: PairingGroup>(a: G, x: G::Twin, s: G::Scalar) {
+        let expected = a.pairing(&x) * &s;
+        assert_eq!(
+            (a.clone() * &s).pairing(&x),
+            expected,
+            "(A * s) o X != (A o X) * s"
+        );
+        assert_eq!(a.pairing(&(x * &s)), expected, "A o (X * s) != (A o X) * s");
+    }
+
+    fn check_pairings_eq_naive<G: PairingGroup>(pairs: &[(G, G::Twin)]) {
+        use commonware_parallel::Sequential;
+        // Start each output one generator away from its expected value, so the check
+        // below catches any output that `pairings` leaves unwritten.
+        let mut outputs: Vec<G::Target> = pairs
+            .iter()
+            .map(|(a, x)| a.pairing(x) + &G::Target::generator())
+            .collect();
+        G::pairings(pairs, &mut outputs, &Sequential);
+        for ((a, x), out) in pairs.iter().zip(&outputs) {
+            assert_eq!(*out, a.pairing(x), "pairings does not match pairing");
+        }
+    }
+
+    fn check_multi_pairing_eq_naive<G: PairingGroup>(pairs: &[(G, G::Twin)]) {
+        use commonware_parallel::Sequential;
+        let mut expected = G::Target::zero();
+        for (a, x) in pairs {
+            expected += &a.pairing(x);
+        }
+        assert_eq!(
+            G::multi_pairing(pairs, &Sequential),
+            expected,
+            "multi_pairing does not match the sum of pairings"
+        );
+    }
+
+    /// Checks the [`PairingGroup`] laws on arbitrary inputs.
+    ///
+    /// Each call runs one check, since pairings are expensive: that the pairing is
+    /// bilinear, or that [`PairingGroup::pairings`] or
+    /// [`PairingGroup::multi_pairing`] agrees with [`PairingGroup::pairing`].
+    ///
+    /// It does not check that the pairing is non-degenerate. The [`Space`] suites
+    /// cover [`PairingGroup::Twin`] and [`PairingGroup::Target`] as groups.
+    pub fn fuzz_pairing_group<G>(u: &mut Unstructured<'_>) -> arbitrary::Result<()>
+    where
+        G: PairingGroup + for<'a> Arbitrary<'a>,
+        G::Twin: for<'a> Arbitrary<'a>,
+        G::Scalar: for<'a> Arbitrary<'a>,
+    {
+        match u.int_in_range(0u8..=5)? {
+            0 => check_pairing_zero::<G>(u.arbitrary()?, u.arbitrary()?),
+            1 => check_pairing_linear_left::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
+            2 => check_pairing_linear_right::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
+            3 => check_pairing_scalar::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
+            4 => check_pairings_eq_naive::<G>(&u.arbitrary::<Vec<_>>()?),
+            _ => check_multi_pairing_eq_naive::<G>(&u.arbitrary::<Vec<_>>()?),
+        }
         Ok(())
     }
 
