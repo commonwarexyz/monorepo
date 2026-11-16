@@ -221,11 +221,12 @@ where
         block: &Digested<Self::Block>,
         _bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
-        // A coded block can be voted for before it is held, so its height may not have been
-        // checked against this parent. Its commitment binds its consensus context, and voters
-        // compare that context with their own. The round it names for the parent therefore
-        // bounds the request even when the height does not. The caller's bound is never earlier
-        // than the round named here, so it adds nothing.
+        // The provider bounds the request by the parent round in the block's consensus context,
+        // because the commitment binds that context and voters compare it with their own. The
+        // height by itself is not a safe bound, because a validator can vote for a coded block
+        // before it holds the block, and so before it has checked the height against the
+        // parent. The caller's bound is never earlier than the parent round, so it adds nothing
+        // and is ignored.
         let receiver = block.height().previous().map(|parent_height| {
             let context = block.context();
             self.subscribe_by_commitment(
