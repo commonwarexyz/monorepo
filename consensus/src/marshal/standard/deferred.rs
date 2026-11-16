@@ -16,10 +16,10 @@
 //!
 //! Before casting a notarize vote, [`Deferred`] waits for the block to become available and then
 //! verifies that the block's embedded context matches the consensus context and that the block
-//! names that context's parent as its own. A re-proposal of the epoch's last block skips both
-//! comparisons. It is the context's parent itself and was checked when it was first proposed.
-//! [`Deferred`] votes without waiting for the check of the block's height against its parent or for
-//! the application to finish verifying the block contents.
+//! names that context's parent as its own. [`Deferred`] makes neither comparison for a re-proposed
+//! boundary block, because the block is the consensus context's parent and both comparisons were
+//! made when it was first proposed. [`Deferred`] votes without waiting for the check of the block's
+//! height against its parent or for the application to finish verifying the block contents.
 //!
 //! This enables verification to run while we wait for a quorum of votes to form a certificate
 //! (hiding verification latency behind network latency). Once a certificate is formed, we wait on
@@ -755,9 +755,9 @@ where
                 // Checking the link before the vote ensures that every digest such a walk
                 // requests was named by a round of consensus.
                 //
-                // The rejection is safe to publish as a gate verdict. The embedded context
-                // matched, so certification would verify the block under that same context
-                // and reject the same parent link.
+                // Certification can reuse this rejection instead of verifying the block again.
+                // A second verification would run under the block's embedded context, which
+                // matched the consensus context, and would find the same parent mismatch.
                 if block.parent() != context.parent.1 {
                     debug!(
                         expected_parent = %context.parent.1,
