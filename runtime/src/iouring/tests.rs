@@ -4213,6 +4213,25 @@ fn test_push_ends_a_spin_through_its_notification() {
     });
 }
 
+/// An idle worker whose next timer falls within its spin budget parks until
+/// the timer instead of spinning, since a timer does not notify the worker
+/// and so cannot end a spin.
+#[test]
+fn test_idle_worker_parks_instead_of_spinning_near_its_timer() {
+    let cfg = config()
+        .with_worker_threads(1)
+        .with_idle_spinner(endless_spinner());
+    Runner::new(cfg).start(|context| async move {
+        // The root sleeps, leaving its worker idle with a deadline well within
+        // the spin budget and nothing to notify it.
+        let start = Instant::now();
+        context.sleep(Duration::from_millis(10)).await;
+
+        // A spin would have run for the whole budget, far past the timeout.
+        assert!(start.elapsed() < TEST_TIMEOUT);
+    });
+}
+
 /// A worker whose spin ended on a push's notification observes the sequence
 /// again on its next turn, so once idle it can finish spinning and sleep on
 /// its futex.
