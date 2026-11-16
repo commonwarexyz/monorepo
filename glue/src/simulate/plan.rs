@@ -1658,6 +1658,70 @@ mod tests {
             .run();
     }
 
+    /// Runs one validator that processes a height every 10ms against `crash` until it has
+    /// processed `exit` heights. Returns the number of crashes the plan applied and the height
+    /// the validator had processed at each of its starts.
+    fn crashes_and_start_heights(
+        crash: impl FnOnce(ed25519::PublicKey) -> Crash<ed25519::PublicKey>,
+        exit: u64,
+    ) -> (u64, Vec<u64>) {
+        let engine = ProcessingEngine::new([Duration::from_millis(10)]);
+        let crash = crash(engine.participants[0].clone());
+        let starts = engine.starts.clone();
+        let result = PlanBuilder::new(engine)
+            .crash(crash)
+            .exit_condition(ProcessedHeightAtLeast::new(exit))
+            .timeout(Duration::from_secs(2))
+            .run()
+            .expect("simulation must complete")
+            .pop()
+            .expect("one seed must produce one result");
+        let heights = starts.lock().iter().map(|start| start.heights[0]).collect();
+        (result.crashes, heights)
+    }
+
+    /// A validator stopped by a processed-height crash with no downtime restarts and keeps
+    /// processing.
+    #[test]
+    fn processed_height_crash_restarts_without_downtime() {
+        let (crashes, starts) = crashes_and_start_heights(
+            |pk| Crash::ProcessedHeight {
+                participants: NonEmptyVec::new(pk),
+                heights: 2..=2,
+                downtime: Duration::ZERO,
+            },
+            4,
+        );
+        assert_eq!(crashes, 1, "the validator must stop once");
+        assert_eq!(
+            starts,
+            [0, 2],
+            "the validator must restart at the height it stopped at"
+        );
+    }
+
+    /// A validator stopped by random crashes with no downtime restarts each time and keeps
+    /// processing.
+    #[test]
+    fn random_crash_restarts_without_downtime() {
+        // A crash is due every 25ms. With immediate restarts the validator needs 70ms to
+        // process six heights, so it stops exactly twice.
+        let (crashes, starts) = crashes_and_start_heights(
+            |_| Crash::Random {
+                frequency: Duration::from_millis(25),
+                downtime: Duration::ZERO,
+                count: 1,
+            },
+            6,
+        );
+        assert_eq!(crashes, 2, "the validator must stop twice");
+        assert_eq!(
+            starts,
+            [0, 2, 4],
+            "the validator must restart at the height it stopped at"
+        );
+    }
+
     #[test]
     fn custom_exit_condition_overrides_required_finalizations() {
         let result = PlanBuilder::new(FinalizingEngine::new(2, Duration::from_millis(10), 1))
