@@ -582,7 +582,7 @@ mod tests {
     use commonware_p2p::utils::StaticProvider;
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZDuration, NZUsize, non_empty_vec, ordered::Set};
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, future::Aborted};
     use std::time::Duration;
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5720.
@@ -635,9 +635,16 @@ mod tests {
             // The consumer fetches again. The engine takes the fetch before it polls
             // the verdict.
             engine.add_fetch(fetch());
-            if let Some(Ok(completed)) = engine.inflight.next_delivery().now_or_never() {
-                engine.handle_delivery(completed);
-            }
+
+            // The fetch applied the verdict, so the wait for the first delivery aborts and
+            // cannot complete the repeat.
+            assert!(
+                matches!(
+                    engine.inflight.next_delivery().now_or_never(),
+                    Some(Err(Aborted))
+                ),
+                "the wait for the first delivery must abort"
+            );
 
             // The repeat keeps its subscriber and waits for a request of its own.
             assert!(

@@ -535,7 +535,7 @@ mod tests {
     };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Runner};
     use commonware_utils::{channel::oneshot, non_empty_vec, sync::Mutex};
-    use futures::FutureExt as _;
+    use futures::{FutureExt as _, future::Aborted};
     use std::{
         collections::{HashMap, VecDeque},
         sync::{
@@ -1051,9 +1051,16 @@ mod tests {
                     None => drop(first.response),
                 }
                 actor.add_fetch(fetch());
-                if let Some(Ok(completed)) = actor.deliveries.next_completion().now_or_never() {
-                    actor.handle_delivered(completed);
-                }
+
+                // The fetch applied the verdict, so the wait for the first delivery aborts
+                // and cannot complete the repeat.
+                assert!(
+                    matches!(
+                        actor.deliveries.next_completion().now_or_never(),
+                        Some(Err(Aborted))
+                    ),
+                    "the wait for the first delivery must abort"
+                );
 
                 // The repeat causes a second source fetch and a second delivery.
                 let completed = actor
