@@ -17,6 +17,7 @@ use crate::{
     qmdb::operation::Operation,
     translator::Translator,
 };
+use bytes::BufMut as _;
 use commonware_runtime::{
     AbortOnDrop, Blob, Error as RuntimeError, IoBufMut, ReadOptions, Spawner, Storage, WriteOptions,
 };
@@ -510,7 +511,7 @@ impl<B: Blob, R> Buckets<B, R> {
             pin_mut!(reads);
             while let Some(read) = reads.next().await {
                 let (_, run) = read?;
-                data.extend_from_slice(run.coalesce().as_ref());
+                data.put(run);
             }
         }
         Ok(())
@@ -618,15 +619,17 @@ impl<B: Blob, R> Buckets<B, R> {
         let mut unsorted = runs.as_slice();
         let mut buf = Some(buf);
         while buf.is_some() {
-            // A piece is as many runs as fit, and at least one. The records still in memory join
-            // the last piece.
+            // A piece is as many runs as fit, and at least one. The last piece starts from the
+            // records still in memory, so it is sized once for both.
             let (piece, rest) = unsorted.split_at(leading_runs(unsorted, PIECE_BYTES));
             unsorted = rest;
-            let mut data = Vec::with_capacity(piece.iter().map(|(_, len)| len).sum());
+            let mut data = if unsorted.is_empty() {
+                buf.take().expect("records in memory join once")
+            } else {
+                Vec::new()
+            };
+            data.reserve_exact(piece.iter().map(|(_, len)| len).sum());
             self.read(piece, &mut data).await?;
-            if unsorted.is_empty() {
-                data.extend_from_slice(&buf.take().expect("records in memory join once"));
-            }
             let mut run = RunWriter::default();
             for record in sort_records(&data, layout) {
                 self.push(context, &mut run, record.key(&data), record.tagged)
@@ -764,9 +767,9 @@ where
         active_keys += if runs.is_empty() {
             load_bucket::<F, _>(&mut range, &buf, buckets.layout, activate)
         } else if stored + buf.len() <= MERGE_BYTES {
-            let mut data = Vec::with_capacity(stored + buf.len());
+            let mut data = buf;
+            data.reserve_exact(stored);
             buckets.read(&runs, &mut data).await?;
-            data.extend_from_slice(&buf);
             load_bucket::<F, _>(&mut range, &data, buckets.layout, activate)
         } else {
             buckets
