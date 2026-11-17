@@ -271,6 +271,10 @@ pub trait Registrar: Send + Sync + 'static {
 ///
 /// Writes must be durable when their futures resolve. Losing an acknowledged write can
 /// cause a dealer to equivocate after restart or lose a share already in use.
+///
+/// Once a restarted node starts reading this store, operations from previous runs
+/// must not change stored material. This includes writes and prunes whose futures
+/// were dropped. Reads must reflect the state left by those operations.
 pub trait SecretStore: Send + Sync + 'static {
     /// Stores this node's [`Share`] for `epoch`.
     fn put_share(&mut self, epoch: Epoch, share: Share) -> impl Future<Output = ()> + Send;
@@ -280,8 +284,7 @@ pub trait SecretStore: Send + Sync + 'static {
 
     /// Stores this node's dealer RNG seed for `epoch`.
     ///
-    /// A restarted dealer replays the stored seed, so it deals the same shares it dealt
-    /// before the restart.
+    /// Restarted dealers reuse the stored seed to deal the same shares.
     fn put_seed(&mut self, epoch: Epoch, seed: Summary) -> impl Future<Output = ()> + Send;
 
     /// Returns this node's dealer RNG seed for `epoch`, if stored.
@@ -289,9 +292,8 @@ pub trait SecretStore: Send + Sync + 'static {
 
     /// Stores a private dealing received from `dealer` during `epoch`.
     ///
-    /// `public`, the public message that `private` was received with, distinguishes the
-    /// dealings of one dealer, because a dealer can send several dealings in an epoch and
-    /// a private dealing is valid only with its own public message.
+    /// `public` distinguishes multiple dealings from the same dealer in one epoch.
+    /// A private dealing is valid only with its matching public message.
     fn put_dealing<V: Variant, P: PublicKey>(
         &mut self,
         epoch: Epoch,
