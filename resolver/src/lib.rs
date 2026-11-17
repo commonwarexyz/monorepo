@@ -190,6 +190,10 @@ commonware_macros::stability_scope!(BETA {
         /// subscribers, without crediting or penalizing the source. Any remaining
         /// subscribers receive the same response.
         ///
+        /// A verdict, or a dropped sender, does not retire a fetch issued after it. A
+        /// fetch issued before it for a delivered subscriber may be retired with that
+        /// subscriber.
+        ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).
         ///
