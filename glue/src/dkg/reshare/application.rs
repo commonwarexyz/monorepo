@@ -9,7 +9,7 @@ use commonware_consensus::{
     marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
-use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digested, Signer, bls::variant::Variant};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::sequence::Unit;
 use std::{future, num::NonZeroU64};
@@ -325,10 +325,11 @@ mod tests {
     };
     use commonware_cryptography::{
         Digestible, Signer,
-        bls12381::{
+        bls::{
             dkg::feldman_desmedt::{Dealer, Info, Reveal, deal},
-            primitives::{sharing::Mode, variant::MinPk},
+            sharing::Mode,
         },
+        bls12381::primitives::variant::MinPk,
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };

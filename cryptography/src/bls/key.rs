@@ -87,7 +87,7 @@ impl<'a, S: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for Private<S> {
     }
 }
 
-/// A share of a threshold signing key.
+/// A share of a BLS threshold signing key.
 #[derive(Clone)]
 pub struct Share<S> {
     /// The share's index in the polynomial.

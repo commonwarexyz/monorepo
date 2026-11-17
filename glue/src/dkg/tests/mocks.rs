@@ -32,12 +32,13 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
-        primitives::{
-            group::{Scalar, Share},
-            variant::{MinPk, Variant},
-        },
+        variant::Variant,
+    },
+    bls12381::primitives::{
+        group::{Scalar, Share},
+        variant::MinPk,
     },
     certificate::{ConstantProvider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},

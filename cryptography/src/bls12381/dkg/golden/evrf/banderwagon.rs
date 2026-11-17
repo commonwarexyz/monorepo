@@ -38,10 +38,12 @@
 pub use crate::banderwagon::{F, G};
 use crate::{
     banderwagon::{GVar, scalar_bits_le},
-    bls12381::primitives::{group::Scalar, variant::DST},
+    bls::variant::DST,
+    bls12381::primitives::group::Scalar,
     zk::{
         bulletproofs::circuit::{Circuit, Witness, zkc_to_circuit, zkc_to_circuit_and_witness},
-        circuit::{self as zk, BoolVar, Var},
+        circuit as zk,
+        circuit::{BoolVar, Var},
     },
 };
 use commonware_codec::Encode;

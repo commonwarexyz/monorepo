@@ -3,8 +3,7 @@ use crate::Scheme;
 use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::{
-    Digest,
-    bls12381::primitives::variant::{MinSig, Variant},
+    Digest, bls::variant::Variant, bls12381::primitives::variant::MinSig,
 };
 use commonware_runtime::BufMut;
 
@@ -218,7 +217,7 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::{certificate::threshold::Certificate, primitives::group},
+        bls::certificate::threshold::Certificate, bls12381::primitives::group,
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{CryptoGroup, Random as _};

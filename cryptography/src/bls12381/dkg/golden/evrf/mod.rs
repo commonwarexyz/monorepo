@@ -2,13 +2,14 @@ mod banderwagon;
 
 use crate::{
     Secret,
-    bls12381::primitives::{
-        group::{G1, Scalar},
-        variant::ScalarReadCfg,
-    },
+    bls::variant::ScalarReadCfg,
+    bls12381::primitives::group::{G1, Scalar},
     transcript::{Summary, Transcript, Version},
     zk::{
-        bulletproofs::circuit::{self, prove, verify},
+        bulletproofs::{
+            circuit,
+            circuit::{prove, verify},
+        },
         pedersen_to_plain,
     },
 };

@@ -2,11 +2,12 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Encode, ReadExt};
-use commonware_cryptography::bls12381::primitives::{
-    group::{G1, G2, Share},
-    ops::threshold,
-    sharing::Sharing,
-    variant::{MinPk, MinSig, PartialSignature},
+use commonware_cryptography::{
+    bls::{ops::threshold, sharing::Sharing, variant::PartialSignature},
+    bls12381::primitives::{
+        group::{G1, G2, Share},
+        variant::{MinPk, MinSig},
+    },
 };
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, Participant, non_empty, test_rng};

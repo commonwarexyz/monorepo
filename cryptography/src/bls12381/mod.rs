@@ -1,5 +1,4 @@
-//! Distributed Key Generation (DKG), Resharing, Signatures, and Threshold Signatures over the BLS12-381 curve.
-pub mod certificate;
+//! The BLS12-381 curve, the variants of [crate::bls] over it, and schemes specific to it.
 #[cfg(feature = "std")]
 pub mod dkg;
 pub mod primitives;

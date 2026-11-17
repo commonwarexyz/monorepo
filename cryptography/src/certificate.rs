@@ -61,9 +61,7 @@
 //! Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
 
 #[cfg(feature = "bls12381")]
-pub use crate::bls12381::certificate::{
-    multisig as bls12381_multisig, threshold as bls12381_threshold,
-};
+pub use crate::bls::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold};
 pub use crate::ed25519::certificate as ed25519;
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
@@ -907,20 +905,17 @@ macro_rules! cfg_mocks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "bls12381")]
-    use crate::bls12381::{
-        dkg::feldman_desmedt as dkg,
-        primitives::{
-            key::Private as BlsPrivate,
-            ops::{compute_public, sign_proof_of_possession, verify_proof_of_possession},
-            sharing::Mode,
-            variant::{MinPk, MinSig, Variant},
-        },
-    };
     use crate::{
         Signer as _,
         ed25519::{PrivateKey, Signature},
         sha256::Digest as Sha256Digest,
+    };
+    #[cfg(feature = "bls12381")]
+    use crate::{
+        bls::dkg::feldman_desmedt as dkg, bls::key::Private as BlsPrivate,
+        bls::ops::compute_public, bls::ops::sign_proof_of_possession,
+        bls::ops::verify_proof_of_possession, bls::sharing::Mode, bls::variant::Variant,
+        bls12381::primitives::variant::MinPk, bls12381::primitives::variant::MinSig,
     };
     use commonware_codec::{Decode, Encode, varint::MAX_U32_VARINT_SIZE};
     use commonware_math::algebra::Random;

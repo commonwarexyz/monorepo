@@ -22,14 +22,15 @@ use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Writ
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerMessageError as DkgDealerMessageError,
             DealerPrivMsg, DealerPubMsg, Error as DkgError, FinalizeError as DkgFinalizeError,
             Info, Logs, Output, Player as CryptoPlayer, PlayerAck, PlayerAckError as DkgAckError,
             SignedDealerLog,
         },
-        primitives::{key, variant::Variant},
+        key,
+        variant::Variant,
     },
     transcript::{Summary, Transcript, Version},
 };
@@ -711,10 +712,11 @@ mod tests {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,
-        bls12381::{
+        bls::{
             dkg::feldman_desmedt::{Info, Output, Reveal, deal},
-            primitives::{sharing::Mode, variant::MinPk},
+            sharing::Mode,
         },
+        bls12381::primitives::variant::MinPk,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{

@@ -958,9 +958,10 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer as _,
+        bls::variant::Variant,
         bls12381::primitives::{
             group::Scalar,
-            variant::{MinPk, MinSig, Variant},
+            variant::{MinPk, MinSig},
         },
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},

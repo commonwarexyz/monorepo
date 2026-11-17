@@ -1,7 +1,7 @@
-//! Test fixtures for BLS12-381 multi-signature certificate schemes.
+//! Test fixtures for BLS multi-signature certificate schemes.
 
 use crate::{
-    bls12381::primitives::{key::Private, ops::compute_public, variant::Variant},
+    bls::{key::Private, ops::compute_public, variant::Variant},
     certificate::{Scheme, mocks::Fixture},
     ed25519,
 };
@@ -9,7 +9,7 @@ use commonware_math::algebra::Random;
 use commonware_utils::{TryCollect as _, ordered::BiMap};
 use rand_core::CryptoRng;
 
-/// Builds ed25519 identities and matching BLS12-381 multisig schemes.
+/// Builds ed25519 identities and matching BLS multisig schemes.
 pub fn fixture<S, V, R>(
     rng: &mut R,
     namespace: &[u8],

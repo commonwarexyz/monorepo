@@ -1,4 +1,4 @@
-//! Aggregation operations for BLS12-381 signatures.
+//! Aggregation operations for BLS signatures.
 //!
 //! This module provides functions for aggregating public keys and signatures,
 //! as well as verifying aggregate signatures.
@@ -302,10 +302,12 @@ mod tests {
         super::{aggregate, keypair, sign_message},
         *,
     };
-    use crate::bls12381::primitives::{
-        Error,
-        group::{G1_MESSAGE, G2_MESSAGE},
-        variant::{MinPk, MinSig},
+    use crate::{
+        bls::Error,
+        bls12381::primitives::{
+            group::{G1_MESSAGE, G2_MESSAGE},
+            variant::{MinPk, MinSig},
+        },
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;

@@ -1,11 +1,12 @@
 use super::utils::optimistic_assemble::{BenchSubject, Case, bench_case};
 use commonware_cryptography::{
     Signer as _,
-    bls12381::primitives::{
+    bls::{
         key::Private,
         ops::{compute_public, sign_proof_of_possession, verify_proof_of_possession},
-        variant::{MinPk, MinSig, Variant},
+        variant::Variant,
     },
+    bls12381::primitives::variant::{MinPk, MinSig},
     certificate::{Attestation, Scheme as _},
     ed25519, impl_certificate_bls12381_multisig,
     sha256::Digest as Sha256Digest,

@@ -29,10 +29,12 @@
 
 use super::primitives::{
     group::{self, Private},
-    ops,
-    variant::{MinPk, Variant},
+    variant::MinPk,
 };
-use crate::{BatchEntry, BatchVerifier, Secret, Signer as _};
+use crate::{
+    BatchEntry, BatchVerifier, Secret, Signer as _,
+    bls::{ops, variant::Variant},
+};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;

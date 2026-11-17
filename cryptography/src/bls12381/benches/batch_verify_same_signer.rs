@@ -1,4 +1,4 @@
-use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
+use commonware_cryptography::{bls::ops, bls12381::primitives::variant::MinSig};
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, TestRng, non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};

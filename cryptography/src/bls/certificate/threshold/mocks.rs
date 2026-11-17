@@ -1,13 +1,11 @@
-//! Test fixtures for BLS12-381 threshold certificate schemes.
+//! Test fixtures for BLS threshold certificate schemes.
 
 use crate::{
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::deal,
-        primitives::{
-            key::Share,
-            sharing::{Mode, Sharing},
-            variant::Variant,
-        },
+        key::Share,
+        sharing::{Mode, Sharing},
+        variant::Variant,
     },
     certificate::{Scheme, mocks::Fixture},
     ed25519,
@@ -15,7 +13,7 @@ use crate::{
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRng;
 
-/// Builds ed25519 identities and matching BLS12-381 threshold schemes.
+/// Builds ed25519 identities and matching BLS threshold schemes.
 pub fn fixture<S, V, R>(
     rng: &mut R,
     namespace: &[u8],

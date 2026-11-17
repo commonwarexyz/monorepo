@@ -1,6 +1,6 @@
-//! BLS12-381 threshold signature scheme implementation.
+//! BLS threshold signature scheme implementation.
 //!
-//! This module provides both the generic BLS12-381 threshold implementation and a macro to generate
+//! This module provides both the generic BLS threshold implementation and a macro to generate
 //! protocol-specific wrappers.
 //!
 //! Unlike multi-signature schemes, threshold signatures:
@@ -25,9 +25,10 @@ pub mod mocks;
 
 use crate::{
     PublicKey,
-    bls12381::primitives::{
+    bls::{
         key::Share,
-        ops::{self, batch, threshold},
+        ops,
+        ops::{batch, threshold},
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },
@@ -49,7 +50,7 @@ use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
-/// Generic BLS12-381 threshold signature implementation.
+/// Generic BLS threshold signature implementation.
 ///
 /// This enum contains the core cryptographic operations without protocol-specific
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
@@ -444,7 +445,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     pub const fn certificate_codec_config_unbounded() {}
 }
 
-/// Certificate for BLS12-381 threshold signatures.
+/// Certificate for BLS threshold signatures.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
     /// The recovered threshold signature.
@@ -501,7 +502,7 @@ where
     }
 }
 
-/// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
+/// Generates a BLS threshold signing scheme wrapper for a specific protocol.
 ///
 /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
 /// implementation, and a `fixture` function for testing when this crate's `mocks` feature is
@@ -537,7 +538,7 @@ where
 macro_rules! impl_certificate_bls12381_threshold {
     ($subject:ty, $namespace:ty, $faults:ty) => {
         $crate::cfg_mocks! {
-            /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
+            /// Generates a test fixture with Ed25519 identities and BLS threshold schemes.
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
             /// scheme instances share a consistent ordering.
@@ -547,10 +548,10 @@ macro_rules! impl_certificate_bls12381_threshold {
                 n: u32,
             ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
             where
-                V: $crate::bls12381::primitives::variant::Variant,
+                V: $crate::bls::variant::Variant,
                 R: rand_core::CryptoRng,
             {
-                $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+                $crate::bls::certificate::threshold::mocks::fixture::<_, V, _>(
                     rng,
                     namespace,
                     n,
@@ -560,34 +561,34 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
         }
 
-        /// BLS12-381 threshold signature scheme wrapper.
+        /// BLS threshold signature scheme wrapper.
         #[derive(Clone, Debug)]
         pub struct Scheme<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > {
             /// Verification state, plus the signing material of a signer.
-            generic: $crate::bls12381::certificate::threshold::Generic<P, V, $namespace>,
+            generic: $crate::bls::certificate::threshold::Generic<P, V, $namespace>,
             /// Index of the local identity key for an instance built with [`Self::member`].
             member: Option<commonware_utils::Participant>,
         }
 
         impl<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > Scheme<P, V> {
             /// Creates a new signer instance with a private share and evaluated public polynomial
             /// compatible with the configured fault model.
             pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
-                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
-                share: $crate::bls12381::primitives::key::Share<
-                    <V as $crate::bls12381::primitives::variant::Variant>::Scalar,
+                polynomial: $crate::bls::sharing::Sharing<V>,
+                share: $crate::bls::key::Share<
+                    <V as $crate::bls::variant::Variant>::Scalar,
                 >,
             ) -> Option<Self> {
                 Some(Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::signer::<$faults>(
+                    generic: $crate::bls::certificate::threshold::Generic::signer::<$faults>(
                         namespace,
                         participants,
                         polynomial,
@@ -605,10 +606,10 @@ macro_rules! impl_certificate_bls12381_threshold {
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
-                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+                polynomial: $crate::bls::sharing::Sharing<V>,
             ) -> Self {
                 Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::verifier::<$faults>(
+                    generic: $crate::bls::certificate::threshold::Generic::verifier::<$faults>(
                         namespace,
                         participants,
                         polynomial,
@@ -634,12 +635,12 @@ macro_rules! impl_certificate_bls12381_threshold {
             pub fn member(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
-                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+                polynomial: $crate::bls::sharing::Sharing<V>,
                 public_key: &P,
             ) -> Option<Self> {
                 let member = commonware_utils::ordered::Quorum::index(&participants, public_key)?;
                 Some(Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::verifier::<$faults>(
+                    generic: $crate::bls::certificate::threshold::Generic::verifier::<$faults>(
                         namespace,
                         participants,
                         polynomial,
@@ -651,7 +652,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             /// Creates a lightweight verifier that only checks recovered certificates.
             pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
                 Self {
-                    generic: $crate::bls12381::certificate::threshold::Generic::certificate_verifier(
+                    generic: $crate::bls::certificate::threshold::Generic::certificate_verifier(
                         namespace,
                         identity,
                     ),
@@ -665,8 +666,8 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             /// Returns the local share if this instance can generate partial signatures.
-            pub const fn share(&self) -> Option<&$crate::bls12381::primitives::key::Share<
-                    <V as $crate::bls12381::primitives::variant::Variant>::Scalar,
+            pub const fn share(&self) -> Option<&$crate::bls::key::Share<
+                    <V as $crate::bls::variant::Variant>::Scalar,
                 >> {
                 self.generic.share()
             }
@@ -674,12 +675,12 @@ macro_rules! impl_certificate_bls12381_threshold {
 
         impl<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > $crate::certificate::Verifier for Scheme<P, V> {
             type Subject<'a, D: $crate::Digest> = $subject;
             type Faults = $faults;
             type PublicKey = P;
-            type Certificate = $crate::bls12381::certificate::threshold::Certificate<V>;
+            type Certificate = $crate::bls::certificate::threshold::Certificate<V>;
 
             fn verify_certificate<R, D>(
                 &self,
@@ -712,7 +713,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             fn is_batchable() -> bool {
-                $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
+                $crate::bls::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
             }
 
             fn max_certificate_size(_participants: u32) -> usize {
@@ -727,13 +728,13 @@ macro_rules! impl_certificate_bls12381_threshold {
 
             fn certificate_codec_config_unbounded(
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
+                $crate::bls::certificate::threshold::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
             }
         }
 
         impl<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > $crate::certificate::Scheme for Scheme<P, V> {
             type Signature = V::Signature;
 
@@ -820,7 +821,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             fn is_attributable() -> bool {
-                $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_attributable()
+                $crate::bls::certificate::threshold::Generic::<P, V, $namespace>::is_attributable()
             }
         }
     };
@@ -831,16 +832,14 @@ mod tests {
     use super::*;
     use crate::{
         Signer as _,
-        bls12381::{
-            dkg::feldman_desmedt as dkg,
-            primitives::{
-                ops::threshold::sign_message,
-                sharing::Mode,
-                variant::{MinPk, MinSig, Variant},
-            },
+        bls::{
+            dkg::feldman_desmedt as dkg, ops::threshold::sign_message, sharing::Mode,
+            variant::Variant,
         },
+        bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{Membership, Scheme as _, Verifier as _},
-        ed25519::{self, PrivateKey as Ed25519PrivateKey},
+        ed25519,
+        ed25519::PrivateKey as Ed25519PrivateKey,
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;

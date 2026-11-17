@@ -14,8 +14,7 @@ use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{Viewable, simplex::types::Activity};
 use commonware_cryptography::{
-    Hasher,
-    bls12381::primitives::variant::{MinSig, Variant},
+    Hasher, bls::variant::Variant, bls12381::primitives::variant::MinSig,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Spawner};

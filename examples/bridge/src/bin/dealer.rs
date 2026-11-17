@@ -2,10 +2,8 @@ use clap::{Arg, Command, value_parser};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{
-        dkg::feldman_desmedt::deal_anonymous,
-        primitives::{sharing::Mode, variant::MinSig},
-    },
+    bls::{dkg::feldman_desmedt::deal_anonymous, sharing::Mode},
+    bls12381::primitives::variant::MinSig,
     ed25519,
 };
 use commonware_formatting::hex;

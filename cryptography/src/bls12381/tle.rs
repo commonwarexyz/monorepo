@@ -33,11 +33,11 @@
 //! signatures in production (where no single party owns the private key)._
 //!
 //! ```rust
-//! use commonware_cryptography::bls12381::{
-//!     tle::{encrypt, decrypt, Block},
-//!     primitives::{
-//!         ops::{keypair, sign_message},
-//!         variant::MinPk,
+//! use commonware_cryptography::{
+//!     bls::ops::{keypair, sign_message},
+//!     bls12381::{
+//!         tle::{encrypt, decrypt, Block},
+//!         primitives::variant::MinPk,
 //!     },
 //! };
 //! use commonware_utils::test_rng;
@@ -83,11 +83,11 @@
 //! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
 
 use crate::{
-    bls12381::primitives::{
-        group::Scalar,
+    bls::{
         ops::hash_with_namespace,
         variant::{DST, Variant},
     },
+    bls12381::primitives::group::Scalar,
     sha256::Digest,
 };
 #[cfg(not(feature = "std"))]
@@ -326,9 +326,9 @@ pub fn decrypt<V: Variant<Scalar = Scalar>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::{
-        ops,
-        variant::{MinPk, MinSig},
+    use crate::{
+        bls::ops,
+        bls12381::primitives::variant::{MinPk, MinSig},
     };
     use commonware_math::algebra::Random as _;
     use commonware_utils::test_rng;

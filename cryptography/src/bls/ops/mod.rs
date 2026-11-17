@@ -1,6 +1,6 @@
-//! Digital signatures over the BLS12-381 curve.
+//! BLS digital signatures.
 //!
-//! This module provides BLS12-381 signature operations:
+//! This module provides BLS signature operations:
 //!
 //! - Core primitives (keypair generation, signing, verification, proof of possession)
 //! - [`aggregate`]: Aggregation of public keys and signatures

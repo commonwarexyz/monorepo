@@ -1,9 +1,7 @@
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{
-        dkg::feldman_desmedt::deal,
-        primitives::{self, sharing::Mode, variant::MinSig},
-    },
+    bls::{dkg::feldman_desmedt::deal, ops::threshold, sharing::Mode},
+    bls12381::primitives::variant::MinSig,
     ed25519::PrivateKey,
 };
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
@@ -48,10 +46,9 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                                         .map(|_| {
                                             let mut msg = [0u8; 32];
                                             rng.fill(&mut msg);
-                                            let sig =
-                                                primitives::ops::threshold::sign_message::<MinSig>(
-                                                    signer, namespace, &msg,
-                                                );
+                                            let sig = threshold::sign_message::<MinSig>(
+                                                signer, namespace, &msg,
+                                            );
                                             (namespace.to_vec(), msg.to_vec(), sig)
                                         })
                                         .collect();
@@ -66,11 +63,7 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                                         .collect();
                                     let result = if concurrency > 1 {
                                         black_box(
-                                            primitives::ops::threshold::batch_verify_same_signer::<
-                                                _,
-                                                MinSig,
-                                                _,
-                                            >(
+                                            threshold::batch_verify_same_signer::<_, MinSig, _>(
                                                 &mut rng,
                                                 &polynomial,
                                                 index,
@@ -80,11 +73,7 @@ fn bench_threshold_batch_verify_same_signer(c: &mut Criterion) {
                                         )
                                     } else {
                                         black_box(
-                                            primitives::ops::threshold::batch_verify_same_signer::<
-                                                _,
-                                                MinSig,
-                                                _,
-                                            >(
+                                            threshold::batch_verify_same_signer::<_, MinSig, _>(
                                                 &mut rng,
                                                 &polynomial,
                                                 index,

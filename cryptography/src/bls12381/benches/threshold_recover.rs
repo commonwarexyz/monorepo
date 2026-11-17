@@ -1,9 +1,7 @@
 use commonware_cryptography::{
     Signer,
-    bls12381::{
-        dkg::feldman_desmedt::deal,
-        primitives::{self, sharing::Mode, variant::MinSig},
-    },
+    bls::{dkg::feldman_desmedt::deal, ops::threshold, sharing::Mode},
+    bls12381::primitives::variant::MinSig,
     ed25519::PrivateKey,
 };
 use commonware_parallel::Sequential;
@@ -34,22 +32,14 @@ fn bench_threshold_recover(c: &mut Criterion) {
                                 shares
                                     .values()
                                     .iter()
-                                    .map(|s| {
-                                        primitives::ops::threshold::sign_message::<MinSig>(
-                                            s, namespace, msg,
-                                        )
-                                    })
+                                    .map(|s| threshold::sign_message::<MinSig>(s, namespace, msg))
                                     .collect::<Vec<_>>(),
                             )
                         },
                         |(public, partials)| {
                             black_box(
-                                primitives::ops::threshold::recover(
-                                    public.public(),
-                                    &partials,
-                                    &Sequential,
-                                )
-                                .unwrap(),
+                                threshold::recover(public.public(), &partials, &Sequential)
+                                    .unwrap(),
                             );
                         },
                         BatchSize::SmallInput,
