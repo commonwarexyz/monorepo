@@ -184,8 +184,7 @@ where
         );
         self.channels.bind(router_mailbox.clone());
         self.context
-            .child("run")
-            .spawn(move |_| self.run(router, router_mailbox))
+            .spawn(move |context| Self { context, ..self }.run(router, router_mailbox))
     }
 
     async fn run(

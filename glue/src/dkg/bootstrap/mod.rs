@@ -435,8 +435,8 @@ where
         ),
     ) -> (Handle<()>, oneshot::Receiver<Completion<V, D>>) {
         let (completion_tx, completion_rx) = oneshot::channel();
-        let handle = self.context.child("run").spawn(move |_| {
-            self.run(
+        let handle = self.context.spawn(move |context| {
+            Self { context, ..self }.run(
                 votes,
                 certificates,
                 resolver,

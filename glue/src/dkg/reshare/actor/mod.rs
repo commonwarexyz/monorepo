@@ -310,7 +310,8 @@ where
         SE: Sender<PublicKey = C::PublicKey>,
         RE: Receiver<PublicKey = C::PublicKey>,
     {
-        self.context.child("run").spawn(move |_| self.run(chan))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(chan))
     }
 
     async fn run<SE, RE>(mut self, (sender, receiver): (SE, RE))

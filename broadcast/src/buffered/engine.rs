@@ -160,7 +160,8 @@ where
         self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context.child("run").spawn(move |_| self.run(network))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(network))
     }
 
     /// Inner run loop called by `start`.

@@ -118,7 +118,8 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
 
     /// Start the demuxer using the given spawner.
     pub fn start(self) -> Handle<Result<(), R::Error>> {
-        self.context.child("run").spawn(move |_| self.run())
+        self.context
+            .spawn(move |context| Self { context, ..self }.run())
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.

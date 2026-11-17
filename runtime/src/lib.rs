@@ -434,8 +434,8 @@ stability_scope!(BETA {
         ///
         /// # Components
         ///
-        /// A component that keeps its context in a field starts its task from a child of
-        /// that context, so the field never changes:
+        /// A component starts its task on its own node and rebuilds itself with the
+        /// context supplied by the factory:
         ///
         /// ```
         /// use commonware_runtime::{deterministic, Handle, Runner, Spawner, Supervisor};
@@ -446,7 +446,7 @@ stability_scope!(BETA {
         ///
         /// impl<E: Spawner> Actor<E> {
         ///     fn start(self) -> Handle<()> {
-        ///         self.context.child("run").spawn(move |_| self.run())
+        ///         self.context.spawn(move |context| Self { context, ..self }.run())
         ///     }
         ///
         ///     async fn run(self) {
@@ -463,16 +463,17 @@ stability_scope!(BETA {
         /// });
         /// ```
         ///
-        /// The task owns the actor and the actor owns its context, so everything started
-        /// from that context, before or after `start`, ends when the task ends. Dropping
-        /// an actor that never started ends that work too.
+        /// The task takes over the actor's node. The factory's context replaces the
+        /// actor's context field at a fresh child node, preserving its metric name,
+        /// attributes, and labels. Everything the actor started before or after
+        /// `start` ends when the task ends. Dropping an actor that never started
+        /// closes its node and ends its work too. Placement on the actor's context
+        /// applies to its task.
         ///
-        /// The run task sits below the component's context, so the component must keep
-        /// that context until `run` returns. Dropping it, or moving it into a sub-state
-        /// that finishes earlier, aborts the run task itself: hand sub-states a child
-        /// instead. The child also starts from a clean spawn configuration, so set any
-        /// placement on it (`self.context.child("run").dedicated()`), not on the
-        /// component's context.
+        /// Keep the replacement context until `run` returns. Dropping it, or moving
+        /// it into a sub-state that finishes earlier, aborts work started under it
+        /// after `start`. The run task remains on the actor's original node. Hand
+        /// sub-states a child instead.
         ///
         /// # Spawn Configuration
         ///
@@ -2614,43 +2615,67 @@ mod tests {
     where
         R::Context: Spawner + Clock,
     {
-        /// A component that keeps its context and starts its task from a child of it.
+        /// A component that hands its node to its task and keeps the factory context.
         struct Actor<E: Spawner> {
             context: E,
             late: oneshot::Sender<Handle<()>>,
+            finish: oneshot::Receiver<()>,
         }
 
         impl<E: Spawner> Actor<E> {
-            fn new(context: E, late: oneshot::Sender<Handle<()>>) -> (Self, Handle<()>) {
+            fn new(
+                context: E,
+                late: oneshot::Sender<Handle<()>>,
+            ) -> (Self, Handle<()>, oneshot::Sender<()>) {
                 let early = context.child("early").spawn(|_| pending::<()>());
-                (Self { context, late }, early)
+                let (finish_tx, finish) = oneshot::channel();
+                (
+                    Self {
+                        context,
+                        late,
+                        finish,
+                    },
+                    early,
+                    finish_tx,
+                )
             }
 
             fn start(self) -> Handle<()> {
-                self.context.child("run").spawn(move |_| self.run())
+                self.context
+                    .spawn(move |context| Self { context, ..self }.run())
             }
 
             async fn run(self) {
                 let late = self.context.child("late").spawn(|_| pending::<()>());
                 let _ = self.late.send(late);
-                pending::<()>().await;
+                let _ = self.finish.await;
             }
         }
 
         runner.start(|context| async move {
             // Dropping a component that never started ends what it started in `new`.
             let (late, _) = oneshot::channel();
-            let (actor, early) = Actor::new(context.child("unstarted"), late);
+            let (actor, early, _finish) = Actor::new(context.child("unstarted"), late);
             drop(actor);
             assert!(matches!(early.await, Err(Error::Closed)));
 
             // Aborting a started component ends what it started before and after `start`.
             let (late, late_rx) = oneshot::channel();
-            let (actor, early) = Actor::new(context.child("started"), late);
+            let (actor, early, _finish) = Actor::new(context.child("started"), late);
             let handle = actor.start();
             let late = late_rx.await.unwrap();
             handle.abort();
             assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(matches!(early.await, Err(Error::Closed)));
+            assert!(matches!(late.await, Err(Error::Closed)));
+
+            // Normal completion also closes both generations of children.
+            let (late, late_rx) = oneshot::channel();
+            let (actor, early, finish) = Actor::new(context.child("completed"), late);
+            let handle = actor.start();
+            let late = late_rx.await.unwrap();
+            finish.send(()).unwrap();
+            handle.await.unwrap();
             assert!(matches!(early.await, Err(Error::Closed)));
             assert!(matches!(late.await, Err(Error::Closed)));
         });

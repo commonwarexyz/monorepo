@@ -209,7 +209,8 @@ where
     /// verifications wait until it completes. Otherwise it recovers from marshal before handling
     /// any message. See [Startup](crate::stateful#startup).
     pub fn start(self) -> Handle<()> {
-        self.context.child("run").spawn(move |_| self.run())
+        self.context
+            .spawn(move |context| Self { context, ..self }.run())
     }
 
     async fn run(self) {

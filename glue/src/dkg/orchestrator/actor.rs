@@ -311,8 +311,7 @@ where
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         self.context
-            .child("run")
-            .spawn(move |_| self.run(votes, certificates, resolver))
+            .spawn(move |context| Self { context, ..self }.run(votes, certificates, resolver))
     }
 
     /// Drives epoch consensus from finalized blocks and future-epoch traffic

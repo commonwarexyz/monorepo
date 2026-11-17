@@ -93,8 +93,7 @@ impl<
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
         self.context
-            .child("run")
-            .spawn(move |_| self.run(voter, sender, receiver))
+            .spawn(move |context| Self { context, ..self }.run(voter, sender, receiver))
     }
 
     async fn run(

@@ -359,11 +359,9 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let actor = Box::new(self);
-        actor
-            .context
-            .child("run")
-            .spawn(move |_| actor.run(application, buffer, resolver))
+        self.context.spawn(move |context| {
+            Box::new(Self { context, ..self }).run(application, buffer, resolver)
+        })
     }
 
     /// Start the actor without a broadcast buffer.
