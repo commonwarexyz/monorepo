@@ -7,7 +7,9 @@ use crate::{
     Block, Heightable,
     ancestry::BlockProvider,
     simplex::{
-        marshal::core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
+        marshal::core::{
+            Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, RoundBounded, Variant,
+        },
         scheme::Scheme as SimplexScheme,
     },
     types::Round,
@@ -146,7 +148,40 @@ where
     }
 }
 
-impl<S, B> BlockProvider for Mailbox<S, Standard<B>>
+/// A standard marshal mailbox with the bound of its parent requests.
+///
+/// Built through [RoundBounded]. A standard block isn't required to carry a consensus context, so
+/// the bound chosen there is the only round that can retire a parent request.
+#[derive(Clone)]
+pub struct Bounded<S: Scheme, B: Block + Codec> {
+    mailbox: Mailbox<S, Standard<B>>,
+    bound: Option<Round>,
+}
+
+impl<S, B> RoundBounded for Mailbox<S, Standard<B>>
+where
+    S: Scheme,
+    B: Block + Codec,
+{
+    type Block = B;
+    type Provider = Bounded<S, B>;
+
+    fn bounded(&self, bound: Round) -> Self::Provider {
+        Bounded {
+            mailbox: self.clone(),
+            bound: Some(bound),
+        }
+    }
+
+    fn unbounded(&self) -> Self::Provider {
+        Bounded {
+            mailbox: self.clone(),
+            bound: None,
+        }
+    }
+}
+
+impl<S, B> BlockProvider for Bounded<S, B>
 where
     S: Scheme,
     B: Block + Codec,
@@ -156,16 +191,13 @@ where
     fn subscribe_parent(
         &self,
         block: &Digested<Self::Block>,
-        bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
-        // A standard block isn't required to carry a consensus context, so the provider reads no
-        // parent round from it. The caller's bound is the only round that can retire the request.
         let receiver = block.height().previous().map(|parent_height| {
-            self.subscribe_by_commitment(
+            self.mailbox.subscribe_by_commitment(
                 block.parent(),
                 CommitmentFallback::FetchByCommitment {
                     height: parent_height,
-                    round: bound,
+                    round: self.bound,
                 },
             )
         });

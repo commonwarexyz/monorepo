@@ -8,7 +8,7 @@ use crate::{
         scheme::Scheme,
         types::{BlockRef, Body, Context, TransactionBlock},
     },
-    types::{Height, Round},
+    types::Height,
 };
 use commonware_cryptography::{Digested, Hasher};
 use commonware_macros::select;
@@ -91,7 +91,6 @@ where
     fn subscribe_parent(
         &self,
         block: &Digested<Self::Block>,
-        _bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
         let chains = self.clone();
         let block = block.inner();
@@ -204,15 +203,7 @@ where
             clock: Arc::clone(&clock),
             marshal: self.marshal.clone(),
         };
-        // Producer blocks are fetched by the hash-committed reference their child names, so no round
-        // bounds the fetch.
-        AncestorStream::new(
-            clock,
-            chains,
-            initial,
-            None,
-            self.ancestor_fetch_duration.clone(),
-        )
+        AncestorStream::new(clock, chains, initial, self.ancestor_fetch_duration.clone())
     }
 }
 

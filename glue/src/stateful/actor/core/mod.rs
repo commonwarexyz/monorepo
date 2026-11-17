@@ -16,12 +16,9 @@ use crate::stateful::{
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
-use commonware_consensus::{
-    ancestry::BlockProvider,
-    simplex::{
-        marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
-        types::Finalization,
-    },
+use commonware_consensus::simplex::{
+    marshal::core::{Floor, Mailbox as MarshalMailbox, RoundBounded, Variant},
+    types::Finalization,
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
@@ -166,7 +163,7 @@ where
     A::Databases: StateSyncSet<E, R>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: RoundBounded<Block = A::Block>,
     T: Strategy,
 {
     /// Creates a [`Stateful`] actor and its [`Mailbox`].

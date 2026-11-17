@@ -45,6 +45,9 @@
 mod actor;
 pub use actor::Actor;
 
+mod ancestry;
+pub use ancestry::RoundBounded;
+
 mod acks;
 pub(crate) mod cache;
 mod certified;
