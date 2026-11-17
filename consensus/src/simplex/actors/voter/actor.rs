@@ -1047,9 +1047,9 @@ impl<
         vote_sender: impl Sender<PublicKey = S::PublicKey>,
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
-        self.context.child("run").spawn(move |_| {
-            self.run(batcher, resolver, vote_sender, certificate_sender)
-        })
+        self.context
+            .child("run")
+            .spawn(move |_| self.run(batcher, resolver, vote_sender, certificate_sender))
     }
 
     /// Core event loop that drives proposal, voting, networking, and recovery.

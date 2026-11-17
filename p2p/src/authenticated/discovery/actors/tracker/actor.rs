@@ -93,8 +93,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
 
     /// Start the actor and run it in the background.
     pub fn start(self) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run())
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {

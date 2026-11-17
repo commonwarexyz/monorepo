@@ -1823,6 +1823,7 @@ mod tests {
         embedded_ctx: Ctx,
         equivocating_ctx: Ctx,
         _extra: <StandardHarness as TestHarness>::ValidatorExtra,
+        _context: deterministic::Context,
     }
 
     async fn equivocation_fixture(
@@ -1917,6 +1918,7 @@ mod tests {
             embedded_ctx,
             equivocating_ctx,
             _extra: buffer,
+            _context: setup.context,
         }
     }
 

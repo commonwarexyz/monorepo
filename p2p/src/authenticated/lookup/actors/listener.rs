@@ -186,7 +186,8 @@ where
         >,
     ) -> Handle<()> {
         self.context
-            .child("run").spawn(move |_| self.run(tracker, supervisor))
+            .child("run")
+            .spawn(move |_| self.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]

@@ -1209,7 +1209,7 @@ mod tests {
     {
         let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
-            context.child("network"),
+            context,
             Config {
                 max_size: max_message_size([max_payload_size::<S, Sha256Digest>(
                     u32::try_from(peers.len()).unwrap(),
@@ -1222,10 +1222,7 @@ mod tests {
             peers,
         )
         .await;
-        let handle = network.start();
-        context.spawn(move |_| async move {
-            let _ = handle.await;
-        });
+        network.start();
         oracle
     }
 
@@ -1245,7 +1242,7 @@ mod tests {
         let primary: Vec<_> = primary.into_iter().collect();
         let secondary: Vec<_> = secondary.into_iter().collect();
         let (network, oracle) = Network::new_with_split_peers(
-            context.child("network"),
+            context,
             Config {
                 max_size: max_message_size([max_payload_size::<S, Sha256Digest>(
                     u32::try_from(primary.len()).unwrap(),
@@ -1258,10 +1255,7 @@ mod tests {
             secondary,
         )
         .await;
-        let handle = network.start();
-        context.spawn(move |_| async move {
-            let _ = handle.await;
-        });
+        network.start();
         oracle
     }
 
@@ -1352,6 +1346,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -1418,7 +1413,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: strategy.clone(),
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -1448,7 +1443,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -1618,6 +1613,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             let Fixture {
                 participants,
                 schemes,
@@ -1713,7 +1709,7 @@ mod tests {
                 let engine = Engine::new(validator_context.child("engine"), cfg);
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
-                reporter.retain_context(validator_context);
+                validator_contexts.push(validator_context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -1833,7 +1829,7 @@ mod tests {
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
             let (pending, recovered, resolver) = register_validator(&mut oracle, joiner).await;
-            joiner_reporter.retain_context(joiner_context);
+            validator_contexts.push(joiner_context);
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             let (mut joiner_latest, mut joiner_monitor) = joiner_reporter.subscribe().await;
@@ -1899,6 +1895,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             let Fixture {
                 participants,
                 schemes,
@@ -1963,7 +1960,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -1991,7 +1988,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -2068,7 +2065,9 @@ mod tests {
         Vec<RoundRobinReporter>,
         usize,
         Oracle<PublicKey, deterministic::Context>,
+        Vec<deterministic::Context>,
     ) {
+        let mut validator_contexts = Vec::new();
         let epoch = Epoch::new(333);
         let Fixture {
             participants,
@@ -2120,7 +2119,7 @@ mod tests {
                 blocker,
                 automaton: application.clone(),
                 relay: application,
-                reporter: reporter.clone(),
+                reporter,
                 strategy: Sequential,
                 partition: validator.to_string(),
                 mailbox_size: NZUsize!(1024),
@@ -2146,7 +2145,7 @@ mod tests {
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
-            reporter.retain_context(context);
+            validator_contexts.push(context);
             engine.start(pending, recovered, resolver);
         }
 
@@ -2154,7 +2153,7 @@ mod tests {
         let built_elector: RoundRobinElector<ed25519::Scheme> = elector.build(&participants_set);
         let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
 
-        (reporters, leader_idx, oracle)
+        (reporters, leader_idx, oracle, validator_contexts)
     }
 
     #[test_traced]
@@ -2163,7 +2162,7 @@ mod tests {
         let link_latency = Duration::from_millis(100);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, _oracle) = setup_round_robin_cluster(
+            let (reporters, leader_idx, _oracle, _validator_contexts) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_high_latency",
                 Link {
@@ -2222,7 +2221,7 @@ mod tests {
         let term_length = TermLength::new(NZU32!(2));
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (reporters, _, _oracle) = setup_round_robin_cluster(
+            let (reporters, _, _oracle, _validator_contexts) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_pipelined_handoff_boundary_latency",
                 Link {
@@ -2284,7 +2283,7 @@ mod tests {
         let link_latency = Duration::from_millis(100);
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            let (reporters, _, _oracle) = setup_round_robin_cluster(
+            let (reporters, _, _oracle, _validator_contexts) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_pipelined_handoff_rotating",
                 Link {
@@ -2341,6 +2340,7 @@ mod tests {
         let required = View::new(10);
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             let Fixture {
                 participants,
                 schemes,
@@ -2442,7 +2442,7 @@ mod tests {
                     blocker: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -2468,7 +2468,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -2501,7 +2501,7 @@ mod tests {
         let required_view = View::new(1000);
         let executor = deterministic::Runner::timed(Duration::from_secs(40));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, oracle) = setup_round_robin_cluster(
+            let (reporters, leader_idx, oracle, _validator_contexts) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_full_term_no_nullify",
                 // 1s latency shrinks `CLUSTER_LEADER_TIMEOUT` below a
@@ -2620,6 +2620,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants (active)
             let Fixture {
                 participants,
@@ -2700,7 +2701,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -2730,7 +2731,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -2811,6 +2812,7 @@ mod tests {
             relay.deregister_all(); // Clear all recipients from previous restart.
 
             let f = |mut context: deterministic::Context| async move {
+                let mut validator_contexts = Vec::new();
                 // Register participants
                 let mut oracle = start_test_network_with_peers::<S, _>(
                     context.child("network"),
@@ -2868,7 +2870,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application,
-                        reporter: reporter.clone(),
+                        reporter,
                         strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
@@ -2900,7 +2902,7 @@ mod tests {
                     let (pending, recovered, resolver) = registrations
                         .remove(validator)
                         .expect("validator should be registered");
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engine_handlers.push(engine.start(pending, recovered, resolver));
                 }
 
@@ -3000,6 +3002,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -3073,7 +3076,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3103,7 +3106,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3229,7 +3232,7 @@ mod tests {
             let (pending, recovered, resolver) = registrations
                 .remove(&me)
                 .expect("validator should be registered");
-            reporter.retain_context(context);
+            validator_contexts.push(context);
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             // Wait for new engine to finalize required
@@ -3286,6 +3289,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -3358,7 +3362,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3388,7 +3392,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3531,6 +3535,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -3603,7 +3608,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3633,7 +3638,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3710,6 +3715,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -3771,7 +3777,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3801,7 +3807,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3912,6 +3918,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(3600));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -3971,7 +3978,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -4001,7 +4008,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -4122,7 +4129,7 @@ mod tests {
                 // Start engine
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -4167,6 +4174,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -4229,7 +4237,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -4259,7 +4267,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -4382,6 +4390,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(5_000)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -4449,7 +4458,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -4479,7 +4488,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -4593,6 +4602,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -4642,7 +4652,7 @@ mod tests {
 
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
                         mocks::conflicter::Conflicter::new(context.child("byzantine_engine"), cfg);
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -4691,6 +4701,7 @@ mod tests {
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
+                    validator_contexts.push(context);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -4765,6 +4776,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -4841,7 +4853,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -4869,7 +4881,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -4937,6 +4949,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             let Fixture {
                 participants,
                 schemes,
@@ -5009,7 +5022,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -5037,7 +5050,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine.start(pending, recovered, resolver);
             }
             // Wait for an honest node to observe the finalizations
@@ -5254,6 +5267,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -5306,7 +5320,7 @@ mod tests {
                             context.child("byzantine_engine"),
                             cfg,
                         );
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -5355,6 +5369,7 @@ mod tests {
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
+                    validator_contexts.push(context);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -5419,6 +5434,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -5476,7 +5492,7 @@ mod tests {
                         context.child("byzantine_engine"),
                         cfg,
                     );
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engines.push(engine.start(pending, recovered));
                 } else {
                     let application_cfg = mocks::application::Config::<Sha256, _> {
@@ -5524,6 +5540,7 @@ mod tests {
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
+                    validator_contexts.push(context);
                     engines.push(engine.start(pending, recovered, resolver));
                 }
             }
@@ -5622,7 +5639,7 @@ mod tests {
             };
             let engine = Engine::new(context.child("engine"), cfg);
             let finalizer_context = context.child("finalizer");
-            reporter.retain_context(context);
+            validator_contexts.push(context);
             engine.start(pending, recovered, resolver);
 
             // Wait for all engines to hit required containers
@@ -5707,6 +5724,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -5758,7 +5776,7 @@ mod tests {
                             context.child("byzantine_engine"),
                             cfg,
                         );
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -5807,6 +5825,7 @@ mod tests {
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
+                    validator_contexts.push(context);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -5862,6 +5881,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -5910,7 +5930,7 @@ mod tests {
                     };
                     let engine: mocks::nuller::Nuller<_, _, Sha256> =
                         mocks::nuller::Nuller::new(context.child("byzantine_engine"), cfg);
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -5959,6 +5979,7 @@ mod tests {
                         track_historical_votes: true,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
+                    validator_contexts.push(context);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -6030,6 +6051,7 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -6079,7 +6101,7 @@ mod tests {
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.child("byzantine_engine"), cfg);
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -6128,6 +6150,7 @@ mod tests {
                         track_historical_votes: false,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
+                    validator_contexts.push(context);
                     engine.start(pending, recovered, resolver);
                 }
             }
@@ -6176,6 +6199,7 @@ mod tests {
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -6237,7 +6261,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -6267,7 +6291,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -6476,6 +6500,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -6522,7 +6547,7 @@ mod tests {
                     Sequential,
                     true, // Enable verification
                 );
-                reporters.push(mock_reporter.clone());
+                reporters.push(mock_reporter);
 
                 let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
@@ -6574,7 +6599,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                mock_reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -8149,6 +8174,7 @@ mod tests {
         let skip_timeout = Duration::from_secs(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -8215,7 +8241,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -8245,7 +8271,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -8309,6 +8335,7 @@ mod tests {
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
+            let mut validator_contexts = Vec::new();
             // Register participants
             let Fixture {
                 participants,
@@ -8370,7 +8397,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter: reporter.clone(),
+                    reporter,
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -8400,7 +8427,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
-                reporter.retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
             }
 
@@ -8502,7 +8529,7 @@ mod tests {
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
                 let finalizer_context = context.child("finalizer");
-                reporters[&idx].retain_context(context);
+                validator_contexts.push(context);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
 
                 // Wait for all engines to hit required containers
@@ -8789,6 +8816,7 @@ mod tests {
             let cfg = deterministic::Config::new().with_rng(rng);
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
+                let mut validator_contexts = Vec::new();
                 let Fixture {
                     participants,
                     schemes,
@@ -8954,7 +8982,7 @@ mod tests {
                             blocker,
                             automaton: application.clone(),
                             relay: application,
-                            reporter: reporter.clone(),
+                            reporter,
                             strategy: Sequential,
                             partition,
                             mailbox_size: NZUsize!(1024),
@@ -8979,7 +9007,7 @@ mod tests {
                             track_historical_votes: false,
                         };
                         let engine = Engine::new(context.child("engine"), cfg);
-                        reporter.retain_context(context);
+                        validator_contexts.push(context);
                         engine_handlers.push(engine.start(
                             pending,
                             recovered,
@@ -9031,7 +9059,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application,
-                        reporter: reporter.clone(),
+                        reporter,
                         strategy: Sequential,
                         partition,
                         mailbox_size: NZUsize!(1024),
@@ -9064,7 +9092,7 @@ mod tests {
                     ) = registrations
                         .remove(validator)
                         .expect("validator should be registered");
-                    reporter.retain_context(context);
+                    validator_contexts.push(context);
                     engine_handlers.push(engine.start(
                         (pending_sender, pending_receiver),
                         (recovered_sender, recovered_receiver),
@@ -9435,7 +9463,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|mut context| async move {
             // Run a cluster whose last two validators certify slowly
-            let (reporters, _, oracle) = setup_round_robin_cluster(
+            let (reporters, _, oracle, _validator_contexts) = setup_round_robin_cluster(
                 &mut context,
                 namespace,
                 Link {

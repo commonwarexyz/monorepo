@@ -199,7 +199,7 @@ mod tests {
     {
         let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
-            context.child("network"),
+            context,
             NConfig {
                 max_size: 1024 * 1024,
                 max_peers_per_set: NZUsize!(peers.len()),
@@ -209,10 +209,7 @@ mod tests {
             peers,
         )
         .await;
-        let handle = network.start();
-        context.spawn(move |_| async move {
-            let _ = handle.await;
-        });
+        network.start();
         oracle
     }
 
@@ -14448,7 +14445,7 @@ mod tests {
         page_cache: CacheRef,
         floor: Finalization<S, Sha256Digest>,
         restart: Floor<S, Sha256Digest>,
-    ) -> Handle<()>
+    ) -> (Handle<()>, deterministic::Context)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
     {
@@ -14518,8 +14515,7 @@ mod tests {
         )
         .await;
         assert!(reporter.finalizations.lock().contains_key(&floor_view));
-        reporter.retain_context(restarted);
-        handle
+        (handle, restarted)
     }
 
     /// Counts the journaled finalizations at `view` in `partition`.
@@ -14620,7 +14616,7 @@ mod tests {
                 Sha256::hash(&[b"same-floor-finalization"]),
             );
             let (_, floor) = build_finalization(&schemes, &floor_proposal, quorum);
-            let handle = restart_resumes_at_floor(
+            let (handle, _restarted_context) = restart_resumes_at_floor(
                 &mut context,
                 &participants,
                 &schemes,

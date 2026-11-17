@@ -193,9 +193,6 @@ where
     O: Operation<F>,
     H: Hasher,
 {
-    /// Owns database tasks, including compact-sync forwarders.
-    _context: E,
-
     /// The peak-only Merkle the witnesses describe.
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
 
@@ -299,7 +296,6 @@ where
             journal = journal.sync().await?;
         }
         Ok(Self {
-            _context: context,
             merkle,
             storage: Storage::Open(OpenJournal {
                 journal,
@@ -341,12 +337,10 @@ where
             pinned_nodes,
         };
         let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(cfg.strategy, imported)?;
-        let witness_context = context.child("witness");
         Ok(Self {
-            _context: context,
             merkle,
             storage: Storage::Replacing(Box::new(Destination {
-                context: witness_context,
+                context: context.child("witness"),
                 cfg: journal_cfg,
             })),
             tip,
@@ -2190,36 +2184,6 @@ pub(crate) mod tests {
             assert_eq!(db.root(), root_a);
             assert_eq!(db.get_metadata(), Some(meta1));
             db.destroy().await.unwrap();
-        });
-    }
-
-    pub(crate) fn test_compact_context_owns_tasks<O: TestOperation>() {
-        deterministic::Runner::default().start(|context| async move {
-            for imported in [false, true] {
-                let owner = context.child(if imported { "imported" } else { "opened" });
-                let (tx, rx) = futures::channel::oneshot::channel();
-                let task = owner.child("worker").spawn(move |_| async move {
-                    rx.await.unwrap();
-                });
-                let db = if imported {
-                    TestDb::<O>::init_from_sync(
-                        owner,
-                        Config {
-                            strategy: Sequential,
-                            witness: witness_config::<O>("context-import"),
-                        },
-                        Location::new(0),
-                        Vec::new(),
-                        O::commit(None, Location::new(0)),
-                    )
-                    .unwrap()
-                } else {
-                    open_db::<O>(owner, "context-open").await
-                };
-                tx.send(()).unwrap();
-                task.await.unwrap();
-                db.destroy().await.unwrap();
-            }
         });
     }
 
@@ -4231,7 +4195,6 @@ pub(crate) mod tests {
                 test_compact_commit_persists_across_reopen,
                 test_compact_bounded_initialization_to_committed_entry_after_reopen,
                 test_compact_sync_after_commit,
-                test_compact_context_owns_tasks,
                 test_compact_import_persists,
                 test_compact_import_then_apply_persists,
                 test_compact_import_over_unreadable_destination,

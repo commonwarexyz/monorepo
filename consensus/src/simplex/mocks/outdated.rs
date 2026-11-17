@@ -47,7 +47,8 @@ where
 
     pub fn start(self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
         self.context
-            .child("run").spawn(move |_| self.run(vote_network))
+            .child("run")
+            .spawn(move |_| self.run(vote_network))
     }
 
     async fn run(mut self, vote_network: (impl Sender, impl Receiver)) {

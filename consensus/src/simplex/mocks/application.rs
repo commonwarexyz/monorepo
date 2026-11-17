@@ -480,8 +480,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     }
 
     pub fn start(self) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run())
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {

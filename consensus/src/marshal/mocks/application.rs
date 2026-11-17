@@ -1,6 +1,5 @@
 use crate::{Block, Heightable, Reporter, marshal::Update, types::Height};
 use commonware_actor::Feedback;
-use commonware_runtime::deterministic;
 use commonware_utils::{
     Acknowledgement,
     acknowledgement::Exact,
@@ -14,7 +13,6 @@ use std::{
 /// A mock application that stores finalized blocks.
 #[derive(Clone)]
 pub struct Application<B: Block> {
-    owners: Vec<Arc<deterministic::Context>>,
     blocks: Arc<Mutex<BTreeMap<Height, Arc<B>>>>,
     #[allow(clippy::type_complexity)]
     tip: Arc<Mutex<Option<(Height, B::Digest)>>>,
@@ -27,7 +25,6 @@ impl<B: Block> Default for Application<B> {
     fn default() -> Self {
         Self {
             blocks: Default::default(),
-            owners: Default::default(),
             tip: Default::default(),
             pending_acks: Default::default(),
             notify: Arc::new(Notify::new()),
@@ -37,11 +34,6 @@ impl<B: Block> Default for Application<B> {
 }
 
 impl<B: Block> Application<B> {
-    /// Retains an owner shared by the validator actors.
-    pub(crate) fn retain_context(&mut self, context: deterministic::Context) {
-        self.owners.push(Arc::new(context));
-    }
-
     /// Returns an application that stores acks for manual release.
     pub fn manual_ack() -> Self {
         Self {

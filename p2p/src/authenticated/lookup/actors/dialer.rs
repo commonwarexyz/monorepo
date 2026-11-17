@@ -172,7 +172,8 @@ where
         supervisor: SupervisorMailbox<E, U>,
     ) -> Handle<()> {
         self.context
-            .child("run").spawn(move |_| self.run(tracker, supervisor))
+            .child("run")
+            .spawn(move |_| self.run(tracker, supervisor))
     }
 
     async fn run(

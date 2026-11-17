@@ -151,7 +151,8 @@ where
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
         self.context
-            .child("run").spawn(move |_| self.run(boundaries))
+            .child("run")
+            .spawn(move |_| self.run(boundaries))
     }
 
     async fn run<BSE, BRE>(self, (boundary_sender, boundary_receiver): (BSE, BRE))

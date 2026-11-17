@@ -61,7 +61,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
         certificate_network: (impl Sender, impl Receiver),
     ) -> Handle<()> {
         self.context
-            .child("run").spawn(move |_| self.run(vote_network, certificate_network))
+            .child("run")
+            .spawn(move |_| self.run(vote_network, certificate_network))
     }
 
     async fn run(

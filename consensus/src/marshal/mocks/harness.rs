@@ -42,7 +42,7 @@ use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _,
+    Clock, Metrics as _, Quota, Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::metrics::{
@@ -219,7 +219,7 @@ where
 {
     let participants: Vec<_> = participants.into_iter().collect();
     let (network, oracle) = Network::new_with_peers(
-        context.child("network"),
+        context,
         simulated::Config {
             max_size,
             max_peers_per_set: NZUsize!(participants.len()),
@@ -229,10 +229,7 @@ where
         participants,
     )
     .await;
-    let handle = network.start();
-    context.spawn(move |_| async move {
-        let _ = handle.await;
-    });
+    network.start();
     oracle
 }
 
@@ -285,6 +282,7 @@ pub struct ValidatorSetup<H: TestHarness> {
     pub extra: H::ValidatorExtra,
     pub height: Option<Height>,
     pub actor_handle: commonware_runtime::Handle<()>,
+    pub context: deterministic::Context,
 }
 
 impl<H: TestHarness> ValidatorSetup<H> {
@@ -463,6 +461,7 @@ pub trait TestHarness: 'static + Sized {
             Mailbox<S, Self::Variant>,
             Self::ValidatorExtra,
             Application<Self::ApplicationBlock>,
+            deterministic::Context,
         ),
     > + Send;
 
@@ -491,6 +490,7 @@ struct HailstormValidator<H: TestHarness> {
     application: Application<H::ApplicationBlock>,
     handle: ValidatorHandle<H>,
     actor_handle: commonware_runtime::Handle<()>,
+    _context: deterministic::Context,
 }
 
 type CanonicalEntry<H> = (Height, D, Finalization<S, <H as TestHarness>::Commitment>);
@@ -855,6 +855,7 @@ pub fn hailstorm<H: TestHarness>(
                     extra: setup.extra,
                 },
                 actor_handle: setup.actor_handle,
+                _context: setup.context,
             }));
         }
 
@@ -988,6 +989,7 @@ pub fn hailstorm<H: TestHarness>(
                         extra: restarted.extra,
                     },
                     actor_handle: restarted.actor_handle,
+                    _context: restarted.context,
                 };
                 for (_, _, finalization) in canonical.iter().skip(persisted_height as usize) {
                     H::report_finalization(&mut restarted.handle.mailbox, finalization.clone())
@@ -1930,7 +1932,7 @@ impl TestHarness for StandardHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        mut application: Application<Self::ApplicationBlock>,
+        application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider,
@@ -2066,7 +2068,7 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-        application.retain_context(context);
+
         let actor_handle = actor.start(application.clone(), buffer.clone(), resolver);
 
         ValidatorSetup {
@@ -2075,6 +2077,7 @@ impl TestHarness for StandardHarness {
             extra: buffer,
             height: floor.processed().map(Processed::height),
             actor_handle,
+            context,
         }
     }
 
@@ -2168,6 +2171,7 @@ impl TestHarness for StandardHarness {
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<B>,
+        deterministic::Context,
     ) {
         let control = oracle.control(validator.clone());
         let provider = ConstantProvider::new(schemes[0].clone());
@@ -2265,11 +2269,11 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-        let mut application = Application::<B>::default();
-        application.retain_context(context);
+        let application = Application::<B>::default();
+
         actor.start(application.clone(), buffer.clone(), resolver);
 
-        (mailbox, buffer, application)
+        (mailbox, buffer, application, context)
     }
 
     async fn verify_for_prune(
@@ -2304,6 +2308,7 @@ impl TestHarness for InlineHarness {
             extra: setup.extra,
             height: setup.height,
             actor_handle: setup.actor_handle,
+            context: setup.context,
         }
     }
 
@@ -2330,6 +2335,7 @@ impl TestHarness for InlineHarness {
             extra: setup.extra,
             height: setup.height,
             actor_handle: setup.actor_handle,
+            context: setup.context,
         }
     }
 
@@ -2444,6 +2450,7 @@ impl TestHarness for InlineHarness {
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<Self::ApplicationBlock>,
+        deterministic::Context,
     ) {
         StandardHarness::setup_prunable_validator(
             context,
@@ -2496,6 +2503,7 @@ impl TestHarness for DeferredHarness {
             extra: setup.extra,
             height: setup.height,
             actor_handle: setup.actor_handle,
+            context: setup.context,
         }
     }
 
@@ -2522,6 +2530,7 @@ impl TestHarness for DeferredHarness {
             extra: setup.extra,
             height: setup.height,
             actor_handle: setup.actor_handle,
+            context: setup.context,
         }
     }
 
@@ -2636,6 +2645,7 @@ impl TestHarness for DeferredHarness {
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<Self::ApplicationBlock>,
+        deterministic::Context,
     ) {
         InlineHarness::setup_prunable_validator(
             context,
@@ -2732,7 +2742,7 @@ impl TestHarness for CodingHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        mut application: Application<Self::ApplicationBlock>,
+        application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider: provider.clone(),
@@ -2869,7 +2879,7 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
-        application.retain_context(context);
+
         let actor_handle = actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         ValidatorSetup {
@@ -2878,6 +2888,7 @@ impl TestHarness for CodingHarness {
             extra: shard_mailbox,
             height: floor.processed().map(Processed::height),
             actor_handle,
+            context,
         }
     }
 
@@ -3002,6 +3013,7 @@ impl TestHarness for CodingHarness {
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<CodingB>,
+        deterministic::Context,
     ) {
         let control = oracle.control(validator.clone());
         let provider = ConstantProvider::new(schemes[0].clone());
@@ -3099,11 +3111,11 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
-        let mut application = Application::<CodingB>::default();
-        application.retain_context(context);
+        let application = Application::<CodingB>::default();
+
         actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
-        (mailbox, shard_mailbox, application)
+        (mailbox, shard_mailbox, application, context)
     }
 
     async fn verify_for_prune(
@@ -3142,6 +3154,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
+        let mut validator_contexts = Vec::new();
 
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
@@ -3152,6 +3165,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             )
             .await;
             applications.insert(validator.clone(), setup.application);
+            validator_contexts.push(setup.context);
             handles.push(ValidatorHandle {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
@@ -3558,6 +3572,7 @@ pub fn sync_height_floor<H: TestHarness>() {
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
+        let mut validator_contexts = Vec::new();
 
         // Skip first validator
         for (i, validator) in participants.iter().enumerate().skip(1) {
@@ -3569,6 +3584,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             )
             .await;
             applications.insert(validator.clone(), setup.application);
+            validator_contexts.push(setup.context);
             handles.push(ValidatorHandle {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
@@ -3749,7 +3765,8 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             }
         };
 
-        let (mut mailbox, extra, application) = init_marshal(context.child("init")).await;
+        let (mut mailbox, extra, application, _initial_context) =
+            init_marshal(context.child("init")).await;
         let _ = extra; // Used by CodingHarness, silence warning for StandardHarness
 
         let mut parent = Sha256::hash(&[b""]);
@@ -3863,7 +3880,8 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         drop(mailbox);
         drop(extra);
-        let (mailbox, _extra, _application) = init_marshal(context.child("restart")).await;
+        let (mailbox, _extra, _application, _restart_context) =
+            init_marshal(context.child("restart")).await;
 
         // Startup classifies the stored processed block.
         assert_eq!(
@@ -3914,7 +3932,7 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
 
         // Prunable archives use ten-item sections, so a floor at 20 starts a new section.
         let validator = participants[0].clone();
-        let (mut mailbox, extra, _application) = H::setup_prunable_validator(
+        let (mut mailbox, extra, _application, _validator_context) = H::setup_prunable_validator(
             context.child("validator"),
             &oracle,
             validator.clone(),
@@ -4023,16 +4041,17 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         .await;
 
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
-            context.child("victim"),
-            &oracle,
-            victim.clone(),
-            &schemes,
-            &format!("stale-floor-victim-{}", victim),
-            page_cache.clone(),
-        )
-        .await;
-        let (attacker_mailbox, attacker_extra, _attacker_application) =
+        let (mut victim_mailbox, victim_extra, _victim_application, _validator_context) =
+            H::setup_prunable_validator(
+                context.child("victim"),
+                &oracle,
+                victim.clone(),
+                &schemes,
+                &format!("stale-floor-victim-{}", victim),
+                page_cache.clone(),
+            )
+            .await;
+        let (attacker_mailbox, attacker_extra, _attacker_application, _attacker_context) =
             H::setup_prunable_validator(
                 context.child("attacker"),
                 &oracle,
@@ -4309,6 +4328,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
         .await;
 
         let mut handles = Vec::new();
+        let mut validator_contexts = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
                 context.child("validator").with_attribute("index", i),
@@ -4317,6 +4337,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
                 ConstantProvider::new(schemes[i].clone()),
             )
             .await;
+            validator_contexts.push(setup.context);
             handles.push(ValidatorHandle {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
@@ -4388,6 +4409,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
         .await;
 
         let mut handles = Vec::new();
+        let mut validator_contexts = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
                 context.child("validator").with_attribute("index", i),
@@ -4396,6 +4418,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
                 ConstantProvider::new(schemes[i].clone()),
             )
             .await;
+            validator_contexts.push(setup.context);
             handles.push(ValidatorHandle {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
@@ -4490,6 +4513,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
         .await;
 
         let mut handles = Vec::new();
+        let mut validator_contexts = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
                 context.child("validator").with_attribute("index", i),
@@ -4498,6 +4522,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
                 ConstantProvider::new(schemes[i].clone()),
             )
             .await;
+            validator_contexts.push(setup.context);
             handles.push(ValidatorHandle {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
@@ -4581,6 +4606,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
         .await;
 
         let mut handles = Vec::new();
+        let mut validator_contexts = Vec::new();
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
                 context.child("validator").with_attribute("index", i),
@@ -4589,6 +4615,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
                 ConstantProvider::new(schemes[i].clone()),
             )
             .await;
+            validator_contexts.push(setup.context);
             handles.push(ValidatorHandle {
                 mailbox: setup.mailbox,
                 extra: setup.extra,
@@ -5433,6 +5460,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 
         // Set up two validators
         let mut handles = Vec::new();
+        let mut validator_contexts = Vec::new();
         for (i, validator) in participants.iter().enumerate().take(2) {
             let setup = H::setup_validator(
                 context.child("validator").with_attribute("index", i),
@@ -5441,6 +5469,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
                 ConstantProvider::new(schemes[i].clone()),
             )
             .await;
+            validator_contexts.push(setup.context);
             handles.push(ValidatorHandle {
                 mailbox: setup.mailbox,
                 extra: setup.extra,

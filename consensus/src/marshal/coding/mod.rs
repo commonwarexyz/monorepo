@@ -134,7 +134,8 @@ mod tests {
         telemetry::metrics::{
             MetricsExt as _,
             histogram::{Buckets, Timed},
-        }, utils::reschedule,
+        },
+        utils::reschedule,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -248,7 +249,6 @@ mod tests {
     /// dropped.
     #[derive(Clone, Default)]
     struct RecordingResolver {
-        _owner: Option<Arc<deterministic::Context>>,
         fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
         active_fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
         targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
@@ -268,7 +268,6 @@ mod tests {
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
-                    _owner: None,
                     sender: Some(sender),
                 },
             )
@@ -538,15 +537,9 @@ mod tests {
         let config = test_config(partition_prefix, provider);
         let (finalizations_by_height, finalized_blocks) =
             immutable_finalized_stores(&context, partition_prefix, &config).await;
-        let (actor, mailbox, _) = core::Actor::init(
-            context.child("actor"),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        let (resolver_rx, mut resolver) = RecordingResolver::holding(context.child("resolver"));
-        resolver._owner = Some(Arc::new(context));
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let (actor, mailbox, _) =
+            core::Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
         let actor_handle = actor.start(
             Application::<CodingB>::default(),
             buffer,
@@ -4934,7 +4927,7 @@ mod tests {
             // Marshal answers a query only after it has finished with the delivery. It did not
             // cache the parent, and epoch 0 is still the only epoch with a cache.
             assert!(mailbox.get_block(&parent.digest()).await.is_none());
-            assert_eq!(opened_cache_epochs(&context, "validator_actor_cache"), [0]);
+            assert_eq!(opened_cache_epochs(&context, "validator_cache"), [0]);
 
             // Consensus then reaches epoch 64, and the validator stores a candidate of that epoch.
             let reached = Round::new(Epoch::new(64), View::new(1));
@@ -4961,7 +4954,7 @@ mod tests {
             );
             assert!(mailbox.get_block(&parent.digest()).await.is_some());
             assert_eq!(
-                opened_cache_epochs(&context, "validator_actor_cache"),
+                opened_cache_epochs(&context, "validator_cache"),
                 [0, 64]
             );
         });

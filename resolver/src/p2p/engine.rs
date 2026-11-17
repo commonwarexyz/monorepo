@@ -141,8 +141,7 @@ where
         self,
         network: (NetS, NetR),
     ) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run(network))
+        self.context.child("run").spawn(move |_| self.run(network))
     }
 
     /// Inner run loop called by `start`.

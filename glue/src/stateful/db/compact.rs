@@ -269,7 +269,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, Metrics as _, Runner as _, Supervisor as _, buffer::paged::CacheRef,
-        deterministic, telemetry::metrics::count_running_tasks,
+        deterministic,
     };
     use commonware_storage::{
         journal::contiguous::{
@@ -980,7 +980,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (source, targets) = compact_source::<O>(context.child("source"), &[7]).await;
 
-            let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
             let synced = <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
                 context.child("target"),
                 compact_config("target"),
@@ -994,9 +994,8 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(
-                count_running_tasks(&context, "target_compact_updates"),
-                0,
+            assert!(
+                update_tx.is_closed(),
                 "compact target forwarder outlived the completed sync",
             );
             drop(synced);

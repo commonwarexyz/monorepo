@@ -71,7 +71,8 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: Public
 
     pub fn start(self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) -> Handle<()> {
         self.context
-            .child("run").spawn(move |_| self.run(tracker, router))
+            .child("run")
+            .spawn(move |_| self.run(tracker, router))
     }
 
     async fn run(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) {

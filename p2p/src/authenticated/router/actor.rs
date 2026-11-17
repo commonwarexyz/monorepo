@@ -73,8 +73,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed or shutdown is signaled.
     pub fn start(self, routing: Channels<P>) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run(routing))
+        self.context.child("run").spawn(move |_| self.run(routing))
     }
 
     /// Runs the [Actor] event loop, processing incoming control and content messages.

@@ -733,8 +733,7 @@ where
         self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run(network))
+        self.context.child("run").spawn(move |_| self.run(network))
     }
 
     /// Run the shard engine's event loop.

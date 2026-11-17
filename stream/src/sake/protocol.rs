@@ -194,7 +194,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
 mod test {
     use super::*;
     use crate::{
-        Handshake as _, Upgrader as _,
+        Upgrader as _,
         cups::{self, Cups},
         sake,
         utils::{Timeout, TimeoutError},
@@ -205,10 +205,7 @@ mod test {
         BufMut, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Runner as _, Spawner as _,
         Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{
-        channel::{mpsc, oneshot},
-        sync::Mutex,
-    };
+    use commonware_utils::sync::Mutex;
     use futures::FutureExt as _;
     use std::{
         ops::Range,
@@ -225,82 +222,6 @@ mod test {
 
     type TestCups = Cups<(), ChaCha20Poly1305>;
     type TestUpgrade = Cups<Sake<PrivateKey>, ChaCha20Poly1305>;
-
-    /// Keeps child tasks alive while either side completes its handshake I/O.
-    #[test]
-    fn test_handshake_retains_context() {
-        struct ProbeSink<S> {
-            inner: S,
-            probe: Option<mpsc::UnboundedSender<oneshot::Sender<()>>>,
-        }
-
-        impl<S: Sink> Sink for ProbeSink<S> {
-            async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
-                if let Some(probe) = &self.probe {
-                    let (tx, rx) = oneshot::channel();
-                    probe.send(tx).expect("context child stopped before send");
-                    rx.await.expect("context child stopped during send");
-                }
-                self.inner.send(bufs).await
-            }
-        }
-
-        for probe_dialer in [true, false] {
-            deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-                let dialer = context.child("dialer");
-                let listener = context.child("listener");
-                let probe_context = if probe_dialer {
-                    dialer.child("probe")
-                } else {
-                    listener.child("probe")
-                };
-                let (probe, mut requests) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
-                probe_context.spawn(|_| async move {
-                    while let Some(request) = requests.recv().await {
-                        let _ = request.send(());
-                    }
-                });
-                let (dialer_sink, mut listener_stream) = mocks::Channel::init();
-                let (listener_sink, mut dialer_stream) = mocks::Channel::init();
-                let mut dialer_sink = ProbeSink {
-                    inner: dialer_sink,
-                    probe: probe_dialer.then(|| probe.clone()),
-                };
-                let mut listener_sink = ProbeSink {
-                    inner: listener_sink,
-                    probe: (!probe_dialer).then_some(probe),
-                };
-                let handshake = |seed| Sake {
-                    signer: PrivateKey::from_seed(seed),
-                    synchrony_bound: Duration::from_secs(5),
-                    max_handshake_age: Duration::from_secs(10),
-                    version: sake::Version::V1,
-                };
-                let listener_handle = context.child("handshake").spawn(move |_| async move {
-                    handshake(1)
-                        .listen(
-                            listener,
-                            NAMESPACE,
-                            |_| async { true },
-                            &mut listener_stream,
-                            &mut listener_sink,
-                        )
-                        .await
-                });
-                handshake(0)
-                    .dial(
-                        dialer,
-                        NAMESPACE,
-                        PrivateKey::from_seed(1).public_key(),
-                        &mut dialer_stream,
-                        &mut dialer_sink,
-                    )
-                    .await
-                    .unwrap();
-                listener_handle.await.unwrap().unwrap();
-            });
-        }
-    }
 
     /// Checks that a closed peer fails the first handshake frame with a send error.
     #[test]

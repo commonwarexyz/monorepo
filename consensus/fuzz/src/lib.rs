@@ -381,7 +381,7 @@ fn spawn_honest_validator<
     ResolverSender,
     ResolverReceiver,
 >(
-    context: deterministic::Context,
+    context: &deterministic::Context,
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
@@ -456,10 +456,7 @@ where
         track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
-    let handle = engine.start(pending, recovered, resolver);
-    context.spawn(move |_| async move {
-        handle.await.expect("validator engine failed");
-    });
+    engine.start(pending, recovered, resolver);
 
     reporter
 }
@@ -476,7 +473,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         let mut reporters = Vec::new();
         let config = input.configuration;
 
-        let mut disrupter_contexts = Vec::new();
+        let mut validator_contexts = Vec::new();
 
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
@@ -485,7 +482,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            disrupter_contexts.push(spawn_disrupter::<P>(
+            validator_contexts.push(spawn_disrupter::<P>(
                 ctx,
                 schemes[i].clone(),
                 &input,
@@ -501,7 +498,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 .child("validator")
                 .with_attribute("public_key", &validator);
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
-                ctx,
+                &ctx,
                 &oracle,
                 &participants,
                 input.term_length,
@@ -516,6 +513,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 recovered,
                 resolver,
             );
+            validator_contexts.push(ctx);
             reporters.push((validator, reporter));
         }
 
@@ -576,6 +574,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
+        let mut validator_contexts = Vec::new();
         let config = input.configuration;
         let term_length = input.term_length;
 
@@ -716,7 +715,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 track_historical_votes: false,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);
-            let handle = engine.start(
+            engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
                 (resolver_sender_primary, resolver_receiver_primary),
@@ -731,12 +730,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 (certificate_sender_secondary, certificate_receiver_secondary),
                 (resolver_sender_secondary, resolver_receiver_secondary),
             );
-            let handle = primary_context.spawn(move |_| async move {
-                handle.await.expect("primary engine failed");
-            });
-            context.spawn(move |_| async move {
-                handle.await.expect("twin engine failed");
-            });
+            validator_contexts.push(primary_context);
+            validator_contexts.push(context);
         }
 
         // Spawn honest validators
@@ -748,7 +743,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .remove(validator)
                 .expect("validator should be registered");
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
-                ctx,
+                &ctx,
                 &oracle,
                 participants.as_ref(),
                 input.term_length,
@@ -763,6 +758,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 recovered,
                 resolver,
             );
+            validator_contexts.push(ctx);
             reporters.push((validator, reporter));
         }
 

@@ -245,7 +245,7 @@ mod tests {
         Registrations<PublicKey>,
     ) {
         let (network, mut oracle) = Network::new_with_peers(
-            context.child("network"),
+            context,
             commonware_p2p::simulated::Config {
                 max_size: max_message_size([max_payload_size::<S, Sha256Digest>()]),
                 max_peers_per_set: NZUsize!(fixture.participants.len()),
@@ -255,10 +255,7 @@ mod tests {
             fixture.participants.clone(),
         )
         .await;
-        let handle = network.start();
-        context.spawn(move |_| async move {
-            let _ = handle.await;
-        });
+        network.start();
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
         link_participants(&mut oracle, &fixture.participants, link).await;

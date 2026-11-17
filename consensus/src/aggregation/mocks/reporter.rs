@@ -87,8 +87,7 @@ where
     where
         R: Spawner,
     {
-        self.context
-            .child("run").spawn(move |_| self.run())
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     pub async fn run(mut self) {

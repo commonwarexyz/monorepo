@@ -202,9 +202,9 @@ impl<
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context.child("run").spawn(move |_| {
-            self.run(vote_network, certificate_network, resolver_network)
-        })
+        self.context
+            .child("run")
+            .spawn(move |_| self.run(vote_network, certificate_network, resolver_network))
     }
 
     async fn run(

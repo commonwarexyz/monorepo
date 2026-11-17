@@ -100,8 +100,7 @@ where
         self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run(net))
+        self.context.child("run").spawn(move |_| self.run(net))
     }
 
     async fn run(

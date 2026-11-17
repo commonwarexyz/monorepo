@@ -882,14 +882,14 @@ mod tests {
             );
 
             // Give the peer all blocks so it can serve them during repair.
-            let mut peer_mailbox = StandardHarness::setup_validator(
+            let peer_setup = StandardHarness::setup_validator(
                 context.child("peer_validator"),
                 &mut oracle,
                 peer_validator.clone(),
                 ConstantProvider::new(schemes[1].clone()),
             )
-            .await
-            .mailbox;
+            .await;
+            let mut peer_mailbox = peer_setup.mailbox;
 
             assert!(
                 peer_mailbox
@@ -992,14 +992,14 @@ mod tests {
             );
 
             // Give the peer all blocks so it can serve them during repair.
-            let mut peer_mailbox = StandardHarness::setup_validator(
+            let peer_setup = StandardHarness::setup_validator(
                 context.child("peer_validator"),
                 &mut oracle,
                 peer_validator.clone(),
                 ConstantProvider::new(schemes[1].clone()),
             )
-            .await
-            .mailbox;
+            .await;
+            let mut peer_mailbox = peer_setup.mailbox;
 
             assert!(
                 peer_mailbox
@@ -1700,14 +1700,14 @@ mod tests {
             }
 
             // Give the peer all blocks and finalizations.
-            let mut peer_mailbox = StandardHarness::setup_validator(
+            let peer_setup = StandardHarness::setup_validator(
                 context.child("peer_validator"),
                 &mut oracle,
                 peer_validator.clone(),
                 ConstantProvider::new(schemes[1].clone()),
             )
-            .await
-            .mailbox;
+            .await;
+            let mut peer_mailbox = peer_setup.mailbox;
             for (i, block) in blocks.iter().enumerate() {
                 assert!(
                     peer_mailbox
@@ -1804,14 +1804,14 @@ mod tests {
             // Give the peer every block, but the recovering validator will only
             // know the tip finalization. The repair loop must fetch blocks
             // 18 down to 2 by commitment.
-            let peer_mailbox = StandardHarness::setup_validator(
+            let peer_setup = StandardHarness::setup_validator(
                 context.child("peer_validator"),
                 &mut oracle,
                 peer_validator.clone(),
                 ConstantProvider::new(schemes[1].clone()),
             )
-            .await
-            .mailbox;
+            .await;
+            let peer_mailbox = peer_setup.mailbox;
             for block in blocks.iter() {
                 assert!(
                     peer_mailbox
@@ -2178,7 +2178,7 @@ mod tests {
                 || !resolver.fetches().is_empty(),
             )
             .await;
-            assert_eq!(opened_cache_epochs(&context, "first_actor_cache"), vec![64]);
+            assert_eq!(opened_cache_epochs(&context, "first_cache"), vec![64]);
             handle.abort();
             let _ = handle.await;
             drop(mailbox);
@@ -2201,7 +2201,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                opened_cache_epochs(&context, "restarted_actor_cache"),
+                opened_cache_epochs(&context, "restarted_cache"),
                 vec![64],
                 "restart must open only the floor's epoch"
             );
@@ -6789,7 +6789,6 @@ mod tests {
     /// actor's corresponding receiver stays alive when nothing else owns it.
     #[derive(Clone, Default)]
     struct RecordingResolver {
-        _owner: Option<Arc<deterministic::Context>>,
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
         active_fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
@@ -6811,7 +6810,6 @@ mod tests {
                     retains: Arc::new(Mutex::new(0)),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
-                    _owner: None,
                     sender: Some(sender),
                 },
             )
@@ -7168,15 +7166,9 @@ mod tests {
         )
         .await
         .expect("failed to initialize finalized blocks archive");
-        let (actor, mailbox, _) = Actor::init(
-            context.child("actor"),
-            finalizations_by_height,
-            finalized_blocks,
-            config,
-        )
-        .await;
-        let (resolver_rx, mut resolver) = RecordingResolver::holding(context.child("mailbox"));
-        resolver._owner = Some(Arc::new(context));
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let (actor, mailbox, _) =
+            Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
         let actor_handle = if let Some(buffer) = buffer.clone() {
             actor.start(application, buffer, (resolver_rx, resolver.clone()))
         } else {

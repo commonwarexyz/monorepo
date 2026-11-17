@@ -221,8 +221,7 @@ where
 
     /// Start the background receiver.
     pub fn start(self) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run())
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     /// Run the background receiver's event loop.
@@ -325,9 +324,9 @@ mod tests {
 
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(64));
 
-    fn start_network(context: &deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
+    fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
-            context.child("network"),
+            context,
             simulated::Config {
                 max_size: 1024 * 1024,
                 max_peers_per_set: NZUsize!(3),
@@ -425,8 +424,7 @@ mod tests {
     fn test_valid_messages_forwarded() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -460,8 +458,7 @@ mod tests {
     fn test_invalid_codec_blocks_peer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -521,8 +518,7 @@ mod tests {
     fn test_multiple_valid_messages() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -564,8 +560,7 @@ mod tests {
     fn test_decode_with_strategy() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);
@@ -607,8 +602,7 @@ mod tests {
     fn test_invalid_among_valid_only_blocks_offender() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let pk1 = pk(0);
             let pk2 = pk(1);

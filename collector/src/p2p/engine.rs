@@ -101,7 +101,8 @@ where
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
         self.context
-            .child("run").spawn(move |_| self.run(requests, responses))
+            .child("run")
+            .spawn(move |_| self.run(requests, responses))
     }
 
     async fn run(

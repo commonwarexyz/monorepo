@@ -1754,15 +1754,6 @@ where
     .await
 }
 
-/// Aborts an adapter task when its owning sync future completes or is cancelled.
-struct Forwarder(Handle<()>);
-
-impl Drop for Forwarder {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Syncs a compact database, which does not persist its operation log.
 ///
 /// A compact target that does not convert to an engine target fails the sync when passed as
@@ -1779,7 +1770,7 @@ pub(crate) async fn sync_compact_db<E, DB, S>(
     sync_config: SyncEngineConfig,
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
-    E: Metrics + Spawner,
+    E: Metrics,
     DB: sync::Database<Context = E>,
     S: sync::SourceFor<DB>,
 {
@@ -1795,7 +1786,7 @@ where
     }
 
     let (update_tx, update_rx) = ring::channel(NZUsize!(1));
-    let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
+    let update_forwarder = async move {
         while let Some(update) = tip_updates.recv().await {
             let Ok(update) = sync::Target::try_from(&update) else {
                 continue;
@@ -1804,12 +1795,14 @@ where
                 break;
             }
         }
-    }));
+    };
 
-    let reached_target_tx = reached_target.map(|reached| {
-        let (tx, mut rx) = ring::channel::<sync::Target<DB::Family, DB::Digest>>(NZUsize!(1));
-        context.child("compact_reached").spawn(move |_| async move {
-            while let Some(reached_engine_target) = rx.recv().await {
+    let (reached_target_tx, mut reached_rx) =
+        ring::channel::<sync::Target<DB::Family, DB::Digest>>(NZUsize!(1));
+    let reached_target_tx = reached_target.as_ref().map(|_| reached_target_tx);
+    let reached_forwarder = async move {
+        if let Some(reached) = reached_target {
+            while let Some(reached_engine_target) = reached_rx.recv().await {
                 let target = sync::CompactTarget {
                     root: reached_engine_target.root,
                     size: reached_engine_target.range.end(),
@@ -1818,25 +1811,32 @@ where
                     break;
                 }
             }
-        });
-        tx
-    });
+        }
+    };
 
-    let result = sync::sync(sync::Config {
-        context,
-        source,
-        target: initial,
-        db_config: config,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        update_rx: Some(update_rx),
-        finish_rx: finish,
-        reached_target_tx,
-    })
-    .await;
-    drop(update_forwarder);
-    result
+    let syncing = async move {
+        let (result, ()) = futures::join!(
+            sync::sync(sync::Config {
+                context,
+                source,
+                target: initial,
+                db_config: config,
+                fetch_batch_size: sync_config.fetch_batch_size,
+                apply_batch_size: sync_config.apply_batch_size,
+                max_outstanding_requests: sync_config.max_outstanding_requests,
+                update_rx: Some(update_rx),
+                finish_rx: finish,
+                reached_target_tx,
+            }),
+            reached_forwarder
+        );
+        result
+    };
+    futures::pin_mut!(syncing);
+    commonware_macros::select! {
+        result = &mut syncing => result,
+        _ = update_forwarder => syncing.await,
+    }
 }
 
 #[tracing::instrument(name = "stateful.db.apply", level = "info", skip_all, fields(index = index))]

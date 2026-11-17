@@ -216,7 +216,11 @@ impl MarshalFixture {
     pub(crate) async fn abort(self) {
         let guards = self
             .guards
-            .downcast::<(deterministic::Context, handler::Handler<Sha256Digest>, Handle<()>)>()
+            .downcast::<(
+                deterministic::Context,
+                handler::Handler<Sha256Digest>,
+                Handle<()>,
+            )>()
             .unwrap_or_else(|_| panic!("marshal fixture was not started"));
         let (_context, _, handle) = *guards;
         handle.abort();

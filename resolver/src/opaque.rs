@@ -23,7 +23,7 @@ use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, Handle, Metrics, Spawner,
+    Clock, Metrics, Spawner,
     telemetry::metrics::{MetricsExt as _, status, status::Status},
 };
 use commonware_utils::{
@@ -189,12 +189,7 @@ where
         consumer,
         fetch_retry_delay,
     );
-    // The actor runs under a child of `context`, so a task keeps `context` open for as
-    // long as the actor runs.
-    let actor = actor.start();
-    context.spawn(move |_| async move {
-        let _ = actor.await;
-    });
+    context.spawn(move |_| actor.run());
     Resolver::new(mailbox_tx)
 }
 
@@ -265,11 +260,6 @@ where
             retry_schedule: BTreeSet::new(),
             fetch_retry_delay,
         }
-    }
-
-    fn start(self) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {

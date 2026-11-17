@@ -27,7 +27,6 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
-use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
 
@@ -210,8 +209,7 @@ where
     /// verifications wait until it completes. Otherwise it recovers from marshal before handling
     /// any message. See [Startup](crate::stateful#startup).
     pub fn start(self) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run())
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     async fn run(self) {
@@ -253,7 +251,8 @@ where
             metrics,
             strategy: self.strategy,
         };
-        let _ = join!(syncer.start(), syncing.run());
+        syncer.start();
+        syncing.run().await;
     }
 
     /// Opens the database set from marshal, records completion, then runs processing.

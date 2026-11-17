@@ -992,8 +992,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
     pub fn start(self) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run())
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {
@@ -1382,7 +1381,7 @@ impl<P: PublicKey> Receiver<P> {
 ///
 /// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
 struct Peer<P: PublicKey, E> {
-    // Owns the router and listener until the peer is removed.
+    // Keeps the router and listener scope open for the lifetime of the peer.
     _context: E,
 
     // Socket address that the peer is listening on

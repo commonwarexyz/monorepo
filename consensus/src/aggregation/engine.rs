@@ -214,8 +214,7 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         ),
     ) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run(network))
+        self.context.child("run").spawn(move |_| self.run(network))
     }
 
     /// Inner run loop called by `start`.

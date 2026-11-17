@@ -104,8 +104,7 @@ where
     }
 
     pub fn start(self) -> Handle<()> {
-        self.context
-            .child("run").spawn(move |_| self.run())
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {
