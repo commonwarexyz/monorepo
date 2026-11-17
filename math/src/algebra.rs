@@ -374,6 +374,23 @@ pub trait CryptoGroup: Space<Self::Scalar> {
     fn generator() -> Self;
 }
 
+/// A [`Field`] which messages can be hashed into.
+///
+/// Protocols use this capability to derive challenges and other elements that
+/// must look uniformly random, but be reproducible from public data.
+///
+/// # Properties
+///
+/// - equal `(domain_separator, message)` pairs satisfy
+///   `hash_to_field(dst0, m0) = hash_to_field(dst1, m1)` whenever
+///   `(dst0, m0) = (dst1, m1)`.
+pub trait HashToField: Field {
+    /// Hash a domain separator, and a message, returning a field element.
+    ///
+    /// The result should be indistinguishable from a uniformly random element.
+    fn hash_to_field(domain_separator: &[u8], message: &[u8]) -> Self;
+}
+
 /// A [`CryptoGroup`] which supports obliviously sampling elements.
 ///
 /// This capability is also often referred to as "hash to curve", in the
@@ -663,6 +680,24 @@ pub mod test_suites {
         let a: K = u.arbitrary()?;
         check_scale_one::<R, K>(a.clone());
         check_scale_zero::<R, K>(a);
+        Ok(())
+    }
+
+    fn check_hash_to_field<F: HashToField>(data: [[u8; 4]; 4]) {
+        let (dst0, m0, dst1, m1) = (&data[0], &data[1], &data[2], &data[3]);
+        assert_eq!(
+            (dst0, m0) == (dst1, m1),
+            F::hash_to_field(dst0, m0) == F::hash_to_field(dst1, m1)
+        );
+    }
+
+    /// Fuzz the [`HashToField`] trait properties.
+    ///
+    /// Takes arbitrary data and checks that the hash function is deterministic.
+    /// This doesn't check any properties related to [`Field`].
+    pub fn fuzz_hash_to_field<F: HashToField>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let data: [[u8; 4]; 4] = u.arbitrary()?;
+        check_hash_to_field::<F>(data);
         Ok(())
     }
 
