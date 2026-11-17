@@ -1,4 +1,4 @@
-use crate::bls12381::primitives::{Error, variant::Variant};
+use crate::bls::{Error, variant::Variant};
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]

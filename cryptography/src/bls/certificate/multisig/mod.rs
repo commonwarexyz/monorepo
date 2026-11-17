@@ -1,6 +1,6 @@
-//! BLS12-381 multi-signature signing scheme implementation.
+//! BLS multi-signature signing scheme implementation.
 //!
-//! This module provides both the generic BLS12-381 multisig implementation and a macro to generate
+//! This module provides both the generic BLS multisig implementation and a macro to generate
 //! protocol-specific wrappers.
 //!
 //! # Proof of Possession
@@ -8,7 +8,7 @@
 //! Before constructing a scheme, callers must verify a proof of possession (PoP) for every BLS
 //! public key in the participant map. Without it, aggregate certificate verification is vulnerable
 //! to rogue-key attacks. Verify each PoP during participant registration with
-//! [`verify_proof_of_possession`](crate::bls12381::primitives::ops::verify_proof_of_possession),
+//! [`verify_proof_of_possession`](crate::bls::ops::verify_proof_of_possession),
 //! then construct schemes only from the validated participant set.
 
 #[cfg(feature = "mocks")]
@@ -16,9 +16,10 @@ pub mod mocks;
 
 use crate::{
     PublicKey,
-    bls12381::primitives::{
+    bls::{
         key::Private,
-        ops::{self, aggregate, batch},
+        ops,
+        ops::{aggregate, batch},
         variant::Variant,
     },
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
@@ -40,7 +41,7 @@ use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
-/// Generic BLS12-381 multi-signature implementation.
+/// Generic BLS multi-signature implementation.
 ///
 /// This struct contains the core cryptographic operations without protocol-specific
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
@@ -71,7 +72,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// This function does not verify proofs of possession. The caller must verify a PoP for every
     /// BLS public key in `participants` before constructing the scheme. See the [module-level
-    /// documentation](crate::bls12381::certificate::multisig) for details.
+    /// documentation](crate::bls::certificate::multisig) for details.
     pub fn signer(
         namespace: &[u8],
         participants: BiMap<P, V::Public>,
@@ -101,7 +102,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// This function does not verify proofs of possession. The caller must verify a PoP for every
     /// BLS public key in `participants` before constructing the scheme. See the [module-level
-    /// documentation](crate::bls12381::certificate::multisig) for details.
+    /// documentation](crate::bls::certificate::multisig) for details.
     pub fn verifier(namespace: &[u8], participants: BiMap<P, V::Public>) -> Self {
         Self {
             participants,
@@ -347,7 +348,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 }
 
-/// Certificate formed by an aggregated BLS12-381 signature plus the signers that
+/// Certificate formed by an aggregated BLS signature plus the signers that
 /// contributed to it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Certificate<V: Variant> {
@@ -403,7 +404,7 @@ where
     }
 }
 
-/// Generates a BLS12-381 multisig signing scheme wrapper for a specific protocol.
+/// Generates a BLS multisig signing scheme wrapper for a specific protocol.
 ///
 /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
 /// implementation, and a `fixture` function for testing when this crate's `mocks` feature is
@@ -446,7 +447,7 @@ where
 macro_rules! impl_certificate_bls12381_multisig {
     ($subject:ty, $namespace:ty, $faults:ty) => {
         $crate::cfg_mocks! {
-            /// Generates a test fixture with Ed25519 identities and BLS12-381 multisig schemes.
+            /// Generates a test fixture with Ed25519 identities and BLS multisig schemes.
             ///
             /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
             /// scheme instances share a consistent ordering.
@@ -456,10 +457,10 @@ macro_rules! impl_certificate_bls12381_multisig {
                 n: u32,
             ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
             where
-                V: $crate::bls12381::primitives::variant::Variant,
+                V: $crate::bls::variant::Variant,
                 R: rand_core::CryptoRng,
             {
-                $crate::bls12381::certificate::multisig::mocks::fixture::<_, V, _>(
+                $crate::bls::certificate::multisig::mocks::fixture::<_, V, _>(
                     rng,
                     namespace,
                     n,
@@ -469,24 +470,24 @@ macro_rules! impl_certificate_bls12381_multisig {
             }
         }
 
-        /// BLS12-381 multi-signature signing scheme wrapper.
+        /// BLS multi-signature signing scheme wrapper.
         ///
         /// Every participant BLS public key must have a verified proof of possession before this
         /// scheme is constructed.
         #[derive(Clone, Debug)]
         pub struct Scheme<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > {
             /// Verification state, plus the signing material of a signer.
-            generic: $crate::bls12381::certificate::multisig::Generic<P, V, $namespace>,
+            generic: $crate::bls::certificate::multisig::Generic<P, V, $namespace>,
             /// Index of the local identity key for an instance built with [`Self::member`].
             member: Option<commonware_utils::Participant>,
         }
 
         impl<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > Scheme<P, V> {
             /// Creates a new scheme instance with the provided key material.
             ///
@@ -497,12 +498,12 @@ macro_rules! impl_certificate_bls12381_multisig {
             pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::BiMap<P, V::Public>,
-                private_key: $crate::bls12381::primitives::key::Private<
-                    <V as $crate::bls12381::primitives::variant::Variant>::Scalar,
+                private_key: $crate::bls::key::Private<
+                    <V as $crate::bls::variant::Variant>::Scalar,
                 >,
             ) -> Option<Self> {
                 Some(Self {
-                    generic: $crate::bls12381::certificate::multisig::Generic::signer(
+                    generic: $crate::bls::certificate::multisig::Generic::signer(
                         namespace,
                         participants,
                         private_key,
@@ -525,7 +526,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 participants: commonware_utils::ordered::BiMap<P, V::Public>,
             ) -> Self {
                 Self {
-                    generic: $crate::bls12381::certificate::multisig::Generic::verifier(
+                    generic: $crate::bls::certificate::multisig::Generic::verifier(
                         namespace,
                         participants,
                     ),
@@ -555,7 +556,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 let member =
                     commonware_utils::ordered::Quorum::index(participants.keys(), public_key)?;
                 Some(Self {
-                    generic: $crate::bls12381::certificate::multisig::Generic::verifier(
+                    generic: $crate::bls::certificate::multisig::Generic::verifier(
                         namespace,
                         participants,
                     ),
@@ -566,12 +567,12 @@ macro_rules! impl_certificate_bls12381_multisig {
 
         impl<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > $crate::certificate::Verifier for Scheme<P, V> {
             type Subject<'a, D: $crate::Digest> = $subject;
             type Faults = $faults;
             type PublicKey = P;
-            type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
+            type Certificate = $crate::bls::certificate::multisig::Certificate<V>;
 
             fn verify_certificate<R, D>(
                 &self,
@@ -604,11 +605,11 @@ macro_rules! impl_certificate_bls12381_multisig {
             }
 
             fn is_batchable() -> bool {
-                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_batchable()
+                $crate::bls::certificate::multisig::Generic::<P, V, $namespace>::is_batchable()
             }
 
             fn max_certificate_size(participants: u32) -> usize {
-                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::max_certificate_size(participants)
+                $crate::bls::certificate::multisig::Generic::<P, V, $namespace>::max_certificate_size(participants)
             }
 
             fn certificate_codec_config(
@@ -618,13 +619,13 @@ macro_rules! impl_certificate_bls12381_multisig {
             }
 
             fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
+                $crate::bls::certificate::multisig::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
             }
         }
 
         impl<
             P: $crate::PublicKey,
-            V: $crate::bls12381::primitives::variant::Variant,
+            V: $crate::bls::variant::Variant,
         > $crate::certificate::Scheme for Scheme<P, V> {
             type Signature = V::Signature;
 
@@ -711,7 +712,7 @@ macro_rules! impl_certificate_bls12381_multisig {
             }
 
             fn is_attributable() -> bool {
-                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_attributable()
+                $crate::bls::certificate::multisig::Generic::<P, V, $namespace>::is_attributable()
             }
         }
     };
@@ -722,13 +723,11 @@ mod tests {
     use super::*;
     use crate::{
         Signer as _,
-        bls12381::primitives::{
-            key::Private,
-            ops::compute_public,
-            variant::{MinPk, MinSig, Variant},
-        },
+        bls::{key::Private, ops::compute_public, variant::Variant},
+        bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{Attestation, Membership, Scheme as _, Verifier as _},
-        ed25519::{self, PrivateKey as Ed25519PrivateKey},
+        ed25519,
+        ed25519::PrivateKey as Ed25519PrivateKey,
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
@@ -770,6 +769,7 @@ mod tests {
     }
 
     /// Returns `n` consensus keys and the participants they form.
+    #[allow(clippy::type_complexity)]
     fn setup_keys<V: Variant>(
         rng: &mut impl CryptoRng,
         n: u32,

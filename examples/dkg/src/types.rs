@@ -14,13 +14,14 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Reveal},
-        primitives::{
-            group::{Scalar, Share},
-            sharing::{Mode, ModeVersion},
-            variant::{MinSig, Variant},
-        },
+        sharing::{Mode, ModeVersion},
+        variant::Variant,
+    },
+    bls12381::primitives::{
+        group::{Scalar, Share},
+        variant::MinSig,
     },
     certificate::{Provider as CertificateProvider, Scoped},
     ed25519, sha256,
@@ -687,10 +688,8 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         Signer as _,
-        bls12381::{
-            dkg::feldman_desmedt::{Dealer, Info, deal},
-            primitives::group::Scalar,
-        },
+        bls::dkg::feldman_desmedt::{Dealer, Info, deal},
+        bls12381::primitives::group::Scalar,
     };
     use commonware_glue::dkg::SecretStore as _;
     use commonware_math::algebra::Random;

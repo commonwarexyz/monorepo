@@ -8,9 +8,7 @@ use commonware_consensus::{
     Heightable as _, marshal::core::Variant as MarshalVariant,
     simplex::scheme::Scheme as SimplexScheme, types::Epocher,
 };
-use commonware_cryptography::{
-    BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
-};
+use commonware_cryptography::{BatchVerifier, Signer, bls::variant::Variant as BlsVariant};
 use commonware_macros::select_loop;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;

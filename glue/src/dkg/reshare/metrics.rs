@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{
     PublicKey,
-    bls12381::{dkg::feldman_desmedt::Output, primitives::variant::Variant},
+    bls::{dkg::feldman_desmedt::Output, variant::Variant},
 };
 use commonware_runtime::{
     Metrics as RuntimeMetrics,

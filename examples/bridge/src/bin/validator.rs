@@ -13,11 +13,11 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     ChaCha20Poly1305, Sha256, Signer as _,
-    bls12381::primitives::{
-        group,
+    bls::{
         sharing::{ModeVersion, Sharing},
-        variant::{MinSig, Variant},
+        variant::Variant,
     },
+    bls12381::primitives::{group, variant::MinSig},
     ed25519, sha256,
 };
 use commonware_formatting::from_hex;

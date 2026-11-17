@@ -37,9 +37,8 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
-    bls12381::{
-        dkg::feldman_desmedt::Reveal,
-        primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
+    bls::{
+        dkg::feldman_desmedt::Reveal, sharing::Mode as SharingMode, variant::Variant as BlsVariant,
     },
 };
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};

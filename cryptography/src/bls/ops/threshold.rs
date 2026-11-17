@@ -1,4 +1,4 @@
-//! Threshold signature operations for BLS12-381.
+//! Threshold signature operations for BLS.
 //!
 //! This module provides functions for threshold signature schemes, including:
 //! - Partial signing and verification
@@ -341,13 +341,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::{
-        dkg::feldman_desmedt as dkg,
-        primitives::{
+    use crate::{
+        bls::{
+            dkg::feldman_desmedt as dkg, key::Private, ops, ops::hash_with_namespace, sharing::Mode,
+        },
+        bls12381::primitives::{
             group::{G1_MESSAGE, G2_MESSAGE},
-            key::Private,
-            ops::{self, hash_with_namespace},
-            sharing::Mode,
             variant::{MinPk, MinSig},
         },
     };
@@ -1137,7 +1136,7 @@ mod tests {
         let pk2 = sharing.partial_public(partial2.index).unwrap();
         let pk_sum = pk1 + &pk2;
         let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
-        crate::bls12381::primitives::ops::verify_hashed::<V>(&pk_sum, &hm, &forged_sum)
+        crate::bls::ops::verify_hashed::<V>(&pk_sum, &hm, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_partials = [forged_partial1, forged_partial2];
@@ -1221,7 +1220,7 @@ mod tests {
         let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
         let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
-        crate::bls12381::primitives::ops::verify_hashed::<V>(&pk, &hm_sum, &forged_sum)
+        crate::bls::ops::verify_hashed::<V>(&pk, &hm_sum, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_entries = [

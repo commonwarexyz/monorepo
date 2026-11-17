@@ -1,4 +1,4 @@
-//! Feldman/Desmedt Distributed Key Generation (DKG) and Resharing for BLS12-381.
+//! Feldman/Desmedt Distributed Key Generation (DKG) and Resharing for BLS.
 //!
 //! This module implements a Feldman/Desmedt-style DKG and Resharing protocol. Unlike other
 //! constructions, this construction does not require encrypted shares to be publicly broadcast to
@@ -250,11 +250,14 @@
 //! # Example
 //!
 //! ```
-//! use commonware_cryptography::bls12381::{
-//!     dkg::feldman_desmedt::{
-//!         Dealer, Info, Logs, Player, Reveal, SignedDealerLog, observe,
+//! use commonware_cryptography::{
+//!     bls::{
+//!         dkg::feldman_desmedt::{
+//!             Dealer, Info, Logs, Player, Reveal, SignedDealerLog, observe,
+//!         },
+//!         sharing::Mode,
 //!     },
-//!     primitives::{variant::MinSig, sharing::Mode},
+//!     bls12381::primitives::variant::MinSig,
 //! };
 //! use commonware_cryptography::{ed25519, Signer};
 //! use commonware_math::algebra::Random;
@@ -358,7 +361,7 @@
 
 use crate::{
     BatchEntry, BatchVerifier, PublicKey, Secret, Signer,
-    bls12381::primitives::{
+    bls::{
         key::{Private, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::{ScalarReadCfg, Variant},
@@ -599,7 +602,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
 
     /// Get the public polynomial associated with this output.
     ///
-    /// This is useful for verifying partial signatures, with [crate::bls12381::primitives::ops::threshold::verify_message].
+    /// This is useful for verifying partial signatures, with [crate::bls::ops::threshold::verify_message].
     pub const fn public(&self) -> &Sharing<V> {
         &self.public
     }
@@ -1429,6 +1432,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn zip_players<'a, 'b>(
         &'a self,
         players: &'b Set<P>,
@@ -2048,6 +2052,7 @@ pub fn observe<V: Variant, P: BatchVerifier, M: Faults>(
 /// The player is attempting to get a share of the key.
 ///
 /// They need not have participated in prior rounds.
+#[allow(clippy::type_complexity)]
 pub struct Player<V: Variant, S: Signer> {
     me: S,
     me_pub: S::PublicKey,
@@ -2318,10 +2323,7 @@ mod test_plan {
     use super::*;
     use crate::{
         PublicKey,
-        bls12381::primitives::{
-            ops::{self, threshold},
-            variant::Variant,
-        },
+        bls::{ops, ops::threshold, variant::Variant},
         ed25519,
     };
     use anyhow::anyhow;
@@ -2744,6 +2746,7 @@ mod test_plan {
                     .collect::<anyhow::Result<Vec<_>>>()?
                     .try_into()
                     .unwrap();
+                #[allow(clippy::type_complexity)]
                 let mut acked_dealings: BTreeMap<
                     ed25519::PublicKey,
                     Vec<(

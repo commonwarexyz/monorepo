@@ -53,15 +53,16 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{Reveal, deal},
-        primitives::{group::Share, sharing::Mode, variant::MinPk},
+        sharing::Mode,
     },
+    bls12381::primitives::{group::Share, variant::MinPk},
     certificate::{
         ConstantProvider, Membership, Provider as CertificateProvider, Scheme as _, Scoped,
     },
-    ed25519,
-    sha256::{self, Digest as Sha256Digest},
+    ed25519, sha256,
+    sha256::Digest as Sha256Digest,
 };
 use commonware_formatting::hex;
 use commonware_macros::{test_group, test_traced};

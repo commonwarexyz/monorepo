@@ -1,9 +1,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::bls12381::{
-    dkg::feldman_desmedt::FuzzPlan,
-    primitives::variant::{MinPk, MinSig},
+use commonware_cryptography::{
+    bls::dkg::feldman_desmedt::FuzzPlan,
+    bls12381::primitives::variant::{MinPk, MinSig},
 };
 use libfuzzer_sys::fuzz_target;
 

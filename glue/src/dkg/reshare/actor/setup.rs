@@ -21,9 +21,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{Info, Output},
-        primitives::{key::Share, variant::Variant as BlsVariant},
+        key::Share,
+        variant::Variant as BlsVariant,
     },
     transcript::Summary,
 };
@@ -419,9 +420,9 @@ mod tests {
     };
     use commonware_cryptography::{
         Digested, Digestible as _, Signer,
-        bls12381::{
+        bls::{
             dkg::feldman_desmedt::{Info, Player, Reveal, deal},
-            primitives::sharing::Mode,
+            sharing::Mode,
         },
         ed25519::{PrivateKey, PublicKey},
     };

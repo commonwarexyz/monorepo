@@ -2,7 +2,7 @@
 //!
 //! `dkg` creates a BLS12-381 threshold key with a one-shot [`bootstrap`] ceremony and
 //! rotates its shares across application epochs with [`reshare`]. Both use
-//! [Feldman-Desmedt](commonware_cryptography::bls12381::dkg::feldman_desmedt) DKG and resharing.
+//! [Feldman-Desmedt](commonware_cryptography::bls::dkg::feldman_desmedt) DKG and resharing.
 //!
 //! # Overview
 //!
@@ -203,9 +203,10 @@ use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
 use commonware_cryptography::{
     PublicKey,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
-        primitives::{key::Share, variant::Variant},
+        key::Share,
+        variant::Variant,
     },
     transcript::Summary,
 };

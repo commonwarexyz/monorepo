@@ -63,18 +63,19 @@ use commonware_codec::{
     Buf, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
 };
 #[commonware_macros::stability(ALPHA)]
-use commonware_cryptography::bls12381::tle;
+use commonware_cryptography::bls12381::{primitives::group::Scalar, tle};
 use commonware_cryptography::{
     Digest, PublicKey,
-    bls12381::primitives::{
-        group::Scalar,
+    bls::{
         key::Share,
-        ops::{self, batch, threshold},
+        ops,
+        ops::{batch, threshold},
         sharing::Sharing,
         variant::{PartialSignature, Variant},
     },
+    certificate,
     certificate::{
-        self, AssemblyError, Attestation, Membership, Signers, Subject as CertificateSubject,
+        AssemblyError, Attestation, Membership, Signers, Subject as CertificateSubject,
         Verification,
     },
 };
@@ -395,7 +396,7 @@ where
     V: Variant,
     R: rand_core::CryptoRng,
 {
-    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+    commonware_cryptography::bls::certificate::threshold::mocks::fixture::<_, V, _>(
         rng,
         namespace,
         n,
@@ -1035,14 +1036,10 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         Hasher, Sha256, Signer as _,
-        bls12381::{
-            dkg::feldman_desmedt as dkg,
-            primitives::{
-                group::Scalar,
-                ops::threshold,
-                sharing::Mode,
-                variant::{MinPk, MinSig, Variant},
-            },
+        bls::{dkg::feldman_desmedt as dkg, ops::threshold, sharing::Mode, variant::Variant},
+        bls12381::primitives::{
+            group::Scalar,
+            variant::{MinPk, MinSig},
         },
         certificate::{Scheme as _, Verifier as _, mocks::Fixture},
         ed25519,

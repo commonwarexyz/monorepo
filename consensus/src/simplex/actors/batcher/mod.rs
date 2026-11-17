@@ -76,7 +76,8 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer,
-        bls12381::primitives::variant::{MinPk, MinSig, Variant},
+        bls::variant::Variant,
+        bls12381::primitives::variant::{MinPk, MinSig},
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
         sha256::Digest as Sha256Digest,

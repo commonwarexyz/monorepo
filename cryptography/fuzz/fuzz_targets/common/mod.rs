@@ -1,11 +1,14 @@
 use arbitrary::Unstructured;
 use commonware_codec::ReadExt;
-use commonware_cryptography::bls12381::{
-    primitives::{
-        group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Scalar, Share},
-        variant::{MinPk, MinSig, PartialSignature, Variant},
+use commonware_cryptography::{
+    bls::variant::{PartialSignature, Variant},
+    bls12381::{
+        primitives::{
+            group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Scalar, Share},
+            variant::{MinPk, MinSig},
+        },
+        tle::{Block, Ciphertext},
     },
-    tle::{Block, Ciphertext},
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Twin},

@@ -14,9 +14,8 @@ use commonware_consensus::{
     types::View,
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _,
-    bls12381::primitives::variant::{MinSig, Variant},
-    ed25519::{self, PublicKey},
+    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _, bls::variant::Variant,
+    bls12381::primitives::variant::MinSig, ed25519, ed25519::PublicKey,
     sha256::Digest as Sha256Digest,
 };
 use commonware_formatting::from_hex;

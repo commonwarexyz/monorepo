@@ -1,15 +1,11 @@
 use super::utils::optimistic_assemble::{BenchSubject, Case, bench_case};
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{
-        dkg::feldman_desmedt::deal,
-        primitives::{
-            sharing::Mode,
-            variant::{MinPk, MinSig, Variant},
-        },
-    },
+    bls::{dkg::feldman_desmedt::deal, sharing::Mode, variant::Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
     certificate::{Attestation, Scheme as _},
-    ed25519::{self, PrivateKey},
+    ed25519,
+    ed25519::PrivateKey,
     impl_certificate_bls12381_threshold,
     sha256::Digest as Sha256Digest,
 };

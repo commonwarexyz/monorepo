@@ -1,7 +1,7 @@
 //! Non-interactive Distributed Key Generation (DKG) and Resharing for BLS12-381.
 //!
 //! This module implements a non-interactive DKG and Resharing protocol for the BLS12-381
-//! curve. Unlike the interactive [`super::feldman_desmedt`] protocol, this construction requires no
+//! curve. Unlike the interactive [`feldman_desmedt`](crate::bls::dkg::feldman_desmedt) protocol, this construction requires no
 //! back-and-forth between dealers and players. Each dealer publishes a single message,
 //! and any observer can verify correctness and compute the public output without private
 //! key material.
@@ -128,10 +128,13 @@ mod evrf;
 
 use crate::{
     Signer as _, Verifier as _,
+    bls::{
+        sharing::{Mode, ModeVersion, Sharing},
+        variant::ScalarReadCfg,
+    },
     bls12381::primitives::{
         group::{G1, Private, Scalar, Share, SmallScalar},
-        sharing::{Mode, ModeVersion, Sharing},
-        variant::{MinPk, ScalarReadCfg},
+        variant::MinPk,
     },
     transcript::{Summary, Transcript, Version},
 };
@@ -227,7 +230,7 @@ impl<P> Output<P> {
 
     /// Get the public polynomial associated with this output.
     ///
-    /// This is useful for verifying partial signatures, with [`crate::bls12381::primitives::ops::threshold::verify_message`].
+    /// This is useful for verifying partial signatures, with [`crate::bls::ops::threshold::verify_message`].
     pub const fn public(&self) -> &Sharing<MinPk> {
         &self.public
     }

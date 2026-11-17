@@ -8,13 +8,11 @@ use commonware_codec::{
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     PublicKey,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Output, PlayerAck, SignedDealerLog},
-        primitives::{
-            key::Share,
-            sharing::{ModeVersion, Sharing},
-            variant::Variant,
-        },
+        key::Share,
+        sharing::{ModeVersion, Sharing},
+        variant::Variant,
     },
 };
 use commonware_p2p::TrackedPeers;
@@ -264,10 +262,8 @@ mod tests {
     use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{
         Signer as _,
-        bls12381::{
-            dkg::feldman_desmedt::deal,
-            primitives::{sharing::Mode, variant::MinPk},
-        },
+        bls::{dkg::feldman_desmedt::deal, sharing::Mode},
+        bls12381::primitives::variant::MinPk,
         ed25519,
     };
     use commonware_p2p::Address;

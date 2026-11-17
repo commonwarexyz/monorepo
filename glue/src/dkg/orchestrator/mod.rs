@@ -163,7 +163,7 @@ mod tests {
     };
     use commonware_cryptography::{
         Digested, Digestible as _, Hasher as _,
-        bls12381::{dkg::feldman_desmedt::deal, primitives::sharing::Mode},
+        bls::{dkg::feldman_desmedt::deal, sharing::Mode},
         certificate::Verifier as _,
         sha256::Sha256,
     };

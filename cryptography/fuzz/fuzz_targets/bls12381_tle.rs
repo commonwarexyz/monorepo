@@ -8,13 +8,18 @@ use common::{
     arbitrary_minsig_signature,
 };
 use commonware_codec::{Encode, ReadExt};
-use commonware_cryptography::bls12381::{
-    primitives::{
-        group::Private,
+use commonware_cryptography::{
+    bls::{
         ops::{compute_public, sign_message},
-        variant::{MinPk, MinSig, Variant},
+        variant::Variant,
     },
-    tle::{Block, Ciphertext, decrypt, encrypt},
+    bls12381::{
+        primitives::{
+            group::Private,
+            variant::{MinPk, MinSig},
+        },
+        tle::{Block, Ciphertext, decrypt, encrypt},
+    },
 };
 use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;

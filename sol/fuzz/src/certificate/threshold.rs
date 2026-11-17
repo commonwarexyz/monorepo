@@ -5,13 +5,9 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolValue;
 use clap::{Args, Subcommand};
 use commonware_codec::DecodeExt;
-use commonware_cryptography::bls12381::{
-    dkg::feldman_desmedt,
-    primitives::{
-        ops::{self, threshold},
-        sharing::Mode,
-        variant::{MinPk, MinSig, Variant},
-    },
+use commonware_cryptography::{
+    bls::{dkg::feldman_desmedt, ops, ops::threshold, sharing::Mode, variant::Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{N3f1, NZU32};

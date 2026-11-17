@@ -19,11 +19,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{
             DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
         },
-        primitives::{key::Share, variant::Variant as BlsVariant},
+        key::Share,
+        variant::Variant as BlsVariant,
     },
 };
 use commonware_macros::{select, select_loop};
@@ -1455,13 +1456,14 @@ mod tests {
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         Signer,
-        bls12381::{
+        bls::{
             dkg::feldman_desmedt::{
                 Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
                 Reveal, SignedDealerLog, deal,
             },
-            primitives::{group::Scalar, sharing::Mode as SharingMode},
+            sharing::Mode as SharingMode,
         },
+        bls12381::primitives::group::Scalar,
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
         transcript::Summary,

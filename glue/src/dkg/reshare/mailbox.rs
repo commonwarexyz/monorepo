@@ -15,9 +15,7 @@ use commonware_consensus::{
     },
     types::Height,
 };
-use commonware_cryptography::{
-    Digested, Digestible as _, Signer, bls12381::primitives::variant::Variant,
-};
+use commonware_cryptography::{Digested, Digestible as _, Signer, bls::variant::Variant};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
 use std::collections::VecDeque;

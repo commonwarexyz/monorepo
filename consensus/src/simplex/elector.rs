@@ -41,7 +41,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Hasher, PublicKey, Sha256,
-    bls12381::primitives::variant::Variant,
+    bls::variant::Variant,
     certificate::{Scheme, Verifier},
 };
 use commonware_utils::{Widen, modulo, ordered::Set};

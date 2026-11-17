@@ -1,69 +1,13 @@
-//! Operations over the BLS12-381 scalar field.
+//! The BLS12-381 groups and the variants of the BLS signature scheme over them.
 //!
 //! # Acknowledgements
 //!
 //! _The following crates were used as a reference when implementing this crate. If code is very similar
 //! to the reference, it is accompanied by a comment and link._
 //!
-//! * <https://github.com/celo-org/celo-threshold-bls-rs>: Operations over the BLS12-381 scalar field, GJKR99, and Desmedt97.
 //! * <https://github.com/filecoin-project/blstrs> + <https://github.com/MystenLabs/fastcrypto>: Implementing operations over
 //!   the BLS12-381 scalar field with <https://github.com/supranational/blst>.
 //! * <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs>: Parallel MSM using tile-based Pippenger.
-//!
-//! # Example
-//!
-//! ```rust
-//! use commonware_cryptography::bls12381::{
-//!     dkg::feldman_desmedt as dkg,
-//!     primitives::{ops::{self, threshold}, variant::MinSig, sharing::Mode},
-//! };
-//! use commonware_utils::{NZU32, N3f1};
-//! use commonware_utils::test_rng;
-//!
-//! let mut rng = test_rng();
-//!
-//! // Configure number of players
-//! let n = NZU32!(5);
-//!
-//! // Generate commitment and shares
-//! let (sharing, shares) =
-//!     dkg::deal_anonymous::<MinSig, N3f1>(&mut rng, Mode::NonZeroCounter, n);
-//!
-//! // Generate partial signatures from shares
-//! let namespace = b"demo";
-//! let message = b"hello world";
-//! let partials: Vec<_> = shares.iter().map(|s| threshold::sign_message::<MinSig>(s, namespace, message)).collect();
-//!
-//! // Verify partial signatures
-//! for p in &partials {
-//!     threshold::verify_message::<MinSig>(&sharing, namespace, message, p).expect("signature should be valid");
-//! }
-//!
-//! // Aggregate partial signatures
-//! let threshold_sig = threshold::recover(&sharing, &partials, &commonware_parallel::Sequential).unwrap();
-//!
-//! // Verify threshold signature
-//! let threshold_pub = sharing.public();
-//! ops::verify_message::<MinSig>(threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
-//! ```
 
 pub mod group;
-pub mod key;
-pub mod ops;
-pub mod sharing;
 pub mod variant;
-
-use thiserror::Error;
-
-/// Errors that can occur when working with BLS12-381 primitives.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("not enough partial signatures: {0}/{1}")]
-    NotEnoughPartialSignatures(usize, usize),
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("invalid recovery")]
-    InvalidRecovery,
-    #[error("evaluation index is invalid")]
-    InvalidIndex,
-}

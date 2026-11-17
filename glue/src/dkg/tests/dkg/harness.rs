@@ -20,13 +20,10 @@ use crate::{
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{
-        dkg::feldman_desmedt::Reveal,
-        primitives::{
-            group::{Private, Share},
-            sharing::Mode,
-            variant::MinPk,
-        },
+    bls::{dkg::feldman_desmedt::Reveal, sharing::Mode},
+    bls12381::primitives::{
+        group::{Private, Share},
+        variant::MinPk,
     },
     ed25519,
 };

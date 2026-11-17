@@ -18,11 +18,11 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Signer,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{
             DealerMessageError as DkgDealerMessageError, PlayerAckError as DkgAckError,
         },
-        primitives::variant::Variant as BlsVariant,
+        variant::Variant as BlsVariant,
     },
 };
 use commonware_macros::select_loop;
@@ -343,9 +343,9 @@ mod tests {
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         Digested, Digestible as _,
-        bls12381::{
+        bls::{
             dkg::feldman_desmedt::{Dealer as CryptoDealer, Info, Player as CryptoPlayer, Reveal},
-            primitives::sharing::Mode,
+            sharing::Mode,
         },
         ed25519,
     };

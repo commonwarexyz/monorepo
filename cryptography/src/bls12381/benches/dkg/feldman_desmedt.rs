@@ -1,10 +1,11 @@
 use commonware_bench::Inputs;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{Dealer, Info, Logs, Player, Reveal, deal},
-        primitives::{sharing::Mode, variant::MinSig},
+        sharing::Mode,
     },
+    bls12381::primitives::variant::MinSig,
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;

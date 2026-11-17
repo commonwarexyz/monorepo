@@ -2,7 +2,8 @@ use super::utils::optimistic_assemble::BenchSubject;
 use bytes::Bytes;
 use commonware_codec::{Encode as _, types::lazy::Lazy};
 use commonware_cryptography::{
-    bls12381::primitives::{group::Private, ops::sign_message, variant::MinPk},
+    bls::ops::sign_message,
+    bls12381::primitives::{group::Private, variant::MinPk},
     certificate::Attestation,
     ed25519, impl_certificate_bls12381_multisig,
 };

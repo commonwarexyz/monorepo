@@ -1,7 +1,7 @@
 //! Size limits for the payloads DKG sends.
 
 use crate::dkg::types::Message;
-use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{PublicKey, bls::variant::Variant};
 use commonware_p2p::utils::mux::prefixed;
 use std::num::NonZeroU32;
 
@@ -27,13 +27,8 @@ mod tests {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,
-        bls12381::{
-            dkg::feldman_desmedt::SignedDealerLog,
-            primitives::{
-                sharing::ModeVersion,
-                variant::{MinPk, MinSig},
-            },
-        },
+        bls::{dkg::feldman_desmedt::SignedDealerLog, sharing::ModeVersion},
+        bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         transcript::{Transcript, Version},
     };

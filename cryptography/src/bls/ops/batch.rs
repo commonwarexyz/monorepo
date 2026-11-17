@@ -1,4 +1,4 @@
-//! Batch verification for BLS12-381 signatures.
+//! Batch verification for BLS signatures.
 //!
 //! This module provides batch verification functions that ensure each individual
 //! signature is valid (not just the aggregate). Use [`aggregate`](super::aggregate) instead
@@ -808,7 +808,7 @@ mod tests {
         let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
         let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
-        crate::bls12381::primitives::ops::verify_hashed::<V>(&public, &hm_sum, forged_agg.inner())
+        crate::bls::ops::verify_hashed::<V>(&public, &hm_sum, forged_agg.inner())
             .expect("naive aggregate verification accepts forged aggregate");
 
         // Batch verification (with random weights) rejects forged signatures

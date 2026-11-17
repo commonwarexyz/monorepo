@@ -2,10 +2,15 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Copying, Encode, Read, ReadExt};
-use commonware_cryptography::bls12381::primitives::{
-    group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, Share},
-    ops,
-    variant::{MinPk, MinSig, ScalarReadCfg, Variant},
+use commonware_cryptography::{
+    bls::{
+        ops,
+        variant::{ScalarReadCfg, Variant},
+    },
+    bls12381::primitives::{
+        group::{G1, G1_MESSAGE, G2, G2_MESSAGE, Private, Scalar, Share},
+        variant::{MinPk, MinSig},
+    },
 };
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space, Twin},

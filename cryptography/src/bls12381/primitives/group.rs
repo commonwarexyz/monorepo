@@ -13,7 +13,7 @@
 //! group operations can still be the identity, so an API that treats it as invalid must reject it
 //! at its own boundary.
 
-use super::{
+use crate::bls::{
     key,
     variant::{DST, ScalarReadCfg},
 };
