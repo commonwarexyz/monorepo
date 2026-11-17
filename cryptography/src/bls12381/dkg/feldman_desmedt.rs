@@ -357,13 +357,12 @@
 //! For a complete example with resharing, see [commonware-dkg](https://docs.rs/commonware-dkg).
 
 use crate::{
-    BatchEntry, BatchVerifier, Digestible, Hasher, PublicKey, Secret, Sha256, Signer,
+    BatchEntry, BatchVerifier, PublicKey, Secret, Signer,
     bls12381::primitives::{
         group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
-    sha256,
     transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{
@@ -1068,14 +1067,6 @@ impl<V: Variant> Read for DealerPubMsg<V> {
         Ok(Self {
             commitment: Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=max_size), ()))?,
         })
-    }
-}
-
-impl<V: Variant> Digestible for DealerPubMsg<V> {
-    type Digest = sha256::Digest;
-
-    fn digest(&self) -> Self::Digest {
-        Sha256::hash(&[&self.encode()])
     }
 }
 

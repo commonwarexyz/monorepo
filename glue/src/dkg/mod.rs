@@ -204,10 +204,9 @@ use commonware_consensus::{Block, types::Epoch};
 use commonware_cryptography::{
     PublicKey,
     bls12381::{
-        dkg::feldman_desmedt::DealerPrivMsg,
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
         primitives::{group::Share, variant::Variant},
     },
-    sha256,
     transcript::Summary,
 };
 use commonware_utils::ordered::Set;
@@ -290,25 +289,24 @@ pub trait SecretStore: Send + Sync + 'static {
 
     /// Stores a private dealing received from `dealer` during `epoch`.
     ///
-    /// `public`, the digest of the public message that `private` was received with,
-    /// distinguishes the dealings of one dealer, because a dealer can send several
-    /// dealings in an epoch and a private dealing is valid only with its own public
-    /// message.
-    fn put_dealing<P: PublicKey>(
+    /// `public`, the public message that `private` was received with, distinguishes the
+    /// dealings of one dealer, because a dealer can send several dealings in an epoch and
+    /// a private dealing is valid only with its own public message.
+    fn put_dealing<V: Variant, P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
-        public: sha256::Digest,
+        public: &DealerPubMsg<V>,
         private: DealerPrivMsg,
     ) -> impl Future<Output = ()> + Send;
 
-    /// Returns the private dealing received from `dealer` during `epoch` with the public
-    /// message whose digest is `public`, if stored.
-    fn get_dealing<P: PublicKey>(
+    /// Returns the private dealing received from `dealer` during `epoch` with `public`,
+    /// if stored.
+    fn get_dealing<V: Variant, P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
-        public: sha256::Digest,
+        public: &DealerPubMsg<V>,
     ) -> impl Future<Output = Option<DealerPrivMsg>> + Send;
 
     /// Prunes secrets older than `min`.

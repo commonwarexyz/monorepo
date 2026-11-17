@@ -15,11 +15,11 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256,
     bls12381::{
-        dkg::feldman_desmedt::{DealerPrivMsg, Reveal},
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Reveal},
         primitives::{
             group::Share,
             sharing::{Mode, ModeVersion},
-            variant::MinSig,
+            variant::{MinSig, Variant},
         },
     },
     certificate::{Provider as CertificateProvider, Scoped},
@@ -403,7 +403,7 @@ const SEED: u8 = 1;
 const DEALING: u8 = 2;
 
 /// Size of a [`Secrets`] key: the kind, the big-endian epoch, and the SHA-256
-/// digest of a dealing's dealer and public digest (zero for shares and seeds).
+/// digest of a dealing's dealer and public message (zero for shares and seeds).
 const KEY: usize = 1 + u64::SIZE + sha256::Digest::SIZE;
 
 /// Key of one entry in [`Secrets`].
@@ -532,24 +532,24 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
         self.get(&key(SEED, epoch, None)).await
     }
 
-    async fn put_dealing<P: commonware_cryptography::PublicKey>(
+    async fn put_dealing<V: Variant, P: commonware_cryptography::PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
-        public: sha256::Digest,
+        public: &DealerPubMsg<V>,
         private: DealerPrivMsg,
     ) {
-        let dealing = Sha256::hash(&[&dealer, &public]);
+        let dealing = Sha256::hash(&[&dealer, &public.encode()]);
         self.put(key(DEALING, epoch, Some(dealing)), private).await;
     }
 
-    async fn get_dealing<P: commonware_cryptography::PublicKey>(
+    async fn get_dealing<V: Variant, P: commonware_cryptography::PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
-        public: sha256::Digest,
+        public: &DealerPubMsg<V>,
     ) -> Option<DealerPrivMsg> {
-        let dealing = Sha256::hash(&[dealer, &public]);
+        let dealing = Sha256::hash(&[dealer, &public.encode()]);
         self.get(&key(DEALING, epoch, Some(dealing))).await
     }
 
@@ -687,7 +687,10 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         Signer as _,
-        bls12381::{dkg::feldman_desmedt::deal, primitives::group::Scalar},
+        bls12381::{
+            dkg::feldman_desmedt::{Dealer, Info, deal},
+            primitives::group::Scalar,
+        },
     };
     use commonware_glue::dkg::SecretStore as _;
     use commonware_math::algebra::Random;
@@ -700,6 +703,25 @@ mod tests {
         (0..n)
             .map(|_| ed25519::PrivateKey::random(&mut rng).public_key())
             .collect()
+    }
+
+    /// Returns the public message of a dealing dealt from `seed`. Different seeds give
+    /// different messages.
+    fn public_message(seed: u64) -> DealerPubMsg<MinSig> {
+        let signer = ed25519::PrivateKey::random(TestRng::new(0));
+        let participants = Set::from_iter_dedup([signer.public_key()]);
+        let info = Info::new::<N3f1>(
+            NAMESPACE,
+            0,
+            None,
+            SHARING_MODE,
+            REVEAL,
+            participants.clone(),
+            participants,
+        )
+        .unwrap();
+        let (_, public, _) = Dealer::start::<N3f1>(TestRng::new(seed), info, signer, None).unwrap();
+        public
     }
 
     #[test]
@@ -824,7 +846,7 @@ mod tests {
     #[test]
     fn secrets_survive_restart_and_prune() {
         // Deal a share and draw a seed and three dealings. Two dealers send a dealing with the
-        // same public digest, and the first dealer sends another with a second digest.
+        // same public message, and the first dealer sends another with a second message.
         let player = keys(1).pop().unwrap();
         let players = Set::from_iter_dedup([player.clone()]);
         let (_output, shares) =
@@ -833,12 +855,12 @@ mod tests {
         let mut rng = test_rng();
         let seed = Summary::random(&mut rng);
         let dealers = keys(2);
-        let publics = [Sha256::hash(&[b"first"]), Sha256::hash(&[b"second"])];
+        let publics = [1, 2].map(public_message);
         let dealings = [(0, 0), (1, 0), (0, 1)]
             .map(|(dealer, public)| {
                 (
                     dealers[dealer].clone(),
-                    publics[public],
+                    publics[public].clone(),
                     DealerPrivMsg::new(Scalar::random(&mut rng)),
                 )
             })
@@ -855,7 +877,7 @@ mod tests {
                     secrets.put_seed(epoch, seed).await;
                     for (dealer, public, dealing) in &dealings {
                         secrets
-                            .put_dealing(epoch, dealer.clone(), *public, dealing.clone())
+                            .put_dealing(epoch, dealer.clone(), public, dealing.clone())
                             .await;
                     }
                 }
@@ -874,7 +896,7 @@ mod tests {
                     assert_eq!(secrets.get_seed(epoch).await, Some(seed));
                     for (dealer, public, dealing) in &dealings {
                         assert_eq!(
-                            secrets.get_dealing(epoch, dealer, *public).await,
+                            secrets.get_dealing(epoch, dealer, public).await,
                             Some(dealing.clone())
                         );
                     }
@@ -892,11 +914,11 @@ mod tests {
             assert_eq!(secrets.get_seed(Epoch::new(2)).await, Some(seed));
             for (dealer, public, dealing) in dealings {
                 assert_eq!(
-                    secrets.get_dealing(Epoch::new(1), &dealer, public).await,
+                    secrets.get_dealing(Epoch::new(1), &dealer, &public).await,
                     None
                 );
                 assert_eq!(
-                    secrets.get_dealing(Epoch::new(2), &dealer, public).await,
+                    secrets.get_dealing(Epoch::new(2), &dealer, &public).await,
                     Some(dealing)
                 );
             }
@@ -917,11 +939,11 @@ mod tests {
         let share = shares.get_value(&player).unwrap().clone();
         let mut rng = test_rng();
         let seed = Summary::random(&mut rng);
-        let public = Sha256::hash(&[b"public"]);
+        let public = public_message(1);
         let dealing = DealerPrivMsg::new(Scalar::random(&mut rng));
 
         let (_, checkpoint) = deterministic::Runner::default().start_and_recover({
-            let (share, dealer) = (share.clone(), dealer.clone());
+            let (share, dealer, public) = (share.clone(), dealer.clone(), public.clone());
             |context| async move {
                 // The engine's clone of the bootstrap store persists the
                 // ceremony's epoch-0 share, seed, and dealing.
@@ -931,7 +953,7 @@ mod tests {
                 engine.put_share(Epoch::zero(), share).await;
                 engine.put_seed(Epoch::zero(), seed).await;
                 engine
-                    .put_dealing(Epoch::zero(), dealer, public, dealing)
+                    .put_dealing(Epoch::zero(), dealer, &public, dealing)
                     .await;
 
                 // Hand over the share as `bootstrap` does, then crash.
@@ -950,7 +972,7 @@ mod tests {
             assert_eq!(secrets.get_share(Epoch::zero()).await, Some(share));
             assert_eq!(secrets.get_seed(Epoch::zero()).await, None);
             assert_eq!(
-                secrets.get_dealing(Epoch::zero(), &dealer, public).await,
+                secrets.get_dealing(Epoch::zero(), &dealer, &public).await,
                 None
             );
         });
@@ -969,19 +991,19 @@ mod tests {
         let share = shares.get_value(&player).unwrap().clone();
         let mut rng = test_rng();
         let seed = Summary::random(&mut rng);
-        let public = Sha256::hash(&[b"public"]);
+        let public = public_message(1);
         let dealing = DealerPrivMsg::new(Scalar::random(&mut rng));
 
         // Persist the ceremony's material, then destroy the partition.
         let (_, checkpoint) = deterministic::Runner::default().start_and_recover({
-            let dealer = dealer.clone();
+            let (dealer, public) = (dealer.clone(), public.clone());
             |context| async move {
                 let mut bootstrap =
                     Secrets::init(context.child("secrets"), crate::bootstrap::PARTITION).await;
                 bootstrap.put_share(Epoch::zero(), share).await;
                 bootstrap.put_seed(Epoch::zero(), seed).await;
                 bootstrap
-                    .put_dealing(Epoch::zero(), dealer, public, dealing)
+                    .put_dealing(Epoch::zero(), dealer, &public, dealing)
                     .await;
                 drop(bootstrap);
 
@@ -1000,7 +1022,7 @@ mod tests {
             assert_eq!(bootstrap.get_share(Epoch::zero()).await, None);
             assert_eq!(bootstrap.get_seed(Epoch::zero()).await, None);
             assert_eq!(
-                bootstrap.get_dealing(Epoch::zero(), &dealer, public).await,
+                bootstrap.get_dealing(Epoch::zero(), &dealer, &public).await,
                 None
             );
         });
