@@ -429,7 +429,7 @@ commonware_macros::stability_scope!(ALPHA {
     #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz {
         use super::*;
-        use crate::algebra::test_suites;
+        use crate::algebra::{Twin, test_suites};
         use arbitrary::{Arbitrary, Unstructured};
         use commonware_codec::Encode as _;
 
@@ -440,6 +440,7 @@ commonware_macros::stability_scope!(ALPHA {
             FuzzField,
             FuzzSpace,
             FuzzPairing,
+            FuzzPairingTwin,
         }
 
         impl Plan {
@@ -460,6 +461,9 @@ commonware_macros::stability_scope!(ALPHA {
                     Self::FuzzPairing => {
                         test_suites::fuzz_pairing_group::<G>(u)?;
                     }
+                    Self::FuzzPairingTwin => {
+                        test_suites::fuzz_pairing_group::<Twin<G>>(u)?;
+                    }
                 }
                 Ok(())
             }
@@ -475,6 +479,12 @@ commonware_macros::stability_scope!(ALPHA {
         fn test_fuzz_pairing() {
             use commonware_invariants::minifuzz;
             minifuzz::test(|u| Plan::FuzzPairing.run(u));
+        }
+
+        #[test]
+        fn test_fuzz_pairing_twin() {
+            use commonware_invariants::minifuzz;
+            minifuzz::test(|u| Plan::FuzzPairingTwin.run(u));
         }
     }
 });
@@ -506,5 +516,39 @@ mod test {
             CodecConformance<F>,
             CodecConformance<G>
         }
+    }
+}
+
+// `Twin`'s `msm` and batch pairing methods view a slice of twins as a slice of
+// `G2` through an unsafe cast, which Miri checks here.
+#[cfg(test)]
+#[commonware_macros::test_group("miri")]
+mod twin {
+    use super::*;
+    use crate::algebra::{Twin, msm_naive};
+    use commonware_parallel::Sequential;
+
+    #[test]
+    fn test_twin_slice_methods_match_single_element_methods() {
+        let lefts: Vec<Twin<G>> = (1u8..=3).map(|i| Twin::new(G2(F::from(i)))).collect();
+        let rights: Vec<G> = (4u8..=6).map(|i| G::generator() * &F::from(i)).collect();
+        let scalars: Vec<F> = (7u8..=9).map(F::from).collect();
+
+        let expected: Vec<GT> = lefts
+            .iter()
+            .zip(&rights)
+            .map(|(x, a)| x.pairing(a))
+            .collect();
+        let mut outputs = vec![GT::zero(); expected.len()];
+        Twin::<G>::pairings(&lefts, &rights, &mut outputs, &Sequential);
+        assert_eq!(outputs, expected);
+
+        let sum = expected.iter().fold(GT::zero(), |acc, out| acc + out);
+        assert_eq!(Twin::<G>::multi_pairing(&lefts, &rights, &Sequential), sum);
+
+        assert_eq!(
+            Twin::<G>::msm(&lefts, &scalars, &Sequential),
+            msm_naive(&lefts, &scalars)
+        );
     }
 }
