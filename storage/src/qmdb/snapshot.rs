@@ -1337,7 +1337,7 @@ mod tests {
             let mut case = 0;
             for floor in [0, log.len() as u64 / 3] {
                 for tasks in [1, 3] {
-                    let context = context.child("case").with_attribute("case", case);
+                    let context = context.child("run").with_attribute("case", case);
                     case += 1;
                     check_build(
                         context.child("unordered_one"),
@@ -1450,7 +1450,7 @@ mod tests {
             blob.sync().await.unwrap();
             drop(blob);
             for (case, ops) in [10, 4000].into_iter().enumerate() {
-                let context = context.child("case").with_attribute("case", case);
+                let context = context.child("run").with_attribute("case", case);
                 check_build(
                     context.child("build"),
                     partitioned::unordered::Index::<_, _, 1>::new(context.child("index"), EightCap),
