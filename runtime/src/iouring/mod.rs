@@ -15,7 +15,9 @@
 //! newest half and the new task to the global queue, or only the new task
 //! while another worker is stealing from it. Before parking, a worker with
 //! nothing to run can steal half of another worker's queued tasks, rounded
-//! down, so a task queued alone behind a long poll waits for it.
+//! up, so even a task queued alone behind a long poll can move to a worker
+//! looking for work, once it has waited [`Config::with_steal_age`], or at
+//! once if it was just spawned there. A lone task wakes no parked worker.
 //!
 //! Dedicated and blocking tasks each receive a supervised thread and io_uring
 //! ring. Their ordinary descendants execute on the pool. Task factories run
