@@ -10,9 +10,7 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
-};
+use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, ring},
     ordered::Set,
@@ -23,7 +21,7 @@ use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
-    context: ContextCell<E>,
+    context: E,
 
     /// The local identity advertised in greetings.
     public_key: C,
@@ -80,7 +78,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
         );
 
         let actor = Self {
-            context: ContextCell::new(context),
+            context,
             public_key,
             peer_gossip_max_count: cfg.peer_gossip_max_count,
             receiver,
@@ -94,8 +92,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
     }
 
     /// Start the actor and run it in the background.
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {
@@ -217,7 +216,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 // Truncate to a random selection of peers if we have too many infos
                 let max = self.peer_gossip_max_count;
                 if infos.len() > max {
-                    let _ = infos.partial_shuffle(self.context.as_mut(), max);
+                    let _ = infos.partial_shuffle(&mut self.context, max);
                     infos.truncate(max);
                 }
 

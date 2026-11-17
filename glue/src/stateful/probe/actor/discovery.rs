@@ -18,7 +18,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{
     NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
@@ -42,7 +42,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    pub(super) context: ContextCell<E>,
+    pub(super) context: E,
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) provider: D,
     pub(super) strategy: T,
@@ -219,7 +219,7 @@ where
         let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
             return false;
         };
-        if !finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy) {
+        if !finalization.verify(&mut self.context, &scoped, &self.strategy) {
             commonware_p2p::block!(self.blocker, peer.clone(), "invalid finalization");
             return false;
         }

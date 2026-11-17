@@ -33,7 +33,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
+use commonware_runtime::{Handle, IoBuf, IoBufs, Spawner};
 use commonware_utils::channel::{
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
@@ -79,7 +79,7 @@ type BackupResponse<P> = (Channel, Message<P>);
 
 /// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
-    context: ContextCell<E>,
+    context: E,
     sender: S,
     receiver: R,
     control_rx: mpsc::UnboundedReceiver<Control<R::PublicKey>>,
@@ -99,7 +99,7 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let capacity = receiver.capacity();
         let mux = Self {
-            context: ContextCell::new(context),
+            context,
             sender,
             receiver,
             control_rx,
@@ -117,8 +117,9 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
     }
 
     /// Start the demuxer using the given spawner.
-    pub fn start(mut self) -> Handle<Result<(), R::Error>> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<Result<(), R::Error>> {
+        self.context
+            .child("run").spawn(move |_| self.run())
     }
 
     /// Drive demultiplexing of messages into per-subchannel receivers.

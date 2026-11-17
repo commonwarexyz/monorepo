@@ -21,9 +21,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
 use commonware_resolver::{Fetch, Outcome, Resolution, Resolver, TargetedResolver, p2p};
-use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::traces::TracedExt as _,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{
     NonZeroDuration, channel::fallible::OneshotExt, ordered::Quorum, sequence::U64,
     vec::NonEmptyVec,
@@ -40,7 +38,7 @@ pub struct Actor<
     D: Digest,
     T: Strategy,
 > {
-    context: ContextCell<E>,
+    context: E,
     scheme: S,
     blocker: Option<B>,
     strategy: T,
@@ -70,7 +68,7 @@ impl<
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 scheme: cfg.scheme,
                 blocker: Some(cfg.blocker),
                 strategy: cfg.strategy,
@@ -89,12 +87,13 @@ impl<
     }
 
     pub fn start(
-        mut self,
+        self,
         voter: voter::Mailbox<S, D>,
         sender: impl Sender<PublicKey = S::PublicKey>,
         receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(voter, sender, receiver))
+        self.context
+            .child("run").spawn(move |_| self.run(voter, sender, receiver))
     }
 
     async fn run(
@@ -113,7 +112,7 @@ impl<
         // Every handler entry is one message the network admitted on the resolver channel, and
         // peer requests are dropped once the ready queue is full, so hold as many as the channel.
         let (handler_tx, mut handler_rx) =
-            mailbox::new(self.context.as_ref().child("handler"), receiver.capacity());
+            mailbox::new(self.context.child("handler"), receiver.capacity());
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
@@ -369,7 +368,7 @@ impl<
             return None;
         }
 
-        if !incoming.verify(self.context.as_mut(), &self.scheme, &self.strategy) {
+        if !incoming.verify(&mut self.context, &self.scheme, &self.strategy) {
             debug!(%view, "certificate failed verification");
             return None;
         }

@@ -197,9 +197,7 @@ use commonware_p2p::{
     utils::codec::{WrappedBackgroundReceiver, WrappedSender},
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::metrics::HistogramExt,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, telemetry::metrics::HistogramExt};
 use commonware_utils::{
     Widen,
     channel::{fallible::OneshotExt, oneshot},
@@ -615,7 +613,7 @@ where
     T: Strategy,
 {
     /// Context held by the actor.
-    context: ContextCell<E>,
+    context: E,
 
     /// Receiver for incoming messages to the actor.
     mailbox: mailbox::Receiver<Message<B, C, H>>,
@@ -704,7 +702,7 @@ where
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 mailbox,
                 scheme_provider: config.scheme_provider,
                 blocker: config.blocker,
@@ -732,10 +730,11 @@ where
     /// [`commonware_p2p::Receiver::capacity`]. Each carries data up to the scheme's widest for the
     /// block bound of [`Config::block_codec_config`].
     pub fn start(
-        mut self,
+        self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network))
+        self.context
+            .child("run").spawn(move |_| self.run(network))
     }
 
     /// Run the shard engine's event loop.

@@ -14,7 +14,7 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf, spawn_cell,
+    Clock, Handle, Metrics, Network, Resolver, SinkOf, Spawner, StreamOf,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::Upgrader;
@@ -59,7 +59,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, U: Upgrader>
 where
     U::PublicKey: PublicKey,
 {
-    context: ContextCell<E>,
+    context: E,
 
     /// The list of peers to dial.
     queue: Vec<U::PublicKey>,
@@ -81,7 +81,7 @@ where
     pub fn new(context: E, cfg: Config<U>) -> Self {
         let attempts = context.family("attempts", "The number of dial attempts made to each peer");
         Self {
-            context: ContextCell::new(context),
+            context,
             queue: Vec::new(),
             stream: cfg.stream,
             dial_timeout: cfg.dial_timeout,
@@ -163,11 +163,12 @@ where
 
     /// Start the dialer actor.
     pub fn start(
-        mut self,
+        self,
         tracker: tracker::Mailbox<U::PublicKey>,
         supervisor: SupervisorMailbox<E, U>,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, supervisor))
+        self.context
+            .child("run").spawn(move |_| self.run(tracker, supervisor))
     }
 
     async fn run(
@@ -188,7 +189,7 @@ where
                 if self.queue.is_empty() {
                     let dialable = tracker.dialable().await;
                     self.queue = dialable.peers;
-                    self.queue.shuffle(self.context.as_mut());
+                    self.queue.shuffle(&mut self.context);
                     next_query_at = dialable.next_query_at;
                 }
 

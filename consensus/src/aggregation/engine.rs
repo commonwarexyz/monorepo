@@ -21,9 +21,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
-    spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal, Recovery};
@@ -78,7 +77,7 @@ pub struct Engine<
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     T: Strategy,
 > {
-    context: ContextCell<E>,
+    context: E,
     automaton: A,
     monitor: M,
     provider: P,
@@ -162,7 +161,7 @@ impl<
         let metrics = metrics::Metrics::init(&context);
 
         Self {
-            context: ContextCell::new(context),
+            context,
             automaton: cfg.automaton,
             reporter: cfg.reporter,
             monitor: cfg.monitor,
@@ -209,13 +208,14 @@ impl<
     /// - Messages from the network:
     ///   - Acks from other validators
     pub fn start(
-        mut self,
+        self,
         network: (
             impl Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
             impl Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network))
+        self.context
+            .child("run").spawn(move |_| self.run(network))
     }
 
     /// Inner run loop called by `start`.
@@ -336,7 +336,7 @@ impl<
                         self.metrics.digest.inc(Status::Dropped);
                     }
                     Ok(digest) => {
-                        timer.observe(self.context.as_ref());
+                        timer.observe(&self.context);
                         self = self.handle_digest(height, digest, &mut sender).await;
                     }
                 }
@@ -696,7 +696,7 @@ impl<
         }
 
         // Validate signature
-        if !ack.verify(self.context.as_mut(), &*scheme, &self.strategy) {
+        if !ack.verify(&mut self.context, &*scheme, &self.strategy) {
             return Err(Error::InvalidAckSignature);
         }
 
@@ -709,7 +709,7 @@ impl<
     fn get_digest(&mut self, height: Height) {
         assert!(self.pending.contains_key(&height));
         let mut automaton = self.automaton.clone();
-        let timer = self.metrics.digest_duration.timer(self.context.as_ref());
+        let timer = self.metrics.digest_duration.timer(&self.context);
         self.digest_requests.push(async move {
             let receiver = automaton.propose(height).await;
             let result = receiver.await.map_err(Error::AppProposeCanceled);

@@ -7,9 +7,8 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    ContextCell, Handle, Metrics, Spawner,
+    Handle, Metrics, Spawner,
     iobuf::EncodeExt,
-    spawn_cell,
     telemetry::metrics::{
         MetricsExt as _,
         status::{self, Status},
@@ -179,7 +178,7 @@ where
     V: Decode + Send,
     T: Strategy,
 {
-    context: ContextCell<E>,
+    context: E,
     receiver: R,
     codec_config: V::Cfg,
     blocker: B,
@@ -209,7 +208,7 @@ where
         (
             Self {
                 decode: context.family("decode", "Inbound decode outcomes"),
-                context: ContextCell::new(context),
+                context,
                 receiver,
                 codec_config,
                 blocker,
@@ -221,8 +220,9 @@ where
     }
 
     /// Start the background receiver.
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .child("run").spawn(move |_| self.run())
     }
 
     /// Run the background receiver's event loop.

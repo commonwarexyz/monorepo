@@ -263,9 +263,7 @@ where
         // Persist the epoch's share and seed before registering its scheme, and
         // prune only once the epoch is durable.
         let share = self.recovered_share(store, &info).await;
-        let seed = store
-            .seed_or_random(epoch, self.context.as_present_mut())
-            .await;
+        let seed = store.seed_or_random(epoch, &mut self.context).await;
         if !already_committed {
             store.commit_epoch(info.clone(), seed, share.clone()).await;
             self.register_epoch(&info, share.clone()).await;

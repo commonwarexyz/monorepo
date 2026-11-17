@@ -22,8 +22,6 @@ pub(crate) use handle::Panicked;
 pub use handle::{AbortOnDrop, Handle};
 pub(crate) use handle::{Aborter, FactoryGuard, MetricHandle, Panicker};
 
-mod cell;
-pub use cell::Cell as ContextCell;
 
 pub(crate) mod supervision;
 

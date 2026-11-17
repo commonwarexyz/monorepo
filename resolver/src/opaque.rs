@@ -23,7 +23,7 @@ use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{MetricsExt as _, status, status::Status},
 };
 use commonware_utils::{
@@ -207,7 +207,7 @@ where
     Con: Consumer<Key = F::Key, Value = F::Value>,
     Con::Subscriber: Ord,
 {
-    context: ContextCell<E>,
+    context: E,
     fetcher: F,
     mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
     fetches: AbortablePool<'static, FetchCompletion<F::Key, F::Value>>,
@@ -255,7 +255,7 @@ where
     ) -> Self {
         let fetch = context.family("fetch", "Number of fetches by status");
         Self {
-            context: ContextCell::new(context),
+            context,
             fetcher,
             mailbox,
             fetches: AbortablePool::default(),
@@ -267,8 +267,9 @@ where
         }
     }
 
-    fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    fn start(self) -> Handle<()> {
+        self.context
+            .child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {

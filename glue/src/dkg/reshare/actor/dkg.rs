@@ -119,9 +119,7 @@ where
             "DKG setup requires a tip before the final block"
         );
 
-        let seed = store
-            .seed_or_random(Epoch::zero(), self.context.as_present_mut())
-            .await;
+        let seed = store.seed_or_random(Epoch::zero(), &mut self.context).await;
         store.put_seed(Epoch::zero(), seed).await;
 
         self.prepare_epoch(

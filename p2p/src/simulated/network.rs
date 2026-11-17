@@ -20,8 +20,7 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner, spawn_cell,
+    Clock, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota, Spawner,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -317,7 +316,7 @@ pub struct Config {
 
 /// Implementation of a simulated network.
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
-    context: ContextCell<E>,
+    context: E,
 
     // Maximum size of an application payload.
     max_size: u32,
@@ -397,7 +396,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 max_size: cfg.max_size,
                 max_frame_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
@@ -700,7 +699,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 let link = Link::new(
-                    self.context.as_mut(),
+                    &mut self.context,
                     sender,
                     receiver,
                     receiver_socket,
@@ -913,10 +912,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .inc();
 
             // Sample latency
-            let latency = Duration::from_millis(link.sampler.sample(self.context.as_mut()) as u64);
+            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
 
             // Determine if the message should be delivered
-            let should_deliver = link.success_rate.sample(self.context.as_mut());
+            let should_deliver = link.success_rate.sample(&mut self.context);
 
             // Enqueue message for delivery
             let completions = self.transmitter.enqueue(
@@ -992,8 +991,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {

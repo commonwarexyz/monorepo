@@ -44,9 +44,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef, spawn_cell,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef};
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
 use std::{
@@ -205,7 +203,7 @@ where
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    context: ContextCell<E>,
+    context: E,
     mailbox: MailboxReceiver<Message<B, V, C, A>>,
     signer: C,
     manager: M,
@@ -258,7 +256,7 @@ where
         let metrics = ReshareMetrics::new(&context);
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 mailbox,
                 signer: config.signer,
                 manager: config.manager,
@@ -307,12 +305,13 @@ where
     /// `chan` closes during a dealing window. See the
     /// [module docs](crate::dkg::reshare#failures) for the conditions under
     /// which it panics.
-    pub fn start<SE, RE>(mut self, chan: (SE, RE)) -> Handle<()>
+    pub fn start<SE, RE>(self, chan: (SE, RE)) -> Handle<()>
     where
         SE: Sender<PublicKey = C::PublicKey>,
         RE: Receiver<PublicKey = C::PublicKey>,
     {
-        spawn_cell!(self.context, self.run(chan))
+        self.context
+            .child("run").spawn(move |_| self.run(chan))
     }
 
     async fn run<SE, RE>(mut self, (sender, receiver): (SE, RE))
@@ -347,10 +346,7 @@ where
             .map(|(processed, _)| state_sync::recovered_epoch(*processed, &self.epocher));
         let state_sync = self
             .state_sync
-            .resolve(
-                self.context.as_present().child("state_sync"),
-                recovered_epoch,
-            )
+            .resolve(self.context.child("state_sync"), recovered_epoch)
             .await;
 
         // Register the synced epoch, then resolve its floor height. Setup uses

@@ -1198,7 +1198,7 @@ mod tests {
             };
 
             for actor in ["tracker", "router", "spawner", "listener", "dialer"] {
-                let name = format!("peer_network_{actor}");
+                let name = format!("peer_network_{actor}_run");
                 assert_eq!(
                     tasks_running(&metrics_before, &name),
                     Some(n as u64),
@@ -1227,7 +1227,7 @@ mod tests {
             // Verify that all network actors stopped
             let metrics_after = context.encode();
             for actor in ["tracker", "router", "spawner", "listener", "dialer"] {
-                let name = format!("peer_network_{actor}");
+                let name = format!("peer_network_{actor}_run");
                 assert_eq!(
                     tasks_running(&metrics_after, &name),
                     Some(0),

@@ -8,7 +8,7 @@ use commonware_consensus::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::fallible::OneshotExt;
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
@@ -27,7 +27,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    pub(super) context: ContextCell<E>,
+    pub(super) context: E,
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) marshal: MarshalMailbox<S, V>,
     pub(super) blocker: B,

@@ -9,7 +9,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{GaugeExt, status::Status},
 };
 use commonware_utils::{
@@ -59,7 +59,7 @@ where
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
-    context: ContextCell<E>,
+    context: E,
 
     ////////////////////////////////////////
     // Configuration
@@ -136,7 +136,7 @@ where
         let metrics = metrics::Metrics::init(&context);
 
         let result = Self {
-            context: ContextCell::new(context),
+            context,
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
@@ -157,10 +157,11 @@ where
 
     /// Starts the engine with the given network.
     pub fn start(
-        mut self,
+        self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network))
+        self.context
+            .child("run").spawn(move |_| self.run(network))
     }
 
     /// Inner run loop called by `start`.

@@ -6,13 +6,13 @@ use super::{
 use commonware_actor::mailbox::{self, Receiver};
 use commonware_cryptography::Hasher;
 use commonware_formatting::hex;
-use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{Handle, Metrics, Spawner};
 use rand_core::Rng;
 use tracing::info;
 
 /// Application actor.
 pub struct Application<R: Rng + Spawner + Metrics, H: Hasher> {
-    context: ContextCell<R>,
+    context: R,
     mailbox: Receiver<Message<H::Digest>>,
 }
 
@@ -27,7 +27,7 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
         let reporter = Reporter::new();
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 mailbox: receiver,
             },
             config.scheme,
@@ -37,8 +37,8 @@ impl<R: Rng + Spawner + Metrics, H: Hasher> Application<R, H> {
     }
 
     /// Run the application actor.
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context.child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {

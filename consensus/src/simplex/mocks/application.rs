@@ -13,7 +13,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::Recipients;
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::channel::{
     fallible::{FallibleExt, OneshotExt},
     mpsc, oneshot,
@@ -189,7 +189,7 @@ pub struct Config<H: Hasher, P: PublicKey> {
 }
 
 pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
-    context: ContextCell<E>,
+    context: E,
     me: P,
 
     relay: Arc<Relay<H::Digest, P>>,
@@ -256,7 +256,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         let (sender, receiver) = mpsc::unbounded_channel();
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 me: cfg.me,
 
                 relay: cfg.relay,
@@ -341,7 +341,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
     async fn propose(&mut self, context: Context<H::Digest, P>) -> H::Digest {
         // Simulate the propose latency
-        let duration = self.propose_latency.sample(self.context.as_mut());
+        let duration = self.propose_latency.sample(&mut self.context);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
@@ -366,7 +366,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         mut contents: Bytes,
     ) -> bool {
         // Simulate the verify latency
-        let duration = self.verify_latency.sample(self.context.as_mut());
+        let duration = self.verify_latency.sample(&mut self.context);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
@@ -424,7 +424,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         response: oneshot::Sender<bool>,
     ) {
         // Simulate the certify latency
-        let duration = self.certify_latency.sample(self.context.as_mut());
+        let duration = self.certify_latency.sample(&mut self.context);
         self.context
             .sleep(Duration::from_millis(duration as u64))
             .await;
@@ -479,8 +479,9 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
             .broadcast(&self.me, recipients, (payload, contents));
     }
 
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .child("run").spawn(move |_| self.run())
     }
 
     async fn run(mut self) {

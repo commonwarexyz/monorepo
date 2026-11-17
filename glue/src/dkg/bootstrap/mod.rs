@@ -87,8 +87,7 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufMut, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
-    spawn_cell,
+    BufMut, Clock, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
@@ -360,7 +359,7 @@ pub struct Engine<E, V, M, X, SS, T, D = Unit>
 where
     V: Variant,
 {
-    context: ContextCell<E>,
+    context: E,
     config: Config<M, X, SS, T, D>,
     _variant: PhantomData<V>,
 }
@@ -385,7 +384,7 @@ where
             "sharing mode must be supported by max supported mode",
         );
         Self {
-            context: ContextCell::new(context),
+            context,
             config,
             _variant: PhantomData,
         }
@@ -409,7 +408,7 @@ where
     /// The network carrying these channels must have a `max_message_size` of at least
     /// [`max_payload_size`] for the configured participants, mode, and directory type.
     pub fn start(
-        mut self,
+        self,
         votes: (
             impl Sender<PublicKey = ed25519::PublicKey>,
             impl Receiver<PublicKey = ed25519::PublicKey>,
@@ -436,8 +435,7 @@ where
         ),
     ) -> (Handle<()>, oneshot::Receiver<Completion<V, D>>) {
         let (completion_tx, completion_rx) = oneshot::channel();
-        let handle = spawn_cell!(
-            self.context,
+        let handle = self.context.child("run").spawn(move |_| {
             self.run(
                 votes,
                 certificates,
@@ -445,9 +443,9 @@ where
                 backfill,
                 broadcast,
                 dkg,
-                completion_tx
+                completion_tx,
             )
-        );
+        });
         (handle, completion_rx)
     }
 
@@ -487,7 +485,7 @@ where
         let max_participants = max_participants(self.config.participants.len());
         let block_codec_config = (max_participants, self.config.max_supported_mode);
 
-        let context = self.context.into_present();
+        let context = self.context;
         let page_cache = self.config.page_cache;
         let write_buffer = self.config.write_buffer;
         let replay_buffer = self.config.replay_buffer;

@@ -1418,9 +1418,7 @@ where
         let share = artifact
             .filter(|artifact| artifact.info == info)
             .and_then(|artifact| artifact.share.clone());
-        let rng_seed = store
-            .seed_or_random(next_epoch, self.context.as_present_mut())
-            .await;
+        let rng_seed = store.seed_or_random(next_epoch, &mut self.context).await;
         store
             .commit_epoch(info.clone(), rng_seed, share.clone())
             .await;
@@ -1473,7 +1471,7 @@ mod tests {
         utils::mocks::inert_channel,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{ContextCell, Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
         channel::oneshot, ordered::Set, sequence::Unit, sync::Mutex, test_rng,
@@ -2280,7 +2278,7 @@ mod tests {
                 .spawn(|context| async move { context })
                 .await
                 .expect("context task should finish");
-            actor.context = ContextCell::new(closed_context);
+            actor.context = closed_context;
 
             let genesis = mocks::genesis_block(public_key);
             let final_block = ready(TestBlock::new::<Sha256>(

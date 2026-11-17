@@ -37,7 +37,7 @@ use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Outcome, Resolution, Resolver, TargetedResolver};
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
+    Clock, Handle, Metrics, Spawner, Storage,
     telemetry::{
         metrics::{Gauge, GaugeExt, MetricsExt as _},
         traces::TracedExt as _,
@@ -108,7 +108,7 @@ where
     T: Strategy,
     A: Acknowledgement,
 {
-    context: ContextCell<E>,
+    context: E,
 
     // Mailbox
     mailbox: mailbox::Receiver<Message<P::Scheme, V>>,
@@ -267,7 +267,7 @@ where
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 mailbox,
                 provider: config.provider,
                 epocher: config.epocher,
@@ -359,8 +359,8 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let mut actor = Box::new(self);
-        spawn_cell!(actor.context, actor.run(application, buffer, resolver))
+        let actor = Box::new(self);
+        actor.context.child("run").spawn(move |_| actor.run(application, buffer, resolver))
     }
 
     /// Start the actor without a broadcast buffer.
@@ -1264,7 +1264,7 @@ where
             panic!("floor finalization epoch unavailable");
         };
         assert!(
-            finalization.verify(self.context.as_mut(), &scoped, &self.strategy),
+            finalization.verify(&mut self.context, &scoped, &self.strategy),
             "floor finalization must verify"
         );
 
@@ -1734,8 +1734,7 @@ where
         for indices in by_epoch.values() {
             let scoped = delivers[indices[0]].scoped();
             let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-            let results =
-                verify_certificates(self.context.as_mut(), scoped, &group, &self.strategy);
+            let results = verify_certificates(&mut self.context, scoped, &group, &self.strategy);
             for (j, &idx) in indices.iter().enumerate() {
                 verified[idx] = results[j];
             }

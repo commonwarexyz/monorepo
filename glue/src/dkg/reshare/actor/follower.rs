@@ -112,7 +112,7 @@ where
                             );
 
                             let rng_seed = store
-                                .seed_or_random(info.epoch, self.context.as_present_mut())
+                                .seed_or_random(info.epoch, &mut self.context)
                                 .await;
                             let share = self.recovered_share(store, &info).await;
                             store

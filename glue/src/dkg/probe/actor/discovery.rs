@@ -19,7 +19,7 @@ use commonware_consensus::{
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{
     NonZeroDuration,
     channel::{fallible::OneshotExt as _, oneshot},
@@ -64,7 +64,7 @@ where
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
-    pub(super) context: ContextCell<E>,
+    pub(super) context: E,
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) manager: M,
     pub(super) bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
@@ -321,11 +321,7 @@ where
             );
             return false;
         }
-        if !finalization.verify(
-            self.context.as_present_mut(),
-            &self.verifier,
-            &self.strategy,
-        ) {
+        if !finalization.verify(&mut self.context, &self.verifier, &self.strategy) {
             commonware_p2p::block!(self.blocker, peer, "invalid latest finalization");
             return false;
         }
@@ -421,11 +417,7 @@ where
             return false;
         }
 
-        if !finalization.verify(
-            self.context.as_present_mut(),
-            &self.verifier,
-            &self.strategy,
-        ) {
+        if !finalization.verify(&mut self.context, &self.verifier, &self.strategy) {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
             self.pending = Some(pending);
             return false;

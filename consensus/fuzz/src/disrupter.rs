@@ -11,8 +11,8 @@ use commonware_consensus::{
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, IoBuf, Spawner, spawn_cell};
-use rand::{Rng, RngExt as _};
+use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
+use rand::RngExt as _;
 use rand_core::CryptoRng;
 use std::{collections::VecDeque, time::Duration};
 
@@ -26,7 +26,7 @@ pub struct Disrupter<
     S: Scheme<Sha256Digest>,
     St: Strategy + 'static,
 > {
-    context: ContextCell<E>,
+    context: E,
     scheme: S,
     strategy: St,
     fault_offset: u64,
@@ -50,7 +50,7 @@ where
             last_nullified_view: 0,
             last_notarized_view: 0,
             latest_proposals: VecDeque::new(),
-            context: ContextCell::new(context),
+            context,
             scheme,
             strategy,
             fault_offset,
@@ -107,11 +107,11 @@ where
         let proposals_len = self.latest_proposals.len();
         let payload_source = self
             .strategy
-            .repeated_proposal_index(self.context.as_mut(), proposals_len)
+            .repeated_proposal_index(&mut self.context, proposals_len)
             .and_then(|idx| self.latest_proposals.get(idx).cloned())
             .unwrap_or_else(|| {
                 self.strategy.random_proposal(
-                    self.context.as_mut(),
+                    &mut self.context,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -120,7 +120,7 @@ where
             });
 
         let view = self.strategy.random_view_for_proposal(
-            self.context.as_mut(),
+            &mut self.context,
             self.last_vote_view,
             self.last_finalized_view,
             self.last_notarized_view,
@@ -128,7 +128,7 @@ where
         );
 
         let parent_view = self.strategy.random_parent_view(
-            self.context.as_mut(),
+            &mut self.context,
             view,
             self.last_finalized_view,
             self.last_notarized_view,
@@ -172,7 +172,7 @@ where
     }
 
     pub fn start(
-        mut self,
+        self,
         vote_network: (
             impl Sender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
@@ -186,10 +186,9 @@ where
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(vote_network, certificate_network, resolver_network)
-        )
+        self.context
+            .child("run")
+            .spawn(move |_| self.run(vote_network, certificate_network, resolver_network))
     }
 
     async fn run(
@@ -291,7 +290,7 @@ where
         match vote {
             Vote::Notarize(notarize) => {
                 let proposal = self.strategy.mutate_proposal(
-                    self.context.as_mut(),
+                    &mut self.context,
                     &notarize.proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -305,7 +304,7 @@ where
             }
             Vote::Finalize(finalize) => {
                 let proposal = self.strategy.mutate_proposal(
-                    self.context.as_mut(),
+                    &mut self.context,
                     &finalize.proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -319,7 +318,7 @@ where
             }
             Vote::Nullify(_) => {
                 let v = self.strategy.mutate_nullify_view(
-                    self.context.as_mut(),
+                    &mut self.context,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,
@@ -367,7 +366,7 @@ where
         if self.context.random_bool(0.5) {
             let cert = self
                 .strategy
-                .mutate_certificate_bytes(self.context.as_mut(), msg.as_ref());
+                .mutate_certificate_bytes(&mut self.context, msg.as_ref());
             let _ = sender.send(Recipients::All, cert, true);
         }
     }
@@ -378,9 +377,7 @@ where
         }
         // Optionally send malformed resolver data
         if self.context.random_bool(0.5) {
-            let mutated = self
-                .strategy
-                .mutate_resolver_bytes(self.context.as_mut(), &msg);
+            let mutated = self.strategy.mutate_resolver_bytes(&mut self.context, &msg);
             let _ = sender.send(Recipients::All, IoBuf::from(mutated), true);
         }
     }
@@ -413,7 +410,7 @@ where
         for _ in 0..10 {
             let proposal = self.get_proposal();
             let proposal = self.strategy.mutate_proposal(
-                self.context.as_mut(),
+                &mut self.context,
                 &proposal,
                 self.last_vote_view,
                 self.last_finalized_view,
@@ -431,7 +428,7 @@ where
         }
         let proposal = self.get_proposal();
         let proposal = self.strategy.mutate_proposal(
-            self.context.as_mut(),
+            &mut self.context,
             &proposal,
             self.last_vote_view,
             self.last_finalized_view,
@@ -467,7 +464,7 @@ where
         match self.message() {
             Message::Notarize => {
                 let proposal = self.strategy.mutate_proposal(
-                    self.context.as_mut(),
+                    &mut self.context,
                     &proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -481,7 +478,7 @@ where
             }
             Message::Finalize => {
                 let proposal = self.strategy.mutate_proposal(
-                    self.context.as_mut(),
+                    &mut self.context,
                     &proposal,
                     self.last_vote_view,
                     self.last_finalized_view,
@@ -495,7 +492,7 @@ where
             }
             Message::Nullify => {
                 let view = self.strategy.mutate_nullify_view(
-                    self.context.as_mut(),
+                    &mut self.context,
                     self.last_vote_view,
                     self.last_finalized_view,
                     self.last_notarized_view,

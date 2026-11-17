@@ -11,7 +11,7 @@ use crate::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Hasher, certificate::Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
+use commonware_runtime::{Clock, Handle, Spawner};
 use rand_core::CryptoRng;
 use std::collections::HashMap;
 use tracing::debug;
@@ -22,7 +22,7 @@ pub struct Config<S: Scheme> {
 }
 
 pub struct Outdated<E: Clock + CryptoRng + Spawner, S: Scheme, H: Hasher> {
-    context: ContextCell<E>,
+    context: E,
     scheme: S,
 
     history: HashMap<View, Proposal<H::Digest>>,
@@ -37,7 +37,7 @@ where
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context: ContextCell::new(context),
+            context,
             scheme: cfg.scheme,
 
             history: HashMap::new(),
@@ -45,8 +45,9 @@ where
         }
     }
 
-    pub fn start(mut self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(vote_network))
+    pub fn start(self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context
+            .child("run").spawn(move |_| self.run(vote_network))
     }
 
     async fn run(mut self, vote_network: (impl Sender, impl Receiver)) {

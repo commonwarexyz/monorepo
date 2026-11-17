@@ -9,7 +9,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Delivery, Fetch, Resolver, p2p};
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{GaugeExt, status},
 };
 use commonware_storage::{
@@ -94,7 +94,7 @@ where
     Shared<DB>: Source<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
-    context: ContextCell<E>,
+    context: E,
     config: Config<P, D, B, DB>,
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB>>,
     metrics: ResolverMetrics,
@@ -126,7 +126,7 @@ where
             actor_mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
         let actor = Self {
-            context: ContextCell::new(context),
+            context,
             config: cfg,
             mailbox_rx,
             metrics,
@@ -139,10 +139,11 @@ where
 
     /// Starts the actor, fetching and serving over `net`.
     pub fn start(
-        mut self,
+        self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(net))
+        self.context
+            .child("run").spawn(move |_| self.run(net))
     }
 
     /// Multiplexes mailbox messages and resolver engine callbacks.
@@ -156,7 +157,7 @@ where
             actor_mailbox::new(self.context.child("handler"), receiver.capacity());
         let handler = handler::Handler::new(handler_tx);
         let (engine, mut resolver_mailbox) = p2p::Engine::new(
-            self.context.as_present().child("resolver"),
+            self.context.child("resolver"),
             p2p::Config {
                 peer_provider: self.config.peer_provider.clone(),
                 blocker: self.config.blocker.clone(),

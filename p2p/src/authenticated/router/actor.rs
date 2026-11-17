@@ -9,14 +9,14 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::channel::ring;
 use std::collections::BTreeMap;
 use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
 pub struct Actor<E: Spawner + Metrics, P: PublicKey> {
-    context: ContextCell<E>,
+    context: E,
 
     control: mailbox::UnreliableReceiver<Message<P>>,
     connections: BTreeMap<P, Relay<EncodedData>>,
@@ -33,7 +33,7 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         // Create actor
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 control: control_receiver,
                 connections: BTreeMap::new(),
                 open_subscriptions: Vec::new(),
@@ -72,8 +72,9 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Starts a new task that runs the router [Actor].
     /// Returns a [Handle] that can be used to await the completion of the task,
     /// which will run until its `control` receiver is closed or shutdown is signaled.
-    pub fn start(mut self, routing: Channels<P>) -> Handle<()> {
-        spawn_cell!(self.context, self.run(routing))
+    pub fn start(self, routing: Channels<P>) -> Handle<()> {
+        self.context
+            .child("run").spawn(move |_| self.run(routing))
     }
 
     /// Runs the [Actor] event loop, processing incoming control and content messages.
