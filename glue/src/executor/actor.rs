@@ -409,12 +409,10 @@ where
             height: parent.height().next(),
             input: input.block.digest(),
         };
-        // Executed blocks extend a line of finalized blocks, so their ancestry is already checked.
         let ancestry = AncestorStream::new(
             Arc::new(self.context.child("ancestry")),
             self.chain.clone(),
             [parent],
-            None,
             self.ancestor_fetch_duration.clone(),
         );
         let execute = self.execute.clone();
