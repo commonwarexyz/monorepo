@@ -1646,6 +1646,28 @@ mod tests {
     }
 
     #[test]
+    fn test_rejected_spawn_closes_its_context() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        Runner::new(cfg).start(|context| async move {
+            // Close admission only, leaving supervision open.
+            context.executor.tasks.close();
+            let rejected = context.child("rejected");
+            let retained = rejected.child("retained");
+            assert!(!Tree::child(&retained.tree).1, "retained closed too early");
+            let handle = rejected.spawn(|_| -> std::future::Ready<()> {
+                panic!("a closed tracker must not invoke its factory");
+            });
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(
+                Tree::child(&retained.tree).1,
+                "rejected context stayed open"
+            );
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[test]
     fn test_telemetry() {
         let executor = Runner::default();
         executor.start(|context| async move {

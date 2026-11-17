@@ -7,8 +7,9 @@
 //! future that already completed keeps its output.
 //!
 //! [AbortHandle::suspend] marks the state suspended instead: the wrapper stops polling its future
-//! but stays pending, so the task neither makes progress nor ends, until an abort follows. A
-//! closing supervision subtree suspends every task in it before it aborts any (see
+//! but stays pending until an abort follows. A poll that already passed the state check can
+//! still poll the future and complete. A closing supervision subtree suspends every task in it
+//! before it aborts any (see
 //! [super::supervision::Tree]), so a task in the subtree can only observe another one's abort by
 //! the same close in a poll it started before it was suspended.
 //!
@@ -209,7 +210,7 @@ impl AbortHandle {
         // `AtomicWaker` before the poll checks the state again. Release pairs with the
         // wrapper's acquire load: a task that resolves as aborted, and anything that observes it
         // ending, then also observes the suspensions this thread made before, so the other tasks
-        // of a closing subtree already stopped polling their futures.
+        // of a closing subtree stopped polling their futures, except for a poll already in progress.
         self.shared.state.store(ABORTED, Ordering::Release);
         self.shared.waker.wake();
     }

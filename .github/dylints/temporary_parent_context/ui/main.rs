@@ -1,7 +1,9 @@
 // aux-build:commonware_runtime.rs
+// compile-flags: --edition=2024
+#![allow(unused_must_use)]
 extern crate commonware_runtime;
 
-use commonware_runtime::Supervisor;
+use commonware_runtime::{Spawner, Supervisor};
 
 #[derive(Clone)]
 struct Context;
@@ -14,8 +16,13 @@ impl Context {
     fn dedicated(self) -> Self {
         self
     }
+}
 
-    fn spawn(self, _: impl FnOnce()) {}
+impl Spawner for Context {
+    fn spawn(self, f: impl FnOnce()) -> std::future::Ready<()> {
+        f();
+        std::future::ready(())
+    }
 }
 
 impl Supervisor for Context {
@@ -58,28 +65,60 @@ impl Holder {
     }
 }
 
+struct MetricsOnly;
+
+impl Supervisor for MetricsOnly {
+    fn child(&self, _: &'static str) -> Self {
+        Self
+    }
+    fn with_attribute(self, _: &'static str, _: &'static str) -> Self {
+        self
+    }
+}
+
+impl Holder {
+    fn start(&self) {
+        self.context.child("a").spawn(|| {});
+    }
+}
+
+async fn correct_generic<E: Spawner + Supervisor>(context: E) {
+    context.child("a").child("b").spawn(|| {}).await;
+    context.child("a").spawn(|| {});
+}
+
+async fn awaited(context: Context) {
+    context.child("a").child("b").spawn(|| {}).await;
+    let _ = (
+        context.child("a").child("b").spawn(|| {}),
+        std::future::ready(()),
+    )
+        .1
+        .await;
+    let _ = (
+        context.child("a").child("b").spawn(|| {}),
+        std::future::ready(()).await,
+    );
+}
+
 #[rustfmt::skip]
 fn main() {
     let _ = Unrelated.child("first").child("second");
     let _ = OtherContext.child("first").child("second");
+    let _ = MetricsOnly.child("first").child("second");
     let ctx = Context;
-    let _ = ctx.child("single");
-    let bound = ctx.child("bound");
-    let _ = bound.child("worker");
+    let bound = ctx.child("a").child("b");
+    bound.spawn(|| {});
+    let _ = ctx.child("metrics").child("only").with_attribute("key", "value");
     let holder = Holder { context: Context };
     let _ = holder.child();
-    let _ = ctx.clone().child("cloned");
+    holder.start();
+    let _ = correct_generic(Context);
+    let _ = awaited(Context);
 
-    let _ = ctx.child("direct").child("worker");
-    let _ = ctx.child("attributed").with_attribute("key", "value").child("worker");
-    let _ = ctx
-        .child("multiline")
-        .child("worker");
-    let child = ctx.child("binding").child("worker");
-    child.spawn(|| {});
-    ctx.child("spawning").child("worker").spawn(|| {});
-    let _ = ctx.child("first").child("second").child("third");
-    let _ = ctx.child("shared").shared(true).child("worker");
-    let _ = ctx.child("dedicated").dedicated().child("worker");
-    let _ = ctx.child("clone").clone().child("worker");
+    ctx.child("statement").child("worker").spawn(|| {});
+    let _handle = ctx.child("handle").child("worker").spawn(|| {});
+    ctx.child("attributed").with_attribute("key", "value").child("worker").spawn(|| {});
+    ctx.child("shared").shared(true).child("worker").spawn(|| {});
+    ctx.child("dedicated").dedicated().child("worker").spawn(|| {});
 }

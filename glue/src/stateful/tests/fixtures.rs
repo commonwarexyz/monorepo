@@ -207,7 +207,7 @@ pub(crate) struct MarshalFixture {
     pub(crate) mailbox: MarshalMailbox<TestScheme, TestVariant>,
     pub(crate) floor: Floor,
     /// Keeps the fixture alive: the unstarted actor (its mailbox dead-letters once this
-    /// drops) or the started actor's resolver handler and task handle.
+    /// drops) or the started actor's context, resolver handler, and task handle.
     pub(crate) guards: Box<dyn std::any::Any>,
 }
 

@@ -16,6 +16,9 @@ pub type ChannelPair<P> = (
 /// Arguments passed to [`EngineDefinition::init`].
 pub struct InitContext<'a, P: PublicKey> {
     /// Labeled runtime context for this validator.
+    ///
+    /// Keep this context for as long as the validator's work should run, or hand it to the task
+    /// that owns that work. Dropping it aborts tasks spawned under its children.
     pub context: deterministic::Context,
     /// Index of this validator in the participant list.
     pub index: usize,

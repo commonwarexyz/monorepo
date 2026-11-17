@@ -301,9 +301,10 @@ stability_scope!(BETA {
         /// `context.with_attribute(..).child("b")` also closes `context` when the statement
         /// ends.
         ///
-        /// A closed context still serves metrics, storage, networking and time, but a
-        /// spawn from it, or from any context derived from it, resolves to
-        /// [`Error::Closed`].
+        /// A closed context still serves metrics, storage, time, and existing network
+        /// connections. Operations that spawn work fail: spawns from this context or
+        /// any context derived from it resolve to [`Error::Closed`], and io_uring DNS
+        /// resolution returns [`Error::ResolveFailed`].
         ///
         /// Labels must start with `[a-zA-Z]` and contain only
         /// `[a-zA-Z0-9_]`. Runtime-reserved metric prefixes must not be used.
@@ -467,8 +468,8 @@ stability_scope!(BETA {
         /// ```
         ///
         /// The task takes over the actor's node. The factory's context replaces the
-        /// actor's context field at a fresh child node, preserving its metric name,
-        /// attributes, and labels. Everything the actor started before or after
+        /// actor's context field at a fresh child node, preserving its label and
+        /// attributes. Everything the actor started before or after
         /// `start` ends when the task ends. Dropping an actor that never started
         /// closes its node and ends its work too. Placement on the actor's context
         /// applies to its task.
@@ -478,8 +479,8 @@ stability_scope!(BETA {
         /// after `start`. The run task remains on the actor's original node. Hand
         /// sub-states a child instead.
         ///
-        /// An actor that cannot be rebuilt, because it implements `Drop` or is boxed
-        /// before it starts, can start its task from a child instead:
+        /// A boxed actor can rebuild itself and its box inside the factory. An actor
+        /// that implements `Drop` can start its task from a child instead:
         /// `self.context.child("run").spawn(move |_| self.run())`. The run task then
         /// sits beside the work the actor started rather than above it, so the actor
         /// must keep its context until `run` returns, and placement for the task goes on
@@ -2621,6 +2622,124 @@ mod tests {
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
     #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_dropped_root_context_aborts_nothing<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let (release, released) = oneshot::channel::<()>();
+            let worker = context.child("worker").spawn(move |context| async move {
+                released.await.unwrap();
+                // Spawning below the root still works after the root context is gone.
+                context.child("late").spawn(|_| async { 7 }).await
+            });
+            drop(context);
+            release.send(()).unwrap();
+            assert_eq!(worker.await.unwrap().unwrap(), 7);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_stopped_root_context_aborts_nothing<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let (release, released) = oneshot::channel::<()>();
+            let worker = context.child("worker").spawn(move |_| async move {
+                released.await.unwrap();
+                7
+            });
+            context.stop(0, None).await.unwrap();
+            release.send(()).unwrap();
+            assert_eq!(worker.await.unwrap(), 7);
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_stop_closes_the_consumed_scope<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let scope = context.child("scope");
+            let (started_tx, started_rx) = oneshot::channel();
+            let worker = scope.child("worker").spawn(move |_| async move {
+                started_tx.send(()).unwrap();
+                pending::<()>().await;
+            });
+            started_rx.await.unwrap();
+
+            // No task holds a signal, so the stop resolves, and the consumed scope closes.
+            scope.stop(0, None).await.unwrap();
+            assert!(matches!(worker.await, Err(Error::Closed)));
+
+            // The root scope stays open.
+            assert_eq!(
+                context.child("after").spawn(|_| async { 3 }).await.unwrap(),
+                3
+            );
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
+    fn test_drop_actor_starts_from_child<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        /// An actor that implements `Drop`, so it starts its task from a child.
+        struct Actor<E: Spawner> {
+            context: E,
+            late: Option<oneshot::Sender<Handle<()>>>,
+        }
+
+        impl<E: Spawner> Drop for Actor<E> {
+            fn drop(&mut self) {}
+        }
+
+        impl<E: Spawner> Actor<E> {
+            fn start(self) -> Handle<()> {
+                self.context.child("run").spawn(move |_| self.run())
+            }
+
+            async fn run(mut self) {
+                let late = self.context.child("late").spawn(|_| pending::<()>());
+                let _ = self.late.take().unwrap().send(late);
+                pending::<()>().await;
+            }
+        }
+
+        runner.start(|context| async move {
+            // Aborting the run task ends what the actor started before and after `start`.
+            let context = context.child("actor");
+            let early = context.child("early").spawn(|_| pending::<()>());
+            let (late, late_rx) = oneshot::channel();
+            let handle = Actor {
+                context,
+                late: Some(late),
+            }
+            .start();
+            let late = late_rx.await.unwrap();
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(matches!(early.await, Err(Error::Closed)));
+            assert!(matches!(late.await, Err(Error::Closed)));
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(target_os = "linux", case::iouring(iouring::Runner::default()))]
     fn test_component_owns_its_scope<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -3282,8 +3401,10 @@ mod tests {
     {
         runner.start(|context| async move {
             // Create context with attribute, then nest a label
-            let orchestrator = context.child("orchestrator").with_attribute("epoch", "e5");
-            let ctx = orchestrator.child("engine");
+            let ctx = context
+                .child("orchestrator")
+                .with_attribute("epoch", "e5")
+                .child("engine");
 
             // Register a metric
             let counter = Counter::<u64>::default();
@@ -3299,9 +3420,12 @@ mod tests {
             );
 
             // Multiple levels of nesting with attributes at different levels
-            let outer = context.child("outer").with_attribute("region", "us");
-            let middle = outer.child("middle").with_attribute("az", "east");
-            let ctx2 = middle.child("inner");
+            let ctx2 = context
+                .child("outer")
+                .with_attribute("region", "us")
+                .child("middle")
+                .with_attribute("az", "east")
+                .child("inner");
 
             let counter2 = Counter::<u64>::default();
             let _registered2 = ctx2.register("requests", "request count", counter2.clone());
@@ -3526,14 +3650,16 @@ mod tests {
             let svc_a_v2 = context.child("service_a").with_attribute("version", 2);
 
             // Service B with nested label: service_b_worker
-            let svc_b = context.child("service_b");
-            let svc_b_worker = svc_b.child("worker");
+            let svc_b_worker = context.child("service_b").child("worker");
 
             // Service B with nested label AND attribute
-            let svc_b_worker_shard = svc_b.child("worker").with_attribute("shard", 99);
+            let svc_b_worker_shard = context
+                .child("service_b")
+                .child("worker")
+                .with_attribute("shard", 99);
 
             // Service B different nested label: service_b_manager
-            let svc_b_manager = svc_b.child("manager");
+            let svc_b_manager = context.child("service_b").child("manager");
 
             // Service C: plain, proves no cross-service contamination
             let svc_c = context.child("service_c");

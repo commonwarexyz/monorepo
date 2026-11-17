@@ -6122,16 +6122,16 @@ mod tests {
             assert!(reporter.notarizations.lock().is_empty());
             assert!(reporter.certifications.lock().is_empty());
 
-            let _restarted_context;
+            let restarted_context;
             if restart {
                 let handle = actor_handle.lock().take().unwrap();
                 handle.abort();
                 assert!(handle.await.is_err());
                 assert!(response.is_closed());
                 requests.lock().clear();
-                _restarted_context = context.child("restarted");
+                restarted_context = context.child("restarted");
                 (mailbox, batcher, _resolver, relay, reporter) = setup_voter(
-                    &_restarted_context,
+                    &restarted_context,
                     &oracle,
                     &participants,
                     &schemes,

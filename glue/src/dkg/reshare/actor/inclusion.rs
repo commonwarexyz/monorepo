@@ -3121,7 +3121,7 @@ mod tests {
         )
         .await;
         let (actor, _mailbox) = utils::new_actor(
-            context.child("actor_fixture"),
+            context,
             signer,
             participants,
             &oracle,

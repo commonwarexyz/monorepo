@@ -176,6 +176,10 @@ pub struct Input<Upstream, Provider> {
 /// Methods may run concurrently on different clones. Given the same inputs and database state,
 /// every clone must produce the same state transition. Mutable state that affects execution
 /// must live in the supplied database batches.
+///
+/// Each hook's runtime context closes when its future completes or is dropped, aborting work
+/// spawned under its children. Work that must outlive the hook must consume the context itself
+/// with `context.0.spawn(..)`, handing its node to the task.
 pub trait Application<E>: Clone + Send + 'static {
     /// The signing scheme used by the application and by the marshal supplied through
     /// [`Config::marshal`](crate::stateful::Config::marshal).
@@ -343,10 +347,6 @@ pub trait Application<E>: Clone + Send + 'static {
     ///
     /// Capture, application, and this hook may repeat after a crash until both the block's state
     /// and marshal's processed position are durable.
-    ///
-    /// The runtime context is dropped when this hook returns, which aborts work started under a
-    /// child of it. Spawn follow-on work from the context itself (`context.0.spawn(..)`), which
-    /// hands the context's node to the task.
     ///
     /// # Panics
     ///

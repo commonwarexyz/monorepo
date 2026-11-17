@@ -397,10 +397,11 @@ where
 
 /// Calls [`Handle::abort`] when dropped.
 ///
-/// Supervision ties spawned tasks to the context they were spawned from, so work spawned from a
-/// context that a plain future only borrows outlives that future's drop. Wrapping the handle (see
-/// [`Handle::abort_on_drop`]) ties the task's cancellation to the guard instead. Dropping the
-/// guard signals cancellation. Use [`AbortOnDrop::abort`] to also join the handle. Completion
+/// Supervision ties spawned tasks to their context's node. Work spawned on a child of a context
+/// that a plain future only borrows can outlive that future's drop while the context stays open.
+/// Wrapping the handle (see [`Handle::abort_on_drop`]) ties the task's cancellation to the guard
+/// instead. Dropping the guard signals cancellation. Use [`AbortOnDrop::abort`] to also join the
+/// handle. Completion
 /// handles only stop waiting and do not cancel the underlying work (see [`Handle`]).
 pub struct AbortOnDrop<T: Send + 'static>(Handle<T>);
 

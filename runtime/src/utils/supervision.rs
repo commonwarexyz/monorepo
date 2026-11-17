@@ -277,9 +277,10 @@ mod tests {
             time::{Duration, Instant},
         };
 
-        // A component's run task, a node the test holds locked to pause the
-        // walk, and work that would end as soon as it is polled. The walk
-        // visits the newest child first.
+        // An actor started with child("run") has its run task and work on
+        // sibling nodes. A node the test holds locked pauses the walk before
+        // the run task, after work that would end on its next poll is suspended.
+        // The walk visits the newest child first.
         let scope = Tree::root();
         let (run, _) = Tree::child(&scope);
         let (gate, _) = Tree::child(&scope);

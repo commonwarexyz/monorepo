@@ -363,6 +363,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// State beyond the selected checkpoint must be durably discarded before this returns.
     /// Returns [`InitError::TargetMismatch`] if the recovered target is not `expected`.
+    ///
+    /// `context` is for metrics and storage and may already be closed. Implementations must not
+    /// spawn tasks from it.
     fn init(
         context: E,
         config: Self::Config,
@@ -616,6 +619,9 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     type SyncError: Debug + Send;
 
     /// Syncs a new database from `source` to `target` and returns it.
+    ///
+    /// `context` is for metrics and storage and may already be closed. Implementations must not
+    /// spawn tasks from it.
     ///
     /// The caller sends valid targets of the same database on `tip_updates` in advancing order; a
     /// target may be superseded by a newer one before it is read.
