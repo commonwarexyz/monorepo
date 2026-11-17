@@ -1,9 +1,9 @@
 use commonware_cryptography::{
-    bls::ops,
-    bls12381::{
-        primitives::variant::MinSig,
+    bls::{
+        ops,
         tle::{Block, decrypt, encrypt},
     },
+    bls12381::primitives::variant::MinSig,
 };
 use commonware_utils::test_rng;
 use criterion::{BatchSize, Criterion, criterion_group};

@@ -3,5 +3,4 @@
 pub mod dkg;
 pub mod primitives;
 mod scheme;
-pub mod tle;
 pub use scheme::{PrivateKey, PublicKey, Signature};

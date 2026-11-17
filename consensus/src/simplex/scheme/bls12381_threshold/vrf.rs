@@ -63,7 +63,7 @@ use commonware_codec::{
     Buf, Encode, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
 };
 #[commonware_macros::stability(ALPHA)]
-use commonware_cryptography::bls12381::{primitives::group::Scalar, tle};
+use commonware_cryptography::bls::tle;
 use commonware_cryptography::{
     Digest, PublicKey,
     bls::{
@@ -344,10 +344,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         rng: &mut R,
         target: Round,
         message: impl Into<tle::Block>,
-    ) -> Result<tle::Ciphertext<V>, tle::Error>
-    where
-        V: Variant<Scalar = Scalar>,
-    {
+    ) -> Result<tle::Ciphertext<V>, tle::Error> {
         let block = message.into();
         let target_message = target.encode();
         tle::encrypt(
@@ -367,7 +364,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// have voted in the target round, whether or not their votes form a certificate (notarization,
 /// nullification, or finalization).
 #[stability(ALPHA)]
-pub fn encrypt<R: CryptoRng, V: Variant<Scalar = Scalar>>(
+pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
     identity: V::Public,
     namespace: &[u8],
@@ -547,10 +544,7 @@ impl<V: Variant> Seed<V> {
     /// Returns `None` if the ciphertext is invalid or encrypted for a different
     /// round than this seed.
     #[stability(ALPHA)]
-    pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block>
-    where
-        V: Variant<Scalar = Scalar>,
-    {
+    pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
         decrypt(self, ciphertext)
     }
 }
@@ -560,10 +554,7 @@ impl<V: Variant> Seed<V> {
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
 #[stability(ALPHA)]
-pub fn decrypt<V: Variant<Scalar = Scalar>>(
-    seed: &Seed<V>,
-    ciphertext: &tle::Ciphertext<V>,
-) -> Option<tle::Block> {
+pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
     tle::decrypt(&seed.signature, ciphertext)
 }
 
@@ -1037,10 +1028,7 @@ mod tests {
     use commonware_cryptography::{
         Hasher, Sha256, Signer as _,
         bls::{dkg::feldman_desmedt as dkg, ops::threshold, sharing::Mode, variant::Variant},
-        bls12381::primitives::{
-            group::Scalar,
-            variant::{MinPk, MinSig},
-        },
+        bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{Scheme as _, Verifier as _, mocks::Fixture},
         ed25519,
         ed25519::certificate::mocks::participants as ed25519_participants,
@@ -2117,7 +2105,7 @@ mod tests {
         verify_certificate_detects_seed_corruption::<MinSig>();
     }
 
-    fn encrypt_decrypt<V: Variant<Scalar = Scalar>>() {
+    fn encrypt_decrypt<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 61);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -2165,7 +2153,7 @@ mod tests {
         encrypt_decrypt::<MinSig>();
     }
 
-    fn encrypt_with_identity_returns_error<V: Variant<Scalar = Scalar>>() {
+    fn encrypt_with_identity_returns_error<V: Variant>() {
         let mut rng = test_rng();
         let verifier = Scheme::<V>::certificate_verifier(NAMESPACE, V::Public::zero());
         let target = Round::new(Epoch::new(333), View::new(10));

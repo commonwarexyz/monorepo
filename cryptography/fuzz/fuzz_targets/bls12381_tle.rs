@@ -11,14 +11,12 @@ use commonware_codec::{Encode, ReadExt};
 use commonware_cryptography::{
     bls::{
         ops::{compute_public, sign_message},
+        tle::{Block, Ciphertext, decrypt, encrypt},
         variant::Variant,
     },
-    bls12381::{
-        primitives::{
-            group::Private,
-            variant::{MinPk, MinSig},
-        },
-        tle::{Block, Ciphertext, decrypt, encrypt},
+    bls12381::primitives::{
+        group::Private,
+        variant::{MinPk, MinSig},
     },
 };
 use commonware_utils::TestRng;

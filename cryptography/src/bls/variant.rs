@@ -8,7 +8,7 @@ use bytes::BufMut;
 use commonware_codec::{
     Buf, CodecFixed, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_math::algebra::{FieldNTT, HashToGroup, PairingGroup, Random, Space};
+use commonware_math::algebra::{FieldNTT, HashToField, HashToGroup, PairingGroup, Random, Space};
 use commonware_utils::Participant;
 use core::{fmt::Debug, hash::Hash};
 use ctutils::CtEq;
@@ -17,6 +17,7 @@ use ctutils::CtEq;
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
     /// The scalar type, which holds private keys.
     type Scalar: FieldNTT
+        + HashToField
         + Random
         + From<u64>
         + CtEq
@@ -51,6 +52,12 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// The domain separator tag (DST) for a message.
     const MESSAGE: DST;
+
+    /// The domain separator tag (DST) for the scalar that timelock encryption derives.
+    const TLE: DST;
+
+    /// The namespace of the transcripts of a distributed key generation.
+    const DKG: &'static [u8];
 }
 
 /// A partial signature.
