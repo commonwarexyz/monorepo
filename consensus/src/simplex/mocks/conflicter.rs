@@ -8,7 +8,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Hasher, certificate::Scheme};
 use commonware_math::algebra::Random;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
+use commonware_runtime::{Clock, Handle, Spawner};
 use rand_core::CryptoRng;
 use std::marker::PhantomData;
 use tracing::debug;
@@ -18,7 +18,7 @@ pub struct Config<S: Scheme> {
 }
 
 pub struct Conflicter<E: Clock + CryptoRng + Spawner, S: Scheme, H: Hasher> {
-    context: ContextCell<E>,
+    context: E,
     scheme: S,
     _hasher: PhantomData<H>,
 }
@@ -31,14 +31,15 @@ where
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context: ContextCell::new(context),
+            context,
             scheme: cfg.scheme,
             _hasher: PhantomData,
         }
     }
 
-    pub fn start(mut self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(vote_network))
+    pub fn start(self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(vote_network))
     }
 
     async fn run(mut self, vote_network: (impl Sender, impl Receiver)) {
@@ -57,7 +58,7 @@ where
             match msg {
                 Vote::Notarize(notarize) => {
                     // Notarize random digest
-                    let payload = H::Digest::random(self.context.as_mut());
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(notarize.round(), notarize.proposal.parent, payload);
                     let n = Notarize::<S, _>::sign(&self.scheme, proposal).unwrap();
@@ -71,7 +72,7 @@ where
                 }
                 Vote::Finalize(finalize) => {
                     // Finalize random digest
-                    let payload = H::Digest::random(self.context.as_mut());
+                    let payload = H::Digest::random(&mut self.context);
                     let proposal =
                         Proposal::new(finalize.round(), finalize.proposal.parent, payload);
                     let f = Finalize::<S, _>::sign(&self.scheme, proposal).unwrap();

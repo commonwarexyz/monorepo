@@ -206,8 +206,9 @@ fn prunable_archive_config(page_cache: CacheRef, partition: &str) -> prunable::C
 pub(crate) struct MarshalFixture {
     pub(crate) mailbox: MarshalMailbox<TestScheme, TestVariant>,
     pub(crate) floor: Floor,
-    /// Keeps the fixture alive: the unstarted actor (its mailbox dead-letters once this
-    /// drops) or the started actor's resolver handler and task handle.
+    /// Keeps the fixture alive: the fixture's context (the parent of the actor, its archives
+    /// and its resolver handler) with either the unstarted actor (its mailbox dead-letters once
+    /// this drops) or the started actor's resolver handler and task handle.
     pub(crate) guards: Box<dyn std::any::Any>,
 }
 
@@ -216,9 +217,13 @@ impl MarshalFixture {
     pub(crate) async fn abort(self) {
         let guards = self
             .guards
-            .downcast::<(handler::Handler<Sha256Digest>, Handle<()>)>()
+            .downcast::<(
+                deterministic::Context,
+                handler::Handler<Sha256Digest>,
+                Handle<()>,
+            )>()
             .unwrap_or_else(|_| panic!("marshal fixture was not started"));
-        let (_, handle) = *guards;
+        let (_context, _, handle) = *guards;
         handle.abort();
         let _ = handle.await;
     }
@@ -493,7 +498,7 @@ where
         return MarshalFixture {
             mailbox,
             floor,
-            guards: Box::new(actor),
+            guards: Box::new((context, actor)),
         };
     };
 
@@ -503,6 +508,6 @@ where
     MarshalFixture {
         mailbox,
         floor,
-        guards: Box::new((resolver_handler, handle)),
+        guards: Box::new((context, resolver_handler, handle)),
     }
 }

@@ -7,7 +7,7 @@ use crate::simplex::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Hasher, certificate::Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
+use commonware_runtime::{Handle, Spawner};
 use std::marker::PhantomData;
 use tracing::debug;
 
@@ -16,7 +16,7 @@ pub struct Config<S: Scheme> {
 }
 
 pub struct Nuller<E: Spawner, S: Scheme, H: Hasher> {
-    context: ContextCell<E>,
+    context: E,
     scheme: S,
     _hasher: PhantomData<H>,
 }
@@ -29,14 +29,15 @@ where
 {
     pub fn new(context: E, cfg: Config<S>) -> Self {
         Self {
-            context: ContextCell::new(context),
+            context,
             scheme: cfg.scheme,
             _hasher: PhantomData,
         }
     }
 
-    pub fn start(mut self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
-        spawn_cell!(self.context, self.run(vote_network))
+    pub fn start(self, vote_network: (impl Sender, impl Receiver)) -> Handle<()> {
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(vote_network))
     }
 
     async fn run(self, vote_network: (impl Sender, impl Receiver)) {

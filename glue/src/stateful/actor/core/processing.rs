@@ -20,7 +20,7 @@ use commonware_consensus::{
 };
 use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::{
     Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
 };
@@ -199,7 +199,7 @@ where
     V: Variant,
 {
     /// Runtime context.
-    pub(super) context: ContextCell<E>,
+    pub(super) context: E,
     /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
     /// Provider cloned into each proposal.
@@ -232,7 +232,7 @@ where
         let mut verifications = Verifications::new(
             self.marshal.clone(),
             self.processor.verifier(),
-            self.context.as_present().child("verifications"),
+            self.context.child("verifications"),
         );
         for request in std::mem::take(&mut self.deferred_verifications) {
             verifications.schedule(Request::Verify(request));
@@ -252,7 +252,7 @@ where
                 if pending_prune.is_none()
                     && durability.needs_barrier()
                     && !start_barrier(
-                        self.context.as_present(),
+                        &self.context,
                         &mut durability,
                         &mut verifications,
                         &mut actions,
@@ -340,7 +340,7 @@ where
                         upstream,
                         provider: self.provider.clone(),
                     };
-                    let actor_context = self.context.as_present();
+                    let actor_context = &self.context;
                     let build = self
                         .processor
                         .propose(
@@ -462,7 +462,7 @@ where
                             "uncovered prune target must have unapplied durability",
                         );
                         if !start_barrier(
-                            self.context.as_present(),
+                            &self.context,
                             &mut durability,
                             &mut verifications,
                             &mut actions,
@@ -530,7 +530,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _, Spawner as _,
+        Error as RuntimeError, Handle, Metrics as _, Name, Runner as _, Spawner as _,
         Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
@@ -932,7 +932,7 @@ mod tests {
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
-            context: ContextCell::new(context.child("processing")),
+            context: context.child("processing"),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
@@ -1002,7 +1002,7 @@ mod tests {
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
-            context: ContextCell::new(context.child("processing")),
+            context: context.child("processing"),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
@@ -1055,7 +1055,7 @@ mod tests {
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
-            context: ContextCell::new(context.child("processing")),
+            context: context.child("processing"),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox,
@@ -1397,7 +1397,7 @@ mod tests {
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
         let processing = Processing {
-            context: ContextCell::new(context.child("processing")),
+            context: context.child("processing"),
             mailbox: receiver,
             provider: (),
             marshal: marshal.mailbox.clone(),
@@ -2795,7 +2795,7 @@ mod tests {
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
@@ -2883,7 +2883,7 @@ mod tests {
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
@@ -2961,7 +2961,7 @@ mod tests {
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
@@ -3084,7 +3084,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -3217,7 +3217,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -3655,7 +3655,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -3733,7 +3733,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -3809,7 +3809,7 @@ mod tests {
 
             // Resume the deferred verification after state sync.
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -3958,7 +3958,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -4106,7 +4106,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
@@ -4231,7 +4231,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -4440,7 +4440,7 @@ mod tests {
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
             let mut mailbox = Mailbox::new(sender);
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox,
@@ -4589,7 +4589,7 @@ mod tests {
             let (verify_gate, verify_started, verify_release) = application_gate();
             let observed_contexts = Arc::default();
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
@@ -4773,7 +4773,7 @@ mod tests {
             )
             .await;
             let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
+                context: context.child("processing"),
                 mailbox: receiver,
                 provider: (),
                 marshal: marshal.mailbox.clone(),
@@ -5066,7 +5066,7 @@ mod tests {
             let mut mailbox = Mailbox::new(sender);
             let mut processing = Box::pin(
                 Processing {
-                    context: ContextCell::new(context.child("processing")),
+                    context: context.child("processing"),
                     mailbox: receiver,
                     provider: (),
                     marshal: marshal.mailbox,

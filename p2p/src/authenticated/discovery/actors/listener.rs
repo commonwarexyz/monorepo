@@ -8,8 +8,7 @@ use crate::authenticated::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota, SinkOf,
-    Spawner, StreamOf, spawn_cell,
+    Clock, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota, SinkOf, Spawner, StreamOf,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_stream::Upgrader;
@@ -35,7 +34,7 @@ pub struct Config<U: Upgrader> {
 }
 
 pub struct Actor<E: Spawner + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
-    context: ContextCell<E>,
+    context: E,
 
     address: SocketAddr,
     stream: Arc<StreamConfig<U>>,
@@ -73,7 +72,7 @@ where
         );
 
         Self {
-            context: ContextCell::new(context),
+            context,
 
             address: cfg.address,
             stream: cfg.stream,
@@ -127,7 +126,7 @@ where
 
     #[allow(clippy::type_complexity)]
     pub fn start(
-        mut self,
+        self,
         tracker: tracker::Mailbox<U::PublicKey>,
         supervisor: Mailbox<
             spawner::Message<
@@ -137,7 +136,8 @@ where
             >,
         >,
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, supervisor))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(tracker, supervisor))
     }
 
     #[allow(clippy::type_complexity)]

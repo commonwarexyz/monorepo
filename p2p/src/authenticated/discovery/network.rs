@@ -17,9 +17,7 @@ use crate::{
     sizing::max_retained_peers,
 };
 use commonware_macros::select;
-use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner};
 use commonware_stream::utils::Timeout;
 use commonware_utils::{SystemTimeExt, Widen, ordered::Set, union};
 use rand_core::CryptoRng;
@@ -37,7 +35,7 @@ const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> {
-    context: ContextCell<E>,
+    context: E,
     cfg: Config<U>,
     max_frame_size: u32,
     max_peer_set_size: u64,
@@ -138,7 +136,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
 
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 cfg,
                 max_frame_size,
                 max_peer_set_size,
@@ -217,7 +215,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     ///
     /// Panics if adding the internal mailbox capacity to the registered channel capacities
     /// overflows.
-    pub fn start(mut self) -> Handle<()> {
+    pub fn start(self) -> Handle<()> {
         // Size the router mailbox from the registered channels before binding their senders.
         // Submissions made before binding are accepted and dropped.
         let (router, router_mailbox) = router::Actor::new(
@@ -227,7 +225,8 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
             },
         );
         self.channels.bind(router_mailbox.clone());
-        spawn_cell!(self.context, self.run(router, router_mailbox))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(router, router_mailbox))
     }
 
     async fn run(

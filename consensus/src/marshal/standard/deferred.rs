@@ -1817,6 +1817,7 @@ mod tests {
     /// context names the certified view-1 block as parent, which this
     /// validator's parent selection accepts (view 1 certified, view 2 nullified).
     struct EquivocationFixture {
+        _context: deterministic::Context,
         marshaled: Deferred<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher>,
         round: Round,
         digest: <B as Digestible>::Digest,
@@ -1911,6 +1912,7 @@ mod tests {
         context.sleep(Duration::from_millis(10)).await;
 
         EquivocationFixture {
+            _context: setup.context,
             marshaled,
             round,
             digest,

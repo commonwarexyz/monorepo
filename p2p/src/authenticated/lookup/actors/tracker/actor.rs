@@ -10,9 +10,7 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
-};
+use commonware_runtime::{Clock, Handle, Metrics as RuntimeMetrics, Spawner};
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, ring},
     ordered::Set,
@@ -23,7 +21,7 @@ use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
-    context: ContextCell<E>,
+    context: E,
 
     /// The mailbox for the actor.
     ///
@@ -72,7 +70,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
 
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 receiver,
                 directory,
                 listener: cfg.listener,
@@ -86,8 +84,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
     }
 
     /// Start the actor and run it in the background.
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .spawn(move |context| Self { context, ..self }.run())
     }
 
     async fn run(mut self) {

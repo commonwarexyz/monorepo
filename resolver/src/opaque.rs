@@ -23,7 +23,7 @@ use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{MetricsExt as _, status, status::Status},
 };
 use commonware_utils::{
@@ -189,7 +189,7 @@ where
         consumer,
         fetch_retry_delay,
     )
-    .start();
+    .start(context);
     Resolver::new(mailbox_tx)
 }
 
@@ -202,7 +202,7 @@ where
     Con: Consumer<Key = F::Key, Value = F::Value>,
     Con::Subscriber: Ord,
 {
-    context: ContextCell<E>,
+    context: E,
     fetcher: F,
     mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
     fetches: AbortablePool<'static, FetchCompletion<F::Key, F::Value>>,
@@ -250,7 +250,7 @@ where
     ) -> Self {
         let fetch = context.family("fetch", "Number of fetches by status");
         Self {
-            context: ContextCell::new(context),
+            context,
             fetcher,
             mailbox,
             fetches: AbortablePool::default(),
@@ -262,8 +262,16 @@ where
         }
     }
 
-    fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    /// Runs the actor on its own node. The task keeps `parent`, the context [init] was
+    /// given, because the actor's node sits below it.
+    fn start(self, parent: E) -> Handle<()> {
+        self.context.spawn(move |context| {
+            let actor = Self { context, ..self };
+            async move {
+                let _parent = parent;
+                actor.run().await;
+            }
+        })
     }
 
     async fn run(mut self) {

@@ -27,9 +27,8 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
-    spawn_cell,
     telemetry::{
         metrics::{CounterFamily, Histogram, MetricsExt as _},
         traces::TracedExt as _,
@@ -152,7 +151,7 @@ pub struct Actor<
     R: Relay,
     F: Reporter<Activity = Activity<S, D>>,
 > {
-    context: ContextCell<E>,
+    context: E,
     state: State<E, S, L, D>,
     blocker: B,
     automaton: A,
@@ -239,7 +238,7 @@ impl<
         );
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 state,
                 blocker: cfg.blocker,
                 automaton: cfg.automaton,
@@ -1042,16 +1041,15 @@ impl<
 
     /// Spawns the actor event loop with the provided channels.
     pub fn start(
-        mut self,
+        self,
         batcher: batcher::Mailbox<S, D>,
         resolver: resolver::Mailbox<S, D>,
         vote_sender: impl Sender<PublicKey = S::PublicKey>,
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(batcher, resolver, vote_sender, certificate_sender)
-        )
+        self.context.spawn(move |context| {
+            Self { context, ..self }.run(batcher, resolver, vote_sender, certificate_sender)
+        })
     }
 
     /// Core event loop that drives proposal, voting, networking, and recovery.

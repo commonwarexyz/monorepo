@@ -32,9 +32,8 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, Handle, Metrics, Network, Spawner, Storage,
     buffer::paged::CacheRef,
-    spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{
@@ -221,7 +220,7 @@ where
     T: Strategy,
     ACK: Acknowledgement,
 {
-    context: ContextCell<E>,
+    context: E,
     mailbox: mailbox::Receiver<Message<MV::ApplicationBlock, ACK>>,
     oracle: B,
     manager: M,
@@ -282,7 +281,7 @@ where
 
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 mailbox,
                 oracle: config.oracle,
                 manager: config.manager,
@@ -306,17 +305,13 @@ where
     ///
     /// See [Failures](crate::dkg::orchestrator#failures) for when the returned
     /// task exits or panics.
-    pub fn start<S, R>(
-        mut self,
-        votes: (S, R),
-        certificates: (S, R),
-        resolver: (S, R),
-    ) -> Handle<()>
+    pub fn start<S, R>(self, votes: (S, R), certificates: (S, R), resolver: (S, R)) -> Handle<()>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        spawn_cell!(self.context, self.run(votes, certificates, resolver,))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(votes, certificates, resolver))
     }
 
     /// Drives epoch consensus from finalized blocks and future-epoch traffic
@@ -444,10 +439,7 @@ where
             .map(|processed| state_sync::recovered_epoch(processed, epocher));
         if let Some(state_sync) = self
             .state_sync
-            .resolve(
-                self.context.as_present().child("state_sync"),
-                recovered_epoch,
-            )
+            .resolve(self.context.child("state_sync"), recovered_epoch)
             .await
         {
             return Some(ResolvedStart {

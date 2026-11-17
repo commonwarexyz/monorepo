@@ -20,8 +20,7 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner, spawn_cell,
+    Clock, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota, Spawner,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -317,7 +316,7 @@ pub struct Config {
 
 /// Implementation of a simulated network.
 pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> {
-    context: ContextCell<E>,
+    context: E,
 
     // Maximum size of an application payload.
     max_size: u32,
@@ -347,7 +346,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     links: HashMap<(P, P), Link>,
 
     // A map from a public key to a peer
-    peers: BTreeMap<P, Peer<P>>,
+    peers: BTreeMap<P, Peer<E, P>>,
 
     // Peer sets tracked through the network-wide manager. A new peer starts with a copy.
     network_tracker: Tracker<P>,
@@ -397,7 +396,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 max_size: cfg.max_size,
                 max_frame_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
@@ -700,7 +699,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 let link = Link::new(
-                    self.context.as_mut(),
+                    &mut self.context,
                     sender,
                     receiver,
                     receiver_socket,
@@ -913,10 +912,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .inc();
 
             // Sample latency
-            let latency = Duration::from_millis(link.sampler.sample(self.context.as_mut()) as u64);
+            let latency = Duration::from_millis(link.sampler.sample(&mut self.context) as u64);
 
             // Determine if the message should be delivered
-            let should_deliver = link.success_rate.sample(self.context.as_mut());
+            let should_deliver = link.success_rate.sample(&mut self.context);
 
             // Enqueue message for delivery
             let completions = self.transmitter.enqueue(
@@ -992,8 +991,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     ///
     /// It is not necessary to invoke this method before modifying the network topology, however,
     /// no messages will be sent until this method is called.
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .spawn(move |context| Self { context, ..self }.run())
     }
 
     async fn run(mut self) {
@@ -1381,7 +1381,10 @@ impl<P: PublicKey> Receiver<P> {
 /// A peer in the simulated network.
 ///
 /// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
-struct Peer<P: PublicKey> {
+struct Peer<E, P: PublicKey> {
+    // Keeps the router and listener scope open for the lifetime of the peer.
+    _context: E,
+
     // Socket address that the peer is listening on
     socket: SocketAddr,
 
@@ -1392,13 +1395,13 @@ struct Peer<P: PublicKey> {
     tracker: Tracker<P>,
 }
 
-impl<P: PublicKey> Peer<P> {
+impl<E: Spawner + RNetwork + Metrics + Clock, P: PublicKey> Peer<E, P> {
     /// Create and return a new peer.
     ///
     /// The peer will listen for incoming connections on the given `socket` address.
     /// `max_frame_size` is the maximum size of an internal framed message.
     /// `tracker` holds the peer sets that the peer starts with.
-    async fn new<E: Spawner + RNetwork + Metrics + Clock>(
+    async fn new(
         context: E,
         public_key: P,
         socket: SocketAddr,
@@ -1506,6 +1509,7 @@ impl<P: PublicKey> Peer<P> {
 
         // Return peer
         Self {
+            _context: context,
             socket,
             control: control_sender,
             tracker,
@@ -1635,6 +1639,26 @@ mod tests {
             }
             context.sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    #[test]
+    fn test_unstarted_network_drop_closes_peer_listener() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(2),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(1),
+            };
+            let (mut network, _oracle) = Network::new(context.child("network"), cfg);
+            let public_key = ed25519::PrivateKey::from_seed(0).public_key();
+            let socket = network.ensure_peer_exists(&public_key).await;
+            assert!(context.dial(socket).await.is_ok());
+            drop(network);
+            while context.dial(socket).await.is_ok() {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+        });
     }
 
     /// [`Network::new_with_peers`] seeds peers; controls can register channels and add a link once;

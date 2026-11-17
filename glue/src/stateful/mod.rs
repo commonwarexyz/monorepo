@@ -176,6 +176,11 @@ pub struct Input<Upstream, Provider> {
 /// Methods may run concurrently on different clones. Given the same inputs and database state,
 /// every clone must produce the same state transition. Mutable state that affects execution
 /// must live in the supplied database batches.
+///
+/// In [`process`](Self::process), [`capture`](Self::capture) and [`finalized`](Self::finalized),
+/// `context.0` closes when the call completes or is dropped. Work spawned directly from
+/// `context.0` runs until it ends or [`Stateful`] stops, while work spawned from a child of
+/// `context.0` is aborted when the call ends.
 pub trait Application<E>: Clone + Send + 'static {
     /// The signing scheme used by the application and by the marshal supplied through
     /// [`Config::marshal`](crate::stateful::Config::marshal).

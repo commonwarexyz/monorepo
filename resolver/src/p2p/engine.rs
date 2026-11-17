@@ -16,7 +16,7 @@ use commonware_p2p::{
     utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
@@ -44,7 +44,7 @@ where
     Pro: Producer<Key = Key>,
 {
     /// Context used to spawn tasks, manage time, etc.
-    context: ContextCell<E>,
+    context: E,
 
     /// Produces data for incoming requests
     producer: Pro,
@@ -115,7 +115,7 @@ where
         );
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 producer: cfg.producer,
                 peer_provider: cfg.peer_provider,
                 blocker: cfg.blocker,
@@ -138,10 +138,11 @@ where
     /// - Fetching data from other peers and notifying the `Consumer`
     /// - Serving data to other peers by requesting it from the `Producer`
     pub fn start<NetS: Sender<PublicKey = P>, NetR: Receiver<PublicKey = P>>(
-        mut self,
+        self,
         network: (NetS, NetR),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(network))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(network))
     }
 
     /// Inner run loop called by `start`.
@@ -262,7 +263,7 @@ where
                 // Metrics and logs
                 match result {
                     Ok(_) => {
-                        timer.observe(self.context.as_ref());
+                        timer.observe(&self.context);
                         self.metrics.serve.inc(Status::Success);
                     }
                     Err(ref err) => {
@@ -350,7 +351,7 @@ where
         if is_new {
             self.inflight.insert(
                 key.clone(),
-                self.metrics.fetch_duration.timer(self.context.as_ref()),
+                self.metrics.fetch_duration.timer(&self.context),
             );
             self.fetcher.add_ready(key);
         } else {
@@ -399,7 +400,7 @@ where
         // Serve the request
         trace!(?peer, ?id, "peer request");
         let mut producer = self.producer.clone();
-        let timer = self.metrics.serve_duration.timer(self.context.as_ref());
+        let timer = self.metrics.serve_duration.timer(&self.context);
         let receiver = producer.produce(key);
         self.serves.push(async move {
             let result = receiver.await;
@@ -513,13 +514,13 @@ where
 
                 if let Some(subscribers) = remaining {
                     if !already_accepted {
-                        self.inflight.accept_response(&key, self.context.as_ref());
+                        self.inflight.accept_response(&key, &self.context);
                     }
                     self.inflight.redeliver(Delivery { key, subscribers });
                 } else {
                     // All subscribers observed a valid response, so drop the key's targets
                     // and peer-selection history.
-                    self.inflight.complete(self.context.as_ref(), &key);
+                    self.inflight.complete(&self.context, &key);
                     self.fetcher.clear(&key);
                 }
             }
@@ -533,7 +534,7 @@ where
                 // An accepted response remains valid peer data. Retire conflicting
                 // local demand without fetching the same response again.
                 if already_accepted {
-                    self.inflight.complete(self.context.as_ref(), &key);
+                    self.inflight.complete(&self.context, &key);
                     self.subscribers.remove(&key);
                     self.fetcher.clear(&key);
                     return;

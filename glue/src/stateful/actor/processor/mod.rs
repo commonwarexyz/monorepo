@@ -1162,7 +1162,7 @@ mod tests {
     use commonware_macros::{boxed, select};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
@@ -1741,7 +1741,7 @@ mod tests {
     }
 
     struct Harness {
-        context_cell: ContextCell<deterministic::Context>,
+        context: deterministic::Context,
         processor: Processor<deterministic::Context, ExecutionApp, Sequential>,
         provider: MapProvider,
         db_config: QmdbConfig,
@@ -1778,7 +1778,7 @@ mod tests {
             .await;
             let metrics = StatefulMetrics::new(&context);
             Self {
-                context_cell: ContextCell::new(context),
+                context,
                 processor: Processor::new(
                     app,
                     databases,
@@ -1844,7 +1844,7 @@ mod tests {
             }
             let Applied { barrier, .. } = self
                 .processor
-                .finalize(self.context_cell.as_present(), &self.provider, &block, true)
+                .finalize(&self.context, &self.provider, &block, true)
                 .await;
             assert_durable(barrier).await;
             true
@@ -1862,7 +1862,7 @@ mod tests {
             let block = digested(block);
             let Applied { barrier, prune } = self
                 .processor
-                .finalize(self.context_cell.as_present(), &self.provider, &block, true)
+                .finalize(&self.context, &self.provider, &block, true)
                 .await;
             assert_durable(barrier).await;
             prune
@@ -2083,7 +2083,7 @@ mod tests {
                     round: Block::genesis().context().round,
                     digest: Block::genesis().digest(),
                 },
-                StatefulMetrics::new(harness.context_cell.as_present()),
+                StatefulMetrics::new(&harness.context),
                 Some(Pruning::new(
                     PruneConfig {
                         maintenance_interval: NZUsize!(1),
@@ -2180,7 +2180,7 @@ mod tests {
 
             let finalized_block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
+                &harness.context,
                 &harness.provider,
                 &finalized_block,
                 true,
@@ -2224,7 +2224,7 @@ mod tests {
             let databases = harness.processor.databases().clone();
             let block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
+                &harness.context,
                 &harness.provider,
                 &block,
                 true,
@@ -2314,7 +2314,7 @@ mod tests {
                 Some(ApplicationProbe::new(child.digest(), [gate]));
             let execution = harness.processor.execution.clone();
             let app = harness.processor.app.clone();
-            let replay_context = harness.context_cell.as_present().child("replay");
+            let replay_context = harness.context.child("replay");
             let mut first = Box::pin(process_shared(
                 &execution,
                 &app,
@@ -2381,7 +2381,7 @@ mod tests {
 
             let finalized_block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
+                &harness.context,
                 &harness.provider,
                 &finalized_block,
                 true,
@@ -2425,7 +2425,7 @@ mod tests {
 
             let execution = harness.processor.execution.clone();
             let app = harness.processor.app.clone();
-            let replay_context = harness.context_cell.as_present();
+            let replay_context = &harness.context;
 
             // Two requests share the child's processing. The gate holds it.
             let mut first = Box::pin(process_shared(
@@ -2456,7 +2456,7 @@ mod tests {
 
             let finalized_block = digested(parent.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
+                &harness.context,
                 &harness.provider,
                 &finalized_block,
                 true,
@@ -2503,7 +2503,7 @@ mod tests {
             let mut flight = join_flight(
                 &execution,
                 &harness.processor.app,
-                harness.context_cell.as_present(),
+                &harness.context,
                 marshal_ancestry::from_iter([digested(winner.clone())]),
             );
             assert!(futures::poll!(&mut flight).is_pending());
@@ -2556,7 +2556,7 @@ mod tests {
             let result = harness
                 .processor
                 .rebuild_pending(
-                    harness.context_cell.as_present(),
+                    &harness.context,
                     &harness.provider,
                     digested(block3.clone()),
                 )
@@ -2591,7 +2591,7 @@ mod tests {
             let result = harness
                 .processor
                 .rebuild_pending(
-                    harness.context_cell.as_present(),
+                    &harness.context,
                     &harness.provider,
                     digested(block3.clone()),
                 )
@@ -2633,7 +2633,7 @@ mod tests {
                     harness
                         .processor
                         .rebuild_pending(
-                            harness.context_cell.as_present(),
+                            &harness.context,
                             &harness.provider,
                             digested(block3.clone()),
                         )
@@ -2654,7 +2654,7 @@ mod tests {
                     process_shared(
                         &harness.processor.execution,
                         &harness.processor.app,
-                        harness.context_cell.as_present(),
+                        &harness.context,
                         marshal_ancestry::from_iter([digested(block3.clone())]),
                     )
                     .await,
@@ -3071,11 +3071,7 @@ mod tests {
 
             let result = harness
                 .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    &harness.provider,
-                    digested(stale),
-                )
+                .rebuild_pending(&harness.context, &harness.provider, digested(stale))
                 .await;
             assert_eq!(
                 result,
@@ -3110,7 +3106,7 @@ mod tests {
             let result = harness
                 .processor
                 .rebuild_pending(
-                    harness.context_cell.as_present(),
+                    &harness.context,
                     &harness.provider,
                     digested(block2.clone()),
                 )
@@ -3160,11 +3156,7 @@ mod tests {
 
             let result = harness
                 .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    &provider,
-                    digested(gap_block.clone()),
-                )
+                .rebuild_pending(&harness.context, &provider, digested(gap_block.clone()))
                 .await;
 
             assert_eq!(
@@ -3198,11 +3190,7 @@ mod tests {
             provider.push(&block3, [Some(wrong_parent)]);
             let result = harness
                 .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    &provider,
-                    digested(block3.clone()),
-                )
+                .rebuild_pending(&harness.context, &provider, digested(block3.clone()))
                 .await;
 
             assert_eq!(result, Err(PrepareBatchesError::Invalid));
@@ -3237,11 +3225,7 @@ mod tests {
             provider.push(&child, [Some(parent)]);
             let result = harness
                 .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    &provider,
-                    digested(child.clone()),
-                )
+                .rebuild_pending(&harness.context, &provider, digested(child.clone()))
                 .await;
 
             assert_eq!(result, Err(PrepareBatchesError::Invalid));
@@ -3423,11 +3407,7 @@ mod tests {
 
             let result = harness
                 .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    &provider,
-                    digested(block2),
-                )
+                .rebuild_pending(&harness.context, &provider, digested(block2))
                 .await;
 
             assert_eq!(result, Err(PrepareBatchesError::Incomplete));
@@ -3450,11 +3430,7 @@ mod tests {
 
             let result = harness
                 .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    &provider,
-                    digested(block2),
-                )
+                .rebuild_pending(&harness.context, &provider, digested(block2))
                 .await;
 
             assert_eq!(result, Err(PrepareBatchesError::Incomplete));

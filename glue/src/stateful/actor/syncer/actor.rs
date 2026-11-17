@@ -14,7 +14,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::{
     NZUsize,
     channel::{fallible::OneshotExt, oneshot, ring},
@@ -58,7 +58,7 @@ where
     V: Variant,
 {
     /// Runtime context.
-    context: ContextCell<E>,
+    context: E,
     /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
     /// The produced state sync artifact, if complete.
@@ -89,7 +89,7 @@ where
         let mailbox = Mailbox::new(sender);
         (
             Self {
-                context: ContextCell::new(config.context),
+                context: config.context,
                 mailbox: receiver,
                 artifact: None,
                 db_config: config.db_config,
@@ -103,8 +103,9 @@ where
         )
     }
 
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .spawn(move |context| Self { context, ..self }.run())
     }
 
     async fn run(mut self) {

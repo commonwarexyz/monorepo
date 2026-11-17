@@ -85,9 +85,12 @@ pub fn init(context: Context, logs: Logs, metrics: Option<SocketAddr>, traces: O
     // Set the global subscriber
     tracing::subscriber::set_global_default(registry).expect("Failed to set subscriber");
 
-    // Expose metrics over HTTP
+    // Expose metrics over HTTP. The server runs under a child of `context` and
+    // keeps `context` open for as long as it serves.
     if let Some(cfg) = metrics {
-        context.child("metrics").spawn(move |context| async move {
+        context.child("metrics").spawn(move |metrics| async move {
+            let _context = context;
+
             // Create a tokio listener for the metrics server.
             //
             // We explicitly avoid using a runtime `Listener` because
@@ -98,7 +101,7 @@ pub fn init(context: Context, logs: Logs, metrics: Option<SocketAddr>, traces: O
                 .expect("Failed to bind metrics server");
 
             // Create a router for the metrics server
-            let shared = Arc::new(context);
+            let shared = Arc::new(metrics);
             let app = Router::new()
                 .route(
                     "/metrics",

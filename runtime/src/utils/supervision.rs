@@ -5,77 +5,68 @@ use std::{
     sync::{Arc, Weak},
 };
 
-/// Minimum stale-child count a parent accumulates before [`Children::push`]
-/// compacts its child list, so short lists batch their cleanup.
-const STALE_CHILD_THRESHOLD: usize = 32;
+/// Minimum length a node's child list reaches before [`Children::push`]
+/// compacts it, so short lists batch their cleanup.
+const COMPACTION_THRESHOLD: usize = 32;
 
-/// Tracks the relationship between runtime contexts.
+/// A node in the supervision tree.
 ///
-/// Each [`Tree`] node corresponds to a single context instance. Creating a child
-/// context registers a new child node beneath the current node. When the task spawned
-/// from a context finishes or is aborted, the runtime drains the node and aborts all
-/// descendant tasks.
+/// Each context holds its own node, and creating a child context creates a child
+/// node. The context owns its node until a spawn hands the node to the task. A
+/// node closes when its owner lets go: when the last [`Arc`] to it is dropped, or
+/// when the task that occupies it ends. Closing a node aborts its task and every
+/// node below it.
+///
+/// Parents only hold weak links to their children. Every open node is kept alive
+/// by its owner, so a closing ancestor can always reach it.
 pub(crate) struct Tree {
-    // Keep the strong parent link outside `inner`.
-    //
-    // This link models ownership of the ancestry chain rather than mutable
-    // supervision state. `drop_ancestry` walks that ownership chain using only
-    // `Arc<Tree>` handles, so it must be able to sever each parent link without
-    // taking the `inner` lock first.
-    parent: Mutex<Option<Arc<Self>>>,
     inner: Mutex<TreeInner>,
 }
 
-/// Weak child pointers with a deferred-compaction counter.
-#[derive(Default)]
+/// Weak child pointers, compacted as the list grows.
 struct Children {
     links: Vec<Weak<Tree>>,
-    stale: usize,
+    /// List length at which the next push first drops dead links.
+    compact_at: usize,
 }
 
 impl Children {
-    /// Appends a weak reference to `child`, first compacting the list when the
-    /// stale count reaches both [`STALE_CHILD_THRESHOLD`] and half the list, so
-    /// compaction costs amortized constant time per push.
+    const fn new() -> Self {
+        Self {
+            links: Vec::new(),
+            compact_at: COMPACTION_THRESHOLD,
+        }
+    }
+
+    /// Appends a weak link to `child`. Once the list reaches `compact_at`, dead
+    /// links are dropped first and the next compaction waits until the list has
+    /// doubled again, so compaction costs amortized constant time per push.
     fn push(&mut self, child: &Arc<Tree>) {
-        if self.stale >= STALE_CHILD_THRESHOLD.max(self.links.len() / 2) {
+        if self.links.len() >= self.compact_at {
             self.links.retain(|weak| weak.strong_count() > 0);
-            self.stale = 0;
+            self.compact_at = COMPACTION_THRESHOLD.max(self.links.len() * 2);
         }
         self.links.push(Arc::downgrade(child));
     }
-
-    /// Records that one weak child pointer is known-dead.
-    const fn mark_stale(&mut self) {
-        self.stale = self.stale.saturating_add(1);
-    }
-
-    /// Takes all weak child pointers, resetting the list and stale count.
-    fn drain(&mut self) -> Vec<Weak<Tree>> {
-        mem::take(self).links
-    }
 }
 
+/// The task, children and state of a node.
 struct TreeInner {
     children: Children,
     task: Option<Aborter>,
     aborted: bool,
 }
 
+/// What a node held when it closed: its task and the links to its children.
+type Closed = (Option<Aborter>, Vec<Weak<Tree>>);
+
 impl TreeInner {
     const fn new(aborted: bool) -> Self {
         Self {
-            children: Children {
-                links: Vec::new(),
-                stale: 0,
-            },
+            children: Children::new(),
             task: None,
             aborted,
         }
-    }
-
-    fn child(&mut self, child: &Arc<Tree>) {
-        self.children.push(child);
     }
 
     fn register(&mut self, aborter: Aborter) -> Result<(), Aborter> {
@@ -88,41 +79,37 @@ impl TreeInner {
         Ok(())
     }
 
-    fn abort(&mut self) -> Option<(Option<Aborter>, Vec<Weak<Tree>>)> {
+    /// Marks the node aborted and takes what it held, unless it already closed.
+    fn close(&mut self) -> Option<Closed> {
         if self.aborted {
             return None;
         }
 
         self.aborted = true;
         let task = self.task.take();
-        let children = self.children.drain();
+        let children = mem::take(&mut self.children.links);
         Some((task, children))
     }
 }
 
 impl Tree {
-    /// Returns a new root node without a parent.
+    /// Returns a new root node.
     pub(crate) fn root() -> Arc<Self> {
         Arc::new(Self {
-            parent: Mutex::new(None),
             inner: Mutex::new(TreeInner::new(false)),
         })
     }
 
-    /// Creates a new child node registered under the provided parent.
+    /// Creates a new child node under `parent`, and returns whether it was born
+    /// aborted because `parent` already closed.
     pub(crate) fn child(parent: &Arc<Self>) -> (Arc<Self>, bool) {
         let mut parent_inner = parent.inner.lock();
         let aborted = parent_inner.aborted;
         let child = Arc::new(Self {
-            // Hold a strong reference to the parent to keep an ancestry of
-            // unspawned contexts alive. Without this, the parent could drop
-            // immediately, leaving only weak pointers that cannot be upgraded
-            // during abort cascades.
-            parent: Mutex::new((!aborted).then(|| parent.clone())),
             inner: Mutex::new(TreeInner::new(aborted)),
         });
         if !aborted {
-            parent_inner.child(&child);
+            parent_inner.children.push(&child);
         }
         drop(parent_inner);
 
@@ -130,92 +117,92 @@ impl Tree {
     }
 
     /// Records an [Aborter] on the node.
-    pub(crate) fn register(self: &Arc<Self>, aborter: Aborter) {
+    pub(crate) fn register(&self, aborter: Aborter) {
         let result = {
             let mut inner = self.inner.lock();
             inner.register(aborter)
         };
 
-        // If context was aborted before a task was registered, abort the task.
+        // If the node closed before a task was registered, abort the task.
         if let Err(aborter) = result {
             aborter.abort();
         }
     }
 
     /// Aborts the task and all descendants rooted at this node.
-    pub(crate) fn abort(self: &Arc<Self>) {
-        // Walk the supervision tree iteratively so deep clone/spawn chains do
-        // not exhaust the thread stack while propagating aborts.
-        let mut pending = vec![Arc::clone(self)];
-        while let Some(node) = pending.pop() {
-            // Keep the parent link until `Drop` so stale-child accounting
-            // stays centralized in one place.
-            let result = {
-                let mut inner = node.inner.lock();
-                inner.abort()
-            };
-            let Some((task, children)) = result else {
-                continue;
-            };
+    pub(crate) fn abort(&self) {
+        let closed = self.inner.lock().close();
+        Self::abort_closed(closed);
+    }
 
-            // Abort the task before descending so observers see the parent
-            // transition before any surviving children are visited.
+    /// Aborts what a closed node held, then the rest of its subtree.
+    fn abort_closed(closed: Option<Closed>) {
+        let Some((task, children)) = closed else {
+            return;
+        };
+
+        // Most nodes that close have no live children, so abort a lone task
+        // without allocating.
+        let mut pending: Vec<Arc<Self>> =
+            children.into_iter().filter_map(|c| c.upgrade()).collect();
+        if pending.is_empty() {
             if let Some(aborter) = task {
                 aborter.abort();
             }
+            return;
+        }
 
-            // `abort()` drained this node's child list, so each upgraded child
-            // is visited at most once even if the subtree is shared by weak
-            // pointers elsewhere.
+        // Suspend every task in the subtree before aborting any of them. A
+        // suspended task stops polling its future without ending, so a task in
+        // the subtree can only observe another one's abort by this walk (a closed
+        // channel, a handle resolving to closed) in a poll it started before it
+        // was suspended. Tasks still see closed for other reasons, such as a
+        // spawn under a node this walk already closed, or a descendant closing
+        // concurrently and aborting what it reaches itself.
+        // The walk is iterative so deep chains do not exhaust the thread stack.
+        // Each node's list was drained when it closed, so every live descendant
+        // is visited once.
+        let mut suspended = Vec::new();
+        if let Some(aborter) = task {
+            aborter.suspend();
+            suspended.push(aborter);
+        }
+        while let Some(node) = pending.pop() {
+            let Some((task, children)) = node.inner.lock().close() else {
+                continue;
+            };
+            if let Some(aborter) = task {
+                aborter.suspend();
+                suspended.push(aborter);
+            }
             pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
         }
-    }
 
-    /// Drops a strong ancestry chain iteratively to avoid recursive `Arc`
-    /// teardown.
-    fn drop_ancestry(parent: Arc<Self>) {
-        let mut pending = vec![parent];
-        while let Some(node) = pending.pop() {
-            // Only continue walking upward when this loop owns the final strong
-            // reference to `node`. Child links are weak, so `strong_count == 1`
-            // means no live descendant or external handle still depends on it.
-            if Arc::strong_count(&node) == 1
-                && let Some(parent) = node.parent.lock().take()
-            {
-                // Move the parent `Arc` out of `node` before dropping
-                // `node`. This leaves `node.parent = None`, so `drop(node)`
-                // cannot recurse into the parent. The local `parent`
-                // variable now owns that strong reference until we push it
-                // onto `pending` for the next iteration.
-                //
-                // Because `Drop` will no longer observe this parent edge,
-                // account for the stale weak child entry before releasing
-                // `node`.
-                let mut parent_inner = parent.inner.lock();
-                parent_inner.children.mark_stale();
-                drop(parent_inner);
-                pending.push(parent);
-            }
-            // If another strong owner still exists, dropping our handle only
-            // decrements that count and the remaining ancestry stays reachable
-            // through those owners.
-            drop(node);
+        // Abort every suspended task even if a wake unwinds partway.
+        let mut remaining = AbortRemaining(suspended.into_iter());
+        for aborter in remaining.0.by_ref() {
+            aborter.abort();
+        }
+    }
+}
+
+/// Aborts the tasks it still holds when dropped, so a wake that unwinds while a
+/// closing subtree is aborted does not leave the rest suspended.
+struct AbortRemaining(std::vec::IntoIter<Aborter>);
+
+impl Drop for AbortRemaining {
+    fn drop(&mut self) {
+        for aborter in self.0.by_ref() {
+            aborter.abort();
         }
     }
 }
 
 impl Drop for Tree {
     fn drop(&mut self) {
-        if let Some(parent) = self.parent.get_mut().take() {
-            let mut parent_inner = parent.inner.lock();
-            parent_inner.children.mark_stale();
-            drop(parent_inner);
-
-            // If dropping this node makes its ancestors uniquely owned as well,
-            // release that lineage iteratively instead of recursing through
-            // nested `Arc` drops.
-            Self::drop_ancestry(parent);
-        }
+        // The owner let go of the node, which closes it.
+        let closed = self.inner.get_mut().close();
+        Self::abort_closed(closed);
     }
 }
 
@@ -226,7 +213,7 @@ mod tests {
         telemetry::metrics::raw::Gauge,
         utils::{
             MetricHandle,
-            abort::{AbortHandle, Abortable},
+            abort::{AbortHandle, Abortable, Aborted},
         },
     };
     use futures::future::pending;
@@ -263,6 +250,107 @@ mod tests {
         // The parent and child tasks should abort
         assert!(parent_future.is_aborted(), "parent was not aborted");
         assert!(child_future.is_aborted(), "child was not aborted");
+    }
+
+    #[test]
+    fn dropping_a_node_closes_its_subtree() {
+        let root = Tree::root();
+        let (parent, _) = Tree::child(&root);
+        let (child, _) = Tree::child(&parent);
+        let (aborter, future) = aborter();
+        child.register(aborter);
+
+        // Dropping the last handle to the parent closes it while the child is
+        // still held, so the child's task is aborted and later children of the
+        // child are born aborted.
+        drop(parent);
+        assert!(future.is_aborted(), "child task was not aborted");
+        assert!(Tree::child(&child).1, "grandchild was not born aborted");
+    }
+
+    #[test]
+    fn suspended_tasks_do_not_end_before_the_walk_suspends_every_task() {
+        use futures::{FutureExt as _, future::ready, task::noop_waker};
+        use std::{
+            task::Poll,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        // An actor started with child("run") has its run task and work on
+        // sibling nodes. A node the test holds locked pauses the walk before
+        // the run task, after work that would end on its next poll is suspended.
+        // The walk visits the newest child first.
+        let scope = Tree::root();
+        let (run, _) = Tree::child(&scope);
+        let (gate, _) = Tree::child(&scope);
+        let (work, _) = Tree::child(&scope);
+        let task = |node: &Arc<Tree>| {
+            let (handle, registration) = AbortHandle::new_pair();
+            node.register(Aborter::new(
+                handle.clone(),
+                MetricHandle::new(Gauge::default()),
+            ));
+            (handle, Abortable::new(ready(()), registration))
+        };
+        let (run_handle, _run_task) = task(&run);
+        let (work_handle, mut work_task) = task(&work);
+
+        // Close the scope on another thread and pause the walk at the gate,
+        // after it suspended the work.
+        let paused = gate.inner.lock();
+        let closer = thread::spawn(move || drop(scope));
+        let start = Instant::now();
+        while !work_handle.is_suspended() {
+            assert!(start.elapsed() < Duration::from_secs(10), "walk stalled");
+            thread::yield_now();
+        }
+
+        // The work does not end while the run task still runs.
+        let waker = noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(work_task.poll_unpin(&mut cx).is_pending());
+        assert!(!run_handle.is_suspended() && !run_handle.is_aborted());
+
+        // Once the walk suspended every task, it aborts them all.
+        drop(paused);
+        closer.join().unwrap();
+        assert!(run_handle.is_aborted());
+        assert_eq!(work_task.poll_unpin(&mut cx), Poll::Ready(Err(Aborted)));
+        drop((run, gate, work));
+    }
+
+    #[test]
+    fn a_wake_that_unwinds_leaves_no_task_suspended() {
+        use futures::{
+            FutureExt as _,
+            task::{ArcWake, waker},
+        };
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        struct Unwinds;
+
+        impl ArcWake for Unwinds {
+            fn wake_by_ref(_: &Arc<Self>) {
+                panic!("wake unwound");
+            }
+        }
+
+        // The walk aborts the newest child first, and waking its task unwinds.
+        let scope = Tree::root();
+        let (first, _) = Tree::child(&scope);
+        let (second, _) = Tree::child(&scope);
+        let (first_aborter, first_task) = aborter();
+        first.register(first_aborter);
+        let (second_aborter, mut second_task) = aborter();
+        second.register(second_aborter);
+        let waker = waker(Arc::new(Unwinds));
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(second_task.poll_unpin(&mut cx).is_pending());
+
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(scope))).is_err());
+        assert!(first_task.is_aborted(), "first task stayed suspended");
+        drop((first, second));
     }
 
     #[test]
@@ -304,11 +392,13 @@ mod tests {
     fn abort_deep_chain_without_stack_growth() {
         let depth = 50_000;
         let root = Tree::root();
-        let mut current = root.clone();
+        let mut nodes = Vec::with_capacity(depth);
         let mut futures = Vec::with_capacity(depth);
 
         // Build a single-chain supervision tree deep enough to overflow a
-        // recursive abort implementation on typical stacks.
+        // recursive abort implementation on typical stacks. Every node is kept
+        // open by its handle in `nodes`.
+        let mut current = root.clone();
         for _ in 0..depth {
             let (child, aborted) = Tree::child(&current);
             assert!(!aborted, "child node unexpectedly aborted");
@@ -316,6 +406,7 @@ mod tests {
             let (child_aborter, child_future) = aborter();
             child.register(child_aborter);
             futures.push(child_future);
+            nodes.push(child.clone());
             current = child;
         }
 
@@ -326,230 +417,60 @@ mod tests {
         for future in futures {
             assert!(future.is_aborted(), "descendant was not aborted");
         }
+
+        // Dropping the chain from the top closes nodes that are already closed.
+        drop(nodes);
     }
 
     #[test]
-    fn drop_deep_clone_chain_without_stack_growth() {
-        let depth = 50_000;
+    fn child_list_compacts_dead_links_as_it_grows() {
         let root = Tree::root();
-        let mut current = root.clone();
 
-        // Keep only one strong edge per level so dropping the leaf forces the
-        // ancestry chain to tear down immediately.
-        for _ in 0..depth {
-            let (child, aborted) = Tree::child(&current);
-            assert!(!aborted, "child node unexpectedly aborted");
-            current = child;
-        }
-
-        // This used to recurse through nested `Arc` drops; now the lineage is
-        // released iteratively.
-        drop(current);
-        drop(root);
-    }
-
-    #[test]
-    fn child_reaping_batches_compaction_for_clone_heavy_parent() {
-        let root = Tree::root();
-        let mut dropped = Vec::with_capacity(STALE_CHILD_THRESHOLD);
-
-        // Fill the parent's weak child list exactly to the reap threshold.
-        for _ in 0..STALE_CHILD_THRESHOLD {
+        // Fill the list to the threshold with children that are dropped at once.
+        for _ in 0..COMPACTION_THRESHOLD {
             let (child, aborted) = Tree::child(&root);
             assert!(!aborted, "child node unexpectedly aborted");
-            dropped.push(child);
-        }
-
-        for child in dropped {
             drop(child);
         }
+        assert_eq!(root.inner.lock().children.links.len(), COMPACTION_THRESHOLD);
 
-        {
-            // Reaping is deferred until the next child arrives, so the stale
-            // weak pointers should still be present here.
-            let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), STALE_CHILD_THRESHOLD);
-            assert_eq!(inner.children.stale, STALE_CHILD_THRESHOLD);
-        }
+        // The next child compacts the dead links before it is appended.
+        let (live, _) = Tree::child(&root);
+        assert_eq!(root.inner.lock().children.links.len(), 1);
 
-        // The next child creation should trigger one batched compaction pass.
-        let (child, aborted) = Tree::child(&root);
-        assert!(!aborted, "child node unexpectedly aborted");
-
-        {
-            let inner = root.inner.lock();
-            assert_eq!(
-                inner.children.links.len(),
-                1,
-                "stale children were not reaped"
-            );
-            assert_eq!(inner.children.stale, 0, "stale child count was not reset");
-        }
-
-        drop(child);
-        drop(root);
-    }
-
-    #[test]
-    fn child_reaping_scales_with_list_length() {
-        let root = Tree::root();
-
-        // Fill the list with 1,000 live children, so half of it (500) is well
-        // above `STALE_CHILD_THRESHOLD`.
-        let mut children: Vec<_> = (0..1_000)
-            .map(|_| {
-                let (child, aborted) = Tree::child(&root);
-                assert!(!aborted, "child node unexpectedly aborted");
-                child
-            })
+        // When every link is live, compaction keeps them all and the next one
+        // waits until the list has doubled.
+        let mut children: Vec<_> = (0..COMPACTION_THRESHOLD)
+            .map(|_| Tree::child(&root).0)
             .collect();
-
-        // A stale count above `STALE_CHILD_THRESHOLD` but below half the list
-        // does not compact.
-        children.drain(..33);
-        let (first, _) = Tree::child(&root);
         {
             let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), 1_001);
-            assert_eq!(inner.children.stale, 33);
+            assert_eq!(inner.children.links.len(), COMPACTION_THRESHOLD + 1);
+            assert_eq!(inner.children.compact_at, COMPACTION_THRESHOLD * 2);
         }
 
-        // Half of 1,001 entries is 500, so 499 stale entries do not compact.
-        children.drain(..466);
-        let (second, _) = Tree::child(&root);
-        {
-            let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), 1_002);
-            assert_eq!(inner.children.stale, 499);
+        // Dead links accumulate until then, and the push that reaches it drops
+        // every one of them.
+        children.clear();
+        while root.inner.lock().children.links.len() < COMPACTION_THRESHOLD * 2 {
+            drop(Tree::child(&root).0);
         }
+        let (last, _) = Tree::child(&root);
+        assert_eq!(root.inner.lock().children.links.len(), 2);
 
-        // Each push lengthens the list, so 500 stale entries fall one short of
-        // half of 1,002.
-        children.drain(..1);
-        let (third, _) = Tree::child(&root);
-        {
-            let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), 1_003);
-            assert_eq!(inner.children.stale, 500);
-        }
-
-        // Reaching half the list (501 of 1,003) removes every stale entry
-        // before the new child is appended.
-        children.drain(..1);
-        let (fourth, _) = Tree::child(&root);
-        {
-            let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), 1_003 - 501 + 1);
-            assert_eq!(inner.children.stale, 0);
-        }
-
-        drop((children, first, second, third, fourth));
-        drop(root);
+        drop((live, last));
     }
 
     #[test]
-    fn aborted_children_still_count_toward_batched_reaping() {
-        let root = Tree::root();
-        let mut aborted = Vec::with_capacity(STALE_CHILD_THRESHOLD);
-
-        // Register enough children to fill the weak child list to the reap
-        // threshold, then abort and drop them all.
-        for _ in 0..STALE_CHILD_THRESHOLD {
-            let (child, was_aborted) = Tree::child(&root);
-            assert!(!was_aborted, "child node unexpectedly aborted");
-            aborted.push(child);
-        }
-
-        for child in aborted {
-            child.abort();
-            drop(child);
-        }
-
-        {
-            // Aborted children still leave stale weak pointers behind until a
-            // future insert performs the batched cleanup.
-            let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), STALE_CHILD_THRESHOLD);
-            assert_eq!(inner.children.stale, STALE_CHILD_THRESHOLD);
-        }
-
-        // A fresh child should compact both normally dropped and previously
-        // aborted entries in the same path.
-        let (child, was_aborted) = Tree::child(&root);
-        assert!(!was_aborted, "child node unexpectedly aborted");
-
-        {
-            let inner = root.inner.lock();
-            assert_eq!(
-                inner.children.links.len(),
-                1,
-                "aborted children were not reaped"
-            );
-            assert_eq!(inner.children.stale, 0, "stale child count was not reset");
-        }
-
-        drop(child);
-        drop(root);
-    }
-
-    #[test]
-    fn unique_ancestor_release_counts_stale_child_on_surviving_root() {
-        let root = Tree::root();
-
-        // Arrange for each leaf drop to make its parent uniquely owned so
-        // `drop_ancestry` must walk one level higher and mark the root stale.
-        for _ in 0..STALE_CHILD_THRESHOLD {
-            let (parent, aborted) = Tree::child(&root);
-            assert!(!aborted, "parent node unexpectedly aborted");
-
-            let (leaf, aborted) = Tree::child(&parent);
-            assert!(!aborted, "leaf node unexpectedly aborted");
-
-            // Dropping the explicit parent handle leaves the leaf as the only
-            // strong owner of `parent`, so `drop_ancestry` must account for
-            // the stale weak pointer on `root`.
-            drop(parent);
-            drop(leaf);
-        }
-
-        {
-            // Those stale entries are still deferred until the next child is
-            // inserted under the surviving root.
-            let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), STALE_CHILD_THRESHOLD);
-            assert_eq!(inner.children.stale, STALE_CHILD_THRESHOLD);
-        }
-
-        // Creating one more child should reap the stale root entries produced
-        // by iterative ancestor release.
-        let (child, aborted) = Tree::child(&root);
-        assert!(!aborted, "child node unexpectedly aborted");
-
-        {
-            let inner = root.inner.lock();
-            assert_eq!(
-                inner.children.links.len(),
-                1,
-                "unique ancestors were not reaped"
-            );
-            assert_eq!(inner.children.stale, 0, "stale child count was not reset");
-        }
-
-        drop(child);
-        drop(root);
-    }
-
-    #[test]
-    fn abort_wide_sibling_fanout_after_batched_reaping() {
+    fn abort_wide_sibling_fanout_after_compaction() {
         let root = Tree::root();
         let (parent, aborted) = Tree::child(&root);
         assert!(!aborted, "parent node unexpectedly aborted");
 
         let mut live = Vec::new();
-        let mut dropped = Vec::new();
-        let total = STALE_CHILD_THRESHOLD * 2;
-        // Mix live and dropped siblings so the parent accumulates stale weak
-        // pointers before an abort cascade runs through the remaining subtree.
+        let total = COMPACTION_THRESHOLD * 2;
+        // Mix live and dropped siblings so the parent compacts dead links before
+        // an abort cascade runs through the remaining subtree.
         for idx in 0..total {
             let (child, aborted) = Tree::child(&parent);
             assert!(!aborted, "child node unexpectedly aborted");
@@ -558,31 +479,14 @@ mod tests {
             child.register(aborter);
             if idx % 3 == 0 {
                 live.push((child, future));
-            } else {
-                dropped.push(child);
             }
         }
 
-        for child in dropped {
-            drop(child);
-        }
-
-        // Trigger one more insert so the parent compacts stale entries before
-        // we verify abort propagation across the surviving siblings.
-        let (trigger, aborted) = Tree::child(&parent);
-        assert!(!aborted, "trigger child unexpectedly aborted");
-        let (trigger_aborter, trigger_future) = aborter();
-        trigger.register(trigger_aborter);
-
         parent.abort();
 
-        assert!(trigger_future.is_aborted(), "trigger child was not aborted");
         for (child, future) in live {
             assert!(future.is_aborted(), "live child was not aborted");
             drop(child);
         }
-
-        drop(trigger);
-        drop(root);
     }
 }

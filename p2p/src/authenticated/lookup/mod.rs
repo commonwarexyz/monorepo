@@ -359,6 +359,7 @@ mod tests {
 
         // Create networks
         let (complete_sender, mut complete_receiver) = mpsc::channel(peers.len());
+        let mut peer_contexts = Vec::new();
         for (i, (signer, public_key, address)) in nodes.iter().enumerate() {
             let public_key = public_key.clone();
 
@@ -469,6 +470,7 @@ mod tests {
                     }
                 }
             });
+            peer_contexts.push(context);
         }
 
         // Wait for all peers to finish
@@ -573,6 +575,7 @@ mod tests {
 
             // Create networks
             let mut waiters = Vec::new();
+            let mut peer_contexts = Vec::new();
             for (i, (signer, peer_pk, peer_addr)) in nodes.iter().enumerate() {
                 // Create peer context
                 let context = context.child("peer").with_attribute("index", i);
@@ -633,6 +636,7 @@ mod tests {
 
                 // Add to waiters
                 waiters.push(handler);
+                peer_contexts.push(context);
             }
 
             // Wait for waiters to finish (receiver before sender)
@@ -900,6 +904,7 @@ mod tests {
 
             // Create networks for all peers
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
+            let mut peer_contexts = Vec::new();
             for (i, (signer, pk, addr)) in nodes.iter().enumerate() {
                 let peer_context = context.child("peer").with_attribute("index", i);
                 let config = Config::test(signer.clone(), *addr, 1_024 * 1_024);
@@ -948,6 +953,7 @@ mod tests {
                         }
                     }
                 });
+                peer_contexts.push(peer_context);
             }
 
             // Wait for all peers to establish connectivity
@@ -1152,6 +1158,7 @@ mod tests {
 
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
+            let mut peer_contexts = Vec::new();
             for (i, (signer, public_key, socket, _, _)) in nodes.iter().enumerate() {
                 let context = context.child("peer").with_attribute("index", i);
 
@@ -1227,6 +1234,7 @@ mod tests {
                         }
                     }
                 });
+                peer_contexts.push(context);
             }
 
             // Wait for all peers to exchange messages
@@ -1283,6 +1291,7 @@ mod tests {
 
             // Create networks
             let (complete_sender, mut complete_receiver) = mpsc::channel(n);
+            let mut peer_contexts = Vec::new();
             for (i, (signer, public_key, socket)) in nodes.iter().enumerate() {
                 let context = context.child("peer").with_attribute("index", i);
 
@@ -1358,6 +1367,7 @@ mod tests {
                         }
                     }
                 });
+                peer_contexts.push(context);
             }
 
             // Wait for all peers to exchange messages
@@ -1589,6 +1599,7 @@ mod tests {
                 .collect();
 
             // Create networks for all peers
+            let mut peer_contexts = Vec::new();
             for (i, signer) in signers.iter().enumerate() {
                 let peer_context = context.child("peer").with_attribute("index", i);
 
@@ -1609,6 +1620,7 @@ mod tests {
 
                 let handle = network.start();
                 handles[i] = Some(handle);
+                peer_contexts.push(peer_context);
             }
 
             // Wait for full connectivity (each peer can send to all others)
@@ -1746,6 +1758,7 @@ mod tests {
                         assert_eq!(message, sender.as_ref());
                         received.insert(sender);
                     }
+                    peer_contexts.push(peer_context);
                 }
             }
 
@@ -1792,6 +1805,7 @@ mod tests {
                 (0..n).map(|_| None).collect();
 
             // Create networks for all peers
+            let mut peer_contexts = Vec::new();
             for (i, signer) in signers.iter().enumerate() {
                 let peer_context = context.child("peer").with_attribute("index", i);
 
@@ -1812,6 +1826,7 @@ mod tests {
 
                 let handle = network.start();
                 handles[i] = Some(handle);
+                peer_contexts.push(peer_context);
             }
 
             // Wait for full connectivity
@@ -1899,6 +1914,7 @@ mod tests {
 
                 let handle = network.start();
                 handles[idx] = Some(handle);
+                peer_contexts.push(peer_context);
             }
 
             // Wait for full connectivity after restart

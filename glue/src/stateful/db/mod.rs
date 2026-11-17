@@ -363,6 +363,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// State beyond the selected checkpoint must be durably discarded before this returns.
     /// Returns [`InitError::TargetMismatch`] if the recovered target is not `expected`.
+    ///
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
     fn init(
         context: E,
         config: Self::Config,
@@ -534,6 +537,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Opens every database in the set, each at its target in `expected` when supplied.
     ///
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
+    ///
     /// # Panics
     ///
     /// Panics if a database fails to open, including when it does not match its expected target.
@@ -616,6 +622,9 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     type SyncError: Debug + Send;
 
     /// Syncs a new database from `source` to `target` and returns it.
+    ///
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
     ///
     /// The caller sends valid targets of the same database on `tip_updates` in advancing order; a
     /// target may be superseded by a newer one before it is read.
@@ -721,6 +730,9 @@ pub trait StateSyncSet<E, R>: DatabaseSet<E> {
     ///
     /// Updates on `tip_updates` follow the [module rules](crate::stateful::db#anchors). The
     /// returned anchor, not the latest tip delivered, identifies the synced state.
+    ///
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
     ///
     /// `D` is the block digest type of each [`Anchor`].
     fn sync<D: Digest>(
@@ -1754,15 +1766,6 @@ where
     .await
 }
 
-/// Aborts an adapter task when its owning sync future completes or is cancelled.
-struct Forwarder(Handle<()>);
-
-impl Drop for Forwarder {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Syncs a compact database, which does not persist its operation log.
 ///
 /// A compact target that does not convert to an engine target fails the sync when passed as
@@ -1779,7 +1782,7 @@ pub(crate) async fn sync_compact_db<E, DB, S>(
     sync_config: SyncEngineConfig,
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
-    E: Metrics + Spawner,
+    E: Metrics,
     DB: sync::Database<Context = E>,
     S: sync::SourceFor<DB>,
 {
@@ -1795,7 +1798,7 @@ where
     }
 
     let (update_tx, update_rx) = ring::channel(NZUsize!(1));
-    let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
+    let update_forwarder = async move {
         while let Some(update) = tip_updates.recv().await {
             let Ok(update) = sync::Target::try_from(&update) else {
                 continue;
@@ -1804,12 +1807,14 @@ where
                 break;
             }
         }
-    }));
+    };
 
-    let reached_target_tx = reached_target.map(|reached| {
-        let (tx, mut rx) = ring::channel::<sync::Target<DB::Family, DB::Digest>>(NZUsize!(1));
-        context.child("compact_reached").spawn(move |_| async move {
-            while let Some(reached_engine_target) = rx.recv().await {
+    let (reached_target_tx, mut reached_rx) =
+        ring::channel::<sync::Target<DB::Family, DB::Digest>>(NZUsize!(1));
+    let reached_target_tx = reached_target.as_ref().map(|_| reached_target_tx);
+    let reached_forwarder = async move {
+        if let Some(reached) = reached_target {
+            while let Some(reached_engine_target) = reached_rx.recv().await {
                 let target = sync::CompactTarget {
                     root: reached_engine_target.root,
                     size: reached_engine_target.range.end(),
@@ -1818,25 +1823,32 @@ where
                     break;
                 }
             }
-        });
-        tx
-    });
+        }
+    };
 
-    let result = sync::sync(sync::Config {
-        context,
-        source,
-        target: initial,
-        db_config: config,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        update_rx: Some(update_rx),
-        finish_rx: finish,
-        reached_target_tx,
-    })
-    .await;
-    drop(update_forwarder);
-    result
+    let syncing = async move {
+        let (result, ()) = futures::join!(
+            sync::sync(sync::Config {
+                context,
+                source,
+                target: initial,
+                db_config: config,
+                fetch_batch_size: sync_config.fetch_batch_size,
+                apply_batch_size: sync_config.apply_batch_size,
+                max_outstanding_requests: sync_config.max_outstanding_requests,
+                update_rx: Some(update_rx),
+                finish_rx: finish,
+                reached_target_tx,
+            }),
+            reached_forwarder
+        );
+        result
+    };
+    futures::pin_mut!(syncing);
+    commonware_macros::select! {
+        result = &mut syncing => result,
+        _ = update_forwarder => syncing.await,
+    }
 }
 
 #[tracing::instrument(name = "stateful.db.apply", level = "info", skip_all, fields(index = index))]
@@ -5094,7 +5106,7 @@ mod tests {
     /// Starts a single-database sync of [`LaggingReportSyncDb`] and returns once it is running, so
     /// the coordinator is parked before the test sends anything.
     async fn start_lagging_sync(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         tip_rx: ring::Receiver<TipUpdate<sha256::Digest, u64>>,
         report: mpsc::Receiver<()>,
     ) -> Handle<(Shared<LaggingReportSyncDb>, Anchor<sha256::Digest>)> {
@@ -5146,7 +5158,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(2));
             let (report_tx, report_rx) = mpsc::channel(1);
-            let sync = start_lagging_sync(context, tip_rx, report_rx).await;
+            let sync = start_lagging_sync(&context, tip_rx, report_rx).await;
 
             // Each burst overflows the two-slot tip ring, and the two dispatches overflow the
             // one-slot target ring before the database takes a target.
@@ -5177,7 +5189,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(1));
             let (report_tx, report_rx) = mpsc::channel(1);
-            let sync = start_lagging_sync(context, tip_rx, report_rx).await;
+            let sync = start_lagging_sync(&context, tip_rx, report_rx).await;
 
             // A report of the initial target and a newer tip reach the coordinator in the same
             // step. The report matches the target it last sent, but the queued tip is adopted

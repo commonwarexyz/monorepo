@@ -506,8 +506,9 @@ mod tests {
             )
             .await;
             let _network = network.start();
+            let mut actor_fixture_context = context.child("actor_fixture");
             let (mut actor, _mailbox) = utils::new_actor(
-                context.child("actor_fixture"),
+                &mut actor_fixture_context,
                 target.clone(),
                 participants.clone(),
                 &oracle,

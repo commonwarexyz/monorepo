@@ -1418,9 +1418,7 @@ where
         let share = artifact
             .filter(|artifact| artifact.info == info)
             .and_then(|artifact| artifact.share.clone());
-        let rng_seed = store
-            .seed_or_random(next_epoch, self.context.as_present_mut())
-            .await;
+        let rng_seed = store.seed_or_random(next_epoch, &mut self.context).await;
         store
             .commit_epoch(info.clone(), rng_seed, share.clone())
             .await;
@@ -1473,7 +1471,7 @@ mod tests {
         utils::mocks::inert_channel,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{ContextCell, Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
         channel::oneshot, ordered::Set, sequence::Unit, sync::Mutex, test_rng,
@@ -2280,7 +2278,7 @@ mod tests {
                 .spawn(|context| async move { context })
                 .await
                 .expect("context task should finish");
-            actor.context = ContextCell::new(closed_context);
+            actor.context = closed_context;
 
             let genesis = mocks::genesis_block(public_key);
             let final_block = ready(TestBlock::new::<Sha256>(
@@ -3105,12 +3103,14 @@ mod tests {
         }
     }
 
+    /// Builds an unstarted actor for finalization tests. The actor runs under the returned
+    /// context, which must outlive it.
     async fn setup_finalization_actor(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         signer: PrivateKey,
         participants: Set<PublicKey>,
         partition: &str,
-    ) -> mocks::TestReshareActor {
+    ) -> (deterministic::Context, mocks::TestReshareActor) {
         let (_network, oracle) = Network::new_with_peers(
             context.child("network"),
             NetworkConfig {
@@ -3122,8 +3122,9 @@ mod tests {
             participants.iter().cloned(),
         )
         .await;
+        let mut actor_fixture_context = context.child("actor_fixture");
         let (actor, _mailbox) = utils::new_actor(
-            context.child("actor_fixture"),
+            &mut actor_fixture_context,
             signer,
             participants,
             &oracle,
@@ -3132,7 +3133,7 @@ mod tests {
             NZU64!(8),
         )
         .await;
-        actor
+        (actor_fixture_context, actor)
     }
 
     /// Recovered public logs remain usable when their private dealing snapshot is absent.
@@ -3191,8 +3192,9 @@ mod tests {
                     Some(fixture.share),
                 )
                 .await;
-            let mut actor = setup_finalization_actor(
-                context.child("artifact_actor"),
+            let artifact_actor_context = context.child("artifact_actor");
+            let (_actor_fixture_context, mut actor) = setup_finalization_actor(
+                &artifact_actor_context,
                 target,
                 players(),
                 "missing-dealing-artifact-actor",
@@ -3250,8 +3252,9 @@ mod tests {
                 .await;
 
             // An empty dealer-log view cannot produce a ceremony result.
-            let mut actor = setup_finalization_actor(
-                context.child("artifact_actor"),
+            let artifact_actor_context = context.child("artifact_actor");
+            let (_actor_fixture_context, mut actor) = setup_finalization_actor(
+                &artifact_actor_context,
                 signers()[0].clone(),
                 players(),
                 "finalization-failure-artifact-actor",
@@ -3340,8 +3343,9 @@ mod tests {
                     .append_log(Epoch::zero(), dealer.clone(), log.clone())
                     .await;
             }
-            let mut actor = setup_finalization_actor(
-                context.child("artifact_actor"),
+            let artifact_actor_context = context.child("artifact_actor");
+            let (_actor_fixture_context, mut actor) = setup_finalization_actor(
+                &artifact_actor_context,
                 target,
                 players(),
                 "finalization-error-artifact-actor",

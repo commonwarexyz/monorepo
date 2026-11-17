@@ -13,7 +13,7 @@ use crate::{
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{Hasher, certificate};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
+use commonware_runtime::{Clock, Handle, Spawner};
 use commonware_utils::ordered::Quorum;
 use rand::{Rng, RngExt as _, seq::IteratorRandom};
 use std::{collections::HashSet, sync::Arc};
@@ -31,7 +31,7 @@ pub struct Equivocator<
     L: elector::Config<S>,
     H: Hasher,
 > {
-    context: ContextCell<E>,
+    context: E,
     scheme: S,
     elector: L::Elector,
     epoch: Epoch,
@@ -46,7 +46,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
         let elector = cfg.elector.build(cfg.scheme.participants());
 
         Self {
-            context: ContextCell::new(context),
+            context,
             scheme: cfg.scheme,
             epoch: cfg.epoch,
             relay: cfg.relay,
@@ -56,11 +56,12 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
     }
 
     pub fn start(
-        mut self,
+        self,
         vote_network: (impl Sender<PublicKey = S::PublicKey>, impl Receiver),
         certificate_network: (impl Sender, impl Receiver),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(vote_network, certificate_network))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(vote_network, certificate_network))
     }
 
     async fn run(
@@ -123,7 +124,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| Participant::from_usize(*index) != signer)
-                .choose(self.context.as_mut())
+                .choose(&mut self.context)
                 .unwrap();
 
             // Create two different proposals

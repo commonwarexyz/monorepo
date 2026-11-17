@@ -24,7 +24,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
-use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
+use commonware_runtime::{Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::{
     Acknowledgement as _,
@@ -65,7 +65,7 @@ where
     V: Variant,
 {
     /// Runtime context.
-    pub(super) context: ContextCell<E>,
+    pub(super) context: E,
     /// Actor ingress.
     pub(super) mailbox: actor_mailbox::Receiver<Message<E, A>>,
     /// Inner application.
@@ -274,7 +274,7 @@ where
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
                         let Applied { prune, .. } = processor
-                            .finalize(self.context.as_present(), &self.marshal, &block, false)
+                            .finalize(&self.context, &self.marshal, &block, false)
                             .await;
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
@@ -427,8 +427,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _,
-        deterministic,
+        Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
@@ -560,7 +559,7 @@ mod tests {
 
             let harness = Self {
                 syncing: Syncing {
-                    context: ContextCell::new(context.child("syncing")),
+                    context: context.child("syncing"),
                     mailbox,
                     application: TestApp::default(),
                     provider: (),

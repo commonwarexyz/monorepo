@@ -24,7 +24,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
+use commonware_runtime::{Handle, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
 use futures::join;
@@ -136,7 +136,7 @@ where
     V: Variant,
 {
     /// Runtime context.
-    context: ContextCell<E>,
+    context: E,
     /// The receiver for messages.
     mailbox: actor_mailbox::Receiver<Message<E, A>>,
     /// The inner application that drives state transitions.
@@ -188,7 +188,7 @@ where
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 mailbox,
                 application: config.application,
                 provider: config.provider,
@@ -209,8 +209,9 @@ where
     /// With a persisted floor, the actor runs state sync first: proposals decline and
     /// verifications wait until it completes. Otherwise it recovers from marshal before handling
     /// any message. See [Startup](crate::stateful#startup).
-    pub fn start(mut self) -> Handle<()> {
-        spawn_cell!(self.context, self.run())
+    pub fn start(self) -> Handle<()> {
+        self.context
+            .spawn(move |context| Self { context, ..self }.run())
     }
 
     async fn run(self) {
@@ -224,7 +225,7 @@ where
     /// Runs state sync toward `finalization`, then processing.
     async fn sync(self, finalization: Finalization<A::SigningScheme, V::Commitment>) {
         let (marshal, floor) = self.marshal;
-        let metrics = StatefulMetrics::new(self.context.as_present());
+        let metrics = StatefulMetrics::new(&self.context);
         let (sender, receiver) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
@@ -270,7 +271,7 @@ where
 
         self.resolvers.attach_databases(databases.clone()).await;
 
-        let metrics = StatefulMetrics::new(self.context.as_present());
+        let metrics = StatefulMetrics::new(&self.context);
         let _ = metrics.sync_done.try_set(1);
         let processor = Processor::new(
             self.application,

@@ -353,7 +353,7 @@ fn start_disrupter<P: simplex::Simplex>(
 
 /// Spawn a Disrupter for a Byzantine node.
 fn spawn_disrupter<P: simplex::Simplex>(
-    context: deterministic::Context,
+    context: &deterministic::Context,
     scheme: P::Scheme,
     input: &FuzzInput,
     channels: NetworkChannels,
@@ -380,7 +380,7 @@ fn spawn_honest_validator<
     ResolverSender,
     ResolverReceiver,
 >(
-    context: deterministic::Context,
+    context: &deterministic::Context,
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
@@ -471,6 +471,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
+        let mut validator_contexts = Vec::new();
 
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
@@ -479,7 +480,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            spawn_disrupter::<P>(&ctx, schemes[i].clone(), &input, channels);
+            validator_contexts.push(ctx);
         }
 
         // Spawn honest validators
@@ -490,7 +492,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 .child("validator")
                 .with_attribute("public_key", &validator);
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
-                ctx,
+                &ctx,
                 &oracle,
                 &participants,
                 input.term_length,
@@ -505,6 +507,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 recovered,
                 resolver,
             );
+            validator_contexts.push(ctx);
             reporters.push((validator, reporter));
         }
 
@@ -565,6 +568,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
+        let mut validator_contexts = Vec::new();
         let config = input.configuration;
         let term_length = input.term_length;
 
@@ -720,6 +724,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 (certificate_sender_secondary, certificate_receiver_secondary),
                 (resolver_sender_secondary, resolver_receiver_secondary),
             );
+            validator_contexts.push(primary_context);
+            validator_contexts.push(context);
         }
 
         // Spawn honest validators
@@ -731,7 +737,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .remove(validator)
                 .expect("validator should be registered");
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
-                ctx,
+                &ctx,
                 &oracle,
                 participants.as_ref(),
                 input.term_length,
@@ -746,6 +752,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 recovered,
                 resolver,
             );
+            validator_contexts.push(ctx);
             reporters.push((validator, reporter));
         }
 

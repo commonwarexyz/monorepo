@@ -30,6 +30,7 @@ use std::{
     convert::Infallible,
     env,
     future::{Future, poll_fn},
+    mem,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     ops::RangeInclusive,
@@ -465,7 +466,9 @@ impl crate::Runner for Runner {
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
-        // Run the future
+        // Run the future. The runner owns the root's supervision node, so dropping the
+        // root context aborts nothing, and the runner aborts every task only after it
+        // closed admission.
         let tree = Tree::root();
         let context = Context {
             storage,
@@ -551,32 +554,27 @@ impl crate::Spawner for Context {
         // Get metrics
         let (_, metric) = spawn_metrics!(self);
 
-        // Track supervision before resetting configuration
-        let parent = Arc::clone(&self.tree);
+        // The task takes over this context's node, and its factory receives the
+        // context at a new child of that node.
         let past = self.execution;
         self.execution = Execution::default();
-        let (child, aborted) = Tree::child(&parent);
+        let (child, aborted) = Tree::child(&self.tree);
         if aborted {
             return Handle::closed(metric);
         }
-        self.tree = child;
 
-        // Spawn the task
+        // A rejected spawn drops this context, which closes its node.
         let executor = self.executor.clone();
         let Some(task_guard) = executor.tasks.admit() else {
             return Handle::closed(metric);
         };
+        let parent = mem::replace(&mut self.tree, child);
 
         // The factory runs user code. If it unwinds, the guard finishes the
         // running gauge and closes the supervision node the wrapper never received.
         let guard = FactoryGuard::new(&parent, metric);
         let future = f(self);
-        let (f, handle) = Handle::init(
-            future,
-            guard.disarm(),
-            executor.panicker.clone(),
-            Arc::clone(&parent),
-        );
+        let (f, handle) = Handle::init(future, guard.disarm(), executor.panicker.clone(), parent);
 
         // Destroying a finished or cancelled future, or an undelivered output, can
         // unwind outside the user-poll boundary. Report it before releasing the tracker.
@@ -1645,6 +1643,28 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn test_rejected_spawn_closes_its_context() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        Runner::new(cfg).start(|context| async move {
+            // Close admission only, leaving supervision open.
+            context.executor.tasks.close();
+            let rejected = context.child("rejected");
+            let retained = rejected.child("retained");
+            assert!(!Tree::child(&retained.tree).1, "retained closed too early");
+            let handle = rejected.spawn(|_| -> std::future::Ready<()> {
+                panic!("a closed tracker must not invoke its factory");
+            });
+            assert!(matches!(handle.await, Err(Error::Closed)));
+            assert!(
+                Tree::child(&retained.tree).1,
+                "rejected context stayed open"
+            );
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
     }
 
     #[test]

@@ -62,6 +62,7 @@ exclude = [
     ".github/dylints/implied_bounds",
     ".github/dylints/owned_span_parent",
     ".github/dylints/span_name_style",
+    ".github/dylints/temporary_parent_context",
     ".github/dylints/tracing_int_fields",
 ]
 resolver = "2"

@@ -140,6 +140,8 @@ pub struct PeerInfo {
 
 /// Per-peer network stack.
 pub struct PeerNetwork<S, R, O> {
+    /// Owns the supervision subtree containing the network task.
+    _context: Context,
     /// Sender for sending messages to other peers.
     pub sender: S,
     /// Receiver for receiving messages from other peers.
@@ -287,6 +289,7 @@ impl NetworkScheme for Discovery {
         let handle = network.start();
 
         PeerNetwork {
+            _context: context,
             sender,
             receiver,
             oracle,
@@ -387,6 +390,7 @@ impl NetworkScheme for Lookup {
         let handle = network.start();
 
         PeerNetwork {
+            _context: context,
             sender,
             receiver,
             oracle,

@@ -12,7 +12,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage};
 use rand_core::CryptoRng;
 use tracing::debug;
 
@@ -28,7 +28,7 @@ pub struct Engine<
     F: Reporter<Activity = Activity<S, D>>,
     T: Strategy,
 > {
-    context: ContextCell<E>,
+    context: E,
 
     voter: voter::Actor<E, S, L::Elector, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
@@ -132,7 +132,7 @@ impl<
 
         // Return the engine
         Self {
-            context: ContextCell::new(context),
+            context,
 
             voter,
             voter_mailbox,
@@ -188,7 +188,7 @@ impl<
     /// epoch blocks the sender on the vote and certificate channels, and the resolver
     /// rejects it as invalid, which also blocks the peer.
     pub fn start(
-        mut self,
+        self,
         vote_network: (
             impl Sender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
@@ -202,10 +202,9 @@ impl<
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(vote_network, certificate_network, resolver_network)
-        )
+        self.context.spawn(move |context| {
+            Self { context, ..self }.run(vote_network, certificate_network, resolver_network)
+        })
     }
 
     async fn run(

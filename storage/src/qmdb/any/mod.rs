@@ -5658,7 +5658,8 @@ pub(crate) mod test {
             let mut outcomes = Vec::new();
             for (name, lifecycle) in lifecycles {
                 let label = format!("{variant} {name}");
-                let ctx = context.child(variant).child(name);
+                let variant_context = context.child(variant);
+                let ctx = variant_context.child(name);
                 db.destroy().await.unwrap();
                 let mut fresh = reopen(ctx.child("fresh")).await;
                 let seed: Vec<_> = seeded

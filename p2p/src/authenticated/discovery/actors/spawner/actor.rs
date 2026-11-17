@@ -15,7 +15,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::{Receiver, Sender};
@@ -24,7 +24,7 @@ use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
 pub struct Actor<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey> {
-    context: ContextCell<E>,
+    context: E,
 
     mailbox_size: NonZeroUsize,
     send_batch_size: NonZeroUsize,
@@ -52,7 +52,7 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: Public
 
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 mailbox_size: cfg.mailbox_size,
                 send_batch_size: cfg.send_batch_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
@@ -69,8 +69,9 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: Public
         )
     }
 
-    pub fn start(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) -> Handle<()> {
-        spawn_cell!(self.context, self.run(tracker, router))
+    pub fn start(self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) -> Handle<()> {
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(tracker, router))
     }
 
     async fn run(mut self, tracker: tracker::Mailbox<C>, router: router::Mailbox<C>) {
@@ -271,7 +272,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn setup(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         local: PublicKey,
     ) -> (
         Mailbox<Message<Sender, Receiver, PublicKey>>,
@@ -318,8 +319,9 @@ mod tests {
             let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
                 connections(&context, peer_signer, signer).await;
+            let setup_context = context.child("setup");
             let (mut spawner, mut tracker_receiver, _router_receiver, releaser, _handle) =
-                setup(context.child("setup"), local);
+                setup(&setup_context, local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
 
             assert_eq!(
@@ -361,8 +363,9 @@ mod tests {
             let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
                 connections(&context, peer_signer, signer.clone()).await;
+            let setup_context = context.child("setup");
             let (mut spawner, mut tracker_receiver, mut router_receiver, releaser, _handle) =
-                setup(context.child("setup"), local);
+                setup(&setup_context, local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
 
             assert_eq!(

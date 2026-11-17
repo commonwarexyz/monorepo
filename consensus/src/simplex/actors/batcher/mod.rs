@@ -143,7 +143,7 @@ mod tests {
     {
         let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
-            context.child("network"),
+            context,
             NConfig {
                 max_size: 1024 * 1024,
                 // Certificate-injection tests add one secondary peer to the committee.

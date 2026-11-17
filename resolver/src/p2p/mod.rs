@@ -4898,7 +4898,6 @@ mod tests {
         Vec<Mailbox<Key, PublicKey>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
-        let actor_context = context.child("actor");
         let mut mailboxes = Vec::new();
         let mut handles = Vec::new();
 
@@ -4908,7 +4907,7 @@ mod tests {
             .zip(consumers.into_iter().zip(producers))
             .enumerate()
         {
-            let ctx = actor_context.child("peer").with_attribute("index", idx);
+            let ctx = context.child("peer").with_attribute("index", idx);
             let public_key = scheme.public_key();
             let (engine, mailbox) = Engine::new(
                 ctx,
@@ -4947,8 +4946,9 @@ mod tests {
 
             let (cons1, mut cons_out1) = consumer();
 
+            let actor_context = context.child("actor");
             let (mut mailboxes, handles) = spawn_actors_with_handles(
-                &context,
+                &actor_context,
                 &oracle,
                 schemes,
                 connections,
@@ -5002,8 +5002,9 @@ mod tests {
 
             let (cons1, mut cons_out1) = consumer();
 
+            let actor_context = context.child("actor");
             let (mut mailboxes, handles) = spawn_actors_with_handles(
-                &context,
+                &actor_context,
                 &oracle,
                 schemes,
                 connections,
@@ -5076,7 +5077,6 @@ mod tests {
     /// Starts an authenticated lookup network and a resolver engine on it.
     fn start_lookup_peer<C, Pro>(
         context: &deterministic::Context,
-        label: &'static str,
         signer: PrivateKey,
         listen: SocketAddr,
         peers: Map<PublicKey, Address>,
@@ -5087,7 +5087,6 @@ mod tests {
         C: crate::Consumer<Key = Key, Subscriber = (), Value = Bytes>,
         Pro: crate::p2p::Producer<Key = Key>,
     {
-        let context = context.child(label);
         let public_key = signer.public_key();
         let (mut network, mut oracle) = lookup::Network::new(
             context.child("network"),
@@ -5160,9 +5159,9 @@ mod tests {
 
             // Start a server that holds each response until the test releases it.
             let (producer, mut requests) = GatedProducer::new();
+            let server_context = context.child("server");
             let (_server_mailbox, mut server_oracle, _server_handles) = start_lookup_peer(
-                &context,
-                "server",
+                &server_context,
                 server.clone(),
                 server_addr,
                 peers(requester_addr),
@@ -5172,9 +5171,9 @@ mod tests {
 
             // Allow the peers to connect before fetching so the held response belongs to
             // the requester's first request ID.
+            let requester_context = context.child("requester");
             let (mut mailbox, _oracle, handles) = start_lookup_peer(
-                &context,
-                "requester",
+                &requester_context,
                 requester.clone(),
                 requester_addr,
                 peers(requester_addr),
@@ -5196,9 +5195,9 @@ mod tests {
             server_oracle.track(1, peers(restarted_addr));
             let (mut consumer, mut delivered) = consumer();
             consumer.add_expected(new_key.clone(), new_value.clone());
+            let restarted_context = context.child("requester_restarted");
             let (mut mailbox, mut oracle, _handles) = start_lookup_peer(
-                &context,
-                "requester_restarted",
+                &restarted_context,
                 requester.clone(),
                 restarted_addr,
                 peers(restarted_addr),

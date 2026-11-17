@@ -403,6 +403,7 @@ mod tests {
     }
 
     struct Node {
+        _context: deterministic::Context,
         marshal: mocks::TestMarshalMailbox,
         orchestrator: super::Mailbox<mocks::TestBlock, Exact>,
         application: mocks::MockApplication,
@@ -584,6 +585,7 @@ mod tests {
             let orchestrator_handle = actor.start(votes, certificates, simplex_resolver);
 
             Self {
+                _context: context,
                 marshal,
                 orchestrator,
                 application,

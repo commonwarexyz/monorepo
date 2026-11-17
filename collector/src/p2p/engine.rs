@@ -9,7 +9,7 @@ use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender, utils::codec::wrap};
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{channel::oneshot, futures::Pool};
@@ -28,7 +28,7 @@ where
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
     // Configuration
-    context: ContextCell<E>,
+    context: E,
     blocker: B,
     priority_request: bool,
     request_codec: Rq::Cfg,
@@ -74,7 +74,7 @@ where
 
         (
             Self {
-                context: ContextCell::new(context),
+                context,
                 blocker: cfg.blocker,
                 priority_request: cfg.priority_request,
                 request_codec: cfg.request_codec,
@@ -96,11 +96,12 @@ where
     ///
     /// Returns a handle that can be used to wait for the engine to complete.
     pub fn start(
-        mut self,
+        self,
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
         responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(requests, responses))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(requests, responses))
     }
 
     async fn run(

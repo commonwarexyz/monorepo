@@ -17,7 +17,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, utils::codec::WrappedReceiver};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, Handle, Metrics, Spawner,
     telemetry::{
         metrics::{
             Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
@@ -57,7 +57,7 @@ where
     Rl: Relay,
     T: Strategy,
 {
-    context: ContextCell<E>,
+    context: E,
 
     scheme: Arc<S>,
 
@@ -141,7 +141,7 @@ where
         }
         (
             Self {
-                context: ContextCell::new(context),
+                context,
 
                 last_activity: vec![None; participants.len()],
                 required_active,
@@ -338,22 +338,20 @@ where
         round: &mut Round<S, B, D, Re>,
     ) {
         loop {
-            let timer = self.construct_latency.timer(self.context.as_ref());
+            let timer = self.construct_latency.timer(&self.context);
             let Some(Batch {
                 processed,
                 invalid,
                 certificate,
                 fallback,
-            }) = round
-                .try_construct(self.context.as_mut(), &self.strategy)
-                .await
+            }) = round.try_construct(&mut self.context, &self.strategy).await
             else {
                 trace!(%view, "no verifier ready");
                 break;
             };
 
             // Record completed work even when no certificate was produced.
-            timer.observe(self.context.as_ref());
+            timer.observe(&self.context);
             if fallback {
                 self.construct_fallback.inc();
             }
@@ -382,15 +380,14 @@ where
     }
 
     pub fn start(
-        mut self,
+        self,
         voter: voter::Mailbox<S, D>,
         vote_receiver: impl Receiver<PublicKey = S::PublicKey>,
         certificate_receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(voter, vote_receiver, certificate_receiver)
-        )
+        self.context.spawn(move |context| {
+            Self { context, ..self }.run(voter, vote_receiver, certificate_receiver)
+        })
     }
 
     pub async fn run(
@@ -601,7 +598,7 @@ where
                 let _guard = span.entered();
 
                 // Verify the certificate.
-                if !message.verify(self.context.as_mut(), self.scheme.as_ref(), &self.strategy) {
+                if !message.verify(&mut self.context, self.scheme.as_ref(), &self.strategy) {
                     commonware_p2p::block!(self.blocker, sender, %view, %kind, "invalid certificate");
                     continue;
                 }

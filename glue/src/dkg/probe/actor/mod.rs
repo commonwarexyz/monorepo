@@ -13,7 +13,7 @@ use commonware_consensus::{
 };
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
 use rand_core::CryptoRng;
@@ -86,7 +86,7 @@ where
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
-    context: ContextCell<E>,
+    context: E,
     mailbox: ActorReceiver<Message<S, V>>,
     manager: M,
     bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
@@ -124,7 +124,7 @@ where
         let mailbox_handle = Mailbox::new(sender);
         (
             Self {
-                context: ContextCell::new(config.context),
+                context: config.context,
                 mailbox,
                 manager: config.manager,
                 bootstrap: config.bootstrap,
@@ -145,12 +145,13 @@ where
     ///
     /// `boundaries` carries probe requests and responses in both directions:
     /// this node's discovery and its service to other joining peers.
-    pub fn start<BSE, BRE>(mut self, boundaries: (BSE, BRE)) -> Handle<()>
+    pub fn start<BSE, BRE>(self, boundaries: (BSE, BRE)) -> Handle<()>
     where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
-        spawn_cell!(self.context, self.run(boundaries,))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(boundaries))
     }
 
     async fn run<BSE, BRE>(self, (boundary_sender, boundary_receiver): (BSE, BRE))

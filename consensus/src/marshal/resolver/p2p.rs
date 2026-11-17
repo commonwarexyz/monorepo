@@ -85,6 +85,11 @@ where
             priority_responses: config.priority_responses,
         },
     );
-    resolver_engine.start(backfill);
+    // The engine runs under a child of `context`, so a task keeps `context` open for as
+    // long as the engine runs.
+    let engine = resolver_engine.start(backfill);
+    context.spawn(move |_| async move {
+        let _ = engine.await;
+    });
     (HandlerReceiver::new(receiver), resolver)
 }

@@ -581,6 +581,7 @@ mod test {
 
     /// A single node in the harness: its probe ingress and its marshal mailbox.
     struct Node {
+        _context: deterministic::Context,
         probe: Mailbox<Scheme, Variant>,
         marshal: MarshalMailbox<Scheme, Variant>,
         // A clone of the node's probe channel sender, used by tests to inject raw
@@ -764,6 +765,7 @@ mod test {
                     Box::new(move || probe.start(probe_network));
 
                 nodes.push(Node {
+                    _context: node_ctx,
                     probe: probe_mailbox,
                     marshal: marshal_mailbox,
                     probe_sender,

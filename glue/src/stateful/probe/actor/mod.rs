@@ -7,7 +7,7 @@ use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, type
 use commonware_cryptography::{PublicKey, certificate::Provider};
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner};
 use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
 use rand_core::CryptoRng;
@@ -57,7 +57,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    context: ContextCell<E>,
+    context: E,
     mailbox: ActorReceiver<Message<S, V>>,
     provider: D,
     strategy: T,
@@ -83,7 +83,7 @@ where
         let mailbox = Mailbox::new(sender);
         (
             Self {
-                context: ContextCell::new(config.context),
+                context: config.context,
                 mailbox: receiver,
                 provider: config.provider,
                 strategy: config.strategy,
@@ -97,10 +97,11 @@ where
 
     /// Starts the actor on the probe channel `net`.
     pub fn start(
-        mut self,
+        self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(net))
+        self.context
+            .spawn(move |context| Self { context, ..self }.run(net))
     }
 
     async fn run(

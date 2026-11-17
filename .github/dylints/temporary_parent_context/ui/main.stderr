@@ -1,0 +1,67 @@
+error: child of a temporary parent context
+  --> $DIR/main.rs:90:18
+   |
+LL |     let _bound = ctx.child("a").child("b");
+   |                  ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+   = note: `#[deny(temporary_parent_context)]` on by default
+
+error: child of a temporary parent context
+  --> $DIR/main.rs:91:5
+   |
+LL |     ctx.child("a").child("b").spawn(|| {});
+   |     ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+
+error: child of a temporary parent context
+  --> $DIR/main.rs:92:5
+   |
+LL |     ctx.child("a").child("b").spawn(|| {}).await;
+   |     ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+
+error: child of a temporary parent context
+  --> $DIR/main.rs:93:20
+   |
+LL |     let _metrics = ctx.child("a").with_attribute("k", "v").child("b");
+   |                    ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+
+error: child of a temporary parent context
+  --> $DIR/main.rs:94:19
+   |
+LL |     let _shared = ctx.child("a").shared(true).child("b");
+   |                   ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+
+error: child of a temporary parent context
+  --> $DIR/main.rs:95:22
+   |
+LL |     let _dedicated = ctx.child("a").dedicated().child("b");
+   |                      ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+
+error: child of a temporary parent context
+  --> $DIR/main.rs:99:13
+   |
+LL |     let _ = ctx.child("a").child("b");
+   |             ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+
+error: child of a temporary parent context
+  --> $DIR/main.rs:104:17
+   |
+LL |         let _ = self.context.child("a").child("b");
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first
+
+error: aborting due to 8 previous errors
+

@@ -745,7 +745,8 @@ pub struct Context {
     attributes: Vec<(String, String)>,
     /// Shared services and runner-wide lifecycle state.
     shared: Arc<Shared>,
-    /// This context's node in the mandatory supervision tree.
+    /// This context's node in the mandatory supervision tree, closed when the
+    /// context is dropped unless a spawn took it over.
     tree: Arc<Tree>,
     /// Placement requested for the next consumed spawn.
     execution: Execution,
@@ -776,22 +777,22 @@ impl crate::Spawner for Context {
         T: Send + 'static,
     {
         let (_, metric) = spawn_metrics!(self);
-        let parent = self.tree.clone();
         let execution = self.execution;
 
         // Placement applies to this spawn. Children start with ordinary placement.
+        // The task takes over this context's node, and its factory receives the
+        // context at a new child of that node.
         self.execution = Execution::default();
-        let (child, aborted) = Tree::child(&parent);
+        let (child, aborted) = Tree::child(&self.tree);
         if aborted {
             return Handle::closed(metric);
         }
-
-        self.tree = child;
         let shared = self.shared.clone();
 
         // Dedicated and blocking spawns reserve a dedicated worker before the
         // factory runs, so shutdown waits for them. Ordinary spawns only check
-        // that the task set still accepts tasks.
+        // that the task set still accepts tasks. A rejected spawn drops this
+        // context, which closes its node.
         let reservation = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
             let Some(reservation) = shared.workers.reserve() else {
                 return Handle::closed(metric);
@@ -803,6 +804,7 @@ impl crate::Spawner for Context {
             }
             None
         };
+        let parent = mem::replace(&mut self.tree, child);
 
         // User construction runs on the caller with no runtime borrow or lock.
         // A reserved dedicated worker remains counted through construction and
@@ -2373,6 +2375,8 @@ impl crate::Runner for Runner {
         shared.metrics.tasks_spawned.get_or_create(&label).inc();
 
         let metric = MetricHandle::new(shared.metrics.tasks_running.get_or_create(&label).clone());
+        // The runner owns the root's supervision node, so dropping the root context
+        // aborts nothing, and the runner aborts every task only after it closed admission.
         let tree = Tree::root();
         let context_shared = shared.clone();
         let context_tree = tree.clone();
