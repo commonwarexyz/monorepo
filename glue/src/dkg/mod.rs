@@ -271,6 +271,12 @@ pub trait Registrar: Send + Sync + 'static {
 ///
 /// Writes must be durable when their futures resolve. Losing an acknowledged write can
 /// cause a dealer to equivocate after restart or lose a share already in use.
+///
+/// Before a restarted node reads this store, operations from previous runs must
+/// have finished or been prevented from changing stored material. This includes
+/// writes and prunes whose futures were dropped. Reads must reflect the resulting
+/// state. Operations from previous runs must not change stored material after
+/// these reads begin.
 pub trait SecretStore: Send + Sync + 'static {
     /// Stores this node's [`Share`] for `epoch`.
     fn put_share(&mut self, epoch: Epoch, share: Share) -> impl Future<Output = ()> + Send;
