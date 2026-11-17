@@ -1,7 +1,7 @@
-use super::{Processed, Variant, durability::Durable as _, floor::Installed};
+use super::{Processed, RoundBounded, Variant, durability::Durable as _, floor::Installed};
 use crate::{
     Reporter,
-    ancestry::{AncestorStream, Ancestry, BlockProvider},
+    ancestry::{AncestorStream, Ancestry},
     simplex::{
         marshal::Identifier,
         types::{Activity, Finalization, Notarization},
@@ -944,10 +944,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// ancestry for data they already have locally and are willing to build on,
     /// verify, certify, or repair from. It is not a candidate fetch path.
     ///
-    /// With [`DigestFallback::FetchByRound`], that round is the stream's bound (see
-    /// [`BlockProvider::subscribe_parent`]). With [`DigestFallback::Wait`] the stream passes no
-    /// bound, so start only from a block whose ancestry has been checked, such as a certified
-    /// or finalized block.
+    /// With [`DigestFallback::FetchByRound`], that round bounds the stream's parent requests (see
+    /// [`RoundBounded::bounded`]). With [`DigestFallback::Wait`] they are unbounded, so start only
+    /// from a block whose ancestry has been checked, such as a certified or finalized block.
     ///
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry<C>(
@@ -957,17 +956,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         fetch_duration: Timed,
     ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C>>
     where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
+        Self: RoundBounded<Block = V::ApplicationBlock>,
         C: Clock,
     {
-        let bound = match fallback {
-            DigestFallback::Wait => None,
-            DigestFallback::FetchByRound { round } => Some(round),
+        let provider = match fallback {
+            DigestFallback::Wait => self.unbounded(),
+            DigestFallback::FetchByRound { round } => self.bounded(round),
         };
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver.await.ok().map(|block| {
             let block = V::into_shared(block);
-            AncestorStream::new(clock, self.clone(), [block], bound, fetch_duration)
+            AncestorStream::new(clock, provider, [block], fetch_duration)
         })
     }
 

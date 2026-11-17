@@ -5,7 +5,6 @@
 
 use crate::{
     BoundedBlock, CertifiableBlock, Heightable, Reporter,
-    ancestry::BlockProvider,
     marshal::{Floors, Ledger},
     simplex::{
         marshal::{
@@ -15,7 +14,7 @@ use crate::{
                 types::{CodedBlock, coding_config_for_participants, hash_context},
             },
             config::{Config, Start},
-            core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
+            core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, RoundBounded},
             mocks::{
                 application::Application,
                 block::{Block, encode_block, ready},
@@ -5539,7 +5538,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 /// Test ancestry stream.
 pub fn ancestry_stream<H: TestHarness>()
 where
-    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
+    Mailbox<S, H::Variant>: RoundBounded<Block = H::ApplicationBlock>,
 {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {

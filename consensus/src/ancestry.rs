@@ -1,9 +1,6 @@
 //! A stream that yields the ancestors of a block while prefetching parents.
 
-use crate::{
-    Block, Heightable,
-    types::{Height, Round},
-};
+use crate::{Block, Heightable, types::Height};
 use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
@@ -256,15 +253,8 @@ pub trait BlockProvider: Send + 'static {
     /// will be notified when the parent is available. If the parent is not finalized, it's possible
     /// that it may never become available.
     ///
-    /// `bound` limits how long the caller needs the parent. It is the round consensus assigned to
-    /// `block` or to a descendant the caller walks from, or the round of the consensus request the
-    /// caller serves. Pass `None` only when `block` has been checked against its own parent, such
-    /// as a finalized block.
-    ///
-    /// The provider may stop fetching the parent once the parent is processed or `block` can never
-    /// be finalized. One of those two conditions holds once a block finalized at `bound` or a later
-    /// round is processed. After the provider stops, the subscription completes only if the parent
-    /// becomes available locally.
+    /// A provider may stop fetching a parent it can show is no longer needed. After it stops, the
+    /// subscription completes only if the parent becomes available locally.
     ///
     /// Returns `None` only when the provider can no longer obtain the parent from any source.
     /// Dropping the returned future cancels the subscription.
@@ -273,7 +263,6 @@ pub trait BlockProvider: Send + 'static {
     fn subscribe_parent(
         &self,
         block: &Digested<Self::Block>,
-        bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static;
 }
 
@@ -320,7 +309,6 @@ fn timed_parent_fetch<C, M>(
     clock: &Arc<C>,
     provider: &M,
     child: &Digested<M::Block>,
-    bound: Option<Round>,
     fetch_duration: &Timed,
 ) -> PendingFetch<M::Block>
 where
@@ -331,7 +319,7 @@ where
     let timer = fetch_duration.timer(clock.as_ref());
     let clock = clock.clone();
     provider
-        .subscribe_parent(child, bound)
+        .subscribe_parent(child)
         .map(move |parent| {
             let parent = parent?;
             timer.observe(clock.as_ref());
@@ -346,7 +334,6 @@ where
 pub struct AncestorStream<M: BlockProvider, C: Clock> {
     buffered: Vec<Digested<M::Block>>,
     provider: M,
-    bound: Option<Round>,
     fetch_duration: Timed,
     clock: Arc<C>,
     pending_child: Option<Digested<M::Block>>,
@@ -363,11 +350,6 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// already safe to verify, certify, build on, or repair from, and do not use the stream to
     /// wait for pending candidate proposal data.
     ///
-    /// `bound` is the round consensus assigned to the newest initial block or to a descendant of
-    /// it, or the round of the consensus request the stream serves. The stream passes it to every
-    /// [`BlockProvider::subscribe_parent`] call. Without a bound, every block the stream reaches
-    /// must have been checked against its own parent, as in certified or finalized ancestry.
-    ///
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous.
@@ -376,10 +358,9 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
         clock: Arc<C>,
         provider: M,
         initial: impl IntoIterator<Item = Digested<M::Block>>,
-        bound: Option<Round>,
         fetch_duration: Timed,
     ) -> Self {
-        Self::start(clock, provider, initial, bound, fetch_duration)
+        Self::start(clock, provider, initial, fetch_duration)
     }
 
     /// Creates a new [AncestorStream] as [`Self::new`] does, for callers in this crate at any
@@ -388,7 +369,6 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
         clock: Arc<C>,
         provider: M,
         initial: impl IntoIterator<Item = Digested<M::Block>>,
-        bound: Option<Round>,
         fetch_duration: Timed,
     ) -> Self {
         let mut buffered = initial.into_iter().collect::<Vec<_>>();
@@ -411,7 +391,6 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
         Self {
             provider,
             buffered,
-            bound,
             fetch_duration,
             clock,
             pending_child: None,
@@ -438,13 +417,12 @@ where
         let clock = self.clock.clone();
         let pending = pending_child
             .as_ref()
-            .map(|child| timed_parent_fetch(&clock, &provider, child, self.bound, &fetch_duration))
+            .map(|child| timed_parent_fetch(&clock, &provider, child, &fetch_duration))
             .into();
 
         Self {
             buffered: self.buffered.clone(),
             provider,
-            bound: self.bound,
             fetch_duration,
             clock,
             pending_child,
@@ -481,13 +459,8 @@ where
             let should_walk_parent = height > END_BOUND;
             let end_of_buffered = this.buffered.is_empty();
             if should_walk_parent && end_of_buffered {
-                let future = timed_parent_fetch(
-                    this.clock,
-                    this.provider,
-                    &block,
-                    *this.bound,
-                    this.fetch_duration,
-                );
+                let future =
+                    timed_parent_fetch(this.clock, this.provider, &block, this.fetch_duration);
                 *this.pending_child = Some(block.clone());
                 *this.pending.as_mut() = Some(future).into();
 
@@ -527,13 +500,8 @@ where
                 let height = block.height();
                 let should_walk_parent = height > END_BOUND;
                 if should_walk_parent {
-                    let future = timed_parent_fetch(
-                        this.clock,
-                        this.provider,
-                        &block,
-                        *this.bound,
-                        this.fetch_duration,
-                    );
+                    let future =
+                        timed_parent_fetch(this.clock, this.provider, &block, this.fetch_duration);
                     *this.pending_child = Some(block.clone());
                     *this.pending.as_mut() = Some(future).into();
 
@@ -568,10 +536,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        simplex::marshal::mocks::block::EmptyBlock,
-        types::{Epoch, View},
-    };
+    use crate::simplex::marshal::mocks::block::EmptyBlock;
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{
         Runner as _, Supervisor as _, deterministic,
@@ -599,7 +564,6 @@ mod test {
         fn subscribe_parent(
             &self,
             block: &Digested<Self::Block>,
-            _bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             let parent = block.parent();
             std::future::ready(
@@ -617,7 +581,6 @@ mod test {
     #[derive(Default, Clone)]
     struct PendingProvider {
         subscriptions: Arc<Mutex<Vec<ParentSubscription>>>,
-        bounds: Arc<Mutex<Vec<Option<Round>>>>,
     }
 
     impl PendingProvider {
@@ -639,11 +602,9 @@ mod test {
         fn subscribe_parent(
             &self,
             _block: &Digested<Self::Block>,
-            bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             let (subscription, parent) = oneshot::channel();
             self.subscriptions.lock().push(subscription);
-            self.bounds.lock().push(bound);
             parent.map(Result::ok)
         }
     }
@@ -679,7 +640,6 @@ mod test {
         fn subscribe_parent(
             &self,
             _block: &Digested<Self::Block>,
-            _bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             let mut state = self.state.lock();
             let call = state.0;
@@ -702,7 +662,6 @@ mod test {
         fn subscribe_parent(
             &self,
             _block: &Digested<Self::Block>,
-            _bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             std::future::ready(Some(digested(self.0.clone())))
         }
@@ -730,7 +689,6 @@ mod test {
             Arc::new(stream_context),
             provider,
             initial.into_iter().map(digested),
-            None,
             fetch_duration,
         )
     }
@@ -816,44 +774,6 @@ mod test {
             assert_eq!(provider.subscription_count(), 1);
             provider.complete_all(digested(fetched_parent));
             assert_eq!(stream.next().await, None);
-        });
-    }
-
-    #[test]
-    fn test_requests_every_parent_under_the_stream_bound() {
-        deterministic::Runner::default().start(|context| async move {
-            let grandparent = TestBlock::new(Sha256Digest::EMPTY, Height::zero(), 0);
-            let parent = TestBlock::new(grandparent.digest(), Height::new(1), 1);
-            let child = TestBlock::new(parent.digest(), Height::new(2), 2);
-            let bound = Some(Round::new(Epoch::new(1), View::new(7)));
-            let provider = PendingProvider::default();
-            let stream_context = context.child("ancestor_stream");
-            let fetch_duration = timed(&stream_context);
-            let mut stream = AncestorStream::new(
-                Arc::new(stream_context),
-                provider.clone(),
-                [digested(child.clone())],
-                bound,
-                fetch_duration,
-            );
-
-            // Yielding the child requests its parent, and a clone taken while that request is
-            // pending makes a request of its own.
-            assert_eq!(
-                stream.next().await.as_ref().map(Digested::inner),
-                Some(&child)
-            );
-            let mut clone = stream.clone();
-            provider.complete_all(digested(parent.clone()));
-
-            // Yielding the parent requests the grandparent, in the stream and in its clone.
-            for stream in [&mut stream, &mut clone] {
-                assert_eq!(
-                    stream.next().await.as_ref().map(Digested::inner),
-                    Some(&parent)
-                );
-            }
-            assert_eq!(*provider.bounds.lock(), [bound; 4]);
         });
     }
 

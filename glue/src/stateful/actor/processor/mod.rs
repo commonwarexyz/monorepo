@@ -30,7 +30,7 @@ use crate::stateful::{
 use commonware_consensus::{
     Block, CertifiableBlock, Handoff, Heightable, Roundable,
     ancestry::{AncestorStream, Ancestry, BlockProvider, BoxedAncestry},
-    simplex::marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    simplex::marshal::core::{Mailbox as MarshalMailbox, RoundBounded, Variant as MarshalVariant},
     types::{Height, Round},
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
@@ -610,7 +610,7 @@ where
         target: Digested<A::Block>,
     ) -> Result<(), PrepareBatchesError>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
+        P: RoundBounded<Block = A::Block>,
     {
         self.execution
             .rebuild_pending(&self.app, context, provider, target)
@@ -654,7 +654,7 @@ where
         start_barrier: bool,
     ) -> Applied<SyncTargets<A, E>>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
+        P: RoundBounded<Block = A::Block>,
     {
         let finalized = Anchor::from_block(block);
         let (height, digest) = (finalized.height, finalized.digest);
@@ -695,9 +695,8 @@ where
             // The finalized block must reproduce its committed state.
             let ancestry = self.execution.ancestry(
                 context,
-                provider.clone(),
+                provider.bounded(block_context.round()),
                 [block.clone()],
-                block_context.round(),
             );
             let batch = self
                 .app
@@ -810,14 +809,13 @@ where
     }
 
     /// Returns the ancestry the application reads while processing the newest of `blocks`:
-    /// `blocks` themselves, then earlier ancestors fetched from `provider` on demand. `bound` is
-    /// the round that ends the need for those ancestors.
+    /// `blocks` themselves, then earlier ancestors fetched from `provider` on demand. The provider
+    /// carries the round that ends the need for those ancestors.
     fn ancestry<P, I>(
         &self,
         context: &E,
         provider: P,
         blocks: I,
-        bound: Round,
     ) -> impl Ancestry<A::Block> + use<E, A, P, I>
     where
         P: BlockProvider<Block = A::Block> + Clone,
@@ -827,7 +825,6 @@ where
             Arc::new(context.child("ancestry")),
             provider,
             blocks,
-            Some(bound),
             self.metrics.ancestor_fetch_duration.clone(),
         )
     }
@@ -1002,7 +999,7 @@ where
         target: Digested<A::Block>,
     ) -> Result<ReplayPath<A::Block>, PrepareBatchesError>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
+        P: RoundBounded<Block = A::Block>,
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
         let target_digest = target.digest();
@@ -1036,7 +1033,7 @@ where
                 return Err(PrepareBatchesError::Invalid);
             }
 
-            let Some(parent) = provider.subscribe_parent(&cursor, Some(bound)).await else {
+            let Some(parent) = provider.bounded(bound).subscribe_parent(&cursor).await else {
                 debug!(
                     ?target_digest,
                     cursor = ?cursor.digest(),
@@ -1085,7 +1082,7 @@ where
         path: &mut ReplayPath<A::Block>,
     ) -> Option<BoxedAncestry<A::Block>>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
+        P: RoundBounded<Block = A::Block>,
     {
         let Some(block) = path.blocks.pop() else {
             if let Some((timer, depth)) = path.measurement.take() {
@@ -1097,9 +1094,8 @@ where
         let parent = std::mem::replace(&mut path.parent, block.clone());
         Some(BoxedAncestry::new(self.ancestry(
             context,
-            provider.clone(),
+            provider.bounded(path.bound),
             [block, parent],
-            path.bound,
         )))
     }
 
@@ -1112,7 +1108,7 @@ where
         target: Digested<A::Block>,
     ) -> Result<(), PrepareBatchesError>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
+        P: RoundBounded<Block = A::Block>,
     {
         let mut path = self.prepare_replay(context, provider, target).await?;
         while let Some(ancestry) = self.next_replay(context, provider, &mut path) {
@@ -1151,7 +1147,10 @@ mod tests {
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
         ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
-        simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
+        simplex::{
+            marshal::core::RoundBounded, mocks::scheme::Scheme as MockScheme,
+            types::Context as ConsensusContext,
+        },
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
@@ -1661,6 +1660,8 @@ mod tests {
         fetches: Arc<AtomicUsize>,
         /// The bound of each parent request, in order.
         bounds: Arc<Mutex<Vec<Option<Round>>>>,
+        /// The bound of this handle's parent requests.
+        bound: Option<Round>,
     }
 
     impl MapProvider {
@@ -1682,15 +1683,33 @@ mod tests {
         }
     }
 
+    impl RoundBounded for MapProvider {
+        type Block = Block;
+        type Provider = Self;
+
+        fn bounded(&self, bound: Round) -> Self {
+            Self {
+                bound: Some(bound),
+                ..self.clone()
+            }
+        }
+
+        fn unbounded(&self) -> Self {
+            Self {
+                bound: None,
+                ..self.clone()
+            }
+        }
+    }
+
     impl BlockProvider for MapProvider {
         type Block = Block;
 
         fn subscribe_parent(
             &self,
             block: &Digested<Self::Block>,
-            bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
-            self.bounds.lock().push(bound);
+            self.bounds.lock().push(self.bound);
             let provider = self.clone();
             let parent = block.parent();
             async move { provider.fetch_by_digest(parent).map(digested) }
@@ -1715,13 +1734,25 @@ mod tests {
         }
     }
 
+    impl RoundBounded for ScriptedParentProvider {
+        type Block = Block;
+        type Provider = Self;
+
+        fn bounded(&self, _bound: Round) -> Self {
+            self.clone()
+        }
+
+        fn unbounded(&self) -> Self {
+            self.clone()
+        }
+    }
+
     impl BlockProvider for ScriptedParentProvider {
         type Block = Block;
 
         fn subscribe_parent(
             &self,
             block: &Digested<Self::Block>,
-            _bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let child = block.digest();
