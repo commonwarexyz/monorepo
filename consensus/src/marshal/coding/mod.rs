@@ -128,7 +128,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Runner, Spawner as _, Supervisor as _,
+        Clock, Metrics, Runner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         telemetry::metrics::{
@@ -548,11 +548,16 @@ mod tests {
         (mailbox, resolver, actor_handle)
     }
 
+    /// Starts a shard engine on its own network. The engine and network run until the returned
+    /// context is dropped.
     async fn start_shard_mailbox(
         context: deterministic::Context,
         participants: Vec<K>,
         provider: ConstantProvider<S, Epoch>,
-    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256> {
+    ) -> (
+        shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256>,
+        deterministic::Context,
+    ) {
         let me = participants[0].clone();
         let oracle = setup_network_with_participants(
             context.child("network"),
@@ -575,11 +580,8 @@ mod tests {
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
         let network = control.register(0, TEST_QUOTA).await.unwrap();
-        let handle = shard_engine.start(network);
-        context.spawn(move |_| async move {
-            handle.await.expect("shard engine failed");
-        });
-        shard_mailbox
+        shard_engine.start(network);
+        (shard_mailbox, context)
     }
 
     fn genesis_block() -> CodingB {
@@ -873,7 +875,7 @@ mod tests {
 
                 // Verify the candidate with an application that reads its ancestry down to
                 // genesis and accepts only if it gets there.
-                let shards =
+                let (shards, _shards_context) =
                     start_shard_mailbox(context.child("shards"), participants, provider.clone())
                         .await;
                 let application = WalkingVerifyingApp::default();
@@ -939,7 +941,7 @@ mod tests {
                 buffer.clone(),
             )
             .await;
-            let shards =
+            let (shards, _shards_context) =
                 start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
                     .await;
             let (candidate_ctx, candidate) = missing_candidate(me);
@@ -1006,7 +1008,7 @@ mod tests {
                 RecordingCodingBuffer::default(),
             )
             .await;
-            let shards =
+            let (shards, _shards_context) =
                 start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
                     .await;
             let (candidate_ctx, candidate) = missing_candidate(me);
@@ -1063,7 +1065,7 @@ mod tests {
                 buffer.clone(),
             )
             .await;
-            let shards =
+            let (shards, _shards_context) =
                 start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
                     .await;
 
@@ -1132,7 +1134,7 @@ mod tests {
                 buffer,
             )
             .await;
-            let shards =
+            let (shards, _shards_context) =
                 start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
                     .await;
 
@@ -1202,7 +1204,7 @@ mod tests {
                 RecordingCodingBuffer::default(),
             )
             .await;
-            let shards =
+            let (shards, _shards_context) =
                 start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
                     .await;
             let cfg = MarshaledConfig {
@@ -1275,7 +1277,7 @@ mod tests {
                 buffer.clone(),
             )
             .await;
-            let shards =
+            let (shards, _shards_context) =
                 start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
                     .await;
 
@@ -4590,7 +4592,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(cached.commitment(), parent.commitment());
-            let shards =
+            let (shards, _shards_context) =
                 start_shard_mailbox(context.child("shards"), participants, provider.clone()).await;
             let application = WalkingVerifyingApp::default();
             let mut marshaled = Marshaled::new(
@@ -4748,7 +4750,7 @@ mod tests {
             assert!(mailbox.verified(round, candidate.clone()).await);
 
             // Verify both with an application that reads a block's ancestry down to genesis.
-            let shards = start_shard_mailbox(
+            let (shards, _shards_context) = start_shard_mailbox(
                 context.child("shards"),
                 participants.clone(),
                 provider.clone(),
@@ -5402,7 +5404,7 @@ mod tests {
                 RecordingCodingBuffer::default(),
             )
             .await;
-            let shards = start_shard_mailbox(
+            let (shards, _shards_context) = start_shard_mailbox(
                 context.child("shards"),
                 participants.clone(),
                 provider.clone(),
@@ -5887,7 +5889,7 @@ mod tests {
                 buffer.clone(),
             )
             .await;
-            let shards = start_shard_mailbox(
+            let (shards, _shards_context) = start_shard_mailbox(
                 context.child("shards"),
                 participants.clone(),
                 provider.clone(),
@@ -6007,7 +6009,7 @@ mod tests {
                 buffer.clone(),
             )
             .await;
-            let shards = start_shard_mailbox(
+            let (shards, _shards_context) = start_shard_mailbox(
                 context.child("shards"),
                 participants.clone(),
                 provider.clone(),
@@ -6093,7 +6095,7 @@ mod tests {
                 buffer.clone(),
             )
             .await;
-            let shards = start_shard_mailbox(
+            let (shards, _shards_context) = start_shard_mailbox(
                 context.child("shards"),
                 participants.clone(),
                 provider.clone(),

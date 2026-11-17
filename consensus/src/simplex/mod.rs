@@ -1829,7 +1829,6 @@ mod tests {
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
             let (pending, recovered, resolver) = register_validator(&mut oracle, joiner).await;
-            validator_contexts.push(joiner_context);
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             let (mut joiner_latest, mut joiner_monitor) = joiner_reporter.subscribe().await;
@@ -3232,7 +3231,6 @@ mod tests {
             let (pending, recovered, resolver) = registrations
                 .remove(&me)
                 .expect("validator should be registered");
-            validator_contexts.push(context);
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             // Wait for new engine to finalize required
@@ -5638,23 +5636,17 @@ mod tests {
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
-            let finalizer_context = context.child("finalizer");
-            validator_contexts.push(context);
             engine.start(pending, recovered, resolver);
 
             // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(
-                    finalizer_context
-                        .child("watcher")
-                        .spawn(move |_| async move {
-                            while latest < View::new(required_containers.get() * 3) {
-                                latest = monitor.recv().await.expect("event missing");
-                            }
-                        }),
-                );
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
+                    while latest < View::new(required_containers.get() * 3) {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
             }
             join_all(finalizers).await;
 
@@ -8528,24 +8520,21 @@ mod tests {
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
-                let finalizer_context = context.child("finalizer");
-                validator_contexts.push(context);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
                 for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(finalizer_context.child("watcher").spawn(
-                        move |_| async move {
-                            while latest < target {
-                                latest = monitor.recv().await.expect("event missing");
-                            }
-                        },
-                    ));
+                    finalizers.push(context.child("finalizer").spawn(move |_| async move {
+                        while latest < target {
+                            latest = monitor.recv().await.expect("event missing");
+                        }
+                    }));
                 }
                 join_all(finalizers).await;
                 info!(idx, ?validator, "validator recovered");
+                validator_contexts.push(context);
             }
 
             // Check reporters for correct activity

@@ -1056,7 +1056,6 @@ mod tests {
             let non_target_peer = peers[2].clone();
 
             let peers_context = context.child("peers");
-
             let mailboxes = spawn_peer_engines(&peers_context, &oracle, &mut registrations).await;
             let sender_mb = mailboxes.get(&sender_pk).unwrap().clone();
 
@@ -1522,7 +1521,6 @@ mod tests {
                 initialize_simulation(context.child("network"), 2, probability!(1.0)).await;
 
             let peers_context = context.child("peers");
-
             let (mailboxes, handles) =
                 spawn_peer_engines_with_handles(&peers_context, &oracle, &mut registrations).await;
 

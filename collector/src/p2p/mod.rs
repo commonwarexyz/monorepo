@@ -914,7 +914,6 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let engines_context = context.child("engine");
-
             let (mut mailboxes, handles) =
                 spawn_engines_with_handles(&engines_context, &oracle, schemes, connections);
 
@@ -950,7 +949,6 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let engines_context = context.child("peers");
-
             let (mut mailboxes, handles) =
                 spawn_engines_with_handles(&engines_context, &oracle, schemes, connections);
 

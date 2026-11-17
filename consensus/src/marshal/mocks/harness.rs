@@ -2068,7 +2068,6 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-
         let actor_handle = actor.start(application.clone(), buffer.clone(), resolver);
 
         ValidatorSetup {
@@ -2270,7 +2269,6 @@ impl TestHarness for StandardHarness {
         )
         .await;
         let application = Application::<B>::default();
-
         actor.start(application.clone(), buffer.clone(), resolver);
 
         (mailbox, buffer, application, context)
@@ -2879,7 +2877,6 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
-
         let actor_handle = actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         ValidatorSetup {
@@ -3112,7 +3109,6 @@ impl TestHarness for CodingHarness {
         )
         .await;
         let application = Application::<CodingB>::default();
-
         actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         (mailbox, shard_mailbox, application, context)

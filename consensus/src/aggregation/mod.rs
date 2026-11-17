@@ -264,16 +264,22 @@ mod tests {
     }
 
     /// Spawn aggregation engines for all validators.
+    ///
+    /// Returns each validator's reporter mailbox and the contexts its engines run under.
     fn spawn_validator_engines<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
-        context: &Context,
+        context: Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
         epoch: Epoch,
         rebroadcast_timeout: Duration,
         incorrect: Vec<usize>,
-    ) -> BTreeMap<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>> {
+    ) -> (
+        BTreeMap<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>,
+        Vec<Context>,
+    ) {
         let mut reporters = BTreeMap::new();
+        let mut contexts = Vec::new();
 
         for (idx, participant) in fixture.participants.iter().enumerate() {
             let context = context
@@ -329,13 +335,12 @@ mod tests {
             );
 
             let (sender, receiver) = registrations.remove(participant).unwrap();
-            let handle = engine.start((sender, receiver));
-            context.spawn(move |_| async move {
-                handle.await.expect("engine failed");
-            });
+            engine.start((sender, receiver));
+            contexts.push(context);
         }
 
-        reporters
+        contexts.push(context);
+        (reporters, contexts)
     }
 
     /// Wait for all reporters to reach the specified consensus threshold.
@@ -411,10 +416,8 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
-            let validators_context = context.child("validator");
-
-            let reporters = spawn_validator_engines(
-                &validators_context,
+            let (reporters, _validator_contexts) = spawn_validator_engines(
+                context.child("validator"),
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -456,6 +459,7 @@ mod tests {
             // All three running validators must contribute their acks to reach quorum.
             let admitted = mocks::Monitor::new(epoch);
             let mut admitted_reporter = None;
+            let mut validator_contexts = Vec::new();
 
             for index in [4, 1, 2] {
                 let participant = &fixture.participants[index];
@@ -517,24 +521,21 @@ mod tests {
                         strategy: Sequential,
                     },
                 );
-                let observer = context.child("observer");
-                let handle = engine.start(registrations.remove(participant).unwrap());
-                context.spawn(move |_| async move {
-                    handle.await.expect("engine failed");
-                });
+                engine.start(registrations.remove(participant).unwrap());
 
                 // Wait for both digests to be verified without signing authority
                 // before changing epochs or starting peers that could send acks.
                 if index == 4 {
-                    while !observer
+                    while !context
                         .encode()
                         .lines()
                         .any(|line| line.contains("digest_duration_count") && line.ends_with(" 2"))
                     {
-                        observer.sleep(Duration::from_millis(10)).await;
+                        context.sleep(Duration::from_millis(10)).await;
                     }
                     admitted.update(next_epoch);
                 }
+                validator_contexts.push(context);
             }
 
             // Both pending heights must certify at the joining validator, requiring
@@ -564,10 +565,8 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
-            let validators_context = context.child("validator");
-
-            let reporters = spawn_validator_engines(
-                &validators_context,
+            let (reporters, _validator_contexts) = spawn_validator_engines(
+                context.child("validator"),
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -628,6 +627,7 @@ mod tests {
                     reporter.start();
 
                     // Spawn validator engines
+                    let mut validator_contexts = Vec::new();
                     for (idx, participant) in fixture.participants.iter().enumerate() {
                         let validator_context = context
                             .child("participant")
@@ -676,10 +676,8 @@ mod tests {
                         );
 
                         let (sender, receiver) = registrations.remove(participant).unwrap();
-                        let handle = engine.start((sender, receiver));
-                        validator_context.spawn(move |_| async move {
-                            handle.await.expect("engine failed");
-                        });
+                        engine.start((sender, receiver));
+                        validator_contexts.push(validator_context);
                     }
 
                     // Create a single completion watcher for the shared reporter
@@ -771,6 +769,7 @@ mod tests {
                 reporter.start();
 
                 // Start validator engines with Skip strategy for skip_height
+                let mut validator_contexts = Vec::new();
                 for (idx, participant) in fixture.participants.iter().enumerate() {
                     let validator_context = context
                         .child("participant")
@@ -818,10 +817,8 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(participant).unwrap();
-                    let handle = engine.start((sender, receiver));
-                    validator_context.spawn(move |_| async move {
-                        handle.await.expect("engine failed");
-                    });
+                    engine.start((sender, receiver));
+                    validator_contexts.push(validator_context);
                 }
 
                 // Wait for validators to reach target_height (past skip_height)
@@ -857,6 +854,7 @@ mod tests {
                 reporter.start();
 
                 // Start validator engines with Correct strategy (will sign everything now)
+                let mut validator_contexts = Vec::new();
                 for (idx, participant) in fixture.participants.iter().enumerate() {
                     let validator_context = context
                         .child("participant")
@@ -902,10 +900,8 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(participant).unwrap();
-                    let handle = engine.start((sender, receiver));
-                    validator_context.spawn(move |_| async move {
-                        handle.await.expect("engine failed");
-                    });
+                    engine.start((sender, receiver));
+                    validator_contexts.push(validator_context);
                 }
 
                 // Wait for skip_height to be confirmed (should happen on replay)
@@ -954,10 +950,8 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, degraded_link).await;
 
-            let validators_context = context.child("validator");
-
-            let reporters = spawn_validator_engines(
-                &validators_context,
+            let (reporters, _validator_contexts) = spawn_validator_engines(
+                context.child("validator"),
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -1047,10 +1041,8 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
-            let validators_context = context.child("validator");
-
-            let reporters = spawn_validator_engines(
-                &validators_context,
+            let (reporters, _validator_contexts) = spawn_validator_engines(
+                context.child("validator"),
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -1087,10 +1079,8 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
-            let validators_context = context.child("validator");
-
-            let reporters = spawn_validator_engines(
-                &validators_context,
+            let (reporters, _validator_contexts) = spawn_validator_engines(
+                context.child("validator"),
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -1158,6 +1148,7 @@ mod tests {
                 BTreeMap::<PublicKey, mocks::ReporterMailbox<S, Sha256Digest>>::new();
 
             // Start only 2 out of 5 validators (below quorum of 3)
+            let mut validator_contexts = Vec::new();
             for (idx, participant) in fixture.participants.iter().take(2).enumerate() {
                 let context = context.child("participant").with_attribute("public_key", participant);
 
@@ -1205,10 +1196,8 @@ mod tests {
                 );
 
                 let (sender, receiver) = registrations.remove(participant).unwrap();
-                let handle = engine.start((sender, receiver));
-                context.spawn(move |_| async move {
-                    handle.await.expect("engine failed");
-                });
+                engine.start((sender, receiver));
+                validator_contexts.push(context);
             }
 
             // With insufficient validators, consensus should not be achievable
@@ -1268,9 +1257,8 @@ mod tests {
                 initialize_simulation(context.child("simulation"), &fixture, delayed_link).await;
 
             // Start all validators
-            let validators_context = context.child("validator");
-            let reporters = spawn_validator_engines(
-                &validators_context,
+            let (reporters, _validator_contexts) = spawn_validator_engines(
+                context.child("validator"),
                 &fixture,
                 &mut registrations,
                 &mut oracle,

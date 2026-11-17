@@ -472,7 +472,6 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         let relay = Arc::new(relay::Relay::<Sha256Digest, _>::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
-
         let mut validator_contexts = Vec::new();
 
         // Spawn Byzantine nodes (Disrupters only)
@@ -482,6 +481,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
+
             validator_contexts.push(spawn_disrupter::<P>(
                 ctx,
                 schemes[i].clone(),
