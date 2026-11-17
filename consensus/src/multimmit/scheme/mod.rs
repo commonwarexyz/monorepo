@@ -20,9 +20,7 @@
 //! verification, and assembly once over any such suite. The concrete suites are:
 //!
 //! - [`bls12381`]: BLS multisig ordinary keys with BLS threshold DA and nullification keys, the
-//!   default;
-//! - [`bls12381_sas`]: Pointcheval-Sanders synchronized aggregate ordinary keys with the same
-//!   threshold keys (ALPHA, research grade); and
+//!   default; and
 //! - [`ed25519`]: Ed25519 for every role, whose aggregates and certificates list signatures.
 //!
 //! # Receipts
@@ -47,22 +45,12 @@
 //! block, a vote body, or the round of a novote or nullify share. Each encoding starts with the
 //! object's epoch.
 //!
-//! # Periods
+//! # Signing slots
 //!
-//! Ordinary subjects are [`Synchronized`]. Synchronized aggregate schemes such as
-//! [`bls12381_sas`] aggregate cheaply across signers that share a period, and a key must sign at
-//! most one message per period, or anyone can forge its signature on any message in that period.
-//! Each period matches a durable local choice:
-//!
-//! - votes and novotes share one view period, because a node durably takes exactly one stance per
-//!   view;
-//! - a leader block has its own view period, because the leader also votes in its view; and
-//! - transaction-block headers share one period per epoch and height across chains, because each
-//!   producer owns exactly one chain and never signs two headers at one height; and
-//! - DA votes have one period per epoch, chain, and height, because a validator durably chooses at
-//!   most one header to DA-vote for at each position.
-//!
-//! Schemes without periods ignore them.
+//! A node signs at most one ordinary subject per signing slot, and each slot matches a durable
+//! local choice: one stance (vote or novote) per view, one leader block per view it leads, and one
+//! transaction-block header per height of the chain it produces. A validator also DA-votes for at
+//! most one header per chain position.
 //!
 //! # Known messages
 //!
@@ -83,12 +71,12 @@ use crate::{
     types::{Epoch, Height, Round},
 };
 use bytes::Bytes;
-use commonware_codec::{Encode, Read, Write as _};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::{
     Digest, PublicKey,
     certificate::{
         self, Aggregator, Namespace as CertificateNamespace, Subject as CertificateSubject,
-        Synchronized, Verifier,
+        Verifier,
     },
     sha256,
 };
@@ -97,7 +85,6 @@ use core::{fmt::Debug, hash::Hash};
 use num_traits::ToPrimitive;
 
 pub mod bls12381;
-pub mod bls12381_sas;
 pub mod ed25519;
 #[cfg(any(test, feature = "mocks"))]
 pub(crate) mod fuzz;
@@ -120,10 +107,6 @@ const VOTE_SUFFIX: &[u8] = b"_VOTE";
 const NOVOTE_SUFFIX: &[u8] = b"_NOVOTE";
 const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 const PROOF_OF_KNOWLEDGE_SUFFIX: &[u8] = b"_PROOF_OF_KNOWLEDGE";
-const VIEW_PERIOD_SUFFIX: &[u8] = b"_VIEW_PERIOD";
-const LEADER_PERIOD_SUFFIX: &[u8] = b"_LEADER_PERIOD";
-const HEIGHT_PERIOD_SUFFIX: &[u8] = b"_HEIGHT_PERIOD";
-const DA_PERIOD_SUFFIX: &[u8] = b"_DA_PERIOD";
 
 /// Pre-computed namespaces for Multimmit's signed subjects.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,14 +125,6 @@ pub struct Namespace {
     pub nullify: Vec<u8>,
     /// Namespace for ordinary-key registration proofs.
     pub proof_of_knowledge: Vec<u8>,
-    /// Prefix of the period shared by votes and novotes in one view.
-    pub view_period: Vec<u8>,
-    /// Prefix of the period of a leader block in one view.
-    pub leader_period: Vec<u8>,
-    /// Prefix of the period shared by transaction-block headers at one height.
-    pub height_period: Vec<u8>,
-    /// Prefix of the period of a DA vote at one chain position.
-    pub da_period: Vec<u8>,
 }
 
 impl Namespace {
@@ -163,10 +138,6 @@ impl Namespace {
             novote: union(namespace, NOVOTE_SUFFIX),
             nullify: union(namespace, NULLIFY_SUFFIX),
             proof_of_knowledge: union(namespace, PROOF_OF_KNOWLEDGE_SUFFIX),
-            view_period: union(namespace, VIEW_PERIOD_SUFFIX),
-            leader_period: union(namespace, LEADER_PERIOD_SUFFIX),
-            height_period: union(namespace, HEIGHT_PERIOD_SUFFIX),
-            da_period: union(namespace, DA_PERIOD_SUFFIX),
         }
     }
 
@@ -196,44 +167,6 @@ pub type RoleDigest = sha256::Digest;
 /// `Sync`.
 type Marker<T> = core::marker::PhantomData<fn() -> T>;
 
-/// The period an ordinary signature is synchronized on (see the module documentation).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Period {
-    /// Votes and novotes in one view.
-    View(Round),
-    /// The leader block of one view.
-    Leader(Round),
-    /// Transaction-block headers at one height, across every chain.
-    Height(Epoch, Height),
-    /// DA votes at one chain position.
-    Da(Epoch, ChainId, Height),
-}
-
-impl Period {
-    /// Encodes this period under the deployment's namespaces.
-    pub(crate) fn encode(&self, namespace: &Namespace) -> Bytes {
-        let mut encoded = match self {
-            Self::View(_) => namespace.view_period.clone(),
-            Self::Leader(_) => namespace.leader_period.clone(),
-            Self::Height(..) => namespace.height_period.clone(),
-            Self::Da(..) => namespace.da_period.clone(),
-        };
-        match self {
-            Self::View(round) | Self::Leader(round) => round.write(&mut encoded),
-            Self::Height(epoch, height) => {
-                epoch.write(&mut encoded);
-                height.write(&mut encoded);
-            }
-            Self::Da(epoch, chain, height) => {
-                epoch.write(&mut encoded);
-                chain.write(&mut encoded);
-                height.write(&mut encoded);
-            }
-        }
-        encoded.into()
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ordinary {
     TransactionBlock {
@@ -255,8 +188,7 @@ enum Ordinary {
 /// A subject signed with an ordinary key: a transaction-block header, a leader block, a vote
 /// body, or a novote round.
 ///
-/// Its kind selects the namespace, its message is the canonical encoding of the signed object,
-/// and its [`Synchronized::period`] is the signing slot described in the module documentation.
+/// Its kind selects the namespace, and its message is the canonical encoding of the signed object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrdinarySubject(Ordinary);
 
@@ -286,15 +218,6 @@ impl OrdinarySubject {
     pub(crate) const fn novote(round: Round) -> Self {
         Self(Ordinary::NoVote(round))
     }
-
-    /// Returns the period this subject is synchronized on.
-    pub(crate) const fn period_kind(&self) -> Period {
-        match &self.0 {
-            Ordinary::TransactionBlock { epoch, height, .. } => Period::Height(*epoch, *height),
-            Ordinary::LeaderBlock { round, .. } => Period::Leader(*round),
-            Ordinary::Vote { round, .. } | Ordinary::NoVote(round) => Period::View(*round),
-        }
-    }
 }
 
 impl CertificateSubject for OrdinarySubject {
@@ -319,12 +242,6 @@ impl CertificateSubject for OrdinarySubject {
     }
 }
 
-impl Synchronized for OrdinarySubject {
-    fn period(&self, derived: &Namespace) -> Bytes {
-        self.period_kind().encode(derived)
-    }
-}
-
 impl Epochable for OrdinarySubject {
     fn epoch(&self) -> Epoch {
         match &self.0 {
@@ -338,8 +255,6 @@ impl Epochable for OrdinarySubject {
 
 /// A subject signed with a data-availability key: the canonical encoding of a
 /// transaction-block header.
-///
-/// Its [`Synchronized::period`] is the header's chain position (see the module documentation).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaSubject {
     epoch: Epoch,
@@ -356,12 +271,6 @@ impl DaSubject {
             height: header.height(),
             encoded: header.encode(),
         }
-    }
-}
-
-impl Synchronized for DaSubject {
-    fn period(&self, derived: &Namespace) -> Bytes {
-        Period::Da(self.epoch, self.chain, self.height).encode(derived)
     }
 }
 
@@ -469,12 +378,7 @@ pub type NullifySignature<S> = <<S as Scheme>::Nullify as certificate::Scheme>::
 /// - [`Self::Ordinary`] aggregates attestations over different subjects, so its keys must be
 ///   registered in a way that rules out rogue-key aggregates (for example with the proofs
 ///   [`bls12381::Roster`] verifies).
-/// - A scheme synchronized on periods must never sign two ordinary subjects in one period.
-///   Multimmit assigns periods to durable signing slots (see the module documentation).
 /// - [`Self::Da`] forms certificates at `n - 2f` ([`Available`]), and [`Self::Nullify`] at `2f + 1`.
-/// - A DA role whose certificates count their signers must sign at most one header per
-///   [`DaSubject`] period when it is synchronized, which Multimmit's durable DA-vote choices
-///   guarantee.
 pub trait Scheme: Clone + Debug + Default + Eq + Hash + Send + Sync + 'static {
     /// The identity key of every participant.
     type PublicKey: PublicKey;

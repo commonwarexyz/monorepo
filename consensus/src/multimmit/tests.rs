@@ -9,7 +9,7 @@
 
 use super::{
     mocks::{
-        Bls, Ed25519, Fixture, Mock, MockApplication, Sas,
+        Bls, Ed25519, Fixture, Mock, MockApplication,
         cluster::{Cluster, ClusterOptions, Plane},
     },
     test_utils::benchmarks::{
@@ -1922,11 +1922,6 @@ fn minpk_cluster_smoke() {
 #[test_traced]
 fn minsig_cluster_smoke() {
     cluster_smoke::<Bls<MinSig>>(83);
-}
-
-#[test_traced]
-fn sas_cluster_smoke() {
-    cluster_smoke::<Sas<MinPk>>(85);
 }
 
 #[test_traced]
