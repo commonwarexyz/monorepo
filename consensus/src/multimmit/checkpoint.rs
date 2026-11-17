@@ -43,7 +43,7 @@ mod tests {
     use crate::{
         aggregation::types::{Ack, Certificate},
         multimmit::{
-            mocks::{Bls, Committee, Fixture, Sas},
+            mocks::{Bls, Committee, Fixture},
             scheme::Generic,
             types::PathLimits,
         },
@@ -66,14 +66,6 @@ mod tests {
             |scheme| *scheme.nullify().identity(),
         );
         certifies_checkpoints::<Bls<MinSig>, MinSig>(
-            |scheme, namespace| scheme.checkpoint(namespace),
-            |scheme| *scheme.nullify().identity(),
-        );
-        certifies_checkpoints::<Sas<MinPk>, MinPk>(
-            |scheme, namespace| scheme.checkpoint(namespace),
-            |scheme| *scheme.nullify().identity(),
-        );
-        certifies_checkpoints::<Sas<MinSig>, MinSig>(
             |scheme, namespace| scheme.checkpoint(namespace),
             |scheme| *scheme.nullify().identity(),
         );
