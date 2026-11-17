@@ -190,7 +190,7 @@ test-docs *args='--all':
 
 # Lint the Rust documentation
 check-docs *args='':
-    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items $@
+    RUSTDOCFLAGS="-D warnings --cfg commonware_stability_WIP" cargo doc --no-deps --document-private-items $@
 
 # Check publish workflow ordering against workspace dependencies
 check-publish-order:
@@ -216,6 +216,8 @@ install-dylint-toolchain:
 fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     set -euo pipefail
+    # cargo-fuzz sets RUSTFLAGS itself, which takes precedence over .cargo/config.toml.
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg commonware_stability_WIP"
     targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
     if [ -z "$targets" ]; then
         exit 0
@@ -270,8 +272,8 @@ check-conformance-fixtures *args='':
 
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
-    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
-    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance-fixtures prune {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests --cfg commonware_stability_WIP" just test --features arbitrary --profile conformance {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests --cfg commonware_stability_WIP" just _conformance-fixtures prune {{ args }}
 
 [private]
 _conformance-fixtures mode *args='':
@@ -288,8 +290,9 @@ _conformance-fixtures mode *args='':
 unstable-public *args='':
     NIGHTLY_VERSION="{{ env_nightly_version }}" ./scripts/find_unstable_public.sh {{ args }}
 
-# Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
-# ALPHA (level 0) is the default state and doesn't require a cfg flag.
+# Check stability builds. Optionally specify level (0-5 or WIP/ALPHA/BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
+# The monorepo compiles WIP by default (see .cargo/config.toml); selecting a level here overrides it. ALPHA
+# matches the build consumers get with no stability cfg.
 # Examples: just check-stability, just check-stability 3, just check-stability DELTA, just check-stability GAMMA -p commonware-cryptography
 check-stability *args='':
     #!/usr/bin/env bash
@@ -299,8 +302,8 @@ check-stability *args='':
     # Build exclude flags from shared config
     source scripts/stability_helpers.sh
     excludes=$(stability_exclude_flags)
-    # Level names in order (index 0-4)
-    LEVEL_NAMES=(ALPHA BETA GAMMA DELTA EPSILON)
+    # Level names in order (index 0-5)
+    LEVEL_NAMES=(WIP ALPHA BETA GAMMA DELTA EPSILON)
     # Convert name to index by iterating the array
     name_to_num() {
         for i in "${!LEVEL_NAMES[@]}"; do
@@ -310,20 +313,15 @@ check-stability *args='':
             fi
         done
     }
-    # Check if first arg is a level (number 1-4 or name)
+    # Check if first arg is a level (number 0-5 or name)
     first_arg="${all_args%% *}"
-    if [[ "$first_arg" =~ ^[1-4]$ ]]; then
+    if [[ "$first_arg" =~ ^[0-5]$ ]]; then
         level="$first_arg"
         extra_args="${all_args#* }"
         if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
     else
         num=$(name_to_num "$first_arg")
         if [ -n "$num" ]; then
-            if [ "$num" = "0" ]; then
-                echo "Error: ALPHA is the default stability level (no cfg flag needed)."
-                echo "Use 'cargo build' directly or specify BETA/GAMMA/DELTA/EPSILON."
-                exit 1
-            fi
             level="$num"
             extra_args="${all_args#* }"
             if [ "$extra_args" = "$first_arg" ]; then extra_args=""; fi
@@ -333,7 +331,7 @@ check-stability *args='':
     fi
     # Create level-specific wrapper symlinks so Cargo sees different fingerprints
     mkdir -p target/stability-wrappers
-    for name in "${LEVEL_NAMES[@]:1}"; do
+    for name in "${LEVEL_NAMES[@]}"; do
         ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
     done
     # Save and clear RUSTC_WRAPPER so Cargo doesn't nest it outside the workspace
@@ -341,7 +339,7 @@ check-stability *args='':
     export COMMONWARE_RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
     export NIGHTLY_VERSION="{{ env_nightly_version }}"
     if [ -z "$level" ]; then
-        for name in "${LEVEL_NAMES[@]:1}"; do
+        for name in "${LEVEL_NAMES[@]}"; do
             echo "Checking commonware_stability_${name}..."
             COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib $excludes $extra_args || exit 1
         done

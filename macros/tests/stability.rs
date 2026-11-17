@@ -1,5 +1,15 @@
 use commonware_macros::{stability, stability_scope};
 
+/// Whether any explicit stability level (other than `WIP`) is selected.
+const EXPLICIT_LEVEL: bool = cfg!(any(
+    commonware_stability_ALPHA,
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+));
+
 // All items at level 4 so they're always available
 #[stability(EPSILON)]
 const fn level_4_fn() -> u8 {
@@ -156,4 +166,90 @@ mod stability_scope_with_cfg_level_2_tests {
     fn test_stability_scope_with_cfg_level_2() {
         assert_eq!(cfg_scope_level_2_fn(), 33);
     }
+}
+
+// `WIP` items are additive: they are compiled only when the `WIP` cfg is set and no other level
+// is selected.
+#[stability(WIP)]
+const WIP_ITEM_COMPILED: bool = true;
+
+#[cfg(not(all(
+    commonware_stability_WIP,
+    not(any(
+        commonware_stability_ALPHA,
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ))
+)))]
+const WIP_ITEM_COMPILED: bool = false;
+
+stability_scope!(WIP {
+    const WIP_SCOPE_COMPILED: bool = true;
+});
+
+#[cfg(not(all(
+    commonware_stability_WIP,
+    not(any(
+        commonware_stability_ALPHA,
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ))
+)))]
+const WIP_SCOPE_COMPILED: bool = false;
+
+// `ALPHA` items are subtractive: they are compiled unless a higher level (or `RESERVED`) is
+// selected, including when no level is selected at all.
+#[stability(ALPHA)]
+const ALPHA_ITEM_COMPILED: bool = true;
+
+#[cfg(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+))]
+const ALPHA_ITEM_COMPILED: bool = false;
+
+#[test]
+fn test_wip_follows_wip_cfg() {
+    let expected = cfg!(commonware_stability_WIP) && !EXPLICIT_LEVEL;
+    assert_eq!(WIP_ITEM_COMPILED, expected);
+    assert_eq!(WIP_SCOPE_COMPILED, expected);
+}
+
+#[test]
+fn test_alpha_is_default() {
+    let expected = !cfg!(any(
+        commonware_stability_BETA,
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ));
+    assert_eq!(ALPHA_ITEM_COMPILED, expected);
+}
+
+// The monorepo enables `WIP` in `.cargo/config.toml`. A job that overrides `RUSTFLAGS` without
+// `--cfg commonware_stability_WIP` silently drops `WIP` code (and its tests), so fail loudly.
+#[cfg(not(any(
+    commonware_stability_ALPHA,
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
+#[test]
+fn test_workspace_compiles_wip_by_default() {
+    assert!(
+        std::hint::black_box(WIP_ITEM_COMPILED && WIP_SCOPE_COMPILED),
+        "WIP is not compiled; add `--cfg commonware_stability_WIP` to RUSTFLAGS/RUSTDOCFLAGS"
+    );
 }

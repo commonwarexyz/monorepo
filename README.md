@@ -65,23 +65,26 @@ All public primitives (and primitive dialects) in the Commonware Library are ann
 
 | Level        | Index | Description                                                                              |
 |--------------|-------|------------------------------------------------------------------------------------------|
-| **ALPHA**    | 0     | Breaking changes expected. No migration path provided.                                   |
-| **BETA**     | 1     | Wire and storage formats stable. Breaking changes include a migration path.              |
-| **GAMMA**    | 2     | API stable. Extensively tested and fuzzed.                                               |
-| **DELTA**    | 3     | Battle-tested. Bug bounty eligible.                                                      |
-| **EPSILON**  | 4     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
+| **WIP**      | 0     | Under development. Merged to trunk but not released: excluded unless explicitly enabled. |
+| **ALPHA**    | 1     | Breaking changes expected. No migration path provided.                                   |
+| **BETA**     | 2     | Wire and storage formats stable. Breaking changes include a migration path.              |
+| **GAMMA**    | 3     | API stable. Extensively tested and fuzzed.                                               |
+| **DELTA**    | 4     | Battle-tested. Bug bounty eligible.                                                      |
+| **EPSILON**  | 5     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
-_Stability is transitive in the Commonware Library; primitives only depend on primitives with equal or higher stability. All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future)._
+_Stability is transitive in the Commonware Library; primitives only depend on primitives with equal or higher stability. All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future) but, like the rest of the monorepo, may use `WIP` primitives._
 
 Users employing the Commonware Library can compile with the `commonware_stability_<level>` configuration flag to both view scoped documentation and enforce their application only depends on primitives of a minimum stability:
 
 ```bash
-# Generate docs for only code with stability >= BETA (level 1)
+# Generate docs for only code with stability >= BETA (level 2)
 RUSTFLAGS="--cfg commonware_stability_BETA" RUSTDOCFLAGS="--cfg commonware_stability_BETA -A rustdoc::broken_intra_doc_links" cargo doc --open
 
 # Check if your application only uses commonware APIs with stability >= BETA
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
+
+`ALPHA` is the default: a build that sets no `commonware_stability_<level>` flag compiles every primitive at `ALPHA` or above and none at `WIP`. `WIP` is the only opt-in level. It is compiled when `--cfg commonware_stability_WIP` is set and no other level is, which the monorepo does by default in [`.cargo/config.toml`](./.cargo/config.toml) (cargo reads this file only for builds run inside this repository). Anything in the monorepo that overrides `RUSTFLAGS` or `RUSTDOCFLAGS` must also pass `--cfg commonware_stability_WIP`. `WIP` code may only depend on primitives at `WIP` or above, and `ALPHA` or above code must never depend on `WIP`; `just check-stability` enforces both.
 
 ## Platform Compatibility
 
