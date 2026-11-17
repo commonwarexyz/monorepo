@@ -87,7 +87,9 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R> {
+// The bound states the sender's key in terms of the receiver's, the type the fields use. Stated
+// the other way, Rust 1.95 (the MSRV) fails to compile the struct update in `start`.
+impl<E: Spawner, S: Sender<PublicKey = R::PublicKey>, R: Receiver> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
     pub fn new(context: E, sender: S, receiver: R) -> (Self, MuxHandle<S>) {
