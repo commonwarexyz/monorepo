@@ -8,7 +8,7 @@ use commonware_consensus::{
     Block, Reporter,
     ancestry::BlockProvider,
     marshal::{Delivery, Finalized, Ledger, Linear},
-    types::{Epoch, Height, OutputIndex, Round},
+    types::{Epoch, Height, OutputIndex},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_utils::channel::oneshot;
@@ -194,7 +194,6 @@ impl<B: Block> BlockProvider for Mailbox<B> {
     fn subscribe_parent(
         &self,
         block: &Digested<B>,
-        _bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<B>>> + Send + 'static {
         let mailbox = self.clone();
         let parent = block.inner().height().previous();
