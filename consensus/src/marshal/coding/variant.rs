@@ -1,7 +1,7 @@
 use crate::{
     CertifiableBlock, Heightable,
     marshal::{
-        ancestry::BlockProvider,
+        ancestry::{AncestorStream, BlockProvider},
         coding::{
             shards,
             types::{CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants},
@@ -18,6 +18,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
+use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
 
@@ -238,6 +239,29 @@ where
             )
         });
         async move { receiver?.await.ok().map(|block| block.inner_digested()) }
+    }
+}
+
+impl<S, B, C, H, P, E> AncestorStream<Mailbox<S, Coding<B, C, H, P>>, E>
+where
+    S: Scheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+    E: Clock,
+{
+    /// Creates a new [AncestorStream] over a coding mailbox (see [`AncestorStream::new`]).
+    ///
+    /// The stream passes no bound because the coding provider bounds each parent request by the
+    /// parent round in the child's consensus context.
+    pub(super) fn unbounded(
+        clock: Arc<E>,
+        marshal: Mailbox<S, Coding<B, C, H, P>>,
+        initial: impl IntoIterator<Item = Digested<B>>,
+        fetch_duration: Timed,
+    ) -> Self {
+        Self::new(clock, marshal, initial, None, fetch_duration)
     }
 }
 

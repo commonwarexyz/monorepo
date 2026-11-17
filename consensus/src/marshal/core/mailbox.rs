@@ -12,7 +12,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
     Clock, Handle,
@@ -690,32 +690,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         self.max_pending_acks
     }
 
-    /// Create an ancestor stream that fetches missing parents by commitment.
-    ///
-    /// This stream is always a fetching stream. Callers must already have a block
-    /// that is safe to verify, certify, build on, or repair from. The stream derives
-    /// each missing parent's height and digest from its child and terminates if a
-    /// fetched block does not match that relationship.
-    ///
-    /// `bound` is the round of the consensus request the stream serves (see
-    /// [`BlockProvider::subscribe_parent`]).
-    ///
-    /// Do not use this to wait for pending candidate proposal data.
-    pub(crate) fn ancestor_stream<I, C>(
-        &self,
-        clock: Arc<C>,
-        initial: I,
-        bound: Option<Round>,
-        fetch_duration: Timed,
-    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
-    where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
-        I: IntoIterator<Item = Digested<V::ApplicationBlock>>,
-        C: Clock,
-    {
-        AncestorStream::new(clock, self.clone(), initial, bound, fetch_duration)
-    }
-
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
     pub async fn get_info(
         &self,
@@ -930,7 +904,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver.await.ok().map(|block| {
             let block = V::into_shared(block);
-            self.ancestor_stream(clock, [block], bound, fetch_duration)
+            AncestorStream::new(clock, self.clone(), [block], bound, fetch_duration)
         })
     }
 
@@ -1138,7 +1112,7 @@ mod tests {
         types::{Epoch, View},
     };
     use commonware_cryptography::{
-        Digest as _, Signer as _, certificate::mocks::Fixture, ed25519::PrivateKey,
+        Digest as _, Digested, Signer as _, certificate::mocks::Fixture, ed25519::PrivateKey,
     };
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZUsize, TestRng, channel::oneshot::error::TryRecvError};
