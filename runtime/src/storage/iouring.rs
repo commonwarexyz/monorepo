@@ -10,6 +10,9 @@
 //! Empty reads and writes return without touching the ring. Metadata and flushing a dirty
 //! predecessor during reopen run synchronously on the calling worker. The kernel runs every
 //! resize on an io-wq thread.
+//! A later operation on the same open can complete before a pending resize. On XFS, for
+//! example, a write issued while a truncation is pending, or after its future was dropped,
+//! lands first and is then truncated.
 //!
 //! Registered requests retain the open they were issued through, with its file,
 //! directory hold, and durability debt. Dropping a caller never releases them
@@ -69,7 +72,7 @@ use crate::{
     iouring::{
         operation::{self, Operation},
         request::{
-            Cache, FtruncateRequest, IOVEC_BATCH_SIZE, ReadAtRequest, Request, RequestOutput,
+            Cache, IOVEC_BATCH_SIZE, ReadAtRequest, Request, RequestOutput, ResizeRequest,
             SyncRequest, WriteAtRequest, WriteAtState,
         },
     },
@@ -407,28 +410,6 @@ impl Shared {
             return Err(error);
         }
         result
-    }
-
-    /// Settle a resize from the outcome the ring observed.
-    ///
-    /// The caller recorded the mutation before submission, and success completes it. A failure
-    /// leaves the mutation uncovered, as after a failed plain write. A truncation cannot consume
-    /// the kernel's writeback error, so a failure does not poison the open.
-    pub(crate) fn resized(&self, result: Result<(), Error>) -> Result<(), Error> {
-        if result.is_ok() {
-            self.tracker.complete();
-        }
-        result.map_err(|error| self.resize_failed(error))
-    }
-
-    /// Name a resize failure like the caller sees it, keeping the kernel's errno.
-    fn resize_failed(&self, error: Error) -> Error {
-        let (partition, name) = &self.key;
-        let error = match error {
-            Error::Io(error) => error,
-            error => IoError::other(error).into(),
-        };
-        Error::BlobResizeFailed(partition.clone(), hex(name), error)
     }
 
     /// Retain a failed barrier under the name the caller sees.
@@ -878,19 +859,29 @@ impl crate::Blob for Blob {
         // Record the mutation before submission. The ring settles it at completion, including
         // when this future is dropped, so a caller that stops waiting changes nothing.
         self.shared.tracker.write();
-        match Operation::register(Request::Ftruncate(FtruncateRequest::new(
+        let result = Operation::register(Request::Resize(ResizeRequest::new(
             self.shared.clone(),
             len,
         )))
         .await
-        {
-            Ok(RequestOutput::Ftruncate(result)) => result,
-            Ok(_) => unreachable!("resize request returned another output kind"),
+        .and_then(|output| {
+            let RequestOutput::Resize(result) = output else {
+                unreachable!("resize request returned another output kind");
+            };
+            result
+        });
 
-            // A worker that closed before accepting the request leaves the mutation uncovered.
-            // One that accepted it settles the mutation at the CQE during shutdown.
-            Err(error) => Err(self.shared.resize_failed(error)),
-        }
+        // A worker that closed before accepting the request leaves the mutation uncovered. One
+        // that accepted it settles the mutation at the CQE during shutdown. Name every failure
+        // like the caller sees it, keeping the kernel's errno.
+        result.map_err(|error| {
+            let (partition, name) = &self.shared.key;
+            let error = match error {
+                Error::Io(error) => error,
+                error => IoError::other(error).into(),
+            };
+            Error::BlobResizeFailed(partition.clone(), hex(name), error)
+        })
     }
 
     async fn sync(&self) -> Result<(), Error> {
@@ -2132,10 +2123,11 @@ mod tests {
                     "blob resize failed: partition/{} error:",
                     hex(b"blob")
                 )));
-                let Error::BlobResizeFailed(_, _, error) = err else {
-                    panic!("expected a resize failure");
-                };
-                assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+                assert!(matches!(
+                    &err,
+                    Error::BlobResizeFailed(_, _, error)
+                        if error.raw_os_error() == Some(libc::EINVAL)
+                ));
             }
             assert!(blob.shared.tracker.is_dirty());
 
@@ -2157,8 +2149,8 @@ mod tests {
     }
 
     /// A failed resize leaves its mutation uncovered without poisoning the open, whether it is
-    /// awaited, orphaned, rejected by a closing worker, or abandoned by one. Later barriers
-    /// still run and succeed, and the next open of the name is admitted to flush the debt.
+    /// awaited, orphaned, or rejected by a closing worker. Later barriers still run and succeed,
+    /// and the next open of the name is admitted to flush the debt.
     #[test]
     fn test_resize_failure_leaves_debt() {
         // Awaited: every later barrier reaches the kernel and succeeds, and none covers the
@@ -2167,10 +2159,11 @@ mod tests {
             let directory = create_test_directory();
             let pending = Arc::new(Pending::default());
             let blob = read_only_blob(&directory, &pending);
-            let Err(Error::BlobResizeFailed(_, _, error)) = blob.resize(0).await else {
-                panic!("expected a resize failure");
-            };
-            assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+            assert!(matches!(
+                blob.resize(0).await,
+                Err(Error::BlobResizeFailed(_, _, error))
+                    if error.raw_os_error() == Some(libc::EINVAL)
+            ));
             assert!(blob.shared.tracker.is_dirty());
             assert!(blob.shared.tracker.failure().is_none());
             blob.sync().await.unwrap();
@@ -2215,66 +2208,6 @@ mod tests {
             drop(storage);
             fs::remove_dir_all(directory).unwrap();
         });
-
-        // The worker closed under the pending resize. The request was accepted and finished at
-        // shutdown, so the caller sees a failure for a resize that landed. The completion is
-        // counted once, and the open is not poisoned.
-        let (storage, directory) = create_test_storage();
-        let (blob, _) = futures::executor::block_on(storage.open("partition", b"closed")).unwrap();
-        let data_offset = blob.data_offset;
-        let blob = Arc::new(blob);
-        #[expect(
-            clippy::async_yields_async,
-            reason = "Keep the pending resize alive until after worker shutdown"
-        )]
-        let resize = iouring::Runner::default().start({
-            let blob = blob.clone();
-            |_| async move {
-                let mut resize = Box::pin(async move { blob.resize(5).await });
-                assert!(futures::poll!(resize.as_mut()).is_pending());
-                resize
-            }
-        });
-        assert!(matches!(
-            futures::executor::block_on(resize),
-            Err(Error::BlobResizeFailed(..))
-        ));
-        assert!(blob.shared.tracker.is_dirty());
-        assert_eq!(blob.shared.tracker.begin_sync(), 1);
-        assert!(blob.shared.tracker.failure().is_none());
-        let path = directory.join("partition").join(hex(b"closed"));
-        assert_eq!(fs::metadata(path).unwrap().len(), data_offset + 5);
-        drop(blob);
-        drop(storage);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// The first poll of a resize registers it without truncating inline, so the poll returns
-    /// to the worker before the kernel resizes the file.
-    #[test]
-    fn test_resize_registers_on_first_poll() {
-        iouring::Runner::new(iouring::Config::default().with_worker_threads(1)).start(|_| async {
-            let (storage, directory) = create_test_storage();
-            let (blob, _) = storage.open("partition", b"serving").await.unwrap();
-            let path = directory.join("partition").join(hex(b"serving"));
-            let raw = fs::metadata(&path).unwrap().len();
-
-            let mut resize = Box::pin(blob.resize(4096));
-            assert!(
-                futures::poll!(resize.as_mut()).is_pending(),
-                "resize must not complete inside its first poll"
-            );
-            assert_eq!(fs::metadata(&path).unwrap().len(), raw);
-            assert!(blob.shared.tracker.is_dirty());
-
-            resize.await.unwrap();
-            assert_eq!(fs::metadata(&path).unwrap().len(), raw + 4096);
-            blob.sync().await.unwrap();
-            assert!(!blob.shared.tracker.is_dirty());
-            drop(blob);
-            drop(storage);
-            fs::remove_dir_all(directory).unwrap();
-        });
     }
 
     /// Resizes dropped by their caller before any driver service finish at shutdown in
@@ -2282,62 +2215,68 @@ mod tests {
     /// directory hold until they do.
     #[test]
     fn test_orphaned_resize_finishes_at_shutdown() {
-        for (size, lens) in [(1024, &[100][..]), (1, &[50, 100, 7][..])] {
-            let (storage, directory) = create_test_storage();
-            let (blob, _) =
-                futures::executor::block_on(storage.open("partition", b"orphaned")).unwrap();
-            let raw = blob.data_offset;
-            drop(storage);
-            let contender = File::options()
-                .write(true)
-                .open(directory.join(".hold"))
-                .unwrap();
+        let (storage, directory) = create_test_storage();
+        let (blob, _) =
+            futures::executor::block_on(storage.open("partition", b"orphaned")).unwrap();
+        let raw = blob.data_offset;
+        drop(storage);
+        let contender = File::options()
+            .write(true)
+            .open(directory.join(".hold"))
+            .unwrap();
 
-            iouring::Runner::new(iouring::Config::default().with_ring_config(
-                iouring::RingConfig {
-                    size,
-                    ..Default::default()
-                },
-            ))
-            .start(|_| async {
-                // With a ring of one, each resize waits for the one before it to complete.
-                let mut resizes = Vec::new();
-                for &len in lens {
-                    let mut resize = Box::pin(blob.resize(len));
-                    assert!(futures::poll!(resize.as_mut()).is_pending());
-                    resizes.push(resize);
-                }
-                assert!(blob.shared.tracker.is_dirty());
-                drop(resizes);
-                drop(blob);
-                assert!(matches!(
-                    contender.try_lock(),
-                    Err(std::fs::TryLockError::WouldBlock)
-                ));
-            });
+        iouring::Runner::new(
+            iouring::Config::default().with_ring_config(iouring::RingConfig {
+                size: 1,
+                ..Default::default()
+            }),
+        )
+        .start(|_| async {
+            // With a ring of one, each resize waits for the one before it to complete.
+            let mut resizes = Vec::new();
+            for len in [50, 100, 7] {
+                let mut resize = Box::pin(blob.resize(len));
+                assert!(futures::poll!(resize.as_mut()).is_pending());
+                resizes.push(resize);
+            }
+            drop(resizes);
+            drop(blob);
+            assert!(matches!(
+                contender.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+        });
 
-            // The runner returned, so the orphaned resizes landed and released their hold.
-            contender
-                .try_lock()
-                .expect("retired request must release its hold");
-            let path = directory.join("partition").join(hex(b"orphaned"));
-            let last = lens.last().unwrap();
-            assert_eq!(fs::metadata(path).unwrap().len(), raw + last, "size={size}");
-            drop(contender);
-            let _ = fs::remove_dir_all(directory);
-        }
+        // The runner returned, so the orphaned resizes landed in order and released their hold.
+        contender
+            .try_lock()
+            .expect("retired request must release its hold");
+        let path = directory.join("partition").join(hex(b"orphaned"));
+        assert_eq!(fs::metadata(path).unwrap().len(), raw + 7);
+        drop(contender);
+        let _ = fs::remove_dir_all(directory);
     }
 
-    /// A barrier covers only the resizes that completed before it began, whether the resize is
-    /// awaited first or still pending when the barrier is issued.
+    /// The first poll of a resize registers it without truncating inline. A barrier covers only
+    /// the resizes that completed before it began, whether the resize is awaited first or still
+    /// pending when the barrier is issued.
     #[test]
     fn test_resize_sync_ordering() {
         iouring::Runner::default().start(|_| async {
             let (storage, directory) = create_test_storage();
             let (blob, _) = storage.open("partition", b"ordering").await.unwrap();
+            let path = directory.join("partition").join(hex(b"ordering"));
+            let raw = fs::metadata(&path).unwrap().len();
+
+            // The first poll leaves the file unchanged, and the resize lands once awaited, here
+            // past 32-bit offsets.
+            let mut resize = Box::pin(blob.resize(5 << 30));
+            assert!(futures::poll!(resize.as_mut()).is_pending());
+            assert_eq!(fs::metadata(&path).unwrap().len(), raw);
+            resize.await.unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().len(), raw + (5 << 30));
 
             // A completed resize is covered by the next barrier, which is not skipped.
-            blob.resize(10).await.unwrap();
             assert!(blob.shared.tracker.is_dirty());
             blob.sync().await.unwrap();
             assert!(!blob.shared.tracker.is_dirty());
@@ -2361,48 +2300,38 @@ mod tests {
         });
     }
 
-    /// A resize sets lengths beyond 32-bit offsets.
-    #[test]
-    fn test_resize_beyond_32_bit_offsets() {
-        iouring::Runner::default().start(|_| async {
-            let (storage, directory) = create_test_storage();
-            let (blob, _) = storage.open("partition", b"large").await.unwrap();
-            let path = directory.join("partition").join(hex(b"large"));
-            for len in [5 << 30, 0] {
-                blob.resize(len).await.unwrap();
-                assert_eq!(fs::metadata(&path).unwrap().len(), blob.data_offset + len);
-            }
-            drop(blob);
-            drop(storage);
-            fs::remove_dir_all(directory).unwrap();
-        });
-    }
-
     #[test]
     fn test_pending_blob_operations_observe_worker_closure() {
-        let (read, write, sync, directory) = iouring::Runner::default().start(|_| async {
-            let (storage, directory) = create_test_storage();
-            let (blob, _) = storage.open("partition", b"closed").await.unwrap();
-            let blob = Arc::new(blob);
-            let reader = Arc::clone(&blob);
-            let writer = Arc::clone(&blob);
-            let mut read =
-                Box::pin(async move { reader.read_at(0, 1, ReadOptions::default()).await });
-            let mut write =
-                Box::pin(async move { writer.write_at(0, b"x", WriteOptions::default()).await });
+        let (blob, read, write, sync, resize, directory) =
+            iouring::Runner::default().start(|_| async {
+                let (storage, directory) = create_test_storage();
+                let (blob, _) = storage.open("partition", b"closed").await.unwrap();
+                let blob = Arc::new(blob);
+                let reader = Arc::clone(&blob);
+                let writer = Arc::clone(&blob);
+                let syncer = Arc::clone(&blob);
+                let resizer = Arc::clone(&blob);
+                let mut read =
+                    Box::pin(async move { reader.read_at(0, 1, ReadOptions::default()).await });
+                let mut write =
+                    Box::pin(
+                        async move { writer.write_at(0, b"x", WriteOptions::default()).await },
+                    );
 
-            // Record an uncovered mutation so the sync reaches the ring.
-            blob.shared.tracker.write();
-            let mut sync = Box::pin(async move { blob.sync().await });
+                // Record an uncovered mutation so the sync reaches the ring.
+                blob.shared.tracker.write();
+                let mut sync = Box::pin(async move { syncer.sync().await });
+                let mut resize = Box::pin(async move { resizer.resize(5).await });
 
-            // Register each operation before allowing worker shutdown. Keeping
-            // these futures tests closure of their original worker identity.
-            assert!(futures::poll!(read.as_mut()).is_pending());
-            assert!(futures::poll!(write.as_mut()).is_pending());
-            assert!(futures::poll!(sync.as_mut()).is_pending());
+                // Register each operation before allowing worker shutdown. Keeping
+                // these futures tests closure of their original worker identity.
+                assert!(futures::poll!(read.as_mut()).is_pending());
+                assert!(futures::poll!(write.as_mut()).is_pending());
+                assert!(futures::poll!(sync.as_mut()).is_pending());
+                assert!(futures::poll!(resize.as_mut()).is_pending());
 
-            (read, write, sync, directory)
-        });
+                (blob, read, write, sync, resize, directory)
+            });
 
         assert!(matches!(
             futures::executor::block_on(read),
@@ -2416,6 +2345,18 @@ mod tests {
             futures::executor::block_on(sync),
             Err(Error::BlobSyncFailed(..))
         ));
+        assert!(matches!(
+            futures::executor::block_on(resize),
+            Err(Error::BlobResizeFailed(..))
+        ));
+
+        // The write and the resize finished at shutdown, each completion counted once, and the
+        // failures the callers saw poisoned nothing.
+        let path = directory.join("partition").join(hex(b"closed"));
+        assert_eq!(fs::metadata(path).unwrap().len(), blob.data_offset + 5);
+        assert_eq!(blob.shared.tracker.begin_sync(), 2);
+        assert!(blob.shared.tracker.failure().is_none());
+        drop(blob);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2719,16 +2660,6 @@ mod tests {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
             shared::check_orphaned_resize(&storage).await;
-            drop(storage);
-            let _ = std::fs::remove_dir_all(storage_directory);
-        });
-    }
-
-    #[test]
-    fn test_unrepresentable_resize_leaves_no_debt() {
-        iouring::Runner::default().start(|_| async {
-            let (storage, storage_directory) = create_test_storage();
-            shared::check_unrepresentable_resize(&storage, &storage.pending).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });

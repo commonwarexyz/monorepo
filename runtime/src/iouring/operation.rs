@@ -563,7 +563,7 @@ pub mod tests {
             let waker = callbacks.waker();
             let mut cx = Context::from_waker(&waker);
 
-            Local::current().unwrap().borrow_mut().closing = true;
+            close_current_worker();
             assert!(matches!(
                 operation.poll_unpin(&mut cx),
                 Poll::Ready(Err(Error::Closed))

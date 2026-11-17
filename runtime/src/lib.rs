@@ -938,6 +938,11 @@ stability_scope!(BETA {
     /// stages of that mutation. The ranges of one batched read are not a snapshot either.
     /// Callers that need a stable view must synchronize mutations with their reads or read
     /// only immutable ranges.
+    ///
+    /// Mutations that overlap are not ordered by when they are called or first polled, so a
+    /// write that overlaps a resize may land before or after it. To order an operation after a
+    /// mutation, await the mutation's completion first. A mutation whose future was dropped may
+    /// still take effect after later operations complete.
     pub trait Blob: Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///

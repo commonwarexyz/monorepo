@@ -2077,9 +2077,10 @@ mod tests {
         let (storage, directory) = storage_for_reopen_test("resize_length_bound", Layout::ALL);
         let path = directory.join("readonly");
         std::fs::write(&path, b"").unwrap();
+        let data_offset = Layout::V0.data_offset();
         let blob = Blob::new(
             File::options().read(true).open(&path).unwrap(),
-            0,
+            data_offset,
             storage.hold.clone(),
             storage
                 .pending
@@ -2089,7 +2090,8 @@ mod tests {
         );
 
         // A physical length beyond the signed file limit fails before any mutation is recorded.
-        for len in [i64::MAX as u64 + 1, u64::MAX] {
+        let limit = i64::MAX as u64 - data_offset;
+        for len in [limit + 1, u64::MAX] {
             assert!(matches!(blob.resize(len).await, Err(Error::OffsetOverflow)));
         }
         assert!(!blob.shared.tracker.is_dirty());
@@ -2097,7 +2099,7 @@ mod tests {
         // The largest representable length reaches the kernel, which rejects the read-only
         // descriptor.
         assert!(matches!(
-            blob.resize(i64::MAX as u64).await,
+            blob.resize(limit).await,
             Err(Error::BlobResizeFailed(_, _, error)) if error.raw_os_error() == Some(libc::EINVAL)
         ));
         assert!(blob.shared.tracker.is_dirty());

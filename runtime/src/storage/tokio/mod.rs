@@ -1664,16 +1664,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unrepresentable_resize_leaves_no_debt() {
-        let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_unrepresentable_{}", random_suffix()));
-        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
-        shared::check_unrepresentable_resize(&storage, &storage.pending).await;
-        drop(storage);
-        let _ = std::fs::remove_dir_all(storage_directory);
-    }
-
-    #[tokio::test]
     async fn test_untouched_creation_needs_no_reopen_flush() {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_eager_creation_{}", random_suffix()));

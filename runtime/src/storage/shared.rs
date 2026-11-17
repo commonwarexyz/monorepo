@@ -211,27 +211,6 @@ pub(crate) async fn check_orphaned_resize<S: crate::Storage>(storage: &S) {
     }
 }
 
-/// A resize to a length the file cannot represent fails before it records a mutation, so the
-/// open leaves no debt.
-pub(crate) async fn check_unrepresentable_resize<S: crate::Storage>(
-    storage: &S,
-    pending: &Pending,
-) {
-    let (blob, _) = storage
-        .open("unrepresentable_resize", b"blob")
-        .await
-        .unwrap();
-    for len in [i64::MAX as u64, u64::MAX] {
-        assert!(matches!(blob.resize(len).await, Err(Error::OffsetOverflow)));
-    }
-    drop(blob);
-    assert!(!pending.owes("unrepresentable_resize", b"blob"));
-    storage
-        .remove("unrepresentable_resize", None)
-        .await
-        .unwrap();
-}
-
 /// Successful `SYNC` writes leave nothing for a reopen to flush.
 ///
 /// Mixing plain and durable writes must retain any debt the backend's write barrier

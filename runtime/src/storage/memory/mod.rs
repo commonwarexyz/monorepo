@@ -716,7 +716,8 @@ mod tests {
     async fn test_resize_rejects_unrepresentable_lengths() {
         let storage = Storage::new();
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        for len in [i64::MAX as u64 + 1, u64::MAX] {
+        // The header makes the first length unrepresentable only as a physical length.
+        for len in [i64::MAX as u64, u64::MAX] {
             assert!(matches!(
                 blob.resize(len).await,
                 Err(crate::Error::OffsetOverflow)

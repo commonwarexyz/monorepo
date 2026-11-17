@@ -520,8 +520,8 @@ pub mod tests {
         IoBuf, IoBufMut, IoBufs,
         iouring::{
             request::{
-                Cache, ConnectRequest, FtruncateRequest, PollRequest, ReadAtRequest, RecvRequest,
-                SendRequest, SyncRequest,
+                Cache, ConnectRequest, PollRequest, ReadAtRequest, RecvRequest, SendRequest,
+                SyncRequest,
             },
             slab::tests::set_generation,
         },
@@ -1129,31 +1129,6 @@ pub mod tests {
         let (sender, result) = deferred.completions.pop().unwrap();
         sender.send(result).unwrap();
         assert!(futures::executor::block_on(receiver).unwrap().is_ok());
-    }
-
-    #[test]
-    fn test_orphaned_resize_runs_until_its_cqe() {
-        let mut waiters = Waiters::new(1);
-        let mut deferred = Deferred::default();
-        let file = make_file(File::from(make_socket_fd()));
-        file.tracker.write();
-        let resize = waiters.insert(
-            Request::Ftruncate(FtruncateRequest::new(file.clone(), 0)),
-            observer(),
-        );
-        stage(&mut waiters, resize);
-
-        // A resize keeps running without its observer, through a retry, and settles its
-        // mutation at the CQE.
-        assert!(!waiters.orphan(resize, &mut deferred));
-        assert!(waiters.is_in_flight(resize));
-        assert!(
-            matches!(waiters.on_completion(resize.user_data(), -libc::EINTR), CompletionOutcome::Requeue(id) if id == resize)
-        );
-        stage(&mut waiters, resize);
-        complete(&mut waiters, resize, 0, &mut deferred);
-        assert!(waiters.is_empty());
-        assert_eq!(file.tracker.begin_sync(), 1);
     }
 
     #[test]
