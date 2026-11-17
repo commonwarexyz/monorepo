@@ -1082,6 +1082,19 @@ mod tests {
         (blob, data)
     }
 
+    /// A blob over a regular file opened read-only, whose truncation the kernel rejects with
+    /// `EINVAL` while its data syncs succeed.
+    fn read_only_blob(directory: &std::path::Path, pending: &Arc<Pending>) -> Blob {
+        let path = directory.join("read_only");
+        fs::write(&path, [0; 16]).unwrap();
+        Blob::new(
+            File::open(path).unwrap(),
+            Hold::acquire(directory).unwrap(),
+            Layout::V0.data_offset(),
+            pending.admit("partition", b"blob", false).unwrap().0,
+        )
+    }
+
     /// A blob that holds back the results of its first batch read until a gate opens, after that
     /// read's first poll has registered its reads. Later batch reads pass through, and every
     /// batch read's range count is recorded.
@@ -2130,19 +2143,6 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&storage_directory);
         });
-    }
-
-    /// A blob over a regular file opened read-only, whose truncation the kernel rejects with
-    /// `EINVAL` while its data syncs succeed.
-    fn read_only_blob(directory: &std::path::Path, pending: &Arc<Pending>) -> Blob {
-        let path = directory.join("read_only");
-        fs::write(&path, [0; 16]).unwrap();
-        Blob::new(
-            File::open(path).unwrap(),
-            Hold::acquire(directory).unwrap(),
-            Layout::V0.data_offset(),
-            pending.admit("partition", b"blob", false).unwrap().0,
-        )
     }
 
     /// A failed resize leaves its mutation uncovered without poisoning the open, whether it is
