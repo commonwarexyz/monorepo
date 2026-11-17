@@ -14,12 +14,22 @@
 //!
 //! # Deferred Verification
 //!
-//! Before casting a notarize vote, [`Deferred`] waits for the block to become available and
-//! then verifies that the block's embedded context matches the consensus context. However, it does not
-//! wait for the application to finish verifying the block contents before voting. This enables verification
-//! to run while we wait for a quorum of votes to form a certificate (hiding verification latency behind network
-//! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
-//! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
+//! Before casting a notarize vote, [`Deferred`] waits for the block to become available and then
+//! verifies that the block's embedded context matches the consensus context and that the block
+//! names that context's parent as its own. [`Deferred`] makes neither comparison for a re-proposed
+//! boundary block, because the block is the consensus context's parent and both comparisons were
+//! made when it was first proposed. [`Deferred`] votes without waiting for the check of the block's
+//! height against its parent or for the application to finish verifying the block contents.
+//!
+//! This enables verification to run while we wait for a quorum of votes to form a certificate
+//! (hiding verification latency behind network latency). Once a certificate is formed, we wait on
+//! the verification result in [`CertifiableAutomaton::certify`] before voting to finalize (ensuring
+//! no invalid blocks are admitted to the canonical chain).
+//!
+//! A certificate can form for a block this validator was never asked to verify. Certification
+//! then fetches the block and verifies it under its embedded context, so the application can be
+//! asked to verify more than one block of a round. Certifying a block stops the verification of
+//! any conflicting block of its round, since at most one block of a round is notarized.
 //!
 //! A validator whose verification stays pending has already voted to notarize the block but
 //! withholds its finalize vote. Peers that voted to finalize cannot nullify the view, so once
@@ -141,10 +151,12 @@ use tracing::{Instrument as _, debug, info_span};
 /// - Parent digest matches the consensus context's expected parent
 /// - Block height is exactly one greater than the parent's height
 ///
-/// Verifying only the immediate parent is sufficient since the parent was either notarized by
-/// consensus, whose honest voters verified its context, or verified locally before this
-/// participant voted for it (optimistic validation). Either way the entire ancestry chain back
-/// to genesis is transitively validated.
+/// Verifying only the immediate parent is sufficient. The parent was either notarized by consensus
+/// or voted for by this participant (optimistic validation), and an honest vote is cast only after
+/// the block's context and parent digest are checked. Each earlier ancestor was likewise voted for
+/// by an honest validator, so every parent digest in the ancestry chain back to genesis was named
+/// by a round of consensus. Each ancestor certifies only after its own verification checks its
+/// height.
 ///
 /// Applications do not need to re-implement these checks in their own verification logic.
 ///
@@ -518,25 +530,6 @@ where
             };
             parent_timer.observe(&*context);
 
-            // Deferred verification votes before it checks that a block's parent field
-            // matches the parent named by its consensus context, so an uncertified
-            // handoff parent may be unlinked. Build only on a linked parent. A parent at
-            // view zero is the epoch's genesis block, which needs no link check. The first
-            // epoch's genesis has no context parent to match, and a later epoch's genesis
-            // is the previous epoch's finalized boundary block.
-            //
-            // The coding variant needs no such check: it fetches each parent by the
-            // commitment in its child's consensus context, and its ancestry stream ends
-            // at a fetched parent that does not match the child's link.
-            if parent_view != View::zero() && parent.parent() != parent.context().parent.1 {
-                debug!(
-                    ?parent_commitment,
-                    reason = "parent does not link to its context parent",
-                    "skipping proposal"
-                );
-                return Resolved::Skip;
-            }
-
             // Special case: If the parent block is the last block in the epoch,
             // re-propose it so as not to produce any blocks that will be cut out
             // by the epoch transition.
@@ -633,7 +626,7 @@ where
         // active fetch. Register the wait before publishing the gate so it receives the buffered
         // block or is waiting when recovery delivers it.
         let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
-        let (task_tx, task_rx) = oneshot::channel();
+        let (mut task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);
 
         let (mut tx, rx) = oneshot::channel();
@@ -659,11 +652,20 @@ where
                     )
                 });
 
-                // Stop waiting for the block if consensus drops the verification request.
+                // Stop waiting for the block if consensus drops the verification request or
+                // `Gates` drops the certification gate. Consensus uses no verdict from this
+                // request after either.
                 let block = select! {
                     _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
+                            "skipping optimistic verification"
+                        );
+                        return;
+                    },
+                    _ = task_tx.closed() => {
+                        debug!(
+                            reason = "certification gate dropped",
                             "skipping optimistic verification"
                         );
                         return;
@@ -743,6 +745,26 @@ where
                     return;
                 }
 
+                // The block must also name the context's parent as its own. Consensus can
+                // verify a child of a block we voted for, or ask us to build on one, before
+                // that block certifies, and both walk ancestry by following parent digests.
+                // Checking the link before the vote ensures that every digest such a walk
+                // requests was named by a round of consensus.
+                //
+                // Certification can reuse this rejection instead of verifying the block again.
+                // A second verification would run under the block's embedded context, which
+                // matched the consensus context, and would find the same parent mismatch.
+                if block.parent() != context.parent.1 {
+                    debug!(
+                        expected_parent = %context.parent.1,
+                        block_parent = %block.parent(),
+                        "block does not name its context parent during optimistic verification"
+                    );
+                    task_tx.send_lossy(GateOutcome::Ready(false));
+                    tx.send_lossy(false);
+                    return;
+                }
+
                 // Optimistic verify returns immediately; the deferred_verify task
                 // runs in the background and forwards its final verdict to
                 // `task_tx` so `certify` observes the same result via the
@@ -750,7 +772,8 @@ where
                 //
                 // Once the optimistic verdict is delivered, the certification
                 // gate owns the deferred work. Nullification keeps that gate
-                // alive, while finalization drops it.
+                // alive. Finalization drops it, and so does certification of a
+                // conflicting block of the round.
                 let deferred_rx = marshaled
                     .deferred_verify(context, block, parent_request, Stage::Verified);
                 tx.send_lossy(true);
@@ -889,7 +912,9 @@ mod tests {
                     TestHarness, V, default_leader, make_raw_block,
                     setup_network_with_participants,
                 },
-                verifying::{GatedVerifyingApp, MockVerifyingApp},
+                verifying::{
+                    GatedVerifyingApp, MockVerifyingApp, RecordingVerifyingApp, Verification,
+                },
             },
             standard::tests::ready,
         },
@@ -904,7 +929,11 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
+    use commonware_utils::{
+        NZUsize,
+        channel::{fallible::OneshotExt, oneshot::error::TryRecvError},
+    };
+    use rstest::rstest;
     use std::time::Duration;
 
     #[test_traced("INFO")]
@@ -1423,6 +1452,155 @@ mod tests {
                     panic!("certify should resolve after verification is released");
                 },
             }
+        });
+    }
+
+    /// How far verification of a block has progressed when a conflicting block of its round
+    /// is certified.
+    #[derive(Clone, Copy, Debug)]
+    enum Progress {
+        /// The block has not arrived, so the optimistic verdict is still pending.
+        AwaitingBlock,
+        /// The optimistic verdict was delivered and the deferred work waits for the parent.
+        AwaitingParent,
+        /// The application is verifying the block.
+        Verifying,
+    }
+
+    /// A leader that equivocates sends this validator block A while the rest of the network
+    /// notarizes block B of the same round. Certifying B claims the round, so the application
+    /// must not start verifying A afterwards and must stop if it already started.
+    #[rstest]
+    #[case::awaiting_block(Progress::AwaitingBlock)]
+    #[case::awaiting_parent(Progress::AwaitingParent)]
+    #[case::verifying(Progress::Verifying)]
+    #[test_traced("WARN")]
+    fn test_certify_releases_conflicting_verification(#[case] progress: Progress) {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Create the validator set and start the simulated network.
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+
+            // Start the marshal of this validator, participant 0. Blocks arrive through the
+            // broadcast buffer.
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+
+            // Wrap an application that records when verification of a block starts and when it
+            // is cancelled. Its verification never resolves, so it can only end by cancellation.
+            let application: RecordingVerifyingApp<B, S> = RecordingVerifyingApp::new();
+            let mut marshaled = Deferred::new(
+                context.child("deferred"),
+                application.clone(),
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+
+            // Build a parent at height 1 and two different blocks at height 2, A and B. Both
+            // carry the same context of round 2. That is the leader's equivocation.
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let parent_digest = parent.digest();
+            let round = Round::new(Epoch::zero(), View::new(2));
+            let ctx = Ctx {
+                round,
+                leader: participants[1].clone(),
+                parent: (View::new(1), parent_digest),
+            };
+            let a = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 200);
+            let b = B::new::<Sha256>(ctx.clone(), parent_digest, Height::new(2), 201);
+            let (a_digest, b_digest) = (a.digest(), b.digest());
+            assert_ne!(a_digest, b_digest);
+
+            // Deliver everything except the block that verification of A must wait for.
+            let (available, withheld) = match progress {
+                Progress::AwaitingBlock => (vec![parent, b], Some(a)),
+                Progress::AwaitingParent => (vec![a, b], Some(parent)),
+                Progress::Verifying => (vec![parent, a, b], None),
+            };
+            let deliver = |block: B| {
+                assert!(
+                    buffer
+                        .broadcast(commonware_p2p::Recipients::Some(vec![]), ready(block))
+                        .accepted()
+                );
+            };
+            available.into_iter().for_each(&deliver);
+
+            // Consensus asks to verify A, the proposal the leader sent this validator.
+            let mut verify_a = marshaled.verify(ctx, a_digest).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The optimistic verdict is delivered only if A is available, and the application
+            // starts verifying A only if the parent is available too.
+            let (optimistic, started) = match progress {
+                Progress::AwaitingBlock => (Err(TryRecvError::Empty), vec![]),
+                Progress::AwaitingParent => (Ok(true), vec![]),
+                Progress::Verifying => (Ok(true), vec![Verification::Started(a_digest)]),
+            };
+            assert_eq!(verify_a.try_recv(), optimistic);
+            assert_eq!(application.observed(), started);
+
+            // B is notarized, so consensus asks to certify it.
+            let certify_b = marshaled.certify(round, b_digest).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            // A verdict that was still pending is closed without an answer, because B claimed
+            // the round.
+            if matches!(progress, Progress::AwaitingBlock) {
+                assert_eq!(
+                    verify_a.try_recv(),
+                    Err(TryRecvError::Closed),
+                    "the wait for a block that lost its round must end"
+                );
+            }
+
+            // Whatever A was waiting for arrives.
+            withheld.into_iter().for_each(&deliver);
+            context.sleep(Duration::from_millis(100)).await;
+
+            // B's verification started. A's started only if it began before B was certified, and
+            // it was then cancelled.
+            let observed = application.observed();
+            let expected = if started.is_empty() {
+                vec![Verification::Started(b_digest)]
+            } else {
+                vec![
+                    Verification::Started(a_digest),
+                    Verification::Cancelled(a_digest),
+                    Verification::Started(b_digest),
+                ]
+            };
+            assert!(
+                observed.len() == expected.len()
+                    && expected
+                        .iter()
+                        .all(|verification| observed.contains(verification)),
+                "the application must observe exactly {expected:?}, observed {observed:?}"
+            );
+
+            // The test keeps both receivers until here, so the wrapper never sees consensus drop
+            // a request.
+            drop((verify_a, certify_b));
         });
     }
 

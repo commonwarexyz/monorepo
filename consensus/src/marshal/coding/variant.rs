@@ -163,7 +163,7 @@ where
     }
 }
 
-impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
+impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
@@ -202,7 +202,7 @@ where
 
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
-        self.proposed_shared(round, block);
+        self.disperse_shared(round, block);
     }
 }
 

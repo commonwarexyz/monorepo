@@ -508,9 +508,10 @@ impl<
         pending_verify: &mut PendingVerification,
     ) {
         // Retain requests for the current and optimistic future views. Drop requests for exited
-        // views, and a proposal request whose captured parent is no longer valid once a
-        // replacement parent is selectable. Certification of an exited view continues after its
-        // verification receiver is dropped.
+        // views, a verification request whose proposal a certificate replaced, and a proposal
+        // request whose captured parent is no longer valid once a replacement parent is
+        // selectable. Certification of a view continues after its verification receiver is
+        // dropped.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -527,10 +528,9 @@ impl<
                 *pending_propose = None;
             }
         }
-        if pending_verify
-            .as_ref()
-            .is_some_and(|request| request.view() < current_view)
-        {
+        if pending_verify.as_ref().is_some_and(|request| {
+            request.view() < current_view || self.state.verification_superseded(request.view())
+        }) {
             *pending_verify = None;
         }
 

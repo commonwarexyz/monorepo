@@ -7,7 +7,7 @@ use crate::{
 };
 use commonware_utils::Widen;
 use std::{ops::RangeInclusive, sync::Arc};
-use tracing::{Instrument as _, Span, field::Empty};
+use tracing::Instrument as _;
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -184,16 +184,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.start_read_many(ranges, options)
     }
 
-    #[tracing::instrument(
-        name = "runtime.storage.blob.write_at",
-        level = "info",
-        skip_all,
-        fields(
-            partition = %self.partition,
-            bytes = Empty,
-            options = options.0.traced(),
-        )
-    )]
     async fn write_at(
         &self,
         offset: u64,
@@ -203,19 +193,32 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         let bufs = bufs.into();
         let bufs_len = bufs.remaining();
         self.metrics.storage_writes.inc();
-        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
+        self.metrics
+            .storage_write_bytes
+            .inc_by(Widen::widen(bufs_len));
         if options.contains(WriteOptions::SYNC) {
             self.metrics.storage_syncs.inc();
         }
-        Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at(offset, bufs, options).await
+
+        // The span is built here, not with `#[tracing::instrument]`, because `bytes` is known only
+        // after converting `bufs`, and `Span::current().record` would write into the caller's span
+        // when this span is disabled.
+        self.inner
+            .write_at(offset, bufs, options)
+            .instrument(tracing::debug_span!(
+                "runtime.storage.blob.write_at",
+                partition = %self.partition,
+                bytes = bufs_len.traced(),
+                options = options.0.traced(),
+            ))
+            .await
     }
 
     #[tracing::instrument(
         name = "runtime.storage.blob.resize",
-        level = "info",
+        level = "debug",
         skip_all,
-        fields(partition = %self.partition, len = len)
+        fields(partition = %self.partition, len = len.traced())
     )]
     async fn resize(&self, len: u64) -> Result<(), Error> {
         self.metrics.storage_resizes.inc();
@@ -224,7 +227,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
     #[tracing::instrument(
         name = "runtime.storage.blob.sync",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(partition = %self.partition)
     )]
@@ -235,7 +238,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
     #[tracing::instrument(
         name = "runtime.storage.blob.start_sync",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(partition = %self.partition)
     )]
@@ -243,7 +246,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn start_sync(&self) -> Handle<()> {
         self.metrics.storage_syncs.inc();
         let handle = self.inner.start_sync().await;
-        Handle::from_future(handle.instrument(tracing::info_span!(
+        Handle::from_future(handle.instrument(tracing::debug_span!(
             "runtime.storage.blob.sync",
             partition = %self.partition,
         )))

@@ -11,7 +11,9 @@ cfg_if! {
         ),
     ))] {
         mod pair;
+        mod single;
         pub(super) use pair::{hash_pair_64, hash_pair_72};
+        pub(super) use single::{hash_36, hash_40, hash_64, hash_72};
     }
 }
 

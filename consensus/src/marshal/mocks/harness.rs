@@ -1037,7 +1037,6 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let block = block.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
@@ -1139,7 +1138,6 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let block = block.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
@@ -1256,7 +1254,6 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let block = block.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
@@ -1773,8 +1770,6 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let application = application.clone();
-            let block = block.clone();
             let finalization = finalization.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
@@ -2643,7 +2638,7 @@ impl TestHarness for DeferredHarness {
 pub struct CodingHarness;
 
 type CodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
-type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K>;
+type ShardsMailbox = shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256>;
 
 /// Genesis blocks use a special coding config that doesn't actually encode.
 pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::Config {
