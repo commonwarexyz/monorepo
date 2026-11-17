@@ -67,7 +67,7 @@ commonware_macros::stability_scope!(ALPHA {
 });
 
 mod variant;
-pub use variant::Standard;
+pub use variant::{Bounded, Standard};
 
 #[cfg(test)]
 mod tests {
@@ -76,21 +76,21 @@ mod tests {
     use crate::{
         Application as ConsensusApplication, Automaton, CertifiableAutomaton, Handoff, Heightable,
         Relay, Reporter, Viewable,
+        ancestry::{Ancestry, BlockProvider},
         simplex::{
             self, Plan,
             config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
             marshal::{
                 Identifier, Update,
-                ancestry::{Ancestry, BlockProvider},
                 application::{
                     gates::{GateOutcome, Gates},
                     relay,
                 },
                 config::{Config, Start},
                 core::{
-                    Actor, CommitmentFallback, Cutoff, DigestFallback, Mailbox, Processed, cache,
-                    durability::Durable as _,
+                    Actor, CommitmentFallback, Cutoff, DigestFallback, Mailbox, Processed,
+                    RoundBounded, cache, durability::Durable as _,
                 },
                 mocks::{
                     application::Application,
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn mailbox_provides_application_blocks() {
-        fn assert_provider<P: BlockProvider<Block = B>>() {}
+        fn assert_provider<P: RoundBounded<Block = B, Provider: BlockProvider<Block = B>>>() {}
         assert_provider::<Mailbox<S, Standard<B>>>();
     }
 
@@ -284,7 +284,7 @@ mod tests {
 
                 let mut cursor = marshal.get_block(&parent).await.unwrap();
                 for expected in (0..3).rev() {
-                    cursor = marshal.subscribe_parent(&cursor, None).await.unwrap();
+                    cursor = marshal.unbounded().subscribe_parent(&cursor).await.unwrap();
                     assert_eq!(cursor.height(), Height::new(expected));
                 }
                 assert_eq!(counter.count(), 3, "{kind:?} ancestry hashing");
@@ -403,7 +403,7 @@ mod tests {
 
             let parent = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 200);
-            let subscription = mailbox.subscribe_parent(&ready(child.clone()), None);
+            let subscription = mailbox.unbounded().subscribe_parent(&ready(child.clone()));
 
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
@@ -414,7 +414,7 @@ mod tests {
 
             // A caller's bound travels with the request.
             let round = Round::new(Epoch::zero(), View::new(7));
-            let bounded = mailbox.subscribe_parent(&ready(child.clone()), Some(round));
+            let bounded = mailbox.bounded(round).subscribe_parent(&ready(child.clone()));
 
             // A stream that starts from a block found by round requests under that round.
             assert!(mailbox.verified(round, ready(child.clone())).await);
@@ -2579,6 +2579,18 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_finalization_floors() {
+        harness::finalization_floors::<InlineHarness>();
+        harness::finalization_floors::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalization_floors_survive_pruning() {
+        harness::finalization_floors_survive_pruning::<InlineHarness>();
+        harness::finalization_floors_survive_pruning::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_hint_finalized_triggers_fetch() {
         harness::hint_finalized_triggers_fetch::<InlineHarness>();
         harness::hint_finalized_triggers_fetch::<DeferredHarness>();
@@ -2955,7 +2967,7 @@ mod tests {
                 },
             );
             let mut wait = mailbox.subscribe_by_digest(missing_digest, DigestFallback::Wait);
-            let mut parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone()), None));
+            let mut parent = Box::pin(mailbox.unbounded().subscribe_parent(&ready(child.clone())));
 
             // The anchor subscription resolves when the block arrives.
             let anchor_wait = mailbox.subscribe_by_digest(
@@ -3006,7 +3018,8 @@ mod tests {
                     round: Round::new(Epoch::zero(), View::new(3)),
                 },
             );
-            let mut late_parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone()), None));
+            let mut late_parent =
+                Box::pin(mailbox.unbounded().subscribe_parent(&ready(child.clone())));
             let _ = mailbox.get_processed().await;
             assert!(matches!(late_by_round.try_recv(), Err(TryRecvError::Empty)));
             select! {
@@ -13128,7 +13141,6 @@ mod tests {
     impl ConsensusApplication<Runtime> for PipelineApp {
         type Block = B;
         type Context = Ctx;
-        type SigningScheme = S;
         type Input = ();
 
         async fn prepare(

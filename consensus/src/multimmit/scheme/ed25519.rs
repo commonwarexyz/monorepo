@@ -30,10 +30,13 @@ pub mod da {
 
 /// Ed25519 nullifications at `2f+1`.
 pub mod nullify {
-    use crate::multimmit::scheme::{Namespace, NullifyFaults, NullifySubject};
+    use crate::multimmit::{
+        faults::N5f1Nullification,
+        scheme::{Namespace, NullifySubject},
+    };
     use commonware_cryptography::impl_certificate_ed25519;
 
-    impl_certificate_ed25519!(NullifySubject, Namespace, NullifyFaults);
+    impl_certificate_ed25519!(NullifySubject, Namespace, N5f1Nullification);
 }
 
 /// The Ed25519 suite.

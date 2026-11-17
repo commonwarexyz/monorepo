@@ -8,10 +8,10 @@
 use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
+    ancestry::{self as marshal_ancestry, Ancestry, BoxedAncestry},
     simplex::marshal::{
         Identifier,
-        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
-        core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        core::{Mailbox as MarshalMailbox, RoundBounded, Variant as MarshalVariant},
     },
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
@@ -81,7 +81,7 @@ where
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+        MarshalMailbox<S, V>: RoundBounded<Block = A::Block>,
     {
         let execution = self.execution.clone();
         async move {
@@ -208,7 +208,7 @@ where
         prepared: &mut Prepared<A::Block>,
     ) -> Option<PreparedStep<A::Block>>
     where
-        P: BlockProvider<Block = A::Block> + Clone,
+        P: RoundBounded<Block = A::Block>,
     {
         // The missing path comes first. Once it is exhausted, the request's own block is the
         // last step. That step takes the acquired ancestry: cloning a stream with a pending parent

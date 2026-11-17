@@ -1,11 +1,9 @@
-use super::{Processed, Variant, durability::Durable as _};
+use super::{Processed, RoundBounded, Variant, durability::Durable as _, floor::Installed};
 use crate::{
     Reporter,
+    ancestry::{AncestorStream, Ancestry},
     simplex::{
-        marshal::{
-            Identifier,
-            ancestry::{AncestorStream, Ancestry, BlockProvider},
-        },
+        marshal::Identifier,
         types::{Activity, Finalization, Notarization},
     },
     types::{Height, Round},
@@ -27,6 +25,9 @@ use std::{
     sync::Arc,
 };
 use tracing::{Span, info_span};
+
+/// A finalization and the height of the block it certifies.
+type FinalizationAt<S, C> = (Height, Finalization<S, C>);
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -64,6 +65,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         height: Height,
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
+    },
+    /// A request to retrieve the newest finalization at or below a height.
+    GetFinalizationAtOrBelow {
+        /// The span carried with this request.
+        span: Span,
+        /// The highest height the finalization may certify.
+        height: Height,
+        /// A channel to send the retrieved finalization and the height it certifies.
+        response: oneshot::Sender<Option<FinalizationAt<S, V::Commitment>>>,
     },
     /// A request to retrieve the latest processed position.
     GetProcessed {
@@ -218,6 +228,10 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         span: Span,
         /// The candidate floor finalization, verified by the actor before use.
         finalization: Finalization<S, V::Commitment>,
+        /// Receives the floor block's height once the floor is durably applied, and is dropped
+        /// if the floor is ignored. With a reply, a floor that does not verify is ignored;
+        /// without one, it panics.
+        installed: Option<Installed>,
     },
     /// Requests pruning finalized blocks and certificates below the given height.
     ///
@@ -330,6 +344,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetInfo { span, .. }
             | Self::GetBlock { span, .. }
             | Self::GetFinalization { span, .. }
+            | Self::GetFinalizationAtOrBelow { span, .. }
             | Self::GetVerified { span, .. }
             | Self::SubscribeByDigest { span, .. }
             | Self::SubscribeByCommitment { span, .. }
@@ -356,6 +371,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetInfo { .. } => "get_info",
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
+            Self::GetFinalizationAtOrBelow { .. } => "get_finalization_at_or_below",
             Self::GetProcessed { .. } => "get_processed",
             Self::GetAnchor { .. } => "get_anchor",
             Self::HintFinalized { .. } => "hint_finalized",
@@ -403,6 +419,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             | Self::GetProcessed { .. }
             | Self::GetAnchor { .. } => false,
+            // An older finalization may still answer a read below the floor
+            Self::GetFinalizationAtOrBelow { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -424,6 +442,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 response.is_closed()
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
+            Self::GetFinalizationAtOrBelow { response, .. } => response.is_closed(),
             Self::GetProcessed { response, .. } => response.is_closed(),
             Self::GetAnchor { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
@@ -444,8 +463,11 @@ impl<S: Scheme, V: Variant> Message<S, V> {
     }
 }
 
+/// A coalesced [`Message::SetFloor`].
+type PendingFloor<S, C> = (Span, Finalization<S, C>, Option<Installed>);
+
 pub(crate) struct Pending<S: Scheme, V: Variant> {
-    floor: Option<(Span, Finalization<S, V::Commitment>)>,
+    floor: Option<PendingFloor<S, V::Commitment>>,
     prune: Option<(Span, Height)>,
     hints: BTreeMap<Height, (Span, NonEmptyVec<S::PublicKey>)>,
     messages: VecDeque<PendingMessage<S, V>>,
@@ -487,17 +509,22 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
         });
     }
 
-    fn set_floor(&mut self, span: Span, finalization: Finalization<S, V::Commitment>) {
+    fn set_floor(
+        &mut self,
+        span: Span,
+        finalization: Finalization<S, V::Commitment>,
+        installed: Option<Installed>,
+    ) {
         let round = finalization.round();
         if self
             .floor
             .as_ref()
-            .is_some_and(|(_, floor)| floor.round() >= round)
+            .is_some_and(|(_, floor, _)| floor.round() >= round)
         {
             return;
         }
 
-        self.floor = Some((span, finalization));
+        self.floor = Some((span, finalization, installed));
     }
 
     fn prune(&mut self, span: Span, height: Height) {
@@ -564,7 +591,11 @@ impl<S: Scheme, V: Variant> Pending<S, V> {
 
         // Receiver rejected; restore so the next drain retries from the same point
         match message {
-            Message::SetFloor { span, finalization } => self.set_floor(span, finalization),
+            Message::SetFloor {
+                span,
+                finalization,
+                installed,
+            } => self.set_floor(span, finalization, installed),
             Message::Prune { span, height } => self.prune(span, height),
             Message::HintFinalized {
                 span,
@@ -591,8 +622,15 @@ impl<S: Scheme, V: Variant> Overflow<Message<S, V>> for Pending<S, V> {
     {
         // Drain floor and prune first so the actor advances its floor before
         // it sees the height-bounded reads that follow
-        if let Some((span, finalization)) = self.floor.take()
-            && !self.drain_one(Message::SetFloor { span, finalization }, &mut push)
+        if let Some((span, finalization, installed)) = self.floor.take()
+            && !self.drain_one(
+                Message::SetFloor {
+                    span,
+                    finalization,
+                    installed,
+                },
+                &mut push,
+            )
         {
             return;
         }
@@ -652,8 +690,12 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
             }
             // Floors collapse to the highest round seen; prune collapses to
             // the highest height seen.
-            Self::SetFloor { span, finalization } => {
-                overflow.set_floor(span, finalization);
+            Self::SetFloor {
+                span,
+                finalization,
+                installed,
+            } => {
+                overflow.set_floor(span, finalization, installed);
             }
             Self::Prune { span, height } => {
                 overflow.prune(span, height);
@@ -674,7 +716,7 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 #[derive(Clone)]
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
-    max_pending_acks: usize,
+    pub(in crate::simplex::marshal) max_pending_acks: NonZeroUsize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
@@ -682,14 +724,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
         Self {
             sender,
-            max_pending_acks: max_pending_acks.get(),
+            max_pending_acks,
         }
     }
 
     /// Returns the maximum number of application blocks marshal can dispatch before
     /// acknowledgements advance its processed floor.
     pub const fn max_pending_acks(&self) -> usize {
-        self.max_pending_acks
+        self.max_pending_acks.get()
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.
@@ -729,6 +771,25 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetFinalization {
             span: info_span!("marshal.mailbox.get_finalization", height = height.traced()),
+            height,
+            response,
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// A best-effort attempt to retrieve the newest [Finalization] at or below `height`
+    /// from local storage, with the height it certifies. It is not an indication to go fetch
+    /// a [Finalization] from the network.
+    pub async fn get_finalization_at_or_below(
+        &self,
+        height: Height,
+    ) -> Option<(Height, Finalization<S, V::Commitment>)> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetFinalizationAtOrBelow {
+            span: info_span!(
+                "marshal.mailbox.get_finalization_at_or_below",
+                height = height.traced()
+            ),
             height,
             response,
         });
@@ -883,10 +944,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// ancestry for data they already have locally and are willing to build on,
     /// verify, certify, or repair from. It is not a candidate fetch path.
     ///
-    /// With [`DigestFallback::FetchByRound`], that round is the stream's bound (see
-    /// [`BlockProvider::subscribe_parent`]). With [`DigestFallback::Wait`] the stream passes no
-    /// bound, so start only from a block whose ancestry has been checked, such as a certified
-    /// or finalized block.
+    /// With [`DigestFallback::FetchByRound`], that round bounds the stream's parent requests (see
+    /// [`RoundBounded::bounded`]). With [`DigestFallback::Wait`] they are unbounded, so start only
+    /// from a block whose ancestry has been checked, such as a certified or finalized block.
     ///
     /// If the starting block is not found, `None` is returned.
     pub async fn ancestry<C>(
@@ -896,17 +956,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         fetch_duration: Timed,
     ) -> Option<impl Ancestry<V::ApplicationBlock> + use<S, V, C>>
     where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
+        Self: RoundBounded<Block = V::ApplicationBlock>,
         C: Clock,
     {
-        let bound = match fallback {
-            DigestFallback::Wait => None,
-            DigestFallback::FetchByRound { round } => Some(round),
+        let provider = match fallback {
+            DigestFallback::Wait => self.unbounded(),
+            DigestFallback::FetchByRound { round } => self.bounded(round),
         };
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver.await.ok().map(|block| {
             let block = V::into_shared(block);
-            AncestorStream::new(clock, self.clone(), [block], bound, fetch_duration)
+            AncestorStream::start(clock, provider, [block], fetch_duration)
         })
     }
 
@@ -1048,7 +1108,28 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let _ = self.sender.enqueue(Message::SetFloor {
             span: info_span!("marshal.mailbox.set_floor", round = %finalization.round()),
             finalization,
+            installed: None,
         });
+    }
+
+    /// Sets the sync starting point as [Self::set_floor] does, and returns the floor block's
+    /// height once the floor is durably applied.
+    ///
+    /// Unlike [Self::set_floor], a floor that does not verify is ignored instead of panicking, so
+    /// the floor may come from an untrusted peer. Returns `None` if marshal ignores the floor: it
+    /// does not verify, it is stale, a newer floor supersedes it, or its block is at or below the
+    /// processed height.
+    pub async fn install_floor(
+        &self,
+        finalization: Finalization<S, V::Commitment>,
+    ) -> Option<Height> {
+        let (installed, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::SetFloor {
+            span: info_span!("marshal.mailbox.install_floor", round = %finalization.round()),
+            finalization,
+            installed: Some(installed),
+        });
+        receiver.await.ok()
     }
 
     /// Requests pruning finalized blocks and certificates below the given height.
@@ -1290,6 +1371,7 @@ mod tests {
         TestMessage::SetFloor {
             span: Span::none(),
             finalization: finalization(height),
+            installed: None,
         }
     }
 
@@ -1631,7 +1713,7 @@ mod tests {
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
 
         assert_eq!(
-            overflow.floor.as_ref().map(|(_, floor)| floor.round()),
+            overflow.floor.as_ref().map(|(_, floor, _)| floor.round()),
             Some(round(8))
         );
         assert_eq!(
@@ -1656,7 +1738,7 @@ mod tests {
     fn policy_replaces_floor_and_prune_and_drops_stale_pending_on_drain() {
         let mut overflow = pending();
 
-        overflow.floor = Some((Span::none(), finalization(5)));
+        overflow.floor = Some((Span::none(), finalization(5), None));
         let (get_info_4, _get_info_4_rx) = get_info(4);
         let (get_block_7, _get_block_7_rx) = get_block(7);
         let (get_block_8, _get_block_8_rx) = get_block(8);
@@ -1677,7 +1759,7 @@ mod tests {
         <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
         <TestMessage as Policy>::handle(&mut overflow, prune(8));
         assert_eq!(
-            overflow.floor.as_ref().map(|(_, floor)| floor.round()),
+            overflow.floor.as_ref().map(|(_, floor, _)| floor.round()),
             Some(round(8))
         );
         assert_eq!(overflow.messages.len(), 1);

@@ -21,9 +21,8 @@ use crate::stateful::{
         },
     },
 };
-use commonware_consensus::simplex::marshal::{
-    ancestry::BlockProvider,
-    core::{Mailbox as MarshalMailbox, Variant},
+use commonware_consensus::simplex::marshal::core::{
+    Mailbox as MarshalMailbox, RoundBounded, Variant,
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Supervisor};
@@ -233,7 +232,7 @@ where
     E: Supervisor + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: RoundBounded<Block = A::Block>,
 {
     pub(super) fn new(
         marshal: MarshalMailbox<A::SigningScheme, V>,
