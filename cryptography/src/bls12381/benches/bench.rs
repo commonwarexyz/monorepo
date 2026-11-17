@@ -14,7 +14,6 @@ mod evaluate_point;
 mod hash_to_curve;
 mod msm;
 mod multisig_optimistic_assemble;
-mod sas_verify_claims;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
@@ -32,7 +31,6 @@ mod utils;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
-    sas_verify_claims::benches,
     batch_to_affine::benches,
     dkg::golden::benches,
     dkg::feldman_desmedt::benches,

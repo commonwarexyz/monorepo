@@ -1,7 +1,7 @@
 //! Structural checks and known-term discharge for aggregates of unique, additive signatures.
 //!
-//! Both [`multisig`](super::multisig) and [`sas`](super::sas) signatures are unique per signer and
-//! message, and an aggregate is their sum. A valid aggregate therefore contains exactly the known
+//! [`multisig`](super::multisig) signatures are unique per signer and message, and an aggregate is
+//! their sum. A valid aggregate therefore contains exactly the known
 //! signature of every term the caller already verified, and subtracting those signatures leaves an
 //! aggregate over the remaining terms alone.
 
@@ -16,25 +16,23 @@ use bytes::Bytes;
 use commonware_math::algebra::Additive;
 use commonware_utils::Participant;
 
-/// A signer's key and the namespaced message it signed in `period`, owned until a batch borrows
-/// it.
-pub(super) struct Owned<'n, K, P> {
-    pub(super) period: P,
+/// A signer's key and the namespaced message it signed, owned until a batch borrows it.
+pub(super) struct Owned<'n, K> {
     pub(super) public: K,
     pub(super) namespace: &'n [u8],
     pub(super) message: Bytes,
 }
 
 /// The terms a claim covers.
-pub(super) enum Terms<'n, K, P> {
+pub(super) enum Terms<'n, K> {
     /// A single attestation.
-    One(Owned<'n, K, P>),
+    One(Owned<'n, K>),
     /// The terms of an aggregate left after discharge.
-    Many(Vec<Owned<'n, K, P>>),
+    Many(Vec<Owned<'n, K>>),
 }
 
-impl<'n, K, P> Terms<'n, K, P> {
-    pub(super) fn as_slice(&self) -> &[Owned<'n, K, P>] {
+impl<'n, K> Terms<'n, K> {
+    pub(super) fn as_slice(&self) -> &[Owned<'n, K>] {
         match self {
             Self::One(term) => core::slice::from_ref(term),
             Self::Many(terms) => terms,
@@ -43,13 +41,13 @@ impl<'n, K, P> Terms<'n, K, P> {
 }
 
 /// An item after its structural checks and the discharge of its known terms.
-pub(super) enum Prepared<'n, V: Variant, K, P> {
+pub(super) enum Prepared<'n, V: Variant, K> {
     /// The verdict needs no pairing.
     Settled(bool),
     /// The item is valid if `signature` is valid over every term.
     Claim {
         signature: V::Signature,
-        terms: Terms<'n, K, P>,
+        terms: Terms<'n, K>,
     },
 }
 
@@ -58,12 +56,12 @@ pub(super) enum Prepared<'n, V: Variant, K, P> {
 ///
 /// `aggregate` decodes an aggregate signature, and `owned` resolves a signer's term, returning
 /// `None` for a signer outside the participant set.
-pub(super) fn prepare<'n, 'a, S, D, V, K, P>(
+pub(super) fn prepare<'n, 'a, S, D, V, K>(
     participants: usize,
     item: &Item<'_, 'a, S, D>,
     aggregate: impl FnOnce(&S::Aggregate) -> Option<V::Signature>,
-    owned: impl Fn(Participant, &S::Subject<'a, D>) -> Option<Owned<'n, K, P>>,
-) -> Prepared<'n, V, K, P>
+    owned: impl Fn(Participant, &S::Subject<'a, D>) -> Option<Owned<'n, K>>,
+) -> Prepared<'n, V, K>
 where
     S: Aggregator<Signature = V::Signature>,
     D: Digest,

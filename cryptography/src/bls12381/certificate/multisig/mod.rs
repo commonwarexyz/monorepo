@@ -402,13 +402,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         // Decoding signatures and building messages dominate preparation, so items prepare in
         // parallel.
         let prepared = strategy.map_collect_vec(items, |item| {
-            claims::prepare::<_, _, V, _, _>(
+            claims::prepare::<_, _, V, _>(
                 self.participants.len(),
                 item,
                 |aggregate| aggregate.get().map(|signature| *signature.inner()),
                 |signer, subject| {
                     Some(Owned {
-                        period: (),
                         public: *self.participants.value(signer.into())?,
                         namespace: subject.namespace(&self.namespace),
                         message: subject.message(),

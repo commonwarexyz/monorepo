@@ -6,7 +6,6 @@
 //! - [`aggregate`]: Aggregation of public keys and signatures
 //! - [`batch`]: Batch verification of multiple signatures
 //! - [`threshold`]: Threshold signature operations
-//! - [`sas`]: Pointcheval-Sanders synchronized aggregate signatures
 //!
 //! # Domain Separation Tag (DST)
 //!
@@ -22,10 +21,6 @@
 pub mod aggregate;
 pub mod batch;
 pub mod threshold;
-
-commonware_macros::stability_scope!(ALPHA {
-    pub mod sas;
-});
 
 use super::{
     Error,
