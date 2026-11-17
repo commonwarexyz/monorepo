@@ -2642,10 +2642,14 @@ name = "commonware-runtime-fuzz"
 version = "2026.10.0"
 dependencies = [
  "arbitrary",
+ "bytes",
+ "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",
  "commonware-utils",
+ "futures",
  "libfuzzer-sys",
+ "rand 0.10.2",
 ]
 
 [[package]]
