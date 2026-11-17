@@ -23,7 +23,7 @@ use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{Info, Output},
-        primitives::{group::Share, variant::Variant as BlsVariant},
+        primitives::{key::Share, variant::Variant as BlsVariant},
     },
     transcript::Summary,
 };
@@ -55,7 +55,7 @@ where
     pub(super) phase: EpochPhase,
     pub(super) participants: Participants<P>,
     pub(super) previous: Option<Output<V, P>>,
-    pub(super) share: Option<Share>,
+    pub(super) share: Option<Share<V::Scalar>>,
     pub(super) seed: Summary,
 }
 
@@ -108,10 +108,10 @@ async fn recovered_share<E, SS, V, P, D>(
     store: &mut Store<E, SS, V, P, D>,
     public_key: &P,
     info: &EpochInfo<V, P, D>,
-) -> Option<Share>
+) -> Option<Share<V::Scalar>>
 where
     E: Clock + Storage + Metrics,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     V: BlsVariant,
     P: PublicKey,
     D: Directory<P>,
@@ -204,7 +204,7 @@ where
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
@@ -305,7 +305,7 @@ where
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         info: &EpochInfo<V, C::PublicKey, B::Directory>,
-    ) -> Option<Share> {
+    ) -> Option<Share<V::Scalar>> {
         recovered_share(store, &self.signer.public_key(), info).await
     }
 
@@ -337,7 +337,7 @@ where
     pub(super) async fn register_epoch(
         &mut self,
         info: &EpochInfo<V, C::PublicKey, B::Directory>,
-        share: Option<Share>,
+        share: Option<Share<V::Scalar>>,
     ) {
         let scheme_info = SchemeInfo::new(
             &self.signer.public_key(),

@@ -129,9 +129,9 @@ mod evrf;
 use crate::{
     Signer as _, Verifier as _,
     bls12381::primitives::{
-        group::{G1, Private, Scalar, ScalarReadCfg, Share, SmallScalar},
+        group::{G1, Private, Scalar, Share, SmallScalar},
         sharing::{Mode, ModeVersion, Sharing},
-        variant::MinPk,
+        variant::{MinPk, ScalarReadCfg},
     },
     transcript::{Summary, Transcript, Version},
 };

@@ -2,7 +2,7 @@ use super::utils::optimistic_assemble::{BenchSubject, Case, bench_case};
 use commonware_cryptography::{
     Signer as _,
     bls12381::primitives::{
-        group::Private,
+        key::Private,
         ops::{compute_public, sign_proof_of_possession, verify_proof_of_possession},
         variant::{MinPk, MinSig, Variant},
     },

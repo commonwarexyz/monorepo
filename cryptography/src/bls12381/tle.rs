@@ -84,9 +84,9 @@
 
 use crate::{
     bls12381::primitives::{
-        group::{DST, Scalar},
+        group::Scalar,
         ops::hash_with_namespace,
-        variant::Variant,
+        variant::{DST, Variant},
     },
     sha256::Digest,
 };
@@ -232,7 +232,7 @@ fn xor(a: &Block, b: &Block) -> Block {
 ///
 /// # Returns
 /// * `Result<Ciphertext<V>, Error>` - The encrypted ciphertext, or an encryption error
-pub fn encrypt<R: CryptoRng, V: Variant>(
+pub fn encrypt<R: CryptoRng, V: Variant<Scalar = Scalar>>(
     rng: &mut R,
     public: V::Public,
     target: (&[u8], &[u8]),
@@ -292,7 +292,10 @@ pub fn encrypt<R: CryptoRng, V: Variant>(
 ///
 /// # Returns
 /// * `Option<Block>` - The decrypted message
-pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>) -> Option<Block> {
+pub fn decrypt<V: Variant<Scalar = Scalar>>(
+    signature: &V::Signature,
+    ciphertext: &Ciphertext<V>,
+) -> Option<Block> {
     // An identity signature collapses the pairing to a public constant and bypasses target binding.
     if signature == &V::Signature::zero() {
         return None;
@@ -330,7 +333,7 @@ mod tests {
     use commonware_math::algebra::Random as _;
     use commonware_utils::test_rng;
 
-    fn identity_signature_cannot_decrypt<V: Variant>() {
+    fn identity_signature_cannot_decrypt<V: Variant<Scalar = Scalar>>() {
         let sigma = Block::new([1; BLOCK_SIZE]);
         let message = Block::new([2; BLOCK_SIZE]);
         let r = hash::h3(&sigma, message.as_ref());
@@ -353,7 +356,7 @@ mod tests {
         identity_signature_cannot_decrypt::<MinSig>();
     }
 
-    fn identity_public_key_cannot_encrypt<V: Variant>() {
+    fn identity_public_key_cannot_encrypt<V: Variant<Scalar = Scalar>>() {
         let result = encrypt::<_, V>(
             &mut test_rng(),
             V::Public::zero(),

@@ -324,10 +324,7 @@ pub fn verify_hashed<V: Variant>(
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{
-            super::group::Scalar, aggregate, hash_with_namespace, keypair, sign_message,
-            verify_message,
-        },
+        super::{aggregate, hash_with_namespace, keypair, sign_message, verify_message},
         *,
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
@@ -546,7 +543,7 @@ mod tests {
         let hm2 = hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
 
         // Forge signatures that cancel out: sig1' = sig1 - delta, sig2' = sig2 + delta
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_sig1 = sig1 - &delta;
         let forged_sig2 = sig2 + &delta;
@@ -714,7 +711,7 @@ mod tests {
             let pairs = (0..total).flat_map(|i| (i + 1..total).map(move |j| vec![i, j]));
             for corrupted in singles.chain(pairs) {
                 let mut entries = valid.clone();
-                let offset = V::Signature::generator() * &Scalar::random(&mut rng);
+                let offset = V::Signature::generator() * &V::Scalar::random(&mut rng);
                 match corrupted[..] {
                     [index] => entries[index].1 += &offset,
                     [first, second] => {
@@ -752,7 +749,7 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
         let result = verify_same_signer::<_, V, _>(
@@ -784,7 +781,7 @@ mod tests {
         verify_message::<V>(&public, namespace, msg2, &sig2).expect("sig2 should be valid");
 
         // Create forged signatures that cancel out when aggregated
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_sig1 = sig1 - &delta;
         let forged_sig2 = sig2 + &delta;

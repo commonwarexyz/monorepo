@@ -17,7 +17,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Reveal},
         primitives::{
-            group::Share,
+            group::{Scalar, Share},
             sharing::{Mode, ModeVersion},
             variant::{MinSig, Variant},
         },
@@ -515,7 +515,7 @@ impl<E: StorageContext> Secrets<E> {
     }
 }
 
-impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
+impl<E: StorageContext> dkg::SecretStore<Scalar> for Secrets<E> {
     async fn put_share(&mut self, epoch: Epoch, share: Share) {
         self.put(key(SHARE, epoch, None), share).await;
     }
@@ -532,23 +532,23 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
         self.get(&key(SEED, epoch, None)).await
     }
 
-    async fn put_dealing<V: Variant, P: commonware_cryptography::PublicKey>(
+    async fn put_dealing<V: Variant<Scalar = Scalar>, P: commonware_cryptography::PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
         public: &DealerPubMsg<V>,
-        private: DealerPrivMsg,
+        private: DealerPrivMsg<Scalar>,
     ) {
         let dealing = Sha256::hash(&[&dealer, &public.encode()]);
         self.put(key(DEALING, epoch, Some(dealing)), private).await;
     }
 
-    async fn get_dealing<V: Variant, P: commonware_cryptography::PublicKey>(
+    async fn get_dealing<V: Variant<Scalar = Scalar>, P: commonware_cryptography::PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
         public: &DealerPubMsg<V>,
-    ) -> Option<DealerPrivMsg> {
+    ) -> Option<DealerPrivMsg<Scalar>> {
         let dealing = Sha256::hash(&[dealer, &public.encode()]);
         self.get(&key(DEALING, epoch, Some(dealing))).await
     }

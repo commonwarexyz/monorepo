@@ -398,7 +398,7 @@ where
     V: Variant,
     M: Manager<PublicKey = ed25519::PublicKey, Directory = D>,
     X: Blocker<PublicKey = ed25519::PublicKey>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     D: Directory<ed25519::PublicKey>,
 {

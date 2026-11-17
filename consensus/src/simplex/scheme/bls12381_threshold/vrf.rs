@@ -67,7 +67,8 @@ use commonware_cryptography::bls12381::tle;
 use commonware_cryptography::{
     Digest, PublicKey,
     bls12381::primitives::{
-        group::Share,
+        group::Scalar,
+        key::Share,
         ops::{self, batch, threshold},
         sharing::Sharing,
         variant::{PartialSignature, Variant},
@@ -101,7 +102,7 @@ enum Role<P: PublicKey, V: Variant> {
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
-        share: Share,
+        share: Share<V::Scalar>,
         /// Pre-computed namespaces for domain separation.
         namespace: Namespace,
     },
@@ -158,7 +159,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
-        share: Share,
+        share: Share<V::Scalar>,
     ) -> Option<Self> {
         assert_eq!(
             polynomial.total().get() as usize,
@@ -302,7 +303,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     /// Returns the local share if this instance can generate partial signatures.
-    pub const fn share(&self) -> Option<&Share> {
+    pub const fn share(&self) -> Option<&Share<V::Scalar>> {
         match &self.role {
             Role::Signer { share, .. } => Some(share),
             _ => None,
@@ -342,7 +343,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         rng: &mut R,
         target: Round,
         message: impl Into<tle::Block>,
-    ) -> Result<tle::Ciphertext<V>, tle::Error> {
+    ) -> Result<tle::Ciphertext<V>, tle::Error>
+    where
+        V: Variant<Scalar = Scalar>,
+    {
         let block = message.into();
         let target_message = target.encode();
         tle::encrypt(
@@ -362,7 +366,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
 /// have voted in the target round, whether or not their votes form a certificate (notarization,
 /// nullification, or finalization).
 #[stability(ALPHA)]
-pub fn encrypt<R: CryptoRng, V: Variant>(
+pub fn encrypt<R: CryptoRng, V: Variant<Scalar = Scalar>>(
     rng: &mut R,
     identity: V::Public,
     namespace: &[u8],
@@ -542,7 +546,10 @@ impl<V: Variant> Seed<V> {
     /// Returns `None` if the ciphertext is invalid or encrypted for a different
     /// round than this seed.
     #[stability(ALPHA)]
-    pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
+    pub fn decrypt(&self, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block>
+    where
+        V: Variant<Scalar = Scalar>,
+    {
         decrypt(self, ciphertext)
     }
 }
@@ -552,7 +559,10 @@ impl<V: Variant> Seed<V> {
 /// Returns `None` if the ciphertext is invalid or encrypted for a different
 /// round than the given seed.
 #[stability(ALPHA)]
-pub fn decrypt<V: Variant>(seed: &Seed<V>, ciphertext: &tle::Ciphertext<V>) -> Option<tle::Block> {
+pub fn decrypt<V: Variant<Scalar = Scalar>>(
+    seed: &Seed<V>,
+    ciphertext: &tle::Ciphertext<V>,
+) -> Option<tle::Block> {
     tle::decrypt(&seed.signature, ciphertext)
 }
 
@@ -2110,7 +2120,7 @@ mod tests {
         verify_certificate_detects_seed_corruption::<MinSig>();
     }
 
-    fn encrypt_decrypt<V: Variant>() {
+    fn encrypt_decrypt<V: Variant<Scalar = Scalar>>() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(4, 61);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -2158,7 +2168,7 @@ mod tests {
         encrypt_decrypt::<MinSig>();
     }
 
-    fn encrypt_with_identity_returns_error<V: Variant>() {
+    fn encrypt_with_identity_returns_error<V: Variant<Scalar = Scalar>>() {
         let mut rng = test_rng();
         let verifier = Scheme::<V>::certificate_verifier(NAMESPACE, V::Public::zero());
         let target = Round::new(Epoch::new(333), View::new(10));
@@ -2195,7 +2205,7 @@ mod tests {
             &Sequential,
         ));
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let att_sig = attestation.signature.get().unwrap();
         let forged_attestation: Attestation<Scheme<V>> = Attestation {
@@ -2258,7 +2268,7 @@ mod tests {
         assert!(verification.invalid.is_empty());
         assert_eq!(verification.verified.len(), 2);
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let att1_sig = attestation1.signature.get().unwrap();
         let att2_sig = attestation2.signature.get().unwrap();
@@ -2464,7 +2474,7 @@ mod tests {
         ));
 
         let cert = certificate.get().unwrap();
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_certificate: Certificate<V> = Signature {
             vote_signature: cert.vote_signature - &delta,
@@ -2554,7 +2564,7 @@ mod tests {
 
         let cert1 = certificate1.get().unwrap();
         let cert2 = certificate2.get().unwrap();
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_certificate1: Certificate<V> = Signature {
             vote_signature: cert1.vote_signature - &delta,

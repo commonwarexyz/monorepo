@@ -18,7 +18,7 @@ hash = "ad245f64a57c96036599647eaf509937173e9de01503a9e6494f29571191ade1"
 n_cases = 65536
 hash = "ba2d888e6d1050e6a361aa79430c1bb03d90eb8e74b9715b1d7d01c35a495e1d"
 
-["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<AckOrReveal<ed25519::PublicKey>>"]
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<AckOrReveal<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "97c266fb7821326e6333be0859025c774220c8d010e488d2fd13a743e4135f64"
 
@@ -26,7 +26,7 @@ hash = "97c266fb7821326e6333be0859025c774220c8d010e488d2fd13a743e4135f64"
 n_cases = 65536
 hash = "ef8d69a3cbafc5e3f8f98755337acacc6609e92d3fdee0e4576481190cb421b4"
 
-["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<DealerPrivMsg>"]
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<DealerPrivMsg<Scalar>>"]
 n_cases = 65536
 hash = "2d443ed310b383cab74abec888d0637ab81435779e274ed7be84adc7b10e2f86"
 
@@ -34,7 +34,7 @@ hash = "2d443ed310b383cab74abec888d0637ab81435779e274ed7be84adc7b10e2f86"
 n_cases = 65536
 hash = "0a15ca78d654be68bb78cf58cfd1da568f8f1585878f081735939f02da161b22"
 
-["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<DealerResult<ed25519::PublicKey>>"]
+["commonware_cryptography::bls12381::dkg::feldman_desmedt::test::conformance::CodecConformance<DealerResult<MinPk,ed25519::PublicKey>>"]
 n_cases = 65536
 hash = "1a05e4e910dd186bd81189d79eaf1b4c211012d07f534ddaa38ab9705d80fa62"
 

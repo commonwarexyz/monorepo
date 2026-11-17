@@ -205,7 +205,7 @@ use commonware_cryptography::{
     PublicKey,
     bls12381::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
-        primitives::{group::Share, variant::Variant},
+        primitives::{key::Share, variant::Variant},
     },
     transcript::Summary,
 };
@@ -275,12 +275,12 @@ pub trait Registrar: Send + Sync + 'static {
 /// Once a restarted node starts reading this store, operations from previous runs
 /// must not change stored material. This includes writes and prunes whose futures
 /// were dropped. Reads must reflect the state left by those operations.
-pub trait SecretStore: Send + Sync + 'static {
+pub trait SecretStore<S>: Send + Sync + 'static {
     /// Stores this node's [`Share`] for `epoch`.
-    fn put_share(&mut self, epoch: Epoch, share: Share) -> impl Future<Output = ()> + Send;
+    fn put_share(&mut self, epoch: Epoch, share: Share<S>) -> impl Future<Output = ()> + Send;
 
     /// Returns this node's [`Share`] for `epoch`, if stored.
-    fn get_share(&mut self, epoch: Epoch) -> impl Future<Output = Option<Share>> + Send;
+    fn get_share(&mut self, epoch: Epoch) -> impl Future<Output = Option<Share<S>>> + Send;
 
     /// Stores this node's dealer RNG seed for `epoch`.
     ///
@@ -294,22 +294,22 @@ pub trait SecretStore: Send + Sync + 'static {
     ///
     /// `public` distinguishes multiple dealings from the same dealer in one epoch.
     /// A private dealing is valid only with its matching public message.
-    fn put_dealing<V: Variant, P: PublicKey>(
+    fn put_dealing<V: Variant<Scalar = S>, P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
         public: &DealerPubMsg<V>,
-        private: DealerPrivMsg,
+        private: DealerPrivMsg<S>,
     ) -> impl Future<Output = ()> + Send;
 
     /// Returns the private dealing received from `dealer` during `epoch` with `public`,
     /// if stored.
-    fn get_dealing<V: Variant, P: PublicKey>(
+    fn get_dealing<V: Variant<Scalar = S>, P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
         public: &DealerPubMsg<V>,
-    ) -> impl Future<Output = Option<DealerPrivMsg>> + Send;
+    ) -> impl Future<Output = Option<DealerPrivMsg<S>>> + Send;
 
     /// Prunes secrets older than `min`.
     fn prune(&mut self, min: Epoch) -> impl Future<Output = ()> + Send;

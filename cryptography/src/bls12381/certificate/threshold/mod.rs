@@ -26,7 +26,7 @@ pub mod mocks;
 use crate::{
     PublicKey,
     bls12381::primitives::{
-        group::Share,
+        key::Share,
         ops::{self, batch, threshold},
         sharing::Sharing,
         variant::{PartialSignature, Variant},
@@ -66,7 +66,7 @@ pub enum Generic<P: PublicKey, V: Variant, N: Namespace> {
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
         /// Local share used to generate partial signatures.
-        share: Share,
+        share: Share<V::Scalar>,
         /// Pre-computed namespace(s) for this subject type.
         namespace: N,
     },
@@ -110,7 +110,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         namespace: &[u8],
         participants: Set<P>,
         polynomial: Sharing<V>,
-        share: Share,
+        share: Share<V::Scalar>,
     ) -> Option<Self> {
         assert_eq!(
             polynomial.total().get() as usize,
@@ -212,7 +212,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Returns the local share if this instance can generate partial signatures.
-    pub const fn share(&self) -> Option<&Share> {
+    pub const fn share(&self) -> Option<&Share<V::Scalar>> {
         match self {
             Self::Signer { share, .. } => Some(share),
             _ => None,
@@ -582,7 +582,9 @@ macro_rules! impl_certificate_bls12381_threshold {
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
-                share: $crate::bls12381::primitives::group::Share,
+                share: $crate::bls12381::primitives::key::Share<
+                    <V as $crate::bls12381::primitives::variant::Variant>::Scalar,
+                >,
             ) -> Option<Self> {
                 Some(Self {
                     generic: $crate::bls12381::certificate::threshold::Generic::signer::<$faults>(
@@ -663,7 +665,9 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             /// Returns the local share if this instance can generate partial signatures.
-            pub const fn share(&self) -> Option<&$crate::bls12381::primitives::group::Share> {
+            pub const fn share(&self) -> Option<&$crate::bls12381::primitives::key::Share<
+                    <V as $crate::bls12381::primitives::variant::Variant>::Scalar,
+                >> {
                 self.generic.share()
             }
         }
