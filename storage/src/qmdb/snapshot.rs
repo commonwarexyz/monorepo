@@ -18,7 +18,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_runtime::{
-    AbortOnDrop, Blob, Error as RuntimeError, ReadOptions, Spawner, Storage, WriteOptions,
+    AbortOnDrop, Blob, Error as RuntimeError, IoBufMut, ReadOptions, Spawner, Storage, WriteOptions,
 };
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
@@ -253,10 +253,13 @@ where
     R: PartitionRange<Value = Location<F>>,
 {
     let mut records = sort_records(data, layout);
-    records.retain(|record| record.tagged & 1 == 0);
-    for record in &records {
-        activate(record.tagged >> 1);
-    }
+    records.retain(|record| {
+        let survives = record.tagged & 1 == 0;
+        if survives {
+            activate(record.tagged >> 1);
+        }
+        survives
+    });
 
     // Survivors are distinct keys in ascending order, and a partition's keys are contiguous in
     // that order, so each partition is loaded at once. A key's partition depends only on its
@@ -285,8 +288,8 @@ where
 struct Run {
     /// The run's blocks that are yet to be read.
     blocks: std::vec::IntoIter<(u64, usize)>,
-    /// The block being read.
-    block: Vec<u8>,
+    /// The block being read, in the buffer it was read into.
+    block: IoBufMut,
 
     /// The current record: its key's first eight bytes, its tagged location, and where its key
     /// sits in `block`.
@@ -301,7 +304,7 @@ impl Run {
     fn new(blocks: Vec<(u64, usize)>) -> Self {
         Self {
             blocks: blocks.into_iter(),
-            block: Vec::new(),
+            block: IoBufMut::default(),
             prefix: 0,
             tagged: 0,
             key_at: 0,
@@ -311,7 +314,7 @@ impl Run {
 
     /// The current record's key.
     fn key(&self) -> &[u8] {
-        &self.block[self.key_at..][..self.key_len]
+        &self.block.as_ref()[self.key_at..][..self.key_len]
     }
 
     /// Whether the current record sorts before `other`'s: by key, then oldest first.
@@ -328,18 +331,16 @@ impl Run {
         let mut at = self.key_at + self.key_len;
         if at == self.block.len() {
             let Some((offset, len)) = self.blocks.next() else {
-                self.block = Vec::new();
+                *self = Self::new(Vec::new());
                 return Ok(false);
             };
-            let block = blob
+            self.block = blob
                 .read_at(offset, len, ReadOptions::DONT_CACHE)
                 .await?
                 .coalesce();
-            self.block.clear();
-            self.block.extend_from_slice(block.as_ref());
             at = 0;
         }
-        (self.tagged, self.key_at, self.key_len) = layout.decode(&self.block, at);
+        (self.tagged, self.key_at, self.key_len) = layout.decode(self.block.as_ref(), at);
         self.prefix = key_prefix(self.key());
         Ok(true)
     }
