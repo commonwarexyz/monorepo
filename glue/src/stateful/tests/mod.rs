@@ -28,15 +28,15 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Application as _, CertifiableAutomaton as _, Reporter,
-    marshal::{
-        self,
-        ancestry::{self, Ancestry},
-        core::Actor as MarshalActor,
-        resolver::handler,
-        standard::{Deferred, Standard},
-    },
     simplex::{
         elector::RoundRobin,
+        marshal::{
+            self,
+            ancestry::{self, Ancestry},
+            core::Actor as MarshalActor,
+            resolver::handler,
+            standard::{Deferred, Standard},
+        },
         mocks::scheme as scheme_mocks,
         types::{Activity, Context},
     },
