@@ -242,26 +242,25 @@ where
     }
 }
 
-impl<S, B, C, H, P, E> AncestorStream<Mailbox<S, Coding<B, C, H, P>>, E>
+impl<S, B, C, H, P> Mailbox<S, Coding<B, C, H, P>>
 where
     S: Scheme,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
-    E: Clock,
 {
-    /// Creates a new [AncestorStream] over a coding mailbox (see [`AncestorStream::new`]).
+    /// Returns a stream over the ancestry of `initial` (see [`AncestorStream::new`]).
     ///
     /// The stream passes no bound because the coding provider bounds each parent request by the
     /// parent round in the child's consensus context.
-    pub(super) fn unbounded(
+    pub(super) fn unbounded_ancestry<E: Clock>(
+        &self,
         clock: Arc<E>,
-        marshal: Mailbox<S, Coding<B, C, H, P>>,
         initial: impl IntoIterator<Item = Digested<B>>,
         fetch_duration: Timed,
-    ) -> Self {
-        Self::new(clock, marshal, initial, None, fetch_duration)
+    ) -> AncestorStream<Self, E> {
+        AncestorStream::new(clock, self.clone(), initial, None, fetch_duration)
     }
 }
 

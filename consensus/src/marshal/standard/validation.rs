@@ -177,25 +177,24 @@ where
     Some(ParentCheck::Valid(parent))
 }
 
-impl<S, B, C> AncestorStream<Mailbox<S, Standard<B>>, C>
+impl<S, B> Mailbox<S, Standard<B>>
 where
     S: Scheme,
     B: Block + Codec,
-    C: Clock,
 {
-    /// Creates a new [AncestorStream] over a standard mailbox (see [`AncestorStream::new`]).
+    /// Returns a stream over the ancestry of `initial` (see [`AncestorStream::new`]).
     ///
     /// The stream passes `bound`, the round of the consensus request it serves, to limit how long
     /// the provider fetches each missing parent. The round is needed because the only other limit
     /// is the height the parent's child claims, and an unchecked child can claim any height.
-    pub(super) fn bounded(
+    pub(super) fn bounded_ancestry<C: Clock>(
+        &self,
         clock: Arc<C>,
-        marshal: Mailbox<S, Standard<B>>,
         initial: impl IntoIterator<Item = Digested<B>>,
         bound: Round,
         fetch_duration: Timed,
-    ) -> Self {
-        Self::new(clock, marshal, initial, Some(bound), fetch_duration)
+    ) -> AncestorStream<Self, C> {
+        AncestorStream::new(clock, self.clone(), initial, Some(bound), fetch_duration)
     }
 }
 
@@ -223,9 +222,8 @@ where
     B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let ancestry_stream = AncestorStream::bounded(
+    let ancestry_stream = marshal.bounded_ancestry(
         Arc::new(runtime_context.child("ancestor_stream")),
-        marshal.clone(),
         [block.clone(), parent],
         context.round,
         ancestor_fetch_duration,

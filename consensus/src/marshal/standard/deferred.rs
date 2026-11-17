@@ -94,7 +94,7 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, Relay, Reporter,
     marshal::{
-        ancestry::{AncestorStream, Ancestry},
+        ancestry::Ancestry,
         application::{
             build::{self, Resolved},
             gates::{self, GateOutcome, Gates},
@@ -540,9 +540,8 @@ where
                 return Resolved::Reuse(parent.digest(), parent);
             }
 
-            let ancestor_stream = AncestorStream::bounded(
+            let ancestor_stream = marshal.bounded_ancestry(
                 context.clone(),
-                marshal,
                 [parent],
                 consensus_context.round,
                 ancestor_fetch_duration,

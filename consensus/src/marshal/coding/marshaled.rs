@@ -92,7 +92,7 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, Relay, Reporter,
     marshal::{
-        ancestry::{AncestorStream, Ancestry},
+        ancestry::Ancestry,
         application::{
             build::{self, Resolved},
             gates::{self, GateOutcome, Gates},
@@ -462,9 +462,8 @@ where
                         return Some(false);
                     }
 
-                    let ancestry_stream = AncestorStream::unbounded(
+                    let ancestry_stream = marshal.unbounded_ancestry(
                         Arc::new(runtime_context.child("ancestor_stream")),
-                        marshal.clone(),
                         [block.inner_digested(), parent.inner_digested()],
                         ancestor_fetch_duration,
                     );
@@ -729,9 +728,8 @@ where
                 return Resolved::Reuse(parent.commitment(), parent);
             }
 
-            let ancestor_stream = AncestorStream::unbounded(
+            let ancestor_stream = marshal.unbounded_ancestry(
                 context.clone(),
-                marshal,
                 [parent.inner_digested()],
                 ancestor_fetch_duration,
             );
