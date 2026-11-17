@@ -92,7 +92,7 @@ use crate::{
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
     Heightable, Relay, Reporter,
     marshal::{
-        ancestry::Ancestry,
+        ancestry::{AncestorStream, Ancestry},
         application::{
             build::{self, Resolved},
             gates::{self, GateOutcome, Gates},
@@ -462,10 +462,10 @@ where
                         return Some(false);
                     }
 
-                    let ancestry_stream = marshal.ancestor_stream(
+                    let ancestry_stream = AncestorStream::unbounded(
                         Arc::new(runtime_context.child("ancestor_stream")),
+                        marshal.clone(),
                         [block.inner_digested(), parent.inner_digested()],
-                        Some(round),
                         ancestor_fetch_duration,
                     );
                     let validity_request = application
@@ -729,10 +729,10 @@ where
                 return Resolved::Reuse(parent.commitment(), parent);
             }
 
-            let ancestor_stream = marshal.ancestor_stream(
+            let ancestor_stream = AncestorStream::unbounded(
                 context.clone(),
+                marshal,
                 [parent.inner_digested()],
-                Some(consensus_context.round),
                 ancestor_fetch_duration,
             );
             Resolved::Build(

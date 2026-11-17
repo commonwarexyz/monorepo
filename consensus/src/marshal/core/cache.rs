@@ -415,11 +415,12 @@ where
         (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
-    /// Add a block to the height-indexed certified archive.
+    /// Add a block to the height-indexed certified archive, whether or not the block is certified.
     ///
-    /// A block whose epoch lies above the ceiling is not stored, so this write never raises the
-    /// ceiling. The epoch comes from the block's own height, and that height can be an unchecked
-    /// claim.
+    /// A block whose epoch lies below the epoch floor is not stored, because that epoch has been
+    /// pruned. A block whose epoch lies above the epoch ceiling is not stored, because storing the
+    /// block would raise the ceiling to an epoch derived from the block's own height, and that
+    /// height can be an unchecked claim.
     pub(crate) async fn put_certified(
         mut self,
         epoch: Epoch,

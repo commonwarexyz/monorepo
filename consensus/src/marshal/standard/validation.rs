@@ -1,13 +1,13 @@
 use crate::{
     Application, Block, Epochable, Heightable,
     marshal::{
-        ancestry::has_contiguous_height,
+        ancestry::{AncestorStream, has_contiguous_height},
         application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
         core::Mailbox,
         standard::Standard,
     },
     simplex::types::Context,
-    types::Epocher,
+    types::{Epocher, Round},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
@@ -177,6 +177,28 @@ where
     Some(ParentCheck::Valid(parent))
 }
 
+impl<S, B, C> AncestorStream<Mailbox<S, Standard<B>>, C>
+where
+    S: Scheme,
+    B: Block + Codec,
+    C: Clock,
+{
+    /// Creates a new [AncestorStream] over a standard mailbox (see [`AncestorStream::new`]).
+    ///
+    /// The stream passes `bound`, the round of the consensus request it serves, to limit how long
+    /// the provider fetches each missing parent. The round is needed because the only other limit
+    /// is the height the parent's child claims, and an unchecked child can claim any height.
+    pub(super) fn bounded(
+        clock: Arc<C>,
+        marshal: Mailbox<S, Standard<B>>,
+        initial: impl IntoIterator<Item = Digested<B>>,
+        bound: Round,
+        fetch_duration: Timed,
+    ) -> Self {
+        Self::new(clock, marshal, initial, Some(bound), fetch_duration)
+    }
+}
+
 /// Runs application verification over the two-block ancestry prefix.
 ///
 /// The block must already have passed [`await_and_validate_parent`]. Returns `None` when
@@ -201,10 +223,11 @@ where
     B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let ancestry_stream = marshal.ancestor_stream(
+    let ancestry_stream = AncestorStream::bounded(
         Arc::new(runtime_context.child("ancestor_stream")),
+        marshal.clone(),
         [block.clone(), parent],
-        Some(context.round),
+        context.round,
         ancestor_fetch_duration,
     );
     let validity_request = application
