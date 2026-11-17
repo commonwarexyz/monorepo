@@ -465,7 +465,7 @@ pub trait PairingGroup: CryptoGroup {
     /// Returns `self o other`.
     fn pairing(&self, other: &Self::Twin) -> Self::Target;
 
-    /// Writes `A o X` to `outputs[i]` for each pair `(A, X)` at `pairs[i]`.
+    /// Writes `lefts[i] o rights[i]` to `outputs[i]` for each index `i`.
     ///
     /// The default computes each pairing with [`Self::pairing`] on `strategy`. An
     /// override can use batch instructions, which raise throughput even on one
@@ -473,37 +473,57 @@ pub trait PairingGroup: CryptoGroup {
     ///
     /// # Panics
     ///
-    /// Panics if `pairs` and `outputs` differ in length.
+    /// Panics if `lefts`, `rights`, and `outputs` differ in length.
+    //
+    // The batch methods take the left and right elements as separate slices
+    // rather than one slice of pairs. Callers often hold them apart already, as
+    // batch verification holds public keys and hashed messages, and code that
+    // swaps the two groups passes the same slices in the other order instead of
+    // copying every pair.
     fn pairings(
-        pairs: &[(Self, Self::Twin)],
+        lefts: &[Self],
+        rights: &[Self::Twin],
         outputs: &mut [Self::Target],
         strategy: &impl Strategy,
     ) {
         assert_eq!(
-            pairs.len(),
+            lefts.len(),
+            rights.len(),
+            "lefts and rights must have the same length"
+        );
+        assert_eq!(
+            lefts.len(),
             outputs.len(),
-            "pairs and outputs must have the same length"
+            "lefts and outputs must have the same length"
         );
         // `Strategy` has no for-each operation, so this `fold` carries a `()`
         // accumulator and only writes outputs. The zip gives each pair its own
         // output slot: a task writes its pairing in place, however the strategy
         // splits the items.
         strategy.fold(
-            pairs.iter().zip(outputs),
+            lefts.iter().zip(rights).zip(outputs),
             || (),
             |(), ((p, q), out)| *out = p.pairing(q),
             |(), ()| (),
         );
     }
 
-    /// Returns the sum of `A o X` over each pair `(A, X)` in `pairs`, or zero if
-    /// `pairs` is empty.
+    /// Returns the sum of `lefts[i] o rights[i]` over each index `i`, or zero if
+    /// both slices are empty.
     ///
     /// The default sums the outputs of [`Self::pairings`], so an override of that
     /// method also speeds up this one.
-    fn multi_pairing(pairs: &[(Self, Self::Twin)], strategy: &impl Strategy) -> Self::Target {
-        let mut outputs = vec![Self::Target::zero(); pairs.len()];
-        Self::pairings(pairs, &mut outputs, strategy);
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lefts` and `rights` differ in length.
+    fn multi_pairing(
+        lefts: &[Self],
+        rights: &[Self::Twin],
+        strategy: &impl Strategy,
+    ) -> Self::Target {
+        let mut outputs = vec![Self::Target::zero(); lefts.len()];
+        Self::pairings(lefts, rights, &mut outputs, strategy);
         strategy.fold(
             &outputs,
             Self::Target::zero,
@@ -834,28 +854,29 @@ pub mod test_suites {
         assert_eq!(a.pairing(&(x * &s)), expected, "A o (X * s) != (A o X) * s");
     }
 
-    fn check_pairings_eq_naive<G: PairingGroup>(pairs: &[(G, G::Twin)]) {
+    fn check_pairings_eq_naive<G: PairingGroup>(lefts: &[G], rights: &[G::Twin]) {
         use commonware_parallel::Sequential;
         // Start each output one generator away from its expected value, so the check
         // below catches any output that `pairings` leaves unwritten.
-        let mut outputs: Vec<G::Target> = pairs
+        let mut outputs: Vec<G::Target> = lefts
             .iter()
+            .zip(rights)
             .map(|(a, x)| a.pairing(x) + &G::Target::generator())
             .collect();
-        G::pairings(pairs, &mut outputs, &Sequential);
-        for ((a, x), out) in pairs.iter().zip(&outputs) {
+        G::pairings(lefts, rights, &mut outputs, &Sequential);
+        for ((a, x), out) in lefts.iter().zip(rights).zip(&outputs) {
             assert_eq!(*out, a.pairing(x), "pairings does not match pairing");
         }
     }
 
-    fn check_multi_pairing_eq_naive<G: PairingGroup>(pairs: &[(G, G::Twin)]) {
+    fn check_multi_pairing_eq_naive<G: PairingGroup>(lefts: &[G], rights: &[G::Twin]) {
         use commonware_parallel::Sequential;
         let mut expected = G::Target::zero();
-        for (a, x) in pairs {
+        for (a, x) in lefts.iter().zip(rights) {
             expected += &a.pairing(x);
         }
         assert_eq!(
-            G::multi_pairing(pairs, &Sequential),
+            G::multi_pairing(lefts, rights, &Sequential),
             expected,
             "multi_pairing does not match the sum of pairings"
         );
@@ -880,8 +901,16 @@ pub mod test_suites {
             1 => check_pairing_linear_left::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
             2 => check_pairing_linear_right::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
             3 => check_pairing_scalar::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
-            4 => check_pairings_eq_naive::<G>(&u.arbitrary::<Vec<_>>()?),
-            _ => check_multi_pairing_eq_naive::<G>(&u.arbitrary::<Vec<_>>()?),
+            4 => {
+                let (lefts, rights): (Vec<G>, Vec<G::Twin>) =
+                    u.arbitrary::<Vec<_>>()?.into_iter().unzip();
+                check_pairings_eq_naive(&lefts, &rights);
+            }
+            _ => {
+                let (lefts, rights): (Vec<G>, Vec<G::Twin>) =
+                    u.arbitrary::<Vec<_>>()?.into_iter().unzip();
+                check_multi_pairing_eq_naive(&lefts, &rights);
+            }
         }
         Ok(())
     }
