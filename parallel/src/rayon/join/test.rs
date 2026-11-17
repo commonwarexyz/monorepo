@@ -65,19 +65,19 @@ fn sort_in_pool() {
 #[test]
 #[should_panic(expected = "Hello, world!")]
 fn panic_propagate_a() {
-    in_pool(|| join(|| panic!("Hello, world!"), || ()));
+    in_pool(|| join::<_, _, (), ()>(|| panic!("Hello, world!"), || ()));
 }
 
 #[test]
 #[should_panic(expected = "Hello, world!")]
 fn panic_propagate_b() {
-    in_pool(|| join(|| (), || panic!("Hello, world!")));
+    in_pool(|| join::<_, _, (), ()>(|| (), || panic!("Hello, world!")));
 }
 
 #[test]
 #[should_panic(expected = "Hello, world!")]
 fn panic_propagate_both() {
-    in_pool(|| join(|| panic!("Hello, world!"), || panic!("Goodbye, world!")));
+    in_pool(|| join::<_, _, (), ()>(|| panic!("Hello, world!"), || panic!("Goodbye, world!")));
 }
 
 #[test]
