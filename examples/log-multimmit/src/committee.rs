@@ -4,7 +4,7 @@ use crate::config::RunConfig;
 use commonware_consensus::{
     multimmit::{
         config::{Parameters, Protocol, Tuning},
-        scheme::{Generic, bls12381_sas},
+        scheme::{Generic, bls12381},
         types::{BlockRef, CertificateId, ChainId, CodecConfig, EpochGenesis, PathLimits},
     },
     types::{Epoch, Height, Participant, ViewDelta},
@@ -19,19 +19,19 @@ use std::{sync::Arc, time::Duration};
 /// The DA role: aggregate DA certificates that count their signers with the `payments` feature, so
 /// payment chains' producers can form receipts, and threshold certificates otherwise.
 #[cfg(feature = "payments")]
-pub type DaRole = bls12381_sas::Aggregate;
+pub type DaRole = bls12381::Aggregate;
 /// The DA role: aggregate DA certificates that count their signers with the `payments` feature, so
 /// payment chains' producers can form receipts, and threshold certificates otherwise.
 #[cfg(not(feature = "payments"))]
-pub type DaRole = bls12381_sas::Threshold;
+pub type DaRole = bls12381::Threshold;
 
 /// Whether chains with zero pipeline depth and extension bound are payment chains.
 pub const PAYMENTS: bool = cfg!(feature = "payments");
 
-/// The signing suite this example runs: the synchronized aggregate suite over Ed25519 identities,
-/// with Pointcheval-Sanders votes, a threshold nullification certificate, and DA certificates of
-/// the [`DaRole`].
-pub type Suite = bls12381_sas::Scheme<ed25519::PublicKey, MinSig, DaRole>;
+/// The signing suite this example runs: the BLS12-381 multisig suite over Ed25519 identities, with
+/// multi-signature votes, a threshold nullification certificate, and DA certificates of the
+/// [`DaRole`].
+pub type Suite = bls12381::Scheme<ed25519::PublicKey, MinSig, DaRole>;
 
 /// Signature namespace for this example's consensus deployment.
 const CONSENSUS_NAMESPACE: &[u8] = b"_COMMONWARE_LOG_MULTIMMIT_CONSENSUS";
