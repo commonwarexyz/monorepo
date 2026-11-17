@@ -20,16 +20,20 @@ use std::{
     fs::File,
     io::IoSlice,
     ops::Deref,
-    os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 use tokio::task;
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::fs::FileExt};
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
+#[cfg(any(unix, test))]
 const IOVEC_BATCH_SIZE: usize = 1024;
 
 #[cfg(target_os = "linux")]
@@ -52,6 +56,7 @@ impl Cache {
     }
 
     /// Return whether an unsupported cache-bypass attempt should be retried with normal caching.
+    #[cfg(unix)]
     fn retry_cached(
         &mut self,
         supported: &AtomicBool,
@@ -351,17 +356,88 @@ impl Blob {
         Ok(())
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn read_exact_at(_: Cache, file: &Shared, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         file.read_exact_at(buf, offset)?;
         Ok(())
     }
 
+    #[cfg(unix)]
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
         file.write_all_at(buf, offset)?;
         Ok(())
     }
 
+    #[cfg(windows)]
+    fn read_exact_at(_: Cache, file: &Shared, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        Self::read_exact_windows(file, buf, offset)
+    }
+
+    // Windows positioned operations update the handle cursor. Shared blob operations
+    // always supply their own offsets and never depend on that cursor.
+    #[cfg(windows)]
+    fn read_exact_windows(file: &File, mut buf: &mut [u8], mut offset: u64) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match file.seek_read(buf, offset) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()),
+                Ok(read) => {
+                    buf = &mut buf[read..];
+                    offset = offset.checked_add(read as u64).ok_or(Error::OffsetOverflow)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn write_single_at(file: &File, mut offset: u64, mut buf: &[u8]) -> Result<(), Error> {
+        while !buf.is_empty() {
+            match file.seek_write(buf, offset) {
+                Ok(0) => return Err(Error::WriteFailed),
+                Ok(written) => {
+                    buf = &buf[written..];
+                    offset = offset.checked_add(written as u64).ok_or(Error::OffsetOverflow)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn write_vectored_at(
+        _: Cache,
+        file: &Shared,
+        offset: u64,
+        bufs: &mut IoBufs,
+        flags: Option<libc::c_int>,
+    ) -> Result<(), Error> {
+        Self::write_vectored_windows(file, offset, bufs, flags)
+    }
+
+    #[cfg(windows)]
+    fn write_vectored_windows(
+        file: &File,
+        mut offset: u64,
+        bufs: &mut IoBufs,
+        flags: Option<libc::c_int>,
+    ) -> Result<(), Error> {
+        assert!(flags.is_none(), "flags are only supported on Linux");
+        while bufs.has_remaining() {
+            let mut slices = [IoSlice::new(&[])];
+            assert!(bufs.chunks_vectored(&mut slices) > 0);
+            Self::write_single_at(file, offset, &slices[0])?;
+            let written = slices[0].len();
+            bufs.advance(written);
+            offset = offset.checked_add(written as u64).ok_or(Error::OffsetOverflow)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
     /// Write `bufs` at `offset`, batching up to [IOVEC_BATCH_SIZE] iovecs per submission.
     ///
     /// `flags` apply to every submission, so callers must only pass durability flags when the
@@ -2216,5 +2292,63 @@ mod tests {
         assert!(!sibling.is_disabled(&supported));
         assert!(sibling.retry_cached(&supported, &unsupported, true));
         assert!(!cache.retry_cached(&supported, &unsupported, true));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::Blob;
+    use crate::{Buf as _, Error, IoBuf, IoBufs};
+    use std::{fs::OpenOptions, io::{Read as _, Seek as _, SeekFrom}};
+
+    #[test]
+    fn positioned_writes_preserve_other_ranges_and_exact_reads_report_eof() {
+        let path = std::env::temp_dir().join(format!(
+            "commonware_windows_positioned_{}", std::process::id()
+        ));
+        let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+        Blob::write_single_at(&file, 0, b"0123456789").unwrap();
+        Blob::write_single_at(&file, 3, b"ABC").unwrap();
+        Blob::write_single_at(&file, 12, b"Z").unwrap();
+        let mut actual = [0; 13];
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.read_exact(&mut actual).unwrap();
+        assert_eq!(&actual, b"012ABC6789\0\0Z");
+        let mut range = [0; 5];
+        Blob::read_exact_windows(&file, &mut range, 2).unwrap();
+        assert_eq!(&range, b"2ABC6");
+        assert!(matches!(
+            Blob::read_exact_windows(&file, &mut range, 11),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+        let mut bufs = IoBufs::from(vec![IoBuf::from(b"abc"), IoBuf::from(b"d"), IoBuf::from(b"ef")]);
+        Blob::write_vectored_windows(&file, 1, &mut bufs, None).unwrap();
+        assert!(!bufs.has_remaining());
+        let mut vectored = [0; 6];
+        Blob::read_exact_windows(&file, &mut vectored, 1).unwrap();
+        assert_eq!(&vectored, b"abcdef");
+        std::thread::scope(|scope| {
+            let left = scope.spawn(|| {
+                for _ in 0..32 {
+                    Blob::write_single_at(&file, 64, &[b'L'; 128]).unwrap();
+                }
+            });
+            let right = scope.spawn(|| {
+                for _ in 0..32 {
+                    Blob::write_single_at(&file, 192, &[b'R'; 128]).unwrap();
+                }
+            });
+            left.join().unwrap();
+            right.join().unwrap();
+        });
+        let mut concurrent = [0; 256];
+        Blob::read_exact_windows(&file, &mut concurrent, 64).unwrap();
+        assert_eq!(&concurrent[..128], &[b'L'; 128]);
+        assert_eq!(&concurrent[128..], &[b'R'; 128]);
+        drop(file);
+        let readonly = OpenOptions::new().read(true).open(&path).unwrap();
+        assert!(Blob::write_single_at(&readonly, 0, b"x").is_err());
+        drop(readonly);
+        std::fs::remove_file(path).unwrap();
     }
 }

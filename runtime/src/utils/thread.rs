@@ -95,6 +95,11 @@ fn system_thread_stack_size_impl() -> Option<usize> {
     Some(limit)
 }
 
+#[cfg(not(unix))]
+fn system_thread_stack_size_impl() -> Option<usize> {
+    None
+}
+
 /// Spawns a thread with an explicit stack size.
 pub(crate) fn spawn<F, T>(stack_size: usize, f: F) -> thread::JoinHandle<T>
 where
