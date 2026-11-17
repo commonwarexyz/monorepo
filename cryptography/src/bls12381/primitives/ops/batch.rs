@@ -13,12 +13,12 @@
 //! which an attacker cannot arrange without predicting the weights. The soundness error is at most
 //! `2^-128` per check.
 use super::{
-    super::{Error, group::SmallScalar, variant::Variant},
+    super::{Error, variant::Variant},
     hash_with_namespace,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_math::algebra::Space;
+use commonware_math::algebra::{Additive, CryptoGroup, PairingGroup, Random, Space};
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
 use core::num::NonZeroUsize;
@@ -109,7 +109,7 @@ impl<V: Variant> SegmentTree<V> {
             let (pk, sig) = self.tree[node].expect("node exists");
 
             // A valid subtree has only valid leaves.
-            if V::verify(&pk, hm, &sig).is_ok() {
+            if super::verify_hashed::<V>(&pk, hm, &sig).is_ok() {
                 continue;
             }
 
@@ -203,8 +203,8 @@ where
     let (pks, sigs) = entries.into_iter().collect::<(Vec<_>, Vec<_>)>();
 
     // Generate 128-bit random scalars (sufficient for batch verification security)
-    let scalars: Vec<SmallScalar> = (0..pks.len())
-        .map(|_| SmallScalar::random(&mut *rng))
+    let scalars: Vec<V::Challenge> = (0..pks.len())
+        .map(|_| V::Challenge::random(&mut *rng))
         .collect();
 
     // Compute MSMs for pk and sig in parallel using 128-bit scalars.
@@ -214,7 +214,7 @@ where
     );
 
     // Fast path: if all signatures are valid, return empty
-    if V::verify(&sum_pk, &hm, &sum_sig).is_ok() {
+    if super::verify_hashed::<V>(&sum_pk, &hm, &sum_sig).is_ok() {
         return Vec::new();
     }
 
@@ -251,8 +251,8 @@ where
     let entries: Vec<_> = entries.into_iter().collect();
 
     // Generate 128-bit random scalars (sufficient for batch verification security)
-    let scalars: Vec<SmallScalar> = (0..entries.len())
-        .map(|_| SmallScalar::random(&mut *rng))
+    let scalars: Vec<V::Challenge> = (0..entries.len())
+        .map(|_| V::Challenge::random(&mut *rng))
         .collect();
 
     // Hash all messages and collect signatures
@@ -268,7 +268,57 @@ where
     );
 
     // Verify: e(pk, weighted_hm) == e(weighted_sig, G)
-    V::verify(public, &weighted_hm, &weighted_sig)
+    super::verify_hashed::<V>(public, &weighted_hm, &weighted_sig)
+}
+
+/// Verifies signatures over distinct pre-hashed messages from distinct public keys, as one
+/// check.
+///
+/// An empty batch and any batch containing an identity signature are invalid.
+///
+/// This outperforms individual verification (`2` pairings per signature) by verifying a random
+/// linear combination of the equations (`n+1` pairings for `n` signatures). Unlike
+/// [verify_same_message], it does not identify which signatures are invalid.
+///
+/// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
+///
+/// # Panics
+///
+/// Panics if `publics`, `hms`, and `signatures` have different lengths.
+pub fn verify_hashed<V: Variant>(
+    rng: &mut impl CryptoRng,
+    publics: &[V::Public],
+    hms: &[V::Signature],
+    signatures: &[V::Signature],
+    strategy: &impl Strategy,
+) -> Result<(), Error> {
+    assert_eq!(publics.len(), hms.len());
+    assert_eq!(publics.len(), signatures.len());
+    if publics.is_empty() || signatures.contains(&V::Signature::zero()) {
+        return Err(Error::InvalidSignature);
+    }
+
+    // Each signature satisfies e(pk_i, hm_i) - e(g, sig_i) == 0. With independent challenges
+    // r_i, bilinearity turns sum_i r_i * (e(pk_i, hm_i) - e(g, sig_i)) == 0 into
+    // sum_i r_i * e(pk_i, hm_i) + e(-g, sum_i r_i * sig_i) == 0.
+    let challenges: Vec<V::Challenge> = (0..publics.len())
+        .map(|_| V::Challenge::random(&mut *rng))
+        .collect();
+    let aggregate = V::Signature::msm(signatures, &challenges, strategy);
+
+    // The aggregate term is already weighted, so it joins the scaled multi-pairing as the last
+    // pair, which has no challenge and is added unscaled. A separate pairing would cost a second
+    // final exponentiation.
+    let mut lefts = publics.to_vec();
+    lefts.push(-V::Public::generator());
+    let mut rights = hms.to_vec();
+    rights.push(aggregate);
+
+    let sum = V::Public::scaled_multi_pairing(&lefts, &rights, &challenges, strategy);
+    if sum != <V::Public as PairingGroup>::Target::zero() {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -284,6 +334,153 @@ mod tests {
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::{Sequential, mocks::explore};
     use commonware_utils::{non_empty, test_rng};
+
+    fn verify_hashed_correct<V: Variant>() {
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, public2) = keypair::<_, V>(&mut rng);
+        let (private3, public3) = keypair::<_, V>(&mut rng);
+
+        let msg1: &[u8] = b"message 1";
+        let msg2: &[u8] = b"message 2";
+        let msg3: &[u8] = b"message 3";
+
+        let sig1 = sign_message::<V>(&private1, b"test", msg1);
+        let sig2 = sign_message::<V>(&private2, b"test", msg2);
+        let sig3 = sign_message::<V>(&private3, b"test", msg3);
+
+        let hm1 = hash_with_namespace::<V>(V::MESSAGE, b"test", msg1);
+        let hm2 = hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
+        let hm3 = hash_with_namespace::<V>(V::MESSAGE, b"test", msg3);
+
+        assert!(
+            explore(|strategy| {
+                verify_hashed::<V>(
+                    &mut rng,
+                    &[public1, public2, public3],
+                    &[hm1, hm2, hm3],
+                    &[sig1, sig2, sig3],
+                    strategy,
+                )
+                .is_ok()
+            }),
+            "a valid batch must verify"
+        );
+    }
+
+    #[test]
+    fn test_batch_verify_correct() {
+        verify_hashed_correct::<MinPk>();
+        verify_hashed_correct::<MinSig>();
+    }
+
+    fn verify_hashed_rejects_empty<V: Variant>() {
+        assert!(matches!(
+            verify_hashed::<V>(&mut test_rng(), &[], &[], &[], &Sequential),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_empty() {
+        verify_hashed_rejects_empty::<MinPk>();
+        verify_hashed_rejects_empty::<MinSig>();
+    }
+
+    fn verify_hashed_rejects_identity_entry<V: Variant>() {
+        let mut rng = test_rng();
+        let (private, public) = keypair::<_, V>(&mut rng);
+        let namespace = b"test";
+        let message = b"message";
+        let signature = sign_message::<V>(&private, namespace, message);
+        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
+        let identity_public = V::Public::zero();
+        let identity_signature = V::Signature::zero();
+        let identity_hm = hash_with_namespace::<V>(V::MESSAGE, namespace, b"identity entry");
+
+        assert!(matches!(
+            verify_hashed::<V>(
+                &mut rng,
+                &[public, identity_public],
+                &[hm, identity_hm],
+                &[signature, identity_signature],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_identity_entry() {
+        verify_hashed_rejects_identity_entry::<MinPk>();
+        verify_hashed_rejects_identity_entry::<MinSig>();
+    }
+
+    fn verify_hashed_rejects_malleability<V: Variant>() {
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, public2) = keypair::<_, V>(&mut rng);
+
+        let msg1: &[u8] = b"message 1";
+        let msg2: &[u8] = b"message 2";
+
+        let sig1 = sign_message::<V>(&private1, b"test", msg1);
+        let sig2 = sign_message::<V>(&private2, b"test", msg2);
+
+        let hm1 = hash_with_namespace::<V>(V::MESSAGE, b"test", msg1);
+        let hm2 = hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
+
+        // Forge signatures that cancel out: sig1' = sig1 - delta, sig2' = sig2 + delta
+        let random_scalar = Scalar::random(&mut rng);
+        let delta = V::Signature::generator() * &random_scalar;
+        let forged_sig1 = sig1 - &delta;
+        let forged_sig2 = sig2 + &delta;
+
+        // Individual verification should fail for forged signatures
+        assert!(
+            super::super::verify_hashed::<V>(&public1, &hm1, &forged_sig1).is_err(),
+            "forged sig1 should be invalid individually"
+        );
+        assert!(
+            super::super::verify_hashed::<V>(&public2, &hm2, &forged_sig2).is_err(),
+            "forged sig2 should be invalid individually"
+        );
+
+        // Naive aggregate verification would accept forged signatures because:
+        // sig1' + sig2' = (sig1 - delta) + (sig2 + delta) = sig1 + sig2
+        let forged_agg = forged_sig1 + &forged_sig2;
+        let valid_agg = sig1 + &sig2;
+        assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
+
+        // batch_verify with random weights should reject forged signatures
+        let result = verify_hashed::<V>(
+            &mut rng,
+            &[public1, public2],
+            &[hm1, hm2],
+            &[forged_sig1, forged_sig2],
+            &Sequential,
+        );
+        assert!(
+            result.is_err(),
+            "batch_verify should reject forged signatures"
+        );
+
+        // Valid signatures should still pass
+        verify_hashed::<V>(
+            &mut rng,
+            &[public1, public2],
+            &[hm1, hm2],
+            &[sig1, sig2],
+            &Sequential,
+        )
+        .expect("valid signatures should pass batch_verify");
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_malleability() {
+        verify_hashed_rejects_malleability::<MinPk>();
+        verify_hashed_rejects_malleability::<MinSig>();
+    }
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -499,7 +696,7 @@ mod tests {
         let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
         let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
-        V::verify(&public, &hm_sum, forged_agg.inner())
+        crate::bls12381::primitives::ops::verify_hashed::<V>(&public, &hm_sum, forged_agg.inner())
             .expect("naive aggregate verification accepts forged aggregate");
 
         // Batch verification (with random weights) rejects forged signatures

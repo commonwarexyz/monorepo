@@ -18,19 +18,19 @@ use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, Pairing, blst_bendian_from_fp12,
-    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
-    blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
-    blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
-    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
-    blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
-    blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
-    blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
-    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
-    blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, blst_bendian_from_fp12, blst_bendian_from_scalar,
+    blst_expand_message_xmd, blst_fp12, blst_fp12_conjugate, blst_fp12_cyclotomic_sqr, blst_fr,
+    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
+    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
+    blst_miller_loop_n, blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg,
+    blst_p1_compress, blst_p1_double, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf,
+    blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p1s_mult_pippenger,
+    blst_p1s_mult_pippenger_scratch_sizeof, blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2,
+    blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg, blst_p2_compress, blst_p2_double,
+    blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine,
+    blst_p2_uncompress, blst_p2s_mult_pippenger, blst_p2s_mult_pippenger_scratch_sizeof,
+    blst_p2s_tile_pippenger, blst_p2s_to_affine, blst_scalar, blst_scalar_fr_check,
+    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
 };
 use bytes::BufMut;
 use commonware_codec::{
@@ -40,15 +40,14 @@ use commonware_codec::{
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, Random, Ring,
-    Space,
+    Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, PairingGroup,
+    Random, Ring, Space,
 };
 use commonware_parallel::{Grid, Strategy};
 use commonware_utils::{Participant, Widen};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
-    iter,
     num::NonZeroUsize,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Range, Sub, SubAssign},
     ptr,
@@ -288,6 +287,12 @@ impl SmallScalar {
     }
 }
 
+impl Random for SmallScalar {
+    fn random(rng: impl CryptoRng) -> Self {
+        Self::random(rng)
+    }
+}
+
 impl From<SmallScalar> for Scalar {
     fn from(small: SmallScalar) -> Self {
         let mut fr = blst_fr::default();
@@ -450,11 +455,6 @@ pub struct GT(blst_fp12);
 pub const GT_ELEMENT_BYTE_LENGTH: usize = 576;
 
 impl GT {
-    /// Create GT from blst_fp12.
-    pub(crate) const fn from_blst_fp12(fp12: blst_fp12) -> Self {
-        Self(fp12)
-    }
-
     /// Converts the GT element to its canonical big-endian byte representation.
     pub fn as_slice(&self) -> [u8; GT_ELEMENT_BYTE_LENGTH] {
         let mut slice = [0u8; GT_ELEMENT_BYTE_LENGTH];
@@ -464,6 +464,118 @@ impl GT {
             blst_bendian_from_fp12(slice.as_mut_ptr(), &self.0);
         }
         slice
+    }
+}
+
+// `GT` is written additively, like every other group in this crate: `+` is multiplication in
+// `F_p^12`, `zero` is its one, and `-` is the inverse.
+//
+// Every `GT` value is a pairing output or a combination of pairing outputs, so it lies in the
+// cyclotomic subgroup. There, conjugation is the inverse and the cyclotomic square is the square.
+// `GT` has no decoder, which keeps this invariant. A decoder must check `blst_fp12_in_group`.
+
+impl Write for GT {
+    fn write(&self, buf: &mut impl BufMut) {
+        let slice = Zeroizing::new(self.as_slice());
+        buf.put_slice(slice.as_ref());
+    }
+}
+
+impl FixedSize for GT {
+    const SIZE: usize = GT_ELEMENT_BYTE_LENGTH;
+}
+
+impl Object for GT {}
+
+impl<'a> AddAssign<&'a Self> for GT {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.0 *= rhs.0;
+    }
+}
+
+impl<'a> Add<&'a Self> for GT {
+    type Output = Self;
+
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+impl Neg for GT {
+    type Output = Self;
+
+    fn neg(mut self) -> Self::Output {
+        // SAFETY: self.0 is a valid blst_fp12, conjugated in place.
+        unsafe { blst_fp12_conjugate(&mut self.0) };
+        self
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for GT {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        *self += &-*rhs;
+    }
+}
+
+impl<'a> Sub<&'a Self> for GT {
+    type Output = Self;
+
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
+        self -= rhs;
+        self
+    }
+}
+
+impl Additive for GT {
+    fn zero() -> Self {
+        Self(blst_fp12::default())
+    }
+
+    fn double(&mut self) {
+        let mut out = blst_fp12::default();
+        // SAFETY: Both pointers are valid and do not alias.
+        unsafe { blst_fp12_cyclotomic_sqr(&mut out, &self.0) };
+        self.0 = out;
+    }
+}
+
+// Square-and-multiply over the scalar's bits, so this runs in variable time. No caller
+// multiplies a `GT` element by a secret scalar.
+impl<'a> MulAssign<&'a Scalar> for GT {
+    fn mul_assign(&mut self, rhs: &'a Scalar) {
+        let bytes = rhs.as_blst_scalar().b;
+        let limbs: [u64; 4] = core::array::from_fn(|i| {
+            u64::from_le_bytes(bytes[8 * i..8 * (i + 1)].try_into().expect("8 bytes"))
+        });
+        *self = self.scale(&limbs);
+    }
+}
+
+impl<'a> Mul<&'a Scalar> for GT {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Space<Scalar> for GT {}
+
+impl CryptoGroup for GT {
+    type Scalar = Scalar;
+
+    /// Returns `e(G1::generator(), G2::generator())`, which costs a pairing.
+    fn generator() -> Self {
+        G1::generator().pairing(&G2::generator())
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl arbitrary::Arbitrary<'_> for GT {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(u.arbitrary::<G1>()?.pairing(&u.arbitrary::<G2>()?))
     }
 }
 
@@ -1067,29 +1179,6 @@ impl G1 {
         out
     }
 
-    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
-    ///
-    /// `p1` and `p2` MUST have the same length.
-    #[must_use]
-    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G2], t1: &Self, t2: &G2) -> bool {
-        assert_eq!(p1.len(), p2.len());
-        // We deal with group elements directly, so there's no need for hashing,
-        // or a domain separation tag, hence `false`, `&[]`.
-        let mut pairing = Pairing::new(false, &[]);
-        let p1_affine = Self::batch_to_affine(p1);
-        let p2_affine = G2::batch_to_affine(p2);
-        for (p1, p2) in iter::once((&t1.as_blst_p1_affine(), &t2.as_blst_p2_affine()))
-            .chain(p1_affine.iter().zip(p2_affine.iter()))
-        {
-            pairing.raw_aggregate(p2, p1);
-        }
-
-        // These final two steps check that the sum of the pairings is equal to 0.
-        pairing.commit();
-        // Passing `None` here indicates that our target is 0.
-        pairing.finalverify(None)
-    }
-
     fn msm_inner<'a>(
         iter: impl Iterator<Item = (&'a Self, &'a [u8])>,
         nbits: usize,
@@ -1456,6 +1545,80 @@ impl HashToGroup for G1 {
     }
 }
 
+// G1 is the group with the cheaper scalar multiplication, so it implements `PairingGroup` and
+// the provided `scaled_multi_pairing` multiplies G1 elements.
+impl PairingGroup for G1 {
+    type Twin = G2;
+    type Target = GT;
+
+    fn pairing(&self, other: &G2) -> GT {
+        if *self == Self::zero() || *other == G2::zero() {
+            return GT::zero();
+        }
+        let product = blst_fp12::miller_loop(&other.as_blst_p2_affine(), &self.as_blst_p1_affine());
+        GT(product.final_exp())
+    }
+
+    fn multi_pairing(lefts: &[Self], rights: &[G2], strategy: &impl Strategy) -> GT {
+        assert_eq!(
+            lefts.len(),
+            rights.len(),
+            "lefts and rights must have the same length"
+        );
+        // A pair with an identity contributes nothing, and blst's Miller loop expects
+        // finite points.
+        let (lefts, rights): (Vec<Self>, Vec<G2>) = lefts
+            .iter()
+            .zip(rights)
+            .filter(|(p, q)| **p != Self::zero() && **q != G2::zero())
+            .map(|(p, q)| (*p, *q))
+            .unzip();
+        let lefts = Self::batch_to_affine(&lefts);
+        let rights = G2::batch_to_affine(&rights);
+
+        // Each chunk runs one multi-Miller loop, which shares the accumulator's squarings across
+        // its pairs. The chunk results are multiplied together and share one final
+        // exponentiation.
+        let product = strategy.fold(
+            lefts
+                .chunks(MILLER_LOOP_CHUNK)
+                .zip(rights.chunks(MILLER_LOOP_CHUNK)),
+            blst_fp12::default,
+            |mut acc, (ps, qs)| {
+                acc *= miller_loop_n(qs, ps);
+                acc
+            },
+            |mut a, b| {
+                a *= b;
+                a
+            },
+        );
+        GT(product.final_exp())
+    }
+}
+
+/// The number of pairs in one call to blst's multi-Miller loop, matching the batch size of blst's
+/// own pairing aggregator.
+const MILLER_LOOP_CHUNK: usize = 8;
+
+/// Returns the product of the Miller loops of the pairs `(ps[i], qs[i])`, computed with one shared
+/// accumulator.
+///
+/// Every point must be finite: blst only special-cases the identity when there is a single pair.
+fn miller_loop_n(qs: &[blst_p2_affine], ps: &[blst_p1_affine]) -> blst_fp12 {
+    assert_eq!(qs.len(), ps.len(), "qs and ps must have the same length");
+    assert!(!qs.is_empty(), "the Miller loop needs at least one pair");
+    // A null second pointer tells blst that the first points to all `n` elements contiguously.
+    let q_ptrs = [qs.as_ptr(), ptr::null()];
+    let p_ptrs = [ps.as_ptr(), ptr::null()];
+    let mut out = blst_fp12::default();
+    // SAFETY: `q_ptrs[0]` and `p_ptrs[0]` point to `qs.len()` contiguous, initialized affine
+    // points, and the null second entries select blst's contiguous-array mode. `out` is a valid,
+    // exclusively borrowed output.
+    unsafe { blst_miller_loop_n(&mut out, q_ptrs.as_ptr(), p_ptrs.as_ptr(), qs.len()) };
+    out
+}
+
 impl G2 {
     /// Encodes the G2 element into a slice.
     fn as_slice(&self) -> [u8; Self::SIZE] {
@@ -1510,14 +1673,6 @@ impl G2 {
         }
 
         out
-    }
-
-    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
-    ///
-    /// `p1` and `p2` MUST have the same length.
-    #[must_use]
-    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G1], t1: &Self, t2: &G1) -> bool {
-        G1::multi_pairing_check(p2, p1, t2, t1)
     }
 
     fn msm_inner<'a>(
@@ -1886,6 +2041,50 @@ impl HashToGroup for G2 {
     }
 }
 
+// Forwards to G1's implementation with the arguments swapped, as `Twin<G1>` would. `Twin<G1>`
+// cannot be used directly because `G2` needs its codec, `Hash`, and `Copy` impls.
+impl PairingGroup for G2 {
+    type Twin = G1;
+    type Target = GT;
+
+    fn pairing(&self, other: &G1) -> GT {
+        other.pairing(self)
+    }
+
+    fn pairings(lefts: &[Self], rights: &[G1], outputs: &mut [GT], strategy: &impl Strategy) {
+        G1::pairings(rights, lefts, outputs, strategy);
+    }
+
+    fn multi_pairing(lefts: &[Self], rights: &[G1], strategy: &impl Strategy) -> GT {
+        G1::multi_pairing(rights, lefts, strategy)
+    }
+
+    // G1 has the cheaper scalar multiplication, so this override multiplies `rights`.
+    fn scaled_multi_pairing<R: Sync>(
+        lefts: &[Self],
+        rights: &[G1],
+        scalars: &[R],
+        strategy: &impl Strategy,
+    ) -> GT
+    where
+        Self: Space<R>,
+        G1: Space<R>,
+    {
+        assert_eq!(
+            lefts.len(),
+            rights.len(),
+            "lefts and rights must have the same length"
+        );
+        assert!(
+            scalars.len() <= lefts.len(),
+            "scalars must not be longer than lefts"
+        );
+        let mut scaled = rights.to_vec();
+        G1::mul_each(&mut scaled[..scalars.len()], scalars, strategy);
+        G1::multi_pairing(&scaled, lefts, strategy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1935,6 +2134,54 @@ mod tests {
     #[test]
     fn test_hash_to_g2() {
         minifuzz::test(test_suites::fuzz_hash_to_group::<G2>);
+    }
+
+    #[test]
+    fn test_g1_as_pairing_group() {
+        minifuzz::test(test_suites::fuzz_pairing_group::<G1>);
+    }
+
+    #[test]
+    fn test_g2_as_pairing_group() {
+        minifuzz::test(test_suites::fuzz_pairing_group::<G2>);
+    }
+
+    #[test]
+    fn test_gt_as_space() {
+        minifuzz::test(test_suites::fuzz_space_ring::<Scalar, GT>);
+    }
+
+    #[test]
+    fn test_multi_pairing_spans_chunks_and_skips_identities() {
+        let mut rng = test_rng();
+        // More pairs than one Miller-loop chunk, with identities on either side.
+        let n = 2 * MILLER_LOOP_CHUNK + 3;
+        let mut lefts: Vec<G1> = (0..n)
+            .map(|_| G1::generator() * &Scalar::random(&mut rng))
+            .collect();
+        let mut rights: Vec<G2> = (0..n)
+            .map(|_| G2::generator() * &Scalar::random(&mut rng))
+            .collect();
+        lefts[3] = G1::zero();
+        rights[MILLER_LOOP_CHUNK] = G2::zero();
+
+        let expected = lefts
+            .iter()
+            .zip(&rights)
+            .fold(GT::zero(), |acc, (p, q)| acc + &p.pairing(q));
+        assert!(explore(|strategy| G1::multi_pairing(
+            &lefts, &rights, strategy
+        ) == expected));
+        assert_eq!(G2::multi_pairing(&rights, &lefts, &Sequential), expected);
+    }
+
+    #[test]
+    fn test_gt_generator_and_inverse() {
+        let g = GT::generator();
+        assert_ne!(g, GT::zero());
+        assert_eq!(g - &g, GT::zero());
+        // The scalar field has order r, so r * g = (r - 1) * g + g = 0.
+        assert_eq!(g * &-Scalar::one() + &g, GT::zero());
     }
 
     #[test]

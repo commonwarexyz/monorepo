@@ -274,7 +274,7 @@ pub fn verify_same_message<V: Variant>(
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
     // Verify the signature
-    V::verify(public.inner(), &hm, signature.inner())
+    super::verify_hashed::<V>(public.inner(), &hm, signature.inner())
 }
 
 /// Verifies the aggregate signature over multiple messages from a single public key.
@@ -293,7 +293,7 @@ pub fn verify_same_signer<V: Variant>(
     message: &Message<V>,
     signature: &Signature<V>,
 ) -> Result<(), Error> {
-    V::verify(public, message.inner(), signature.inner())
+    super::verify_hashed::<V>(public, message.inner(), signature.inner())
 }
 
 #[cfg(test)]
