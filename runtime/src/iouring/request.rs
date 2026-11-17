@@ -1052,8 +1052,6 @@ impl ResizeRequest {
 
     /// Classify one ftruncate CQE and decide whether the logical request completes
     /// or needs another SQE.
-    ///
-    /// Like a data sync, an error keeps its raw errno, including an unsolicited `ECANCELED`.
     fn on_cqe(&self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         on_status_cqe(state, result)
     }

@@ -1,28 +1,25 @@
-//! This module provides an io_uring-based implementation of the [crate::Storage] trait,
-//! offering fast, high-throughput file operations on Linux systems.
+//! This module provides an io_uring-based implementation of the [crate::Storage] trait, offering
+//! fast, high-throughput file operations on Linux systems.
 //!
 //! ## Architecture
 //!
 //! Reads, writes, syncs, and resizes register requests with the worker that first polls them.
-//! Requests stay on that worker, with completion forwarded when their futures are
-//! polled elsewhere. Storage and blob handles retain no ring identity and can move
-//! between workers. Moving a future does not keep its original worker alive.
-//! Empty reads and writes return without touching the ring. Metadata and flushing a dirty
-//! predecessor during reopen run synchronously on the calling worker. The kernel runs every
-//! resize on an io-wq thread.
-//! A later operation on the same open can complete before a pending resize. On XFS, for
-//! example, a write issued while a truncation is pending, or after its future was dropped,
-//! lands first and is then truncated.
+//! Requests stay on that worker, with completion forwarded when their futures are polled elsewhere.
+//! Storage and blob handles retain no ring identity and can move between workers. Moving a future
+//! does not keep its original worker alive. Empty reads and writes return without touching the
+//! ring. Metadata and flushing a dirty predecessor during reopen run synchronously on the calling
+//! worker. The kernel runs every resize on an io-wq thread. A later operation on the same open can
+//! complete before a pending resize. On XFS, for example, a write issued while a truncation is
+//! pending, or after its future was dropped, lands first and is then truncated.
 //!
-//! Registered requests retain the open they were issued through, with its file,
-//! directory hold, and durability debt. Dropping a caller never releases them
-//! while the kernel can still access the file. Registered writes, syncs, and resizes finish
-//! their logical work after caller cancellation, including requests still queued
-//! for staging capacity or another durability operation on the same open.
+//! Registered requests retain the open they were issued through, with its file, directory hold, and
+//! durability debt. Dropping a caller never releases them while the kernel can still access the
+//! file. Registered writes, syncs, and resizes finish their logical work after caller cancellation,
+//! including requests still queued for staging capacity or another durability operation on the same
+//! open.
 //!
-//! Dropping the last handle of an open performs no I/O. It records what the open
-//! left unflushed, and the next open of the blob establishes that durability
-//! before it returns.
+//! Dropping the last handle of an open performs no I/O. It records what the open left unflushed,
+//! and the next open of the blob establishes that durability before it returns.
 //!
 //! ## Uncached Reads
 //!
