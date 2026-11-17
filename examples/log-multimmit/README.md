@@ -37,14 +37,13 @@ All consensus data is persisted to disk in the `--storage-dir` directory. If you
 
 ## Key Material
 
-This example runs Multimmit's synchronized aggregate suite (`multimmit::scheme::bls12381_sas`, with
-the `MinSig` variant over Ed25519 identities): one roster of Pointcheval-Sanders ordinary keys,
-each with a proof of knowledge, plus two independent BLS12-381 threshold sharings, one for data
-availability and one for nullification. Votes in one view share a signing period, so a vote or
-leader certificate verifies with one pairing product however many distinct blocks it covers. The
-suite is ALPHA and research grade. This example derives all of it deterministically from the
-participant list with the suite's trusted dealer (`bls12381_sas::Scheme::deal`), so every node
-computes the same committee with no setup. A real
+This example runs Multimmit's BLS12-381 multisig suite (`multimmit::scheme::bls12381`, with the
+`MinSig` variant over Ed25519 identities): one roster of BLS12-381 ordinary keys, each with a
+proof of possession, plus two independent BLS12-381 threshold sharings, one for data availability
+and one for nullification. Vote and leader certificates aggregate the multi-signatures of their
+distinct messages. This example derives all of it deterministically from the participant list with
+the suite's trusted dealer (`bls12381::Scheme::deal`), so every node computes the same committee
+with no setup. A real
 deployment runs a distributed key generation instead and never shares private material.
 
 ## Payloads
