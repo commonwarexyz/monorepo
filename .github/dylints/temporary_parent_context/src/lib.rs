@@ -34,9 +34,9 @@ dylint_linting::declare_late_lint! {
     /// `Spawner::spawn(..)` written as a function call, chains produced by a
     /// macro, a parent moved into the chain, as in
     /// `context.with_attribute(..).child("b").spawn(f)`, and a closed context bound by
-    /// one statement and spawned from by a later one. Block tails from crates before
-    /// edition 2024 and `super let` initializers keep their temporaries until the
-    /// end of the enclosing statement, so the lint skips them.
+    /// one statement and spawned from by a later one. `super let` initializers keep
+    /// their temporaries until the end of the enclosing statement, so the lint skips
+    /// them.
     ///
     /// ### Example
     ///
@@ -121,11 +121,7 @@ fn handle_unused(cx: &LateContext<'_>, spawn: &Expr<'_>) -> bool {
         Node::LetStmt(local) => {
             local.super_.is_none() && local.init.is_some_and(|init| init.hir_id == spawn.hir_id)
         }
-        // Before edition 2024, the temporaries of a block's tail outlive the block.
-        Node::Block(block) => {
-            block.span.at_least_rust_2024()
-                && block.expr.is_some_and(|tail| tail.hir_id == spawn.hir_id)
-        }
+        Node::Block(block) => block.expr.is_some_and(|tail| tail.hir_id == spawn.hir_id),
         Node::Expr(parent) => matches!(parent.kind, ExprKind::Ret(_) | ExprKind::Closure(..)),
         _ => false,
     }

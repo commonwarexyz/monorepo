@@ -1,10 +1,8 @@
 // aux-build:commonware_runtime.rs
-// aux-build:old_macros.rs
 // compile-flags: --edition=2024
 #![feature(super_let)]
 #![allow(unused_must_use, dead_code, unused_braces)]
 extern crate commonware_runtime;
-extern crate old_macros;
 
 use commonware_runtime::{Spawner, Supervisor};
 use std::future::{Ready, ready};
@@ -206,12 +204,10 @@ macro_rules! chain {
 
 #[rustfmt::skip]
 async fn temporaries(ctx: &Context) {
-    // Fires: an edition 2024 block drops the parent before `block_on` gets the handle.
+    // Fires: the block drops the parent before `block_on` gets the handle.
     block_on({ ctx.child("a").child("b").spawn(|| {}) });
 
-    // Silent: a block from an older edition and a `super let` keep their temporaries
-    // until the end of the statement.
-    old_macros::wrap!(ctx.child("a").child("b").spawn(|| {})).await;
+    // Silent: a `super let` keeps its temporaries until the end of the statement.
     block_on({
         super let handle = ctx.child("a").child("b").spawn(|| {});
         handle

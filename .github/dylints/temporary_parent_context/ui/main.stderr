@@ -1,5 +1,5 @@
 error: temporary parent context
-  --> $DIR/main.rs:95:5
+  --> $DIR/main.rs:93:5
    |
 LL |     ctx.child("a").child("b").spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -8,7 +8,7 @@ LL |     ctx.child("a").child("b").spawn(|| {});
    = note: `#[deny(temporary_parent_context)]` on by default
 
 error: temporary parent context
-  --> $DIR/main.rs:99:19
+  --> $DIR/main.rs:97:19
    |
 LL |     let _handle = ctx.child("a").child("b").spawn(|| {});
    |                   ^^^^^^^^^^^^^^
@@ -16,7 +16,7 @@ LL |     let _handle = ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:103:5
+  --> $DIR/main.rs:101:5
    |
 LL |     ctx.child("a").child("b").spawn(|| {})
    |     ^^^^^^^^^^^^^^
@@ -24,7 +24,7 @@ LL |     ctx.child("a").child("b").spawn(|| {})
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:107:12
+  --> $DIR/main.rs:105:12
    |
 LL |     return ctx.child("a").child("b").spawn(|| {});
    |            ^^^^^^^^^^^^^^
@@ -32,7 +32,7 @@ LL |     return ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:111:21
+  --> $DIR/main.rs:109:21
    |
 LL |     let _spawn = || ctx.child("a").child("b").spawn(|| {});
    |                     ^^^^^^^^^^^^^^
@@ -40,7 +40,7 @@ LL |     let _spawn = || ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:115:5
+  --> $DIR/main.rs:113:5
    |
 LL |     ctx.child("a")
    |     ^^^^^^^^^^^^^^
@@ -48,7 +48,7 @@ LL |     ctx.child("a")
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:119:5
+  --> $DIR/main.rs:117:5
    |
 LL |     ctx.child("a").shared(true).child("b").spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -56,7 +56,7 @@ LL |     ctx.child("a").shared(true).child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:120:5
+  --> $DIR/main.rs:118:5
    |
 LL |     ctx.child("a").child("b").dedicated().spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -64,7 +64,7 @@ LL |     ctx.child("a").child("b").dedicated().spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:124:5
+  --> $DIR/main.rs:122:5
    |
 LL |     ctx.child("a").child("b").spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -72,7 +72,7 @@ LL |     ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:129:9
+  --> $DIR/main.rs:127:9
    |
 LL |         self.context.child("a").child("b").spawn(|| {});
    |         ^^^^^^^^^^^^^^^^^^^^^^^
@@ -80,7 +80,7 @@ LL |         self.context.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:210:16
+  --> $DIR/main.rs:208:16
    |
 LL |     block_on({ ctx.child("a").child("b").spawn(|| {}) });
    |                ^^^^^^^^^^^^^^
