@@ -958,7 +958,10 @@ mod tests {
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer as _,
-        bls12381::primitives::variant::{MinPk, MinSig, Variant},
+        bls12381::primitives::{
+            group::Scalar,
+            variant::{MinPk, MinSig, Variant},
+        },
         certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
@@ -8100,7 +8103,7 @@ mod tests {
 
     fn tle<V, L>(elector: L)
     where
-        V: Variant,
+        V: Variant<Scalar = Scalar>,
         L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
     {
         // Create context

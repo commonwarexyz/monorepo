@@ -4,7 +4,7 @@ use crate::{
     bls12381::{
         dkg::feldman_desmedt::deal,
         primitives::{
-            group::Share,
+            key::Share,
             sharing::{Mode, Sharing},
             variant::Variant,
         },
@@ -20,7 +20,7 @@ pub fn fixture<S, V, R>(
     rng: &mut R,
     namespace: &[u8],
     n: u32,
-    signer: impl Fn(&[u8], Set<ed25519::PublicKey>, Sharing<V>, Share) -> Option<S>,
+    signer: impl Fn(&[u8], Set<ed25519::PublicKey>, Sharing<V>, Share<V::Scalar>) -> Option<S>,
     verifier: impl Fn(&[u8], Set<ed25519::PublicKey>, Sharing<V>) -> S,
 ) -> Fixture<S>
 where

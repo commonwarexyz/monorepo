@@ -38,7 +38,7 @@
 pub use crate::banderwagon::{F, G};
 use crate::{
     banderwagon::{GVar, scalar_bits_le},
-    bls12381::primitives::group::{DST, Scalar},
+    bls12381::primitives::{group::Scalar, variant::DST},
     zk::{
         bulletproofs::circuit::{Circuit, Witness, zkc_to_circuit, zkc_to_circuit_and_witness},
         circuit::{self as zk, BoolVar, Var},

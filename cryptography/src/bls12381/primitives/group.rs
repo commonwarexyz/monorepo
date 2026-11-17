@@ -13,8 +13,10 @@
 //! group operations can still be the identity, so an API that treats it as invalid must reject it
 //! at its own boundary.
 
-use super::variant::Variant;
-use crate::Secret;
+use super::{
+    key,
+    variant::{DST, ScalarReadCfg},
+};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
@@ -34,7 +36,7 @@ use blst::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize,
+    Buf,
     Error::{self, Invalid},
     FixedArray, FixedSize, Read, ReadExt, Write,
 };
@@ -44,7 +46,7 @@ use commonware_math::algebra::{
     PairingGroup, Random, Ring, Space,
 };
 use commonware_parallel::{Grid, Strategy};
-use commonware_utils::{Participant, Widen};
+use commonware_utils::Widen;
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
@@ -178,20 +180,6 @@ where
         }
         result
     })
-}
-
-/// Domain separation tag used when hashing a message to a curve (G1 or G2).
-///
-/// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
-pub type DST = &'static [u8];
-
-/// Configuration for [`Scalar`]'s [`Read`] implementation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScalarReadCfg {
-    /// Accept any in-range scalar, including zero.
-    AllowZero,
-    /// Reject the zero scalar.
-    RejectZero,
 }
 
 /// Wrapper around [blst_fr] that represents an element of the BLS12-381
@@ -547,66 +535,8 @@ impl arbitrary::Arbitrary<'_> for GT {
     }
 }
 
-/// The private key type.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Private {
-    scalar: Secret<Scalar>,
-}
-
-impl Private {
-    /// Creates a new private key from a scalar.
-    pub const fn new(private: Scalar) -> Self {
-        Self {
-            scalar: Secret::new(private),
-        }
-    }
-
-    /// Temporarily exposes the inner scalar to a closure.
-    ///
-    /// See [`Secret::expose`](crate::Secret::expose) for more details.
-    pub fn expose<R>(&self, f: impl for<'a> FnOnce(&'a Scalar) -> R) -> R {
-        self.scalar.expose(f)
-    }
-
-    /// Consumes the private key and returns the inner scalar.
-    ///
-    /// See [`Secret::expose_unwrap`](crate::Secret::expose_unwrap) for more details.
-    pub fn expose_unwrap(self) -> Scalar {
-        self.scalar.expose_unwrap()
-    }
-}
-
-impl Write for Private {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.expose(|scalar| scalar.write(buf));
-    }
-}
-
-impl Read for Private {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
-        Ok(Self::new(scalar))
-    }
-}
-
-impl FixedSize for Private {
-    const SIZE: usize = PRIVATE_KEY_LENGTH;
-}
-
-impl Random for Private {
-    fn random(rng: impl CryptoRng) -> Self {
-        Self::new(Scalar::random(rng))
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Private {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary::<Scalar>()?))
-    }
-}
+/// A BLS12-381 private key.
+pub type Private = key::Private<Scalar>;
 
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
@@ -1025,67 +955,8 @@ impl FieldNTT for Scalar {
     }
 }
 
-/// A share of a threshold signing key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Share {
-    /// The share's index in the polynomial.
-    pub index: Participant,
-    /// The scalar corresponding to the share's secret.
-    pub private: Private,
-}
-
-impl Share {
-    /// Creates a new `Share` with the given index and private key.
-    pub const fn new(index: Participant, private: Private) -> Self {
-        Self { index, private }
-    }
-
-    /// Returns the public key corresponding to the share.
-    ///
-    /// This can be verified against the public polynomial.
-    pub fn public<V: Variant>(&self) -> V::Public {
-        self.private
-            .expose(|private| V::Public::generator() * private)
-    }
-}
-
-impl Write for Share {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.private.expose(|private| private.write(buf));
-    }
-}
-
-impl Read for Share {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let index = Participant::read(buf)?;
-        let private = Private::read(buf)?;
-        Ok(Self { index, private })
-    }
-}
-
-impl EncodeSize for Share {
-    fn encode_size(&self) -> usize {
-        self.index.encode_size() + self.private.expose(|private| private.encode_size())
-    }
-}
-
-impl Display for Share {
-    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for Share {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let index = u.arbitrary()?;
-        let private = u.arbitrary::<Private>()?;
-        Ok(Self { index, private })
-    }
-}
+/// A share of a BLS12-381 threshold signing key.
+pub type Share = key::Share<Scalar>;
 
 impl G1 {
     /// Encodes the G1 element into a slice.
@@ -2016,7 +1887,7 @@ impl HashToGroup for G2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::group::Scalar;
+    use crate::{Secret, bls12381::primitives::group::Scalar};
     use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
@@ -2026,7 +1897,7 @@ mod tests {
         mocks::{Explorer, explore, pooled},
         rayon::ThreadPoolBuilder,
     };
-    use commonware_utils::{NZUsize, sync::Mutex, test_rng};
+    use commonware_utils::{NZUsize, Participant, sync::Mutex, test_rng};
     use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
         collections::{BTreeSet, HashMap},

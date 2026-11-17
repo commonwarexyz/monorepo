@@ -29,7 +29,7 @@ use commonware_cryptography::{
             Info, Logs, Output, Player as CryptoPlayer, PlayerAck, PlayerAckError as DkgAckError,
             SignedDealerLog,
         },
-        primitives::{group, variant::Variant},
+        primitives::{key, variant::Variant},
     },
     transcript::{Summary, Transcript, Version},
 };
@@ -125,7 +125,7 @@ where
 }
 
 struct EpochCache<V: Variant, P: PublicKey> {
-    dealings: BTreeMap<P, (DealerPubMsg<V>, DealerPrivMsg)>,
+    dealings: BTreeMap<P, (DealerPubMsg<V>, DealerPrivMsg<V::Scalar>)>,
     acks: BTreeMap<P, PlayerAck<P>>,
     logs: BTreeMap<P, DealerLog<V, P>>,
 }
@@ -146,7 +146,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 pub struct Store<E, SS, V, P, D = Unit>
 where
     E: Clock + RuntimeStorage + Metrics,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     V: Variant,
     P: PublicKey,
     D: Directory<P>,
@@ -160,7 +160,7 @@ where
 impl<E, SS, V, P, D> Store<E, SS, V, P, D>
 where
     E: Clock + RuntimeStorage + Metrics,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     V: Variant,
     P: PublicKey,
     D: Directory<P>,
@@ -242,7 +242,7 @@ where
     }
 
     /// Returns the share for `epoch`, if any.
-    pub async fn share(&mut self, epoch: Epoch) -> Option<group::Share> {
+    pub async fn share(&mut self, epoch: Epoch) -> Option<key::Share<V::Scalar>> {
         self.secret_store.get_share(epoch).await
     }
 
@@ -276,7 +276,7 @@ where
         &mut self,
         info: EpochInfo<V, P, D>,
         rng_seed: Summary,
-        share: Option<group::Share>,
+        share: Option<key::Share<V::Scalar>>,
     ) {
         let epoch = info.epoch;
         if let Some(share) = share {
@@ -319,7 +319,7 @@ where
             .is_some_and(|cache| cache.logs.contains_key(dealer))
     }
 
-    fn dealings(&self, epoch: Epoch) -> Vec<(P, DealerPubMsg<V>, DealerPrivMsg)> {
+    fn dealings(&self, epoch: Epoch) -> Vec<(P, DealerPubMsg<V>, DealerPrivMsg<V::Scalar>)> {
         self.epochs
             .get(&epoch)
             .map(|cache| {
@@ -357,7 +357,7 @@ where
         epoch: Epoch,
         dealer: P,
         public: DealerPubMsg<V>,
-        private: DealerPrivMsg,
+        private: DealerPrivMsg<V::Scalar>,
     ) -> bool {
         if self
             .epochs
@@ -431,7 +431,7 @@ where
         epoch: Epoch,
         signer: C,
         info: Info<V, P>,
-        share: Option<group::Share>,
+        share: Option<key::Share<V::Scalar>>,
         rng_seed: Summary,
     ) -> Option<Dealer<V, C>>
     where
@@ -448,7 +448,7 @@ where
             share,
         )
         .expect("failed to create reshare dealer");
-        let mut unsent: BTreeMap<P, DealerPrivMsg> = private.into_iter().collect();
+        let mut unsent: BTreeMap<P, DealerPrivMsg<V::Scalar>> = private.into_iter().collect();
         for (player, ack) in self.acks(epoch) {
             if unsent.contains_key(&player)
                 && dealer.receive_player_ack(player.clone(), ack).is_ok()
@@ -549,7 +549,7 @@ where
 pub struct Dealer<V: Variant, C: Signer> {
     dealer: Option<CryptoDealer<V, C>>,
     public: DealerPubMsg<V>,
-    unsent: BTreeMap<C::PublicKey, DealerPrivMsg>,
+    unsent: BTreeMap<C::PublicKey, DealerPrivMsg<V::Scalar>>,
     finalized: Option<SignedDealerLog<V, C::PublicKey>>,
 }
 
@@ -588,7 +588,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     ) -> Result<AckOutcome, DkgAckError>
     where
         E: Clock + RuntimeStorage + Metrics,
-        SS: SecretStore,
+        SS: SecretStore<V::Scalar>,
         D: Directory<C::PublicKey>,
     {
         let dealer = self
@@ -635,7 +635,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
     /// recorded.
     pub fn shares_to_distribute(
         &self,
-    ) -> impl Iterator<Item = (C::PublicKey, DealerPubMsg<V>, DealerPrivMsg)> + '_ {
+    ) -> impl Iterator<Item = (C::PublicKey, DealerPubMsg<V>, DealerPrivMsg<V::Scalar>)> + '_ {
         self.unsent
             .iter()
             .map(|(player, private)| (player.clone(), self.public.clone(), private.clone()))
@@ -663,11 +663,11 @@ impl<V: Variant, C: Signer> Player<V, C> {
         epoch: Epoch,
         dealer: C::PublicKey,
         public: DealerPubMsg<V>,
-        private: DealerPrivMsg,
+        private: DealerPrivMsg<V::Scalar>,
     ) -> Result<PlayerAck<C::PublicKey>, DkgDealerMessageError>
     where
         E: Clock + RuntimeStorage + Metrics,
-        SS: SecretStore,
+        SS: SecretStore<V::Scalar>,
         D: Directory<C::PublicKey>,
     {
         if let Some(ack) = self.acks.get(&dealer) {
@@ -691,7 +691,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<(Output<V, C::PublicKey>, group::Share), DkgFinalizeError<C::PublicKey>>
+    ) -> Result<(Output<V, C::PublicKey>, key::Share<V::Scalar>), DkgFinalizeError<C::PublicKey>>
     where
         M: Faults,
         C::PublicKey: BatchVerifier,
@@ -1176,7 +1176,10 @@ mod tests {
         SecretStore,
     }
 
-    type TestDealing = (DealerPubMsg<MinPk>, DealerPrivMsg);
+    type TestDealing = (
+        DealerPubMsg<MinPk>,
+        DealerPrivMsg<<MinPk as Variant>::Scalar>,
+    );
 
     fn reshare_info(signers: &[PrivateKey]) -> Info<MinPk, PublicKey> {
         let players = players(signers);

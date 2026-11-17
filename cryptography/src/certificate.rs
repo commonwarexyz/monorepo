@@ -911,7 +911,7 @@ mod tests {
     use crate::bls12381::{
         dkg::feldman_desmedt as dkg,
         primitives::{
-            group::Private as BlsPrivate,
+            key::Private as BlsPrivate,
             ops::{compute_public, sign_proof_of_possession, verify_proof_of_possession},
             sharing::Mode,
             variant::{MinPk, MinSig, Variant},

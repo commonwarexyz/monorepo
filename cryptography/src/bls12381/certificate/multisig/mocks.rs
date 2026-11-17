@@ -1,7 +1,7 @@
 //! Test fixtures for BLS12-381 multi-signature certificate schemes.
 
 use crate::{
-    bls12381::primitives::{group::Private, ops::compute_public, variant::Variant},
+    bls12381::primitives::{key::Private, ops::compute_public, variant::Variant},
     certificate::{Scheme, mocks::Fixture},
     ed25519,
 };
@@ -14,7 +14,7 @@ pub fn fixture<S, V, R>(
     rng: &mut R,
     namespace: &[u8],
     n: u32,
-    signer: impl Fn(&[u8], BiMap<ed25519::PublicKey, V::Public>, Private) -> Option<S>,
+    signer: impl Fn(&[u8], BiMap<ed25519::PublicKey, V::Public>, Private<V::Scalar>) -> Option<S>,
     verifier: impl Fn(&[u8], BiMap<ed25519::PublicKey, V::Public>) -> S,
 ) -> Fixture<S>
 where

@@ -48,6 +48,7 @@
 //! ```
 
 pub mod group;
+pub mod key;
 pub mod ops;
 pub mod sharing;
 pub mod variant;

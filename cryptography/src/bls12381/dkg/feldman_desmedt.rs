@@ -29,7 +29,7 @@
 //!
 //! * [`Info`]: Configuration for a DKG/Reshare round, containing the dealers, players, and optional previous output
 //! * [`Output`]: The public result of a successful DKG round, containing the public polynomial and player list
-//! * [`Share`]: A player's final private share of the distributed key (from `primitives::group`)
+//! * [`Share`]: A player's final private share of the distributed key (from `primitives::key`)
 //! * [`Dealer`]: State machine for a dealer participating in the protocol
 //! * [`Player`]: State machine for a player receiving dealings
 //! * [`SignedDealerLog`]: A dealer's signed transcript of their interactions with players
@@ -359,9 +359,9 @@
 use crate::{
     BatchEntry, BatchVerifier, PublicKey, Secret, Signer,
     bls12381::primitives::{
-        group::{Private, Scalar, ScalarReadCfg, Share},
+        key::{Private, Share},
         sharing::{Mode, ModeVersion, Sharing},
-        variant::Variant,
+        variant::{ScalarReadCfg, Variant},
     },
     transcript::{Summary, Transcript, Version},
 };
@@ -381,6 +381,7 @@ use commonware_utils::{
     ordered::{Map, Quorum, Set},
 };
 use core::num::NonZeroU32;
+use ctutils::CtEq;
 use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use thiserror::Error;
@@ -771,10 +772,10 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
     fn unwrap_or_random_share(
         &self,
         mut rng: impl CryptoRng,
-        share: Option<Scalar>,
-    ) -> Result<Scalar, Error> {
+        share: Option<V::Scalar>,
+    ) -> Result<V::Scalar, Error> {
         let out = match (self.previous.as_ref(), share) {
-            (None, None) => Scalar::random(&mut rng),
+            (None, None) => V::Scalar::random(&mut rng),
             (_, Some(x)) => x,
             (Some(_), None) => return Err(Error::MissingDealerShare),
         };
@@ -828,7 +829,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         self.dealers.index(dealer)
     }
 
-    fn player_scalar(&self, player: &P) -> Option<Scalar> {
+    fn player_scalar(&self, player: &P) -> Option<V::Scalar> {
         self.mode
             .scalar(self.num_players(), self.player_index(player)?)
     }
@@ -858,9 +859,9 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         &self,
         player: Participant,
         pub_msg: &DealerPubMsg<V>,
-        priv_msg: &DealerPrivMsg,
+        priv_msg: &DealerPrivMsg<V::Scalar>,
     ) -> bool {
-        let scalar = self
+        let scalar: V::Scalar = self
             .mode
             .scalar(self.num_players(), player)
             .expect("Player::new validates the participant index");
@@ -897,7 +898,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
         let mut reveal_eval_points = Vec::new();
-        let mut reveal_sum = Scalar::zero();
+        let mut reveal_sum = V::Scalar::zero();
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
@@ -919,9 +920,9 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                         .player_scalar(player)
                         .expect("log players were matched against the round");
                     let coeff = if reveal_count == 1 {
-                        Scalar::one()
+                        V::Scalar::one()
                     } else {
-                        Scalar::random(&mut *rng)
+                        V::Scalar::random(&mut *rng)
                     };
                     reveal_eval_points.push((coeff.clone(), player_scalar));
                     priv_msg
@@ -1081,44 +1082,58 @@ where
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DealerPrivMsg {
-    share: Secret<Scalar>,
+/// The share a dealer sends to one player, which is a nonzero scalar `S`.
+#[derive(Clone)]
+pub struct DealerPrivMsg<S> {
+    share: Secret<S>,
 }
 
-impl DealerPrivMsg {
+impl<S> DealerPrivMsg<S> {
     /// Creates a new `DealerPrivMsg` with the given share.
-    pub const fn new(share: Scalar) -> Self {
+    pub const fn new(share: S) -> Self {
         Self {
             share: Secret::new(share),
         }
     }
 }
 
-impl FixedSize for DealerPrivMsg {
-    const SIZE: usize = Scalar::SIZE;
+impl<S> core::fmt::Debug for DealerPrivMsg<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DealerPrivMsg")
+            .field("share", &self.share)
+            .finish()
+    }
 }
 
-impl Write for DealerPrivMsg {
+impl<S: CtEq> PartialEq for DealerPrivMsg<S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.share == other.share
+    }
+}
+
+impl<S: CtEq> Eq for DealerPrivMsg<S> {}
+
+impl<S: FixedSize> FixedSize for DealerPrivMsg<S> {
+    const SIZE: usize = S::SIZE;
+}
+
+impl<S: Write> Write for DealerPrivMsg<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.share.expose(|share| share.write(buf));
     }
 }
 
-impl Read for DealerPrivMsg {
+impl<S: Read<Cfg = ScalarReadCfg>> Read for DealerPrivMsg<S> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(Scalar::read_cfg(
-            buf,
-            &ScalarReadCfg::RejectZero,
-        )?))
+        Ok(Self::new(S::read_cfg(buf, &ScalarReadCfg::RejectZero)?))
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl arbitrary::Arbitrary<'_> for DealerPrivMsg {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+impl<'a, S: arbitrary::Arbitrary<'a>> arbitrary::Arbitrary<'a> for DealerPrivMsg<S> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         Ok(Self::new(u.arbitrary()?))
     }
 }
@@ -1166,18 +1181,18 @@ where
 }
 
 #[derive(Clone, PartialEq)]
-enum AckOrReveal<P: PublicKey> {
+enum AckOrReveal<V: Variant, P: PublicKey> {
     Ack(PlayerAck<P>),
-    Reveal(DealerPrivMsg),
+    Reveal(DealerPrivMsg<V::Scalar>),
 }
 
-impl<P: PublicKey> AckOrReveal<P> {
+impl<V: Variant, P: PublicKey> AckOrReveal<V, P> {
     const fn is_reveal(&self) -> bool {
         matches!(*self, Self::Reveal(_))
     }
 }
 
-impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
+impl<V: Variant, P: PublicKey> std::fmt::Debug for AckOrReveal<V, P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Ack(x) => write!(f, "Ack({x:?})"),
@@ -1186,7 +1201,7 @@ impl<P: PublicKey> std::fmt::Debug for AckOrReveal<P> {
     }
 }
 
-impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
+impl<V: Variant, P: PublicKey> EncodeSize for AckOrReveal<V, P> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Ack(x) => x.encode_size(),
@@ -1195,16 +1210,16 @@ impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
     }
 }
 
-impl<P: PublicKey> MaxEncodeSize for AckOrReveal<P> {
+impl<V: Variant, P: PublicKey> MaxEncodeSize for AckOrReveal<V, P> {
     // A tag and the wider of an acknowledgement and a revealed share.
     const MAX_ENCODE_SIZE: usize = u8::SIZE
         + max(
             PlayerAck::<P>::MAX_ENCODE_SIZE,
-            DealerPrivMsg::MAX_ENCODE_SIZE,
+            DealerPrivMsg::<V::Scalar>::MAX_ENCODE_SIZE,
         );
 }
 
-impl<P: PublicKey> Write for AckOrReveal<P> {
+impl<V: Variant, P: PublicKey> Write for AckOrReveal<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
             Self::Ack(x) => {
@@ -1219,7 +1234,7 @@ impl<P: PublicKey> Write for AckOrReveal<P> {
     }
 }
 
-impl<P: PublicKey> Read for AckOrReveal<P> {
+impl<V: Variant, P: PublicKey> Read for AckOrReveal<V, P> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -1233,10 +1248,11 @@ impl<P: PublicKey> Read for AckOrReveal<P> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey> arbitrary::Arbitrary<'_> for AckOrReveal<P>
+impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for AckOrReveal<V, P>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    V::Scalar: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=1)?;
@@ -1255,12 +1271,12 @@ where
 }
 
 #[derive(Clone, Debug)]
-enum DealerResult<P: PublicKey> {
-    Ok(Map<P, AckOrReveal<P>>),
+enum DealerResult<V: Variant, P: PublicKey> {
+    Ok(Map<P, AckOrReveal<V, P>>),
     TooManyReveals,
 }
 
-impl<P: PublicKey> PartialEq for DealerResult<P> {
+impl<V: Variant, P: PublicKey> PartialEq for DealerResult<V, P> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Ok(x), Self::Ok(y)) => x == y,
@@ -1270,7 +1286,7 @@ impl<P: PublicKey> PartialEq for DealerResult<P> {
     }
 }
 
-impl<P: PublicKey> EncodeSize for DealerResult<P> {
+impl<V: Variant, P: PublicKey> EncodeSize for DealerResult<V, P> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Ok(r) => r.encode_size(),
@@ -1279,18 +1295,18 @@ impl<P: PublicKey> EncodeSize for DealerResult<P> {
     }
 }
 
-impl<P: PublicKey> DealerResult<P> {
+impl<V: Variant, P: PublicKey> DealerResult<V, P> {
     /// Returns an upper bound on the encoded size of a dealer result for at most `max_players`
     /// players.
     fn max_encode_size(max_players: NonZeroU32) -> usize {
-        Map::<P, AckOrReveal<P>>::max_encode_size(
+        Map::<P, AckOrReveal<V, P>>::max_encode_size(
             Widen::widen(max_players.get()),
-            AckOrReveal::<P>::MAX_ENCODE_SIZE,
+            AckOrReveal::<V, P>::MAX_ENCODE_SIZE,
         ) + u8::SIZE
     }
 }
 
-impl<P: PublicKey> Write for DealerResult<P> {
+impl<V: Variant, P: PublicKey> Write for DealerResult<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         match self {
             Self::Ok(r) => {
@@ -1304,7 +1320,7 @@ impl<P: PublicKey> Write for DealerResult<P> {
     }
 }
 
-impl<P: PublicKey> Read for DealerResult<P> {
+impl<V: Variant, P: PublicKey> Read for DealerResult<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(
@@ -1324,10 +1340,11 @@ impl<P: PublicKey> Read for DealerResult<P> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey> arbitrary::Arbitrary<'_> for DealerResult<P>
+impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for DealerResult<V, P>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    V::Scalar: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let choice = u.int_in_range(0..=1)?;
@@ -1336,7 +1353,7 @@ where
                 use commonware_utils::TryFromIterator;
                 use std::collections::HashMap;
 
-                let base: HashMap<P, AckOrReveal<P>> = u.arbitrary()?;
+                let base: HashMap<P, AckOrReveal<V, P>> = u.arbitrary()?;
                 let map =
                     Map::try_from_iter(base).map_err(|_| arbitrary::Error::IncorrectFormat)?;
 
@@ -1351,7 +1368,7 @@ where
 #[derive(Clone, Debug)]
 pub struct DealerLog<V: Variant, P: PublicKey> {
     pub_msg: DealerPubMsg<V>,
-    results: DealerResult<P>,
+    results: DealerResult<V, P>,
 }
 
 impl<V: Variant, P: PublicKey> PartialEq for DealerLog<V, P> {
@@ -1389,7 +1406,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     /// participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
         DealerPubMsg::<V>::max_encode_size(max_participants)
-            + DealerResult::<P>::max_encode_size(max_participants)
+            + DealerResult::<V, P>::max_encode_size(max_participants)
     }
 
     fn get_ack(&self, player: &P) -> Option<&PlayerAck<P>> {
@@ -1402,7 +1419,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
         }
     }
 
-    fn get_reveal(&self, player: &P) -> Option<&DealerPrivMsg> {
+    fn get_reveal(&self, player: &P) -> Option<&DealerPrivMsg<V::Scalar>> {
         let DealerResult::Ok(results) = &self.results else {
             return None;
         };
@@ -1415,7 +1432,7 @@ impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     fn zip_players<'a, 'b>(
         &'a self,
         players: &'b Set<P>,
-    ) -> Result<Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<P>)>>, FaultReason> {
+    ) -> Result<Option<impl Iterator<Item = (&'b P, &'a AckOrReveal<V, P>)>>, FaultReason> {
         match &self.results {
             DealerResult::TooManyReveals => Ok(None),
             DealerResult::Ok(results) => {
@@ -1472,6 +1489,7 @@ where
     P: for<'a> arbitrary::Arbitrary<'a>,
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    V::Scalar: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let pub_msg = u.arbitrary()?;
@@ -1567,6 +1585,7 @@ where
     P: for<'a> arbitrary::Arbitrary<'a>,
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
     P::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    V::Scalar: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let dealer = u.arbitrary()?;
@@ -1797,7 +1816,7 @@ pub struct Dealer<V: Variant, S: Signer> {
     me: S,
     info: Info<V, S::PublicKey>,
     pub_msg: DealerPubMsg<V>,
-    results: Map<S::PublicKey, AckOrReveal<S::PublicKey>>,
+    results: Map<S::PublicKey, AckOrReveal<V, S::PublicKey>>,
     transcript: Transcript,
 }
 
@@ -1828,8 +1847,15 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
         mut rng: impl CryptoRng,
         info: Info<V, S::PublicKey>,
         me: S,
-        share: Option<Share>,
-    ) -> Result<(Self, DealerPubMsg<V>, Vec<(S::PublicKey, DealerPrivMsg)>), Error> {
+        share: Option<Share<V::Scalar>>,
+    ) -> Result<
+        (
+            Self,
+            DealerPubMsg<V>,
+            Vec<(S::PublicKey, DealerPrivMsg<V::Scalar>)>,
+        ),
+        Error,
+    > {
         // Check that this dealer is defined in the round.
         info.dealer_index(&me.public_key())
             .ok_or_else(|| Error::DealerNotInRound(format!("{:?}", me.public_key())))?;
@@ -1926,7 +1952,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
 
 struct Observe<V: Variant, P: PublicKey> {
     output: Output<V, P>,
-    weights: Option<Interpolator<P, Scalar>>,
+    weights: Option<Interpolator<P, V::Scalar>>,
 }
 
 impl<V: Variant, P: PublicKey> Observe<V, P> {
@@ -2028,7 +2054,7 @@ pub struct Player<V: Variant, S: Signer> {
     info: Info<V, S::PublicKey>,
     index: Participant,
     transcript: Transcript,
-    view: BTreeMap<S::PublicKey, (DealerPubMsg<V>, DealerPrivMsg)>,
+    view: BTreeMap<S::PublicKey, (DealerPubMsg<V>, DealerPrivMsg<V::Scalar>)>,
 }
 
 impl<V: Variant, S: Signer> Player<V, S> {
@@ -2080,7 +2106,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         info: Info<V, S::PublicKey>,
         me: S,
         logs: &BTreeMap<S::PublicKey, DealerLog<V, S::PublicKey>>,
-        msgs: impl IntoIterator<Item = (S::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
+        msgs: impl IntoIterator<Item = (S::PublicKey, DealerPubMsg<V>, DealerPrivMsg<V::Scalar>)>,
     ) -> Result<(Self, BTreeMap<S::PublicKey, PlayerAck<S::PublicKey>>), Error> {
         // Record all acks we've emitted (by dealer).
         let mut this = Self::new(info, me)?;
@@ -2132,7 +2158,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         &mut self,
         dealer: S::PublicKey,
         pub_msg: DealerPubMsg<V>,
-        priv_msg: DealerPrivMsg,
+        priv_msg: DealerPrivMsg<V::Scalar>,
     ) -> Result<Option<PlayerAck<S::PublicKey>>, DealerMessageError> {
         if self.view.contains_key(&dealer) {
             return Ok(None);
@@ -2178,7 +2204,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
         rng: &mut impl CryptoRng,
         logs: Logs<V, S::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<(Output<V, S::PublicKey>, Share), FinalizeError<S::PublicKey>>
+    ) -> Result<(Output<V, S::PublicKey>, Share<V::Scalar>), FinalizeError<S::PublicKey>>
     where
         S::PublicKey: BatchVerifier,
     {
@@ -2214,7 +2240,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
             Observe::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy);
         let private = weights.map_or_else(
             || {
-                let mut out = <Scalar as Additive>::zero();
+                let mut out = V::Scalar::zero();
                 for s in dealings.values() {
                     out += s;
                 }
@@ -2232,7 +2258,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
 }
 
 /// The result of dealing shares to players.
-pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share>), Error>;
+pub type DealResult<V, P> = Result<(Output<V, P>, Map<P, Share<<V as Variant>::Scalar>>), Error>;
 
 /// Simply distribute shares at random, instead of performing a distributed protocol.
 pub fn deal<V: Variant, P: Clone + Ord, M: Faults>(
@@ -2281,7 +2307,7 @@ pub fn deal_anonymous<V: Variant, M: Faults>(
     rng: impl CryptoRng,
     mode: Mode,
     n: NonZeroU32,
-) -> (Sharing<V>, Vec<Share>) {
+) -> (Sharing<V>, Vec<Share<V::Scalar>>) {
     let players = (0..n.get()).try_collect().unwrap();
     let (output, shares) = deal::<V, _, M>(rng, mode, players).unwrap();
     (output.public().clone(), shares.values().to_vec())
@@ -2675,7 +2701,7 @@ mod test_plan {
                 NonZeroU32::new(self.num_participants.get() + max_shift).expect("non-zero");
 
             let mut previous_output: Option<Output<V, ed25519::PublicKey>> = None;
-            let mut shares: BTreeMap<ed25519::PublicKey, Share> = BTreeMap::new();
+            let mut shares: BTreeMap<ed25519::PublicKey, Share<V::Scalar>> = BTreeMap::new();
             let mut threshold_public_key: Option<V::Public> = None;
 
             for (i_round, round) in self.rounds.into_iter().enumerate() {
@@ -2720,7 +2746,11 @@ mod test_plan {
                     .unwrap();
                 let mut acked_dealings: BTreeMap<
                     ed25519::PublicKey,
-                    Vec<(ed25519::PublicKey, DealerPubMsg<V>, DealerPrivMsg)>,
+                    Vec<(
+                        ed25519::PublicKey,
+                        DealerPubMsg<V>,
+                        DealerPrivMsg<V::Scalar>,
+                    )>,
                 > = player_set
                     .iter()
                     .cloned()
@@ -2811,7 +2841,7 @@ mod test_plan {
                     for (player, priv_msg) in &mut priv_msgs {
                         let player_key_idx = pk_to_key_idx[player];
                         if round.bad_shares.contains(&(i_dealer, player_key_idx)) {
-                            *priv_msg = DealerPrivMsg::new(Scalar::random(&mut rng));
+                            *priv_msg = DealerPrivMsg::new(V::Scalar::random(&mut rng));
                         }
                     }
                     assert_eq!(priv_msgs.len(), players.len());
@@ -2896,7 +2926,7 @@ mod test_plan {
                                 *results
                                     .get_value_mut(&player_pk)
                                     .ok_or_else(|| anyhow!("unknown player: {:?}", player_pk))? =
-                                    AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::random(
+                                    AckOrReveal::Reveal(DealerPrivMsg::new(V::Scalar::random(
                                         &mut rng,
                                     )));
                             }
@@ -3353,7 +3383,10 @@ pub use test_plan::Plan as FuzzPlan;
 #[cfg(test)]
 mod test {
     use super::{test_plan::*, *};
-    use crate::{bls12381::primitives::variant::MinPk, ed25519};
+    use crate::{
+        bls12381::primitives::{group::Scalar, variant::MinPk},
+        ed25519,
+    };
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_codec::{DecodeExt, FixedSize};
@@ -5026,7 +5059,7 @@ mod test {
     #[test]
     fn test_dealer_priv_msg_decode_rejects_zero_scalar() {
         let mut encoded = Scalar::zero().encode();
-        let decoded = DealerPrivMsg::read_cfg(&mut encoded, &());
+        let decoded = DealerPrivMsg::<Scalar>::read_cfg(&mut encoded, &());
         assert!(decoded.is_err());
     }
 
@@ -5119,10 +5152,10 @@ mod test {
             FeldmanTranscript<1, 1> => 16,
             CodecConformance<Output<MinPk, ed25519::PublicKey>>,
             CodecConformance<DealerPubMsg<MinPk>>,
-            CodecConformance<DealerPrivMsg>,
+            CodecConformance<DealerPrivMsg<Scalar>>,
             CodecConformance<PlayerAck<ed25519::PublicKey>>,
-            CodecConformance<AckOrReveal<ed25519::PublicKey>>,
-            CodecConformance<DealerResult<ed25519::PublicKey>>,
+            CodecConformance<AckOrReveal<MinPk, ed25519::PublicKey>>,
+            CodecConformance<DealerResult<MinPk, ed25519::PublicKey>>,
             CodecConformance<DealerLog<MinPk, ed25519::PublicKey>>,
             CodecConformance<SignedDealerLog<MinPk, ed25519::PublicKey>>,
         }

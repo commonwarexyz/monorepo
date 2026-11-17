@@ -43,7 +43,7 @@ where
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
     X: Blocker<PublicKey = C::PublicKey>,
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,

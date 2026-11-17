@@ -1,28 +1,52 @@
 //! Different variants of the BLS signature scheme.
 //!
-//! A [Variant] names the group that holds public keys and its [PairingGroup::Twin], which holds
-//! signatures and hashed messages. [MinPk] puts public keys in [G1] and [MinSig] puts them in [G2],
-//! as [Twin]<[G1]>.
+//! A [Variant] names the scalar field that holds private keys, the group that holds public keys,
+//! and that group's [PairingGroup::Twin], which holds signatures and hashed messages. [MinPk] puts
+//! public keys in [G1] and [MinSig] puts them in [G2], as [Twin]<[G1]>.
 
 use super::group::{
-    DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, Scalar,
+    G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, Scalar,
     SmallScalar,
 };
 use bytes::BufMut;
 use commonware_codec::{
     Buf, CodecFixed, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_math::algebra::{HashToGroup, PairingGroup, Random, Space, Twin};
+use commonware_math::algebra::{FieldNTT, HashToGroup, PairingGroup, Random, Space, Twin};
 use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Formatter},
     hash::Hash,
 };
+use ctutils::CtEq;
+
+/// Domain separation tag used when hashing a message to a group.
+///
+/// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
+pub type DST = &'static [u8];
+
+/// Configuration for reading a [Variant::Scalar].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarReadCfg {
+    /// Accept any in-range scalar, including zero.
+    AllowZero,
+    /// Reject the zero scalar.
+    RejectZero,
+}
 
 /// A specific instance of a signature scheme.
 pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
+    /// The scalar type, which holds private keys.
+    type Scalar: FieldNTT
+        + Random
+        + From<u64>
+        + CtEq
+        + Read<Cfg = ScalarReadCfg>
+        + Write
+        + FixedSize;
+
     /// The public key type.
-    type Public: PairingGroup<Scalar = Scalar, Twin = Self::Signature, Target: Encode>
+    type Public: PairingGroup<Scalar = Self::Scalar, Twin = Self::Signature, Target: Encode>
         + HashToGroup
         + Space<Self::Challenge>
         + CodecFixed<Cfg = ()>
@@ -30,7 +54,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
         + Copy;
 
     /// The signature type.
-    type Signature: HashToGroup<Scalar = Scalar>
+    type Signature: HashToGroup<Scalar = Self::Scalar>
         + Space<Self::Challenge>
         + CodecFixed<Cfg = ()>
         + Hash
@@ -54,6 +78,7 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 pub struct MinPk {}
 
 impl Variant for MinPk {
+    type Scalar = Scalar;
     type Public = G1;
     type Signature = G2;
     type Challenge = SmallScalar;
@@ -73,6 +98,7 @@ impl Debug for MinPk {
 pub struct MinSig {}
 
 impl Variant for MinSig {
+    type Scalar = Scalar;
     type Public = Twin<G1>;
     type Signature = G1;
     type Challenge = SmallScalar;
@@ -120,13 +146,16 @@ impl<V: Variant> EncodeSize for PartialSignature<V> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
+impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V>
+where
+    V::Scalar: arbitrary::Arbitrary<'a>,
+{
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         use commonware_math::algebra::CryptoGroup;
 
         Ok(Self {
             index: u.arbitrary()?,
-            value: <V::Signature as CryptoGroup>::generator() * &u.arbitrary::<Scalar>()?,
+            value: <V::Signature as CryptoGroup>::generator() * &u.arbitrary::<V::Scalar>()?,
         })
     }
 }

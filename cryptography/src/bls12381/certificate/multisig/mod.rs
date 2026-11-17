@@ -17,7 +17,7 @@ pub mod mocks;
 use crate::{
     PublicKey,
     bls12381::primitives::{
-        group::Private,
+        key::Private,
         ops::{self, aggregate, batch},
         variant::Variant,
     },
@@ -52,7 +52,7 @@ pub struct Generic<P: PublicKey, V: Variant, N: Namespace> {
     /// Every signing key must have a verified proof of possession.
     pub participants: BiMap<P, V::Public>,
     /// Key used for generating signatures.
-    pub signer: Option<(Participant, Private)>,
+    pub signer: Option<(Participant, Private<V::Scalar>)>,
     /// Pre-computed namespace(s) for this subject type.
     pub namespace: N,
 }
@@ -75,7 +75,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     pub fn signer(
         namespace: &[u8],
         participants: BiMap<P, V::Public>,
-        private_key: Private,
+        private_key: Private<V::Scalar>,
     ) -> Option<Self> {
         let public_key = ops::compute_public::<V>(&private_key);
         let signer = participants
@@ -497,7 +497,9 @@ macro_rules! impl_certificate_bls12381_multisig {
             pub fn signer(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::BiMap<P, V::Public>,
-                private_key: $crate::bls12381::primitives::group::Private,
+                private_key: $crate::bls12381::primitives::key::Private<
+                    <V as $crate::bls12381::primitives::variant::Variant>::Scalar,
+                >,
             ) -> Option<Self> {
                 Some(Self {
                     generic: $crate::bls12381::certificate::multisig::Generic::signer(
@@ -721,7 +723,7 @@ mod tests {
     use crate::{
         Signer as _,
         bls12381::primitives::{
-            group::{Private, Scalar},
+            key::Private,
             ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
@@ -771,12 +773,16 @@ mod tests {
     fn setup_keys<V: Variant>(
         rng: &mut impl CryptoRng,
         n: u32,
-    ) -> (Vec<Private>, BiMap<ed25519::PublicKey, V::Public>) {
+    ) -> (
+        Vec<Private<V::Scalar>>,
+        BiMap<ed25519::PublicKey, V::Public>,
+    ) {
         // Generate identity keys (ed25519) and consensus keys (BLS)
         let identity_keys: Vec<_> = (0..n)
             .map(|_| Ed25519PrivateKey::random(&mut *rng))
             .collect();
-        let consensus_keys: Vec<Private> = (0..n).map(|_| Private::random(&mut *rng)).collect();
+        let consensus_keys: Vec<Private<V::Scalar>> =
+            (0..n).map(|_| Private::random(&mut *rng)).collect();
 
         // Build BiMap of identity public keys -> consensus public keys
         let participants = identity_keys
@@ -1651,7 +1657,7 @@ mod tests {
         assert!(verification.invalid.is_empty());
         assert_eq!(verification.verified.len(), 2);
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_attestation1: Attestation<Scheme<ed25519::PublicKey, V>> = Attestation {
             signer: attestation1.signer,

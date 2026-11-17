@@ -11,7 +11,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Output, PlayerAck, SignedDealerLog},
         primitives::{
-            group::Share,
+            key::Share,
             sharing::{ModeVersion, Sharing},
             variant::Variant,
         },
@@ -60,7 +60,7 @@ pub enum SchemeInfo<V: Variant, P: PublicKey> {
         /// Public group polynomial.
         sharing: Sharing<V>,
         /// This node's secret share.
-        share: Share,
+        share: Share<V::Scalar>,
     },
 }
 
@@ -72,7 +72,7 @@ impl<V: Variant, P: PublicKey> SchemeInfo<V, P> {
         public_key: &P,
         participants: Set<P>,
         sharing: Sharing<V>,
-        share: Option<Share>,
+        share: Option<Share<V::Scalar>>,
     ) -> Self {
         match share {
             Some(share) => Self::Signer {
@@ -691,7 +691,7 @@ where
 /// Point-to-point message of a DKG or reshare ceremony.
 pub enum Message<V: Variant, P: PublicKey> {
     /// A dealer's public and private messages for one player.
-    Dealer(DealerPubMsg<V>, DealerPrivMsg),
+    Dealer(DealerPubMsg<V>, DealerPrivMsg<V::Scalar>),
     /// A player's acknowledgement to a dealer.
     Ack(PlayerAck<P>),
 }
@@ -725,8 +725,8 @@ impl<V: Variant, P: PublicKey> Message<V, P> {
     /// Returns an upper bound on the encoded size of a message for at most `max_participants`
     /// participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
-        let dealer =
-            DealerPubMsg::<V>::max_encode_size(max_participants) + DealerPrivMsg::MAX_ENCODE_SIZE;
+        let dealer = DealerPubMsg::<V>::max_encode_size(max_participants)
+            + DealerPrivMsg::<V::Scalar>::MAX_ENCODE_SIZE;
         dealer.max(PlayerAck::<P>::MAX_ENCODE_SIZE) + u8::SIZE
     }
 }
@@ -755,6 +755,7 @@ impl<V: Variant, P: PublicKey> Read for Message<V, P> {
 impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for Message<V, P>
 where
     DealerPubMsg<V>: for<'a> arbitrary::Arbitrary<'a>,
+    DealerPrivMsg<V::Scalar>: for<'a> arbitrary::Arbitrary<'a>,
     PlayerAck<P>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {

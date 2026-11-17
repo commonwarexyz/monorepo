@@ -1,4 +1,4 @@
-use crate::bls12381::primitives::{Error, group::Scalar, variant::Variant};
+use crate::bls12381::primitives::{Error, variant::Variant};
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
@@ -8,9 +8,10 @@ use commonware_codec::{
     Buf, EncodeSize, FixedSize, Mode as CodecMode, RangeCfg, Read, ReadExt, Write, mode,
 };
 use commonware_macros::stability;
-#[stability(ALPHA)]
-use commonware_math::algebra::{FieldNTT, Ring};
-use commonware_math::poly::{Interpolator, Poly};
+use commonware_math::{
+    algebra::FieldNTT,
+    poly::{Interpolator, Poly},
+};
 use commonware_parallel::Sequential;
 use commonware_utils::{NZU32, Participant, Widen, ordered::Set};
 #[stability(ALPHA)]
@@ -65,14 +66,18 @@ impl Mode {
     /// Compute the scalar for one participant.
     ///
     /// This will return `None` only if `i >= total`.
-    pub(crate) fn scalar(self, total: NonZeroU32, i: Participant) -> Option<Scalar> {
+    pub(crate) fn scalar<S: FieldNTT + From<u64>>(
+        self,
+        total: NonZeroU32,
+        i: Participant,
+    ) -> Option<S> {
         if i.get() >= total.get() {
             return None;
         }
         match self {
             Self::NonZeroCounter => {
                 // Adding 1 is critical, because f(0) will contain the secret.
-                Some(Scalar::from_u64(i.get() as u64 + 1))
+                Some(S::from(i.get() as u64 + 1))
             }
             #[cfg(not(any(
                 commonware_stability_BETA,
@@ -86,7 +91,7 @@ impl Mode {
                 // collides with the secret at f(0).
                 let size = (total.get() as u64).next_power_of_two();
                 let lg_size = size.ilog2() as u8;
-                let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
+                let w = S::root_of_unity(lg_size).expect("domain too large for NTT");
                 Some(w.exp(&[i.get() as u64]))
             }
         }
@@ -94,11 +99,9 @@ impl Mode {
 
     /// Compute the scalars for all participants.
     #[cfg(feature = "std")]
-    pub(crate) fn all_scalars(self, total: NonZeroU32) -> Vec<Scalar> {
+    pub(crate) fn all_scalars<S: FieldNTT + From<u64>>(self, total: NonZeroU32) -> Vec<S> {
         match self {
-            Self::NonZeroCounter => (0..total.get())
-                .map(|i| Scalar::from_u64(i as u64 + 1))
-                .collect(),
+            Self::NonZeroCounter => (0..total.get()).map(|i| S::from(i as u64 + 1)).collect(),
             #[cfg(not(any(
                 commonware_stability_BETA,
                 commonware_stability_GAMMA,
@@ -109,9 +112,9 @@ impl Mode {
             Self::RootsOfUnity => {
                 let size = (total.get() as u64).next_power_of_two();
                 let lg_size = size.ilog2() as u8;
-                let w = Scalar::root_of_unity(lg_size).expect("domain too large for NTT");
+                let w = S::root_of_unity(lg_size).expect("domain too large for NTT");
                 (0..total.get())
-                    .scan(Scalar::one(), |state, _| {
+                    .scan(S::one(), |state, _| {
                         let val = state.clone();
                         *state *= &w;
                         Some(val)
@@ -131,12 +134,12 @@ impl Mode {
     /// - the total number of participants,
     /// - a set of indices (of any type),
     /// - a means to convert indices to Participant values.
-    fn interpolator<I: Clone + Ord>(
+    fn interpolator<I: Clone + Ord, S: FieldNTT + From<u64>>(
         self,
         total: NonZeroU32,
         indices: &Set<I>,
         to_index: impl Fn(&I) -> Option<Participant>,
-    ) -> Option<Interpolator<I, Scalar>> {
+    ) -> Option<Interpolator<I, S>> {
         match self {
             Self::NonZeroCounter => {
                 let mut count = 0;
@@ -201,11 +204,11 @@ impl Mode {
     /// This function will return `None` only if `subset` contains elements
     /// not in `set`.
     #[cfg(feature = "std")]
-    pub(crate) fn subset_interpolator<I: Clone + Ord>(
+    pub(crate) fn subset_interpolator<I: Clone + Ord, S: FieldNTT + From<u64>>(
         self,
         set: &Set<I>,
         subset: &Set<I>,
-    ) -> Option<Interpolator<I, Scalar>> {
+    ) -> Option<Interpolator<I, S>> {
         let Ok(total) = NonZeroU32::try_from(set.len() as u32) else {
             return Some(Interpolator::new(iter::empty()));
         };
@@ -339,12 +342,12 @@ impl<V: Variant> Sharing<V> {
         self.mode
     }
 
-    pub(crate) fn scalar(&self, i: Participant) -> Option<Scalar> {
+    pub(crate) fn scalar(&self, i: Participant) -> Option<V::Scalar> {
         self.mode.scalar(self.total, i)
     }
 
     #[cfg(feature = "std")]
-    fn all_scalars(&self) -> Vec<Scalar> {
+    fn all_scalars(&self) -> Vec<V::Scalar> {
         self.mode.all_scalars(self.total)
     }
 
@@ -368,7 +371,7 @@ impl<V: Variant> Sharing<V> {
     pub(crate) fn interpolator(
         &self,
         indices: &Set<Participant>,
-    ) -> Result<Interpolator<Participant, Scalar>, Error> {
+    ) -> Result<Interpolator<Participant, V::Scalar>, Error> {
         self.mode
             .interpolator(self.total, indices, |&x| Some(x))
             .ok_or(Error::InvalidIndex)
@@ -467,7 +470,7 @@ impl<V: Variant> Read for Sharing<V> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::bls12381::primitives::variant::MinSig;
+    use crate::bls12381::primitives::{group::Scalar, variant::MinSig};
     use commonware_invariants::minifuzz;
     use commonware_utils::{TestRng, ordered::Map};
 
@@ -475,7 +478,7 @@ mod tests {
     fn test_roots_of_unity_interpolator_large_total_returns_none() {
         let total = NonZeroU32::new(u32::MAX).expect("u32::MAX is non-zero");
         let indices = Set::from_iter_dedup([Participant::new(0)]);
-        let interpolator =
+        let interpolator: Option<Interpolator<_, Scalar>> =
             Mode::RootsOfUnity.interpolator(total, &indices, |participant| Some(*participant));
         assert!(
             interpolator.is_none(),
@@ -502,7 +505,7 @@ mod tests {
             let index = u.int_in_range(0u32..=total.get() - 1)?;
             let participant = Participant::new(index);
 
-            let scalars = mode.all_scalars(total);
+            let scalars: Vec<Scalar> = mode.all_scalars(total);
             assert_eq!(
                 scalars[usize::from(participant)].clone(),
                 mode.scalar(total, participant).expect("index is in range")
