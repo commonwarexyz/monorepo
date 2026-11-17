@@ -27,11 +27,6 @@
 - [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
   certificates that are constant-size regardless of committee size. Requires a trusted
   setup (distributed key generation) and cannot attribute signatures to individual signers.
-
-- [`bls12381_sas`]: Attributable synchronized aggregate signatures. Attestations by distinct
-  signers over different subjects in one period aggregate into one signature that verifies with a
-  constant number of pairings. Subjects must implement [`Synchronized`], and callers must verify a
-  proof of knowledge for every signing key before constructing the scheme.
 "
 )]
 //! # Attributable Schemes and Fault Evidence
@@ -72,9 +67,6 @@
 )]
 //! Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
 
-#[cfg(feature = "bls12381")]
-#[commonware_macros::stability(ALPHA)]
-pub use crate::bls12381::certificate::sas as bls12381_sas;
 #[cfg(feature = "bls12381")]
 pub use crate::bls12381::certificate::{
     multisig as bls12381_multisig, threshold as bls12381_threshold,
@@ -254,28 +246,6 @@ pub trait Subject: Clone + Debug + Send + Sync {
 
     /// Get the message bytes for this subject instance.
     fn message(&self) -> Bytes;
-}
-
-/// A [`Subject`] signed in a period that every signer shares.
-///
-/// Synchronized aggregate signature schemes derive every signature in a period from one common
-/// base, so signatures from distinct signers over different subjects in one period aggregate into
-/// a signature that verifies with a constant number of pairings.
-///
-/// # Security
-///
-/// A signer must sign at most one subject per period. Two signatures by one signer over different
-/// subjects in one period let anyone forge that signer's signature on any subject in that period.
-/// Schemes do not track periods: a protocol must assign periods so that an honest signer never
-/// signs two different subjects in one, for example by giving every kind of message signed in a
-/// round its own period.
-///
-/// Periods must be unique across protocols and across the periods of one protocol: derive them from
-/// the protocol namespace in `derived` and encode them unambiguously.
-#[commonware_macros::stability(ALPHA)]
-pub trait Synchronized: Subject {
-    /// Returns the encoded period this subject is signed in.
-    fn period(&self, derived: &Self::Namespace) -> Bytes;
 }
 
 /// Cryptographic surface for recovered certificate verification.
