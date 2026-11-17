@@ -22,14 +22,14 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
-    sync::Mutex,
+    sync::{AsyncMutex, Mutex},
 };
 use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use futures::{StreamExt as _, pin_mut};
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 /// Operations per chunk of the log that a build task claims and replays at a time. Small in
 /// tests so ordinary logs span several chunks.
@@ -100,6 +100,13 @@ const MERGE_BYTES: usize = 6144;
 const PIECE_BYTES: usize = 128 << 20;
 #[cfg(test)]
 const PIECE_BYTES: usize = 2048;
+
+/// Sorted runs merged at a time, each of which holds one block in memory. A bucket with more
+/// runs is merged in several passes. Small in tests so a merged bucket takes several.
+#[cfg(not(test))]
+const MERGE_RUNS: usize = 64;
+#[cfg(test)]
+const MERGE_RUNS: usize = 3;
 
 /// Keys a merged bucket loads into one partition at a time. Small in tests so a partition is
 /// loaded several times.
@@ -321,6 +328,7 @@ impl Run {
         let mut at = self.key_at + self.key_len;
         if at == self.block.len() {
             let Some((offset, len)) = self.blocks.next() else {
+                self.block = Vec::new();
                 return Ok(false);
             };
             let block = blob
@@ -355,6 +363,77 @@ fn sift_down(heap: &mut [usize], mut at: usize, runs: &[Run]) {
     }
 }
 
+/// A merge of sorted runs that yields the newest record of each key, in ascending key order.
+struct Merge {
+    runs: Vec<Run>,
+    /// The runs that have records left, as indices into `runs` in heap order with the run whose
+    /// record sorts first on top.
+    heap: Vec<usize>,
+    /// The key last returned by [Self::next].
+    key: Vec<u8>,
+}
+
+impl Merge {
+    /// Start a merge of `runs`, reading the first block of each.
+    async fn new(
+        blob: &impl Blob,
+        layout: Layout,
+        mut runs: Vec<Run>,
+    ) -> Result<Self, RuntimeError> {
+        let mut heap = Vec::with_capacity(runs.len());
+        for (run, state) in runs.iter_mut().enumerate() {
+            if state.advance(blob, layout).await? {
+                heap.push(run);
+            }
+        }
+        for at in (0..heap.len() / 2).rev() {
+            sift_down(&mut heap, at, &runs);
+        }
+        Ok(Self {
+            runs,
+            heap,
+            key: Vec::new(),
+        })
+    }
+
+    /// Move to the next key, leaving it in `self.key`, and return the tagged location of its
+    /// newest record. Returns `None` once every run is exhausted.
+    async fn next(
+        &mut self,
+        blob: &impl Blob,
+        layout: Layout,
+    ) -> Result<Option<u64>, RuntimeError> {
+        let Some(&top) = self.heap.first() else {
+            return Ok(None);
+        };
+        self.key.clear();
+        self.key.extend_from_slice(self.runs[top].key());
+        loop {
+            // The top run holds the oldest unread record of the key. Read past it, dropping the
+            // run once it has no record left.
+            let top = self.heap[0];
+            let newest = self.runs[top].tagged;
+            if !self.runs[top].advance(blob, layout).await? {
+                self.heap.swap_remove(0);
+            }
+            sift_down(&mut self.heap, 0, &self.runs);
+            match self.heap.first() {
+                Some(&next) if self.runs[next].key() == self.key.as_slice() => {}
+                _ => return Ok(Some(newest)),
+            }
+        }
+    }
+}
+
+/// A sorted run being written to the scratch blob in blocks of whole records.
+#[derive(Default)]
+struct RunWriter {
+    /// The block being filled.
+    block: Vec<u8>,
+    /// Offset and length of each block written.
+    blocks: Vec<(u64, usize)>,
+}
+
 /// One bucket of a build: the records of the operations whose keys fall in a contiguous
 /// range of partitions, and those partitions.
 struct Bucket<R> {
@@ -368,7 +447,7 @@ struct Bucket<R> {
 
 /// The number of leading `runs` whose lengths total at most `limit` bytes, and at least one if
 /// there are any.
-fn leading_runs(runs: &[(u64, usize)], limit: usize) -> usize {
+const fn leading_runs(runs: &[(u64, usize)], limit: usize) -> usize {
     let mut bytes = 0;
     let mut count = 0;
     while count < runs.len() && (count == 0 || bytes + runs[count].1 <= limit) {
@@ -387,9 +466,10 @@ struct Buckets<B, R> {
 
     /// The partition of the scratch blob.
     scratch: String,
-    /// The scratch blob, opened by the first write to it. It is never synced, so it must stay
-    /// open until its records are read back.
-    blob: Mutex<Option<Arc<B>>>,
+    /// The scratch blob, opened by the first write to it. Storage allows one open handle to a
+    /// blob, so the lock is held while it opens. The blob is never synced, so it must stay open
+    /// until its records are read back.
+    blob: AsyncMutex<Option<Arc<B>>>,
     /// The scratch blob's next free offset.
     end: AtomicU64,
 }
@@ -401,17 +481,14 @@ impl<B: Blob, R> Buckets<B, R> {
         context: &impl Storage<Blob = B>,
         records: Vec<u8>,
     ) -> Result<(u64, usize), RuntimeError> {
-        let opened = self.blob.lock().clone();
-        let blob = match opened {
-            Some(blob) => blob,
-            None => {
-                // Tasks that open the blob at the same time get handles to one blob. The first
-                // to finish provides the handle every task writes through.
-                let (blob, _) = context.open(&self.scratch, SCRATCH_BLOB).await?;
-                self.blob
-                    .lock()
-                    .get_or_insert_with(|| Arc::new(blob))
-                    .clone()
+        let blob = {
+            let mut opened = self.blob.lock().await;
+            match &*opened {
+                Some(blob) => blob.clone(),
+                None => {
+                    let (blob, _) = context.open(&self.scratch, SCRATCH_BLOB).await?;
+                    opened.insert(Arc::new(blob)).clone()
+                }
             }
         };
         let len = records.len();
@@ -423,7 +500,7 @@ impl<B: Blob, R> Buckets<B, R> {
 
     /// Append the records of `runs` to `data`, in whatever order their reads finish.
     async fn read(&self, runs: &[(u64, usize)], data: &mut Vec<u8>) -> Result<(), RuntimeError> {
-        let blob = self.blob.lock().clone().expect("runs were written");
+        let blob = self.blob.lock().await.clone().expect("runs were written");
         let mut rest = runs;
         while !rest.is_empty() {
             let (batch, later) = rest.split_at(leading_runs(rest, READ_BYTES));
@@ -482,14 +559,47 @@ impl<B: Blob, R> Buckets<B, R> {
         )
     }
 
+    /// Append the record of an operation on `key` to `run`, writing a block that has filled.
+    async fn push(
+        &self,
+        context: &impl Storage<Blob = B>,
+        run: &mut RunWriter,
+        key: &[u8],
+        tagged: u64,
+    ) -> Result<(), RuntimeError> {
+        self.layout.encode(&mut run.block, key, tagged);
+        if run.block.len() >= SPILL_BYTES {
+            let full = core::mem::replace(
+                &mut run.block,
+                Vec::with_capacity(SPILL_BYTES + STAGE_BYTES),
+            );
+            run.blocks.push(self.write(context, full).await?);
+        }
+        Ok(())
+    }
+
+    /// Write what `run` still holds and return the run for reading.
+    async fn finish(
+        &self,
+        context: &impl Storage<Blob = B>,
+        run: RunWriter,
+    ) -> Result<Run, RuntimeError> {
+        let RunWriter { block, mut blocks } = run;
+        if !block.is_empty() {
+            blocks.push(self.write(context, block).await?);
+        }
+        Ok(Run::new(blocks))
+    }
+
     /// Insert the keys that survive a bucket too large to sort at once into `index`, where `buf`
     /// and `runs` hold the bucket's records. Calls `activate` with each survivor's offset from
     /// the floor and returns their number.
     ///
     /// The records are sorted a piece at a time. Each piece keeps the newest record of each of
-    /// its keys and returns to the scratch blob as a sorted run. Merging the runs then brings
-    /// every key's remaining records together, oldest first, so memory holds one block per run
-    /// however many records the bucket has.
+    /// its keys and returns to the scratch blob as a sorted run. Merging runs brings every
+    /// key's remaining records together, oldest first. At most [MERGE_RUNS] runs are merged at
+    /// a time, into a longer run while more remain, so memory holds that many blocks however
+    /// many records the bucket has.
     async fn merge<F>(
         &self,
         context: &impl Storage<Blob = B>,
@@ -503,7 +613,7 @@ impl<B: Blob, R> Buckets<B, R> {
         R: PartitionRange<Value = Location<F>> + Send,
     {
         let layout = self.layout;
-        let mut sorted = Vec::new();
+        let mut sorted = VecDeque::new();
         let mut unsorted = runs.as_slice();
         let mut buf = Some(buf);
         while buf.is_some() {
@@ -516,36 +626,25 @@ impl<B: Blob, R> Buckets<B, R> {
             if unsorted.is_empty() {
                 data.extend_from_slice(&buf.take().expect("records in memory join once"));
             }
-
-            let mut blocks = Vec::new();
-            let mut block = Vec::with_capacity(SPILL_BYTES + STAGE_BYTES);
+            let mut run = RunWriter::default();
             for record in sort_records(&data, layout) {
-                layout.encode(&mut block, record.key(&data), record.tagged);
-                if block.len() >= SPILL_BYTES {
-                    let full = core::mem::replace(
-                        &mut block,
-                        Vec::with_capacity(SPILL_BYTES + STAGE_BYTES),
-                    );
-                    blocks.push(self.write(context, full).await?);
-                }
+                self.push(context, &mut run, record.key(&data), record.tagged)
+                    .await?;
             }
-            if !block.is_empty() {
-                blocks.push(self.write(context, block).await?);
-            }
-            sorted.push(Run::new(blocks));
+            sorted.push_back(self.finish(context, run).await?);
         }
-
-        // Order the runs by their first records.
-        let blob = self.blob.lock().clone().expect("runs were written");
+        let blob = self.blob.lock().await.clone().expect("runs were written");
         let blob = &*blob;
-        let mut heap = Vec::with_capacity(sorted.len());
-        for (run, state) in sorted.iter_mut().enumerate() {
-            if state.advance(blob, layout).await? {
-                heap.push(run);
+
+        // Merge the oldest runs into one longer run until few enough remain to merge at once.
+        // A merged run keeps deletes, which still decide against records in other runs.
+        while sorted.len() > MERGE_RUNS {
+            let mut merge = Merge::new(blob, layout, sorted.drain(..MERGE_RUNS).collect()).await?;
+            let mut run = RunWriter::default();
+            while let Some(tagged) = merge.next(blob, layout).await? {
+                self.push(context, &mut run, &merge.key, tagged).await?;
             }
-        }
-        for at in (0..heap.len() / 2).rev() {
-            sift_down(&mut heap, at, &sorted);
+            sorted.push_back(self.finish(context, run).await?);
         }
 
         // The survivors of one partition that are waiting to be loaded: their keys back to back,
@@ -560,45 +659,21 @@ impl<B: Blob, R> Buckets<B, R> {
             keys.clear();
             entries.clear();
         };
-
-        // The key whose records are being read and the newest of them so far.
-        let mut key: Vec<u8> = Vec::new();
-        let mut newest = None;
+        let mut merge = Merge::new(blob, layout, sorted.into()).await?;
         let mut survivors = 0;
-        loop {
-            let top = heap.first().map(|&run| &sorted[run]);
-            if let Some(tagged) = newest
-                && top.is_none_or(|run| run.key() != key.as_slice())
-                && tagged & 1 == 0
-            {
-                // Every record of `key` has been read and the newest keeps it.
-                let of = (layout.partition_of)(&key);
-                if !entries.is_empty() && (of != partition || entries.len() >= LOAD_KEYS) {
-                    load(&mut keys, &mut entries);
-                }
-                partition = of;
-                entries.push((keys.len(), key.len(), tagged >> 1));
-                keys.extend_from_slice(&key);
-                activate(tagged >> 1);
-                survivors += 1;
+        while let Some(tagged) = merge.next(blob, layout).await? {
+            if tagged & 1 != 0 {
+                continue;
             }
-            let Some(top) = top else {
-                break;
-            };
-            key.clear();
-            key.extend_from_slice(top.key());
-            newest = Some(top.tagged);
-
-            // Move the top run to its next record, or drop it once it has none.
-            let run = heap[0];
-            if !sorted[run].advance(blob, layout).await? {
-                let last = heap.pop().expect("heap holds the top run");
-                if heap.is_empty() {
-                    continue;
-                }
-                heap[0] = last;
+            let of = (layout.partition_of)(&merge.key);
+            if !entries.is_empty() && (of != partition || entries.len() >= LOAD_KEYS) {
+                load(&mut keys, &mut entries);
             }
-            sift_down(&mut heap, 0, &sorted);
+            partition = of;
+            entries.push((keys.len(), merge.key.len(), tagged >> 1));
+            keys.extend_from_slice(&merge.key);
+            activate(tagged >> 1);
+            survivors += 1;
         }
         if !entries.is_empty() {
             load(&mut keys, &mut entries);
@@ -790,7 +865,7 @@ where
             .collect(),
         held: AtomicU64::new(0),
         scratch: scratch.to_string(),
-        blob: Mutex::new(None),
+        blob: AsyncMutex::new(None),
         end: AtomicU64::new(0),
     });
 
@@ -1059,7 +1134,9 @@ mod tests {
         qmdb::operation::Floored,
         translator::{EightCap, OneCap},
     };
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        BlobVersion, Runner as _, Supervisor as _, deterministic, reschedule,
+    };
     use commonware_utils::{NZUsize, TestRng, probability, test_rng};
     use core::ops::Range;
     use futures::{Stream, future::ready, stream};
@@ -1382,6 +1459,65 @@ mod tests {
                 )
                 .await;
             }
+        });
+    }
+
+    /// A storage whose opens yield once before they run, so that two tasks can both be opening
+    /// a blob at the same time.
+    struct SlowOpen(deterministic::Context);
+
+    impl Storage for SlowOpen {
+        type Blob = <deterministic::Context as Storage>::Blob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: core::ops::RangeInclusive<BlobVersion>,
+        ) -> Result<(Self::Blob, u64, BlobVersion), RuntimeError> {
+            reschedule().await;
+            self.0.open_versioned(partition, name, versions).await
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RuntimeError> {
+            self.0.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RuntimeError> {
+            self.0.scan(partition).await
+        }
+    }
+
+    #[test]
+    fn test_build_opens_scratch_once() {
+        // Tasks whose first writes to scratch overlap must end up sharing one handle to the
+        // blob, which storage allows to be open only once.
+        deterministic::Runner::default().start(|context| async move {
+            let storage = SlowOpen(context.child("storage"));
+            let buckets = Buckets::<_, ()> {
+                layout: Layout {
+                    partition_of: |_| 0,
+                    per_bucket: 1,
+                    floor: 0,
+                    loc_bytes: 1,
+                    record_bytes: 1,
+                },
+                buckets: Vec::new(),
+                held: AtomicU64::new(0),
+                scratch: "scratch".to_string(),
+                blob: Default::default(),
+                end: AtomicU64::new(0),
+            };
+            let (first, second) = futures::join!(
+                buckets.write(&storage, vec![1; 100]),
+                buckets.write(&storage, vec![2; 100]),
+            );
+            let runs = [first.unwrap(), second.unwrap()];
+            assert_ne!(runs[0].0, runs[1].0);
+            let mut data = Vec::new();
+            buckets.read(&runs, &mut data).await.unwrap();
+            data.sort_unstable();
+            assert_eq!(data, [vec![1; 100], vec![2; 100]].concat());
         });
     }
 
