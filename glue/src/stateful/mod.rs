@@ -344,6 +344,10 @@ pub trait Application<E>: Clone + Send + 'static {
     /// Capture, application, and this hook may repeat after a crash until both the block's state
     /// and marshal's processed position are durable.
     ///
+    /// The runtime context is dropped when this hook returns, which aborts work started under a
+    /// child of it. Spawn follow-on work from the context itself (`context.0.spawn(..)`), which
+    /// hands the context's node to the task.
+    ///
     /// # Panics
     ///
     /// Implementations should panic if observing finalized state fails.

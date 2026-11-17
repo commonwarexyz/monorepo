@@ -154,10 +154,11 @@ impl Tree {
 
         // Suspend every task in the subtree before aborting any of them. A
         // suspended task stops polling its future without ending, so a task in
-        // the subtree can only observe another one's abort (a closed channel, a
-        // handle resolving to closed) in a poll it started before it was
-        // suspended. Tasks still see closed for other reasons, such as a spawn
-        // under a node this walk already closed.
+        // the subtree can only observe another one's abort by this walk (a closed
+        // channel, a handle resolving to closed) in a poll it started before it
+        // was suspended. Tasks still see closed for other reasons, such as a
+        // spawn under a node this walk already closed, or a descendant closing
+        // concurrently and aborting what it reaches itself.
         // The walk is iterative so deep chains do not exhaust the thread stack.
         // Each node's list was drained when it closed, so every live descendant
         // is visited once.
@@ -176,7 +177,22 @@ impl Tree {
             }
             pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
         }
-        for aborter in suspended {
+
+        // Abort every suspended task even if a wake unwinds partway.
+        let mut remaining = AbortRemaining(suspended.into_iter());
+        for aborter in remaining.0.by_ref() {
+            aborter.abort();
+        }
+    }
+}
+
+/// Aborts the tasks it still holds when dropped, so a wake that unwinds while a
+/// closing subtree is aborted does not leave the rest suspended.
+struct AbortRemaining(std::vec::IntoIter<Aborter>);
+
+impl Drop for AbortRemaining {
+    fn drop(&mut self) {
+        for aborter in self.0.by_ref() {
             aborter.abort();
         }
     }
@@ -301,6 +317,39 @@ mod tests {
         assert!(run_handle.is_aborted());
         assert_eq!(work_task.poll_unpin(&mut cx), Poll::Ready(Err(Aborted)));
         drop((run, gate, work));
+    }
+
+    #[test]
+    fn a_wake_that_unwinds_leaves_no_task_suspended() {
+        use futures::{
+            FutureExt as _,
+            task::{ArcWake, waker},
+        };
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        struct Unwinds;
+
+        impl ArcWake for Unwinds {
+            fn wake_by_ref(_: &Arc<Self>) {
+                panic!("wake unwound");
+            }
+        }
+
+        // The walk aborts the newest child first, and waking its task unwinds.
+        let scope = Tree::root();
+        let (first, _) = Tree::child(&scope);
+        let (second, _) = Tree::child(&scope);
+        let (first_aborter, first_task) = aborter();
+        first.register(first_aborter);
+        let (second_aborter, mut second_task) = aborter();
+        second.register(second_aborter);
+        let waker = waker(Arc::new(Unwinds));
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(second_task.poll_unpin(&mut cx).is_pending());
+
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(scope))).is_err());
+        assert!(first_task.is_aborted(), "first task stayed suspended");
+        drop((first, second));
     }
 
     #[test]

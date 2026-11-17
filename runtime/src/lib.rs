@@ -296,7 +296,10 @@ stability_scope!(BETA {
         /// as the statement ends, and `let c = context.child("a").child("b");` binds a
         /// context that is already closed. Likewise, a function that takes a context by
         /// value and starts work under a child of it must keep that context, return it,
-        /// or hand it to the work.
+        /// or hand it to the work. Methods that take the context by value, such as
+        /// [Supervisor::with_attribute], move it into the temporary they return, so
+        /// `context.with_attribute(..).child("b")` also closes `context` when the statement
+        /// ends.
         ///
         /// A closed context still serves metrics, storage, networking and time, but a
         /// spawn from it, or from any context derived from it, resolves to
@@ -474,6 +477,13 @@ stability_scope!(BETA {
         /// it into a sub-state that finishes earlier, aborts work started under it
         /// after `start`. The run task remains on the actor's original node. Hand
         /// sub-states a child instead.
+        ///
+        /// An actor that cannot be rebuilt, because it implements `Drop` or is boxed
+        /// before it starts, can start its task from a child instead:
+        /// `self.context.child("run").spawn(move |_| self.run())`. The run task then
+        /// sits beside the work the actor started rather than above it, so the actor
+        /// must keep its context until `run` returns, and placement for the task goes on
+        /// the child.
         ///
         /// # Spawn Configuration
         ///

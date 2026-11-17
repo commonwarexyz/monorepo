@@ -41,7 +41,7 @@ pub(super) async fn new_actor(
     .await;
     let (fence, _gate) = Fence::new();
     mocks::TestReshareActor::new(
-        context.child("actor"),
+        context,
         Config {
             signer: signer.clone(),
             manager: oracle.manager(),
