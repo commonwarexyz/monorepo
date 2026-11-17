@@ -966,7 +966,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let receiver = self.subscribe_by_digest(start_digest, fallback);
         receiver.await.ok().map(|block| {
             let block = V::into_shared(block);
-            AncestorStream::new(clock, provider, [block], fetch_duration)
+            AncestorStream::start(clock, provider, [block], fetch_duration)
         })
     }
 
