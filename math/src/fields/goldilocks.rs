@@ -444,12 +444,17 @@ pub mod fuzz {
         StreamRoundtrip(Vec<u64>),
         ReadRejectsOutOfRange(NonCanonicalU64),
         FuzzField,
+        Codec(F),
     }
 
     impl Plan {
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::StreamRoundtrip(data) => {
+                    assert_eq!(
+                        F::stream_from_u64s(data.clone().into_iter()).count(),
+                        F::bits_to_elements(64 * data.len())
+                    );
                     let mut roundtrip =
                         F::stream_to_u64s(F::stream_from_u64s(data.clone().into_iter()))
                             .collect::<Vec<_>>();
@@ -465,6 +470,13 @@ pub mod fuzz {
                 }
                 Self::FuzzField => {
                     test_suites::fuzz_field_ntt::<F>(u)?;
+                }
+                Self::Codec(x) => {
+                    let encoded = x.encode();
+                    assert_eq!(x, F::read(&mut encoded.clone()).unwrap());
+                    let mut le = x.to_le_bytes();
+                    le.reverse();
+                    assert_eq!(&le[..], &encoded[..]);
                 }
             }
             Ok(())

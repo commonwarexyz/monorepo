@@ -775,6 +775,7 @@ commonware_macros::stability_scope!(ALPHA {
             ScaleZero(F),
             Scale(F, u32, u32),
             Msm2([F; 2], [F; 2]),
+            ExpMultiLimb(F, u64, u64),
         }
 
         impl Plan {
@@ -811,6 +812,11 @@ commonware_macros::stability_scope!(ALPHA {
                     }
                     Self::Msm2(a, b) => {
                         assert_eq!(F::msm(&a, &b, &Sequential), a[0] * b[0] + a[1] * b[1]);
+                    }
+                    Self::ExpMultiLimb(x, lo, hi) => {
+                        // x^(lo + 2^64 hi) = x^lo * (x^(2^64))^hi
+                        let x_2_64 = x.exp(&[1 << 32]).exp(&[1 << 32]);
+                        assert_eq!(x.exp(&[lo, hi]), x.exp(&[lo]) * x_2_64.exp(&[hi]));
                     }
                 }
                 Ok(())

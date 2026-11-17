@@ -590,7 +590,7 @@ pub mod fuzz {
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
     use commonware_utils::{
-        TryFromIterator,
+        FuzzRng, TryFromIterator,
         ordered::{BiMap, Map},
     };
 
@@ -610,12 +610,15 @@ pub mod fuzz {
         RootsOfUnityEqNaive(u16),
         FuzzAdditive,
         FuzzSpaceRing,
+        DegreeExact(Poly<F>),
+        NewWithConstant([u8; 8], u8, F),
     }
 
     impl Plan {
         pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
             match self {
                 Self::Codec(f) => {
+                    assert!(f.encode_size() <= Poly::<F>::max_encode_size(f.coeffs.len().get()));
                     assert_eq!(
                         &f,
                         &Poly::<F>::read_cfg(&mut f.encode(), &(RangeCfg::exact(f.required()), ()))
@@ -720,6 +723,20 @@ pub mod fuzz {
                 }
                 Self::FuzzSpaceRing => {
                     test_suites::fuzz_space_ring::<F, Poly<F>>(u)?;
+                }
+                Self::DegreeExact(f) => {
+                    assert_eq!(f.degree() as usize + 1, f.coeffs.len().get());
+                    let d = f.degree_exact() as usize;
+                    assert!(f.coeffs.iter().skip(d + 1).all(|c| *c == F::zero()));
+                    assert!(d == 0 || f.coeffs[d] != F::zero());
+                }
+                Self::NewWithConstant(seed, degree, constant) => {
+                    let degree = u32::from(degree);
+                    let mut rng = FuzzRng::new(seed.to_vec());
+                    assert_eq!(Poly::<F>::new(&mut rng, degree).degree(), degree);
+                    let f = Poly::new_with_constant(&mut rng, degree, constant);
+                    assert_eq!(f.degree(), degree);
+                    assert_eq!(f.constant(), &constant);
                 }
             }
             Ok(())

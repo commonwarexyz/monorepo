@@ -1290,8 +1290,14 @@ pub fn lagrange_coefficients<F: FieldNTT>(
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use crate::{algebra::Ring, fields::goldilocks::F};
+    use crate::{
+        algebra::{Random, Ring},
+        fields::goldilocks::F,
+    };
     use arbitrary::{Arbitrary, Unstructured};
+    use commonware_codec::Encode as _;
+    use commonware_utils::FuzzRng;
+    use rand_core::Rng as _;
 
     fn arb_polynomial_vector(
         u: &mut Unstructured<'_>,
@@ -1357,6 +1363,102 @@ pub mod fuzz {
         })
     }
 
+    /// Points over more than one `LG_VANISHING_BASE` chunk, so that `vanishing` merges chunks.
+    ///
+    /// Each chunk, taken in the reverse bit order `vanishing` uses, vanishes everywhere,
+    /// nowhere, or at random points, so every pair of chunk states can meet in a merge.
+    fn arb_chunked_vanishing_points(
+        u: &mut Unstructured<'_>,
+        max_extra_log_rows: u32,
+    ) -> arbitrary::Result<VanishingPoints> {
+        let lg_rows = LG_VANISHING_BASE + u.int_in_range(1..=max_extra_log_rows)?;
+        let chunk_size = 1u64 << LG_VANISHING_BASE;
+        let kinds: Vec<u8> = (0..1u64 << (lg_rows - LG_VANISHING_BASE))
+            .map(|_| u.int_in_range(0..=2))
+            .collect::<arbitrary::Result<_>>()?;
+        let set_row = u.int_in_range(0..=(1u64 << lg_rows) - 1)?;
+        let mut rng = FuzzRng::new(u.arbitrary::<[u8; 8]>()?.to_vec());
+        let mut out = VanishingPoints::new(lg_rows);
+        for (chunk, kind) in kinds.into_iter().enumerate() {
+            if kind == 0 {
+                continue;
+            }
+            let start = chunk as u64 * chunk_size;
+            for i in start..start + chunk_size {
+                out.bits.set(i, kind == 1 || rng.next_u32() & 1 == 1);
+            }
+        }
+        out.set_non_vanishing(set_row);
+        Ok(out)
+    }
+
+    fn arb_lagrange(u: &mut Unstructured<'_>, max_log_total: u32) -> arbitrary::Result<Plan> {
+        let lg_size = u.int_in_range(0..=max_log_total)?;
+        let total = if lg_size == 0 {
+            1
+        } else {
+            u.int_in_range((1u32 << (lg_size - 1)) + 1..=1u32 << lg_size)?
+        };
+        let size = 1u32 << lg_size;
+        let mut rng = FuzzRng::new(u.arbitrary::<[u8; 8]>()?.to_vec());
+        let indices: Vec<u32> = match u.int_in_range(0..=2)? {
+            0 => {
+                // Duplicates, padding indices, and indices past the domain are all allowed.
+                let count = u.int_in_range(0..=2 * size)?;
+                (0..count).map(|_| rng.next_u32() % (2 * size)).collect()
+            }
+            1 => (0..total).collect(),
+            _ => Vec::new(),
+        };
+        let mut present: Vec<u32> = indices.iter().copied().filter(|&i| i < total).collect();
+        present.sort_unstable();
+        present.dedup();
+        let f = Matrix::rand(&mut rng, present.len().max(1), 1);
+        Ok(Plan::LagrangeAtZero(
+            NonZeroU32::new(total).expect("total is at least 1"),
+            indices,
+            f,
+        ))
+    }
+
+    fn arb_encode_recover_setup(
+        u: &mut Unstructured<'_>,
+        max_n: usize,
+        max_k: usize,
+        max_cols: usize,
+    ) -> arbitrary::Result<EncodeRecoverSetup> {
+        let n = u.int_in_range(1..=max_n)?;
+        let k = u.int_in_range(0..=max_k)?;
+        let cols = u.int_in_range(1..=max_cols)?;
+        let data_len = u.int_in_range(0..=n * cols)?;
+        let padded_rows = (n + k).next_power_of_two();
+        let num_present = u.int_in_range(n..=padded_rows)?;
+        let mut rng = FuzzRng::new(u.arbitrary::<[u8; 8]>()?.to_vec());
+        let data = (0..data_len).map(|_| F::random(&mut rng)).collect();
+        let mut present: Vec<usize> = (0..padded_rows).collect();
+        for i in 0..num_present {
+            let j = i + (rng.next_u64() % (padded_rows - i) as u64) as usize;
+            present.swap(i, j);
+        }
+        present.truncate(num_present);
+        Ok(EncodeRecoverSetup {
+            n,
+            k,
+            cols,
+            data,
+            present,
+        })
+    }
+
+    #[derive(Debug)]
+    pub struct EncodeRecoverSetup {
+        n: usize,
+        k: usize,
+        cols: usize,
+        data: Vec<F>,
+        present: Vec<usize>,
+    }
+
     #[derive(Debug)]
     pub struct RecoverySetup {
         n: usize,
@@ -1403,15 +1505,28 @@ pub mod fuzz {
         EvaluationThenInverse(PolynomialVector<F>),
         VanishingPolynomial(VanishingPoints),
         Recovery(RecoverySetup),
+        ChunkedVanishingPolynomial(VanishingPoints, F),
+        LagrangeAtZero(NonZeroU32, Vec<u32>, Matrix<F>),
+        EncodeRecover(EncodeRecoverSetup),
+        MatrixCodec(Matrix<F>),
     }
 
     impl<'a> Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            match u.int_in_range(0..=3)? {
+            match u.int_in_range(0..=7)? {
                 0 => Ok(Self::NttEqNaive(arb_polynomial_vector(u, 6, 4)?)),
                 1 => Ok(Self::EvaluationThenInverse(arb_polynomial_vector(u, 6, 4)?)),
                 2 => Ok(Self::VanishingPolynomial(arb_bit_vec_not_all_0(u, 8)?)),
-                _ => Ok(Self::Recovery(arb_recovery_setup(u, 128, 128, 4)?)),
+                3 => Ok(Self::Recovery(arb_recovery_setup(u, 128, 128, 4)?)),
+                4 => Ok(Self::ChunkedVanishingPolynomial(
+                    arb_chunked_vanishing_points(u, 3)?,
+                    F::arbitrary(u)?,
+                )),
+                5 => arb_lagrange(u, LG_VANISHING_BASE + 3),
+                6 => Ok(Self::EncodeRecover(arb_encode_recover_setup(
+                    u, 512, 512, 4,
+                )?)),
+                _ => Ok(Self::MatrixCodec(Matrix::arbitrary(u)?)),
             }
         }
     }
@@ -1456,6 +1571,100 @@ pub mod fuzz {
                 }
                 Self::Recovery(setup) => {
                     setup.test();
+                }
+                Self::ChunkedVanishingPolynomial(bv, x) => {
+                    let lg_size = bv.lg_size();
+                    let expected_degree = ((1u64 << lg_size) - bv.count_non_vanishing()) as usize;
+                    let (at_zero, evals) = EvaluationColumn::<F>::vanishing(&bv);
+                    for (i, (e_i, b_i)) in evals
+                        .evaluations
+                        .iter()
+                        .zip(bv.iter_bits_in_order())
+                        .enumerate()
+                    {
+                        assert_eq!(*e_i == F::zero(), !b_i, "v vanishes at w^{i} iff b_{i} = 0");
+                    }
+                    let v = evals.interpolate();
+                    assert_eq!(v.degree(), expected_degree);
+                    assert_eq!(at_zero, v.coefficients[0]);
+                    // v must be its leading coefficient times the product of (X - w^i)
+                    // over the vanishing points.
+                    let lead =
+                        v.coefficients[reverse_bits(lg_size, expected_degree as u64) as usize];
+                    let w = F::root_of_unity(lg_size as u8).unwrap();
+                    let mut w_i = F::one();
+                    let mut expected = lead;
+                    for b_i in bv.iter_bits_in_order() {
+                        if !b_i {
+                            expected *= &(x - w_i);
+                        }
+                        w_i = w_i * w;
+                    }
+                    assert_eq!(v.evaluate_one(x), expected);
+                }
+                Self::LagrangeAtZero(total, indices, f) => {
+                    let coefficients = lagrange_coefficients::<F>(total, indices.iter().copied());
+                    let mut expected: Vec<u32> =
+                        indices.into_iter().filter(|&i| i < total.get()).collect();
+                    expected.sort_unstable();
+                    expected.dedup();
+                    let mut got: Vec<u32> = coefficients.iter().map(|(i, _)| *i).collect();
+                    got.sort_unstable();
+                    assert_eq!(got, expected);
+                    if coefficients.is_empty() {
+                        return Ok(());
+                    }
+                    // f has fewer coefficients than there are points, so interpolating
+                    // its evaluations at 0 must give its constant term.
+                    let size = total.get().next_power_of_two() as usize;
+                    let evals = f.as_polynomials(size).unwrap().evaluate().data();
+                    let mut at_zero = F::zero();
+                    for (j, l_j) in &coefficients {
+                        at_zero += &(*l_j * evals[(*j as usize, 0)]);
+                    }
+                    assert_eq!(at_zero, f[(0, 0)]);
+                }
+                Self::EncodeRecover(setup) => {
+                    let original = Matrix::init(setup.n, setup.cols, setup.data.into_iter());
+                    assert!(original.as_polynomials(setup.n - 1).is_none());
+                    let encoded = original
+                        .as_polynomials(setup.n + setup.k)
+                        .unwrap()
+                        .evaluate()
+                        .data();
+                    let rows = (setup.n + setup.k).next_power_of_two();
+                    assert_eq!((encoded.rows(), encoded.cols()), (rows, setup.cols));
+                    let mut received =
+                        EvaluationVector::<F>::empty(rows.ilog2() as usize, setup.cols);
+                    for &row in &setup.present {
+                        received.fill_row(row, &encoded[row]);
+                    }
+                    assert_eq!(received.filled_rows(), setup.present.len());
+                    let recovered = received.recover();
+                    let mut recovered_rows = recovered.coefficients_up_to(rows);
+                    for expected in original.iter() {
+                        assert_eq!(recovered_rows.next(), Some(expected));
+                    }
+                    for row in recovered_rows {
+                        assert!(row.iter().all(|c| *c == F::zero()));
+                    }
+                }
+                Self::MatrixCodec(m) => {
+                    let max_els = m.rows() * m.cols();
+                    let decoded = Matrix::<F>::read_cfg(&mut m.encode(), &(max_els, ())).unwrap();
+                    assert_eq!(m, decoded);
+                    let mut forged = bytes::BytesMut::new();
+                    m.rows().write(&mut forged);
+                    (m.cols() + 1).write(&mut forged);
+                    m.data.write(&mut forged);
+                    assert!(matches!(
+                        Matrix::<F>::read_cfg(&mut forged.freeze(), &(max_els + m.rows(), ())),
+                        Err(commonware_codec::Error::Invalid(
+                            "Matrix",
+                            "matrix element count does not match dimensions"
+                        ))
+                    ));
+                    assert_eq!(format!("{m:?}").lines().count(), m.rows());
                 }
             }
             Ok(())

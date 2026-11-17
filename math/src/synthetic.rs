@@ -281,6 +281,7 @@ pub mod fuzz {
         EvalIsLinear(Synthetic<F, G>, Synthetic<F, G>, Vec<G>),
         FuzzAdditive,
         FuzzSpaceRing,
+        EqMatchesDifference(Synthetic<F, G>, Synthetic<F, G>),
     }
 
     fn cover_generators(
@@ -341,6 +342,13 @@ pub mod fuzz {
                 }
                 Self::FuzzSpaceRing => {
                     test_suites::fuzz_space_ring::<F, Synthetic<F, G>>(u)?;
+                }
+                Self::EqMatchesDifference(lhs, rhs) => {
+                    let eq = lhs == rhs;
+                    assert_eq!(eq, rhs == lhs);
+                    assert_eq!(eq, lhs.clone() - &rhs == Synthetic::zero());
+                    // Adding rhs - rhs leaves zero weights at rhs's free indices.
+                    assert_eq!(lhs.clone() + &(rhs.clone() - &rhs), lhs);
                 }
             }
             Ok(())

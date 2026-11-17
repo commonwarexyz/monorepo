@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::acknowledgement::{Acknowledgement, Exact};
 use libfuzzer_sys::fuzz_target;
 
@@ -61,6 +61,7 @@ fn fuzz(input: FuzzInput) {
             for _ in 1..num_clones {
                 clones.push(clones[0].clone());
             }
+            let _all_acknowledged = num_acknowledge == clones.len();
 
             for ack in clones.drain(..num_acknowledge) {
                 ack.acknowledge();
@@ -75,6 +76,8 @@ fn fuzz(input: FuzzInput) {
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+fuzz_target!(|data: &[u8]| {
+    if let Ok(input) = FuzzInput::arbitrary(&mut Unstructured::new(data)) {
+        fuzz(input);
+    }
 });
