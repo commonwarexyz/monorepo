@@ -1146,7 +1146,6 @@ impl EngineDefinition for ReshareEngine {
             merkle: MerkleConfig {
                 partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: Default::default(),
             },
@@ -1160,7 +1159,7 @@ impl EngineDefinition for ReshareEngine {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         };
 
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(

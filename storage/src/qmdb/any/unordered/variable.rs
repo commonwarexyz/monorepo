@@ -45,7 +45,6 @@ pub mod partitioned {
         index::partitioned::unordered::Index, journal::contiguous::variable::Journal,
         merkle::Location,
     };
-    use core::num::NonZeroUsize;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -69,7 +68,7 @@ pub mod partitioned {
     >;
 
     /// Configuration for a [Db].
-    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -125,7 +124,6 @@ pub(crate) mod test {
             merkle: crate::journal::authenticated::Config {
                 partition: format!("metadata-{seed}"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: Default::default(),
             },
@@ -141,7 +139,7 @@ pub(crate) mod test {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         }
     }
 

@@ -455,8 +455,6 @@ pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     strategy: S,
     /// Read buffer for a replay.
     replay_buffer: NonZeroUsize,
-    /// Chunks a startup replay hashes at once.
-    replay_concurrency: NonZeroUsize,
 }
 
 impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
@@ -479,7 +477,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             regions: Regions { height },
             strategy: config.strategy.clone(),
             replay_buffer: config.replay_buffer,
-            replay_concurrency: config.replay_concurrency,
         };
         tree.update_metrics();
         Ok(tree)
@@ -616,11 +613,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self)
     }
 
-    /// Chunks a startup replay reads and hashes at once.
-    pub(crate) const fn replay_concurrency(&self) -> NonZeroUsize {
-        self.replay_concurrency
-    }
-
     /// How a replay from the current size to `end` splits into chunks, with whole subtrees of
     /// `2^height` leaves.
     pub(crate) fn chunk_plan(&self, end: Location<F>, height: u32) -> ChunkPlan {
@@ -650,13 +642,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     }
 
     /// Like [Self::replay], but the chunks of a [Self::chunk_plan] with subtrees of `2^height`
-    /// leaves are read and hashed on tasks of their own spawned from `context`, with
-    /// [Config::replay_concurrency] at once, and appended in order. Appending a whole subtree
-    /// hashes only the nodes above its root.
+    /// leaves are read and hashed on tasks of their own spawned from `context`, `tasks` at once,
+    /// and appended in order. Appending a whole subtree hashes only the nodes above its root.
     ///
     /// Each task holds a clone of `released` until it drops its clone of `journal`, so once every
     /// clone of `released` is dropped, no task still holds the journal, even after the replay is
     /// aborted or fails.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn replay_subtrees<E, C, H>(
         mut self,
         context: E,
@@ -664,6 +656,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         hasher: &H,
         end: Location<F>,
         height: u32,
+        tasks: NonZeroUsize,
         released: mpsc::Sender<()>,
     ) -> Result<Self, super::Error<F>>
     where
@@ -686,6 +679,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 _released: released.clone(),
             };
             let chunk_hasher = plan.hasher(chunk.clone(), hasher.clone());
+
+            // A chunk hashes 2^height operations, too long to share a runtime worker.
             let task = context
                 .child("replay_chunk")
                 .dedicated()
@@ -696,7 +691,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
 
         // `pending` holds the running chunks in position order.
         let mut pending = VecDeque::new();
-        for _ in 0..self.replay_concurrency.get() {
+        for _ in 0..tasks.get() {
             if !spawn_next(&mut pending) {
                 break;
             }
@@ -1207,7 +1202,6 @@ mod tests {
             partition: String::new(),
             resident_height: ResidentHeight::new(resident_height).unwrap(),
             replay_buffer: NonZeroUsize::MIN,
-            replay_concurrency: NonZeroUsize::new(2).unwrap(),
             strategy: Sequential,
         }
     }
@@ -1362,10 +1356,7 @@ mod tests {
                             .map(|p| expected.get_node(p).unwrap())
                             .collect();
                         let ops = Arc::new(Operations::range(boundary..total));
-                        let config = Config {
-                            replay_concurrency: NonZeroUsize::new(concurrency).unwrap(),
-                            ..config(resident)
-                        };
+                        let config = config(resident);
                         let open = || {
                             Tree::new(Location::new(boundary), pins.clone(), &config, &context)
                                 .unwrap()
@@ -1384,6 +1375,7 @@ mod tests {
                                 &hasher,
                                 Location::new(end),
                                 subtree,
+                                NonZeroUsize::new(concurrency).unwrap(),
                                 released,
                             )
                             .await

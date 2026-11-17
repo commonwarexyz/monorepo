@@ -68,7 +68,6 @@ fn config() -> Config<OneCap, Sequential> {
         merkle: MerkleConfig {
             partition: "lifecycle-merkle-metadata".into(),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: Default::default(),
         },
@@ -83,7 +82,7 @@ fn config() -> Config<OneCap, Sequential> {
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(4096),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

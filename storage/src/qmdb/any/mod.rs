@@ -177,7 +177,7 @@ pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy, B = ()> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle: MerkleConfig<S>,
 
@@ -195,12 +195,11 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
-    /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
-    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
-    pub init_concurrency: B,
+    /// Tasks that initialization spawns to scan the log at once. A partitioned index decodes on
+    /// them, beside fewer insert tasks, and any other index builds on the calling task. With 1,
+    /// initialization spawns nothing, and the calling task scans the log while the strategy hashes
+    /// it.
+    pub init_concurrency: NonZeroUsize,
 }
 
 impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
@@ -223,7 +222,7 @@ where
     /// requires one operation. Subsequent appends may exceed this initialization bound.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, QmdbError<F>> {
         init_with_bitmap(context, cfg, None, max_size, None).await
@@ -250,7 +249,7 @@ where
     /// requires one operation. Subsequent appends may exceed this initialization bound.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, QmdbError<F>> {
         init_with_bitmap(context, cfg, None, max_size, None).await
@@ -262,7 +261,7 @@ where
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S>,
     bitmap: Option<Arc<Shared<N>>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
@@ -314,8 +313,8 @@ where
         let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
 
         // A partitioned index built on decode tasks hashes the journal's operations as it decodes
-        // them, so the log is read once. Any other index builds while the journal replays the log
-        // on tasks of its own.
+        // them, so the log is read once. Any other index builds on this task, and the journal
+        // replays the log as `finish_with` describes.
         let (log, (index, active_keys, activity)) = match index.hashing_plan(concurrency, cache) {
             Some(plan) => {
                 pending
@@ -337,7 +336,7 @@ where
             }
             None => {
                 pending
-                    .finish_with(|journal| async move {
+                    .finish_with(concurrency, |journal| async move {
                         let mut index = index;
                         let (active_keys, activity) = index
                             .build_snapshot(
@@ -439,26 +438,23 @@ pub(crate) mod test {
         suffix: &str,
         strategy: S,
     ) -> Config<T, FConfig, S> {
-        fixed_db_config_full(suffix, strategy, ())
+        fixed_db_config_full(suffix, strategy, NZUsize!(2))
     }
 
-    /// Shared config construction for every fixed-value flavor, generic over the strategy and
-    /// the index's snapshot-build concurrency.
+    /// Shared config construction for every fixed-value flavor, generic over the strategy.
     pub(crate) fn fixed_db_config_full<
         T: Translator + Default,
         S: commonware_parallel::Strategy,
-        B,
     >(
         suffix: &str,
         strategy: S,
-        init_concurrency: B,
-    ) -> Config<T, FConfig, S, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, FConfig, S> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
                 partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy,
                 resident_height: crate::journal::authenticated::low_resident_height(),
             },
@@ -476,38 +472,36 @@ pub(crate) mod test {
         }
     }
 
-    /// Like [fixed_db_config], typed for a partitioned index at the serial concurrency.
+    /// Like [fixed_db_config], but initializes serially.
     pub(crate) fn fixed_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
+    ) -> Config<T, FConfig, Sequential> {
         fixed_db_config_full(suffix, Sequential, NZUsize!(1))
     }
 
-    /// Like [variable_db_config], typed for a partitioned index at the serial concurrency.
+    /// Like [variable_db_config], but initializes serially.
     pub(crate) fn variable_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> Config<T, VConfig<((), ())>, Sequential, NonZeroUsize> {
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         variable_db_config_full(suffix, NZUsize!(1))
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
     ) -> Config<T, VConfig<((), ())>, Sequential> {
-        variable_db_config_full(suffix, ())
+        variable_db_config_full(suffix, NZUsize!(2))
     }
 
-    /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
-    pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
+    /// Shared config construction for every variable-value flavor.
+    pub(crate) fn variable_db_config_full<T: Translator + Default>(
         suffix: &str,
-        init_concurrency: B,
-    ) -> Config<T, VConfig<((), ())>, Sequential, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
                 partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: crate::journal::authenticated::low_resident_height(),
             },
@@ -6074,27 +6068,30 @@ pub(crate) mod test {
         db.commit().await.unwrap()
     }
 
+    /// The runtime's gauge of running tasks.
+    const RUNNING: &str = "runtime_tasks_running{";
+
+    /// The runtime's counter of spawned tasks.
+    const SPAWNED: &str = "runtime_tasks_spawned_total{";
+
+    /// The sum of the runtime's `metric` samples for tasks whose labels contain `label`.
+    fn tasks(metrics: &str, metric: &str, label: &str) -> u64 {
+        metrics
+            .lines()
+            .filter(|line| line.starts_with(metric) && line.contains(label))
+            .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
+            .sum()
+    }
+
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
     /// its snapshot workers and decoders rather than leaving them running until they happen
     /// to observe a closed channel.
     #[test_traced("INFO")]
     fn test_parallel_init_aborted_on_cancel() {
-        /// Sum of the runtime's running-task gauges for snapshot build tasks.
-        fn running_build_tasks(metrics: &str) -> u64 {
-            metrics
-                .lines()
-                .filter(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && (line.contains("snapshot_worker") || line.contains("snapshot_decoder"))
-                })
-                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
-                .sum()
-        }
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let cfg = || fixed_db_config_full::<OneCap, _, _>("cancel", Sequential, NZUsize!(4));
+            let cfg = || fixed_db_config_full::<OneCap, _>("cancel", Sequential, NZUsize!(4));
 
             // Persist enough operations that the reopen's build spans many decode chunks.
             let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
@@ -6120,7 +6117,11 @@ pub(crate) mod test {
                         panic!("init completed before it could be cancelled");
                     }
                     context.sleep(Duration::from_millis(1)).await;
-                    if running_build_tasks(&context.encode()) > 0 {
+                    let metrics = context.encode();
+                    if tasks(&metrics, RUNNING, "snapshot_worker")
+                        + tasks(&metrics, RUNNING, "snapshot_decoder")
+                        > 0
+                    {
                         spawned = true;
                         break;
                     }
@@ -6132,36 +6133,19 @@ pub(crate) mod test {
             // the aborted tasks.
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
-            assert_eq!(running_build_tasks(&metrics), 0, "{metrics}");
+            assert_eq!(tasks(&metrics, RUNNING, "snapshot_worker"), 0, "{metrics}");
+            assert_eq!(tasks(&metrics, RUNNING, "snapshot_decoder"), 0, "{metrics}");
         });
     }
 
-    /// A snapshot build that hashes the journal's operations runs the journal's replay concurrency
-    /// of decode tasks when that exceeds its share of `init_concurrency`.
+    /// A snapshot build that hashes the journal's operations decodes on all `init_concurrency`
+    /// tasks, beside fewer insert workers.
     #[test_traced("INFO")]
-    fn test_hashing_build_decoders_follow_replay_concurrency() {
-        /// The runtime's running-task gauge for snapshot decoders.
-        fn running_decoders(metrics: &str) -> u64 {
-            metrics
-                .lines()
-                .filter(|line| {
-                    line.starts_with("runtime_tasks_running{") && line.contains("snapshot_decoder")
-                })
-                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
-                .sum()
-        }
-
+    fn test_hashing_build_decodes_on_init_concurrency() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-
-            // A budget of four gives the index two decoders.
-            let cfg = || {
-                let mut cfg =
-                    fixed_db_config_full::<OneCap, _, _>("decoders", Sequential, NZUsize!(4));
-                cfg.merkle.replay_concurrency = NZUsize!(6);
-                cfg
-            };
+            let cfg = || fixed_db_config_full::<OneCap, _>("decoders", Sequential, NZUsize!(6));
             let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
                 .await
                 .unwrap();
@@ -6177,15 +6161,70 @@ pub(crate) mod test {
 
             let init = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None);
             pin_mut!(init);
-            let mut most = 0;
+            let (mut decoders, mut workers) = (0, 0);
             let db = loop {
                 if let std::task::Poll::Ready(db) = poll!(&mut init) {
                     break db.unwrap();
                 }
-                most = most.max(running_decoders(&context.encode()));
+                let metrics = context.encode();
+                decoders = decoders.max(tasks(&metrics, RUNNING, "snapshot_decoder"));
+                workers = workers.max(tasks(&metrics, RUNNING, "snapshot_worker"));
                 context.sleep(Duration::from_millis(1)).await;
             };
-            assert_eq!(most, 6);
+            assert_eq!(decoders, 6);
+            assert!((1..6).contains(&workers), "{workers} workers");
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// With an unpartitioned index, initialization replays the log on `init_concurrency` tasks
+    /// while this task scans it for the index, and with an `init_concurrency` of 1 it spawns none.
+    #[test_traced("INFO")]
+    fn test_init_concurrency_sizes_the_replay_beside_the_index() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let cfg = |concurrency| {
+                fixed_db_config_full::<OneCap, _>(
+                    "scan",
+                    Sequential,
+                    NonZeroUsize::new(concurrency).unwrap(),
+                )
+            };
+            let db: UnorderedFixed = UnorderedFixedDb::init(ctx.child("storage"), cfg(1), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0..200u64 {
+                batch = batch.write(key(i), Some(key(i)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Three tasks replay while this one scans for the index.
+            let init = UnorderedFixedDb::init(ctx.child("storage"), cfg(3), None);
+            pin_mut!(init);
+            let mut replaying = 0;
+            let db: UnorderedFixed = loop {
+                if let std::task::Poll::Ready(db) = poll!(&mut init) {
+                    break db.unwrap();
+                }
+                let metrics = context.encode();
+                replaying = replaying.max(tasks(&metrics, RUNNING, "replay_chunk"));
+                context.sleep(Duration::from_millis(1)).await;
+            };
+            assert_eq!(replaying, 3);
+            drop(db);
+
+            // One task: nothing is spawned.
+            let spawned = tasks(&context.encode(), SPAWNED, "");
+            let db: UnorderedFixed = UnorderedFixedDb::init(ctx.child("storage"), cfg(1), None)
+                .await
+                .unwrap();
+            assert_eq!(tasks(&context.encode(), SPAWNED, ""), spawned);
             db.destroy().await.unwrap();
         });
     }

@@ -851,7 +851,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Context of the tasks spawned by [Self::finish_with] and [Self::finish_hashing].
+    /// Context of the tasks that replay the selected operations or append their digests.
     context: E,
     /// Operation journal awaiting finalization at `selected_end`.
     journal: C::Recovery,
@@ -900,11 +900,13 @@ where
         Self::assemble(journal, merkle, self.frontier, self.hasher).await
     }
 
-    /// Like [Self::finish], but runs `read` over the selected operations while the journal replays
-    /// them on tasks of its own to rebuild their Merkle digests, so they are read twice. `read`
-    /// must drop every clone of the journal before it completes.
+    /// Like [Self::finish], but runs `read` over the selected operations on this task, so they are
+    /// read twice. The journal replays them on `tasks` tasks of its own while `read` runs, or after
+    /// it on this task when `tasks` is 1. `read` must drop every clone of the journal before it
+    /// completes.
     pub(crate) async fn finish_with<T, X, Fut>(
         self,
+        tasks: NonZeroUsize,
         read: impl FnOnce(Arc<C>) -> Fut,
     ) -> Result<(Journal<F, E, C, H, S>, T), X>
     where
@@ -914,10 +916,25 @@ where
         X: From<Error<F>>,
     {
         let journal = Arc::new(Self::persist(self.journal, self.selected_end).await?);
+        if tasks.get() == 1 {
+            let value = read(journal.clone()).await?;
+            let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
+            let merkle = Journal::<F, E, C, H, S>::align(
+                self.merkle,
+                &journal,
+                &self.hasher,
+                APPLY_BATCH_SIZE,
+            )
+            .await?;
+            return Ok((
+                Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
+                value,
+            ));
+        }
 
-        // A reader sharing this task would starve the replay until it finished. The replay's
-        // subtree tasks each hold a clone of `released` until they drop the journal, so
-        // `released_rx` closing means none of them holds it.
+        // Dedicated, so the replay progresses while `read` keeps this task busy, even on a runtime
+        // with one pool worker. The replay's subtree tasks each hold a clone of `released` until
+        // they drop the journal, so `released_rx` closing means none of them holds it.
         let (released, mut released_rx) = mpsc::channel::<()>(1);
         let replay = {
             let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
@@ -926,7 +943,15 @@ where
                 .spawn(move |context| async move {
                     let end = Location::new(journal.bounds().end);
                     let merkle = merkle
-                        .replay_subtrees(context, &journal, &hasher, end, SUBTREE_HEIGHT, released)
+                        .replay_subtrees(
+                            context,
+                            &journal,
+                            &hasher,
+                            end,
+                            SUBTREE_HEIGHT,
+                            tasks,
+                            released,
+                        )
                         .await;
                     drop(journal);
                     merkle
@@ -958,9 +983,9 @@ where
         ))
     }
 
-    /// Like [Self::finish_with], but the journal does not replay the operations. Instead `read`
-    /// must hash every chunk of the [LeafSink] it receives while it scans them, and send them in
-    /// order. A task of its own appends them to the Merkle structure, so they are read once.
+    /// Like [Self::finish], but the journal does not replay the operations. Instead `read` must
+    /// hash every chunk of the [LeafSink] it receives while it scans them, and send them in order.
+    /// A task of its own appends them to the Merkle structure, so they are read once.
     pub(crate) async fn finish_hashing<T, X, Fut>(
         self,
         read: impl FnOnce(Arc<C>, LeafSink<F, StandardHasher<H>>) -> Fut,
@@ -980,7 +1005,6 @@ where
         let sink = LeafSink {
             plan: self.merkle.chunk_plan(end, SUBTREE_HEIGHT),
             hasher: self.hasher.clone(),
-            concurrency: self.merkle.replay_concurrency(),
             tx,
         };
 
@@ -1080,7 +1104,6 @@ const BUFFERED_CHUNKS: usize = 8;
 pub struct LeafSink<F: Family, H: merkle::hasher::Hasher<F>> {
     plan: ChunkPlan,
     hasher: H,
-    concurrency: NonZeroUsize,
     tx: mpsc::Sender<Chunk<F, H::Digest>>,
 }
 
@@ -1090,11 +1113,6 @@ impl<F: Family, H: merkle::hasher::Hasher<F>> LeafSink<F, H> {
     /// from the journal's pruning boundary to its end.
     pub(crate) fn chunks(&self) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         self.plan.chunks()
-    }
-
-    /// Chunks to scan and hash at once, the journal's [Config::replay_concurrency].
-    pub(crate) const fn concurrency(&self) -> usize {
-        self.concurrency.get()
     }
 
     /// A hasher for `chunk`, one of [Self::chunks].
@@ -1713,7 +1731,6 @@ mod tests {
         MerkleConfig {
             partition: format!("mmr-metadata-{suffix}"),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy,
             resident_height: Default::default(),
         }
@@ -3126,9 +3143,10 @@ mod tests {
                 .unwrap();
 
                 // Fail once every subtree task is parked in a read, holding the journal.
-                let subtrees = merkle_cfg.replay_concurrency.get();
+                let tasks = NZUsize!(2);
+                let subtrees = tasks.get();
                 let result: Result<(_, ()), Error<mmr::Family>> = recovery
-                    .finish_with(|journal| async move {
+                    .finish_with(tasks, |journal| async move {
                         drop(journal);
                         gate.arm();
                         let parked: Vec<_> = (0..subtrees).map(|_| gate.parked()).collect();

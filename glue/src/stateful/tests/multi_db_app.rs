@@ -98,7 +98,6 @@ pub(super) fn qmdb_config(
         merkle: MerkleConfig {
             partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: Default::default(),
         },
@@ -112,7 +111,7 @@ pub(super) fn qmdb_config(
         translator: TwoCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     };
 
     // One witness entry per section so periodic pruning drops entries.

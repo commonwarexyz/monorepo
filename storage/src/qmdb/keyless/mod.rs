@@ -56,6 +56,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use core::num::NonZeroUsize;
 
 pub mod batch;
 mod compact;
@@ -92,6 +93,10 @@ pub struct Config<J, S: Strategy> {
 
     /// Configuration for the operations log journal.
     pub log: J,
+
+    /// Tasks that initialization spawns to scan the log at once. With 1, initialization spawns
+    /// nothing, and the calling task scans the log while the strategy hashes it.
+    pub init_concurrency: NonZeroUsize,
 }
 
 #[cfg(test)]

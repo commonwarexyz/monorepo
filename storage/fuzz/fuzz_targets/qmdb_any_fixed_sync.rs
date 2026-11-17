@@ -94,7 +94,6 @@ fn test_config(test_name: &str) -> Config<TwoCap, Sequential> {
         merkle: MerkleConfig {
             partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: commonware_storage_fuzz::low_resident_height(),
         },
@@ -108,7 +107,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, Sequential> {
         translator: TwoCap,
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

@@ -48,7 +48,6 @@ fn authenticated_merkle_config(prefix: &str) -> authenticated::Config<Sequential
     authenticated::Config {
         partition: format!("{prefix}-merkle-metadata"),
         replay_buffer: REPLAY_BUFFER,
-        replay_concurrency: NZUsize!(2),
         strategy: Sequential,
         resident_height: Default::default(),
     }

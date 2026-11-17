@@ -177,7 +177,7 @@ where
         let (snapshot_context, translator, buffer) =
             (context.child("snapshot"), cfg.translator, cfg.init_buffer);
         let (mut journal, snapshot) = pending
-            .finish_with(|journal| async move {
+            .finish_with(cfg.init_concurrency, |journal| async move {
                 build_snapshot(
                     snapshot_context,
                     translator,

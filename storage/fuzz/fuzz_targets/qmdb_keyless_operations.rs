@@ -199,7 +199,6 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
         merkle: MerkleConfig {
             partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy,
             resident_height: commonware_storage_fuzz::low_resident_height(),
         },
@@ -212,6 +211,7 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
             items_per_section: NZU64!(7),
             page_cache,
         },
+        init_concurrency: NZUsize!(2),
     }
 }
 

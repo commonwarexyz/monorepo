@@ -550,8 +550,8 @@ where
 
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
-    /// (see [crate::qmdb::SnapshotBuild::Concurrency]).
+    /// from grafted metadata). `init_concurrency` is the snapshot build's task budget (see
+    /// [crate::qmdb::any::Config::init_concurrency]).
     ///
     /// # Panics
     ///
@@ -563,7 +563,7 @@ where
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
-        init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
         metrics: Metrics<E>,

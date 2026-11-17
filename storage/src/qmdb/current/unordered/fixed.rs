@@ -43,7 +43,6 @@ pub mod partitioned {
     use super::*;
     pub use super::{Operation, Update};
     use crate::index::partitioned::unordered::Index;
-    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -65,7 +64,7 @@ pub mod partitioned {
         >;
 
     /// Configuration for a [Db].
-    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
+    pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -613,7 +612,6 @@ pub mod test {
                 merkle: MerkleConfig {
                     partition: "rebranch-merkle-metadata".into(),
                     replay_buffer: NZUsize!(4096),
-                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
                     resident_height: Default::default(),
                 },
@@ -628,7 +626,7 @@ pub mod test {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 16),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 

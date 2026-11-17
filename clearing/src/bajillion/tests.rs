@@ -213,7 +213,6 @@ fn journals(name: &str) -> (MerkleConfig<Sequential>, JournalConfig) {
     let merkle = MerkleConfig {
         partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
-        replay_concurrency: NZUsize!(2),
         strategy: Sequential,
         resident_height: Default::default(),
     };
@@ -237,14 +236,18 @@ pub(crate) fn config<T: Translator>(name: &str, translator: T) -> fixed::Config<
         translator,
         init_cache: None,
         init_buffer: NZUsize!(1024),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
 /// Returns the configuration of a payout log in partitions named after `name`.
 fn log_config(name: &str) -> keyless::fixed::Config<Sequential> {
     let (merkle, log) = journals(&format!("{name}-payouts"));
-    keyless::fixed::Config { merkle, log }
+    keyless::fixed::Config {
+        merkle,
+        log,
+        init_concurrency: NZUsize!(2),
+    }
 }
 
 /// Opens the payout log in partitions named after `name`, at its latest commit with at most

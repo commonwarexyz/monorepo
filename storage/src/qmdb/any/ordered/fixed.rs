@@ -48,7 +48,6 @@ pub mod partitioned {
     use crate::{
         index::partitioned::ordered::Index, journal::contiguous::fixed::Journal, merkle::Location,
     };
-    use core::num::NonZeroUsize;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
     ///
@@ -72,7 +71,7 @@ pub mod partitioned {
     >;
 
     /// Configuration for a [Db].
-    pub type Config<T, S> = any::Config<T, JournalConfig, S, NonZeroUsize>;
+    pub type Config<T, S> = any::Config<T, JournalConfig, S>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {

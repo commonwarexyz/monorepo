@@ -370,7 +370,7 @@ use self::db::Metrics;
 
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy, B = ()> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle: MerkleConfig<S>,
 
@@ -391,16 +391,15 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
-    /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
-    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
-    pub init_concurrency: B,
+    /// Tasks that initialization spawns to scan the log at once. A partitioned index decodes on
+    /// them, beside fewer insert tasks, and any other index builds on the calling task. With 1,
+    /// initialization spawns nothing, and the calling task scans the log while the strategy hashes
+    /// it.
+    pub init_concurrency: NonZeroUsize,
 }
 
-impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T, J, S, B> {
-    fn from(cfg: Config<T, J, S, B>) -> Self {
+impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
+    fn from(cfg: Config<T, J, S>) -> Self {
         Self {
             merkle: cfg.merkle,
             log: cfg.log,
@@ -434,7 +433,7 @@ where
     /// itself has been pruned.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         init_db(context, cfg, max_size).await
@@ -463,7 +462,7 @@ where
     /// itself has been pruned.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         init_db(context, cfg, max_size).await
@@ -474,7 +473,7 @@ where
 #[boxed]
 async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S>,
     max_size: Option<Location<F>>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
 where
@@ -865,21 +864,19 @@ pub mod tests {
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
     ) -> Config<T, FConfig, Sequential> {
-        fixed_config_full(partition_prefix, ())
+        fixed_config_full(partition_prefix, NZUsize!(2))
     }
 
-    /// Shared config construction for every fixed-value flavor, generic over the index's
-    /// snapshot-build concurrency.
-    pub(crate) fn fixed_config_full<T: Translator + Default, B>(
+    /// Shared config construction for every fixed-value flavor.
+    pub(crate) fn fixed_config_full<T: Translator + Default>(
         partition_prefix: &str,
-        init_concurrency: B,
-    ) -> Config<T, FConfig, Sequential, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, FConfig, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
                 partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: crate::journal::authenticated::low_resident_height(),
             },
@@ -902,21 +899,19 @@ pub mod tests {
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
     ) -> Config<T, VConfig<((), ())>, Sequential> {
-        variable_config_full(partition_prefix, ())
+        variable_config_full(partition_prefix, NZUsize!(2))
     }
 
-    /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
-    pub(crate) fn variable_config_full<T: Translator + Default, B>(
+    /// Shared config construction for every variable-value flavor.
+    pub(crate) fn variable_config_full<T: Translator + Default>(
         partition_prefix: &str,
-        init_concurrency: B,
-    ) -> Config<T, VConfig<((), ())>, Sequential, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
                 partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: crate::journal::authenticated::low_resident_height(),
             },
@@ -937,17 +932,17 @@ pub mod tests {
         }
     }
 
-    /// Like [fixed_config], typed for a partitioned index at the serial concurrency.
+    /// Like [fixed_config], but initializes serially.
     pub(crate) fn fixed_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
+    ) -> Config<T, FConfig, Sequential> {
         fixed_config_full(partition_prefix, NZUsize!(1))
     }
 
-    /// Like [variable_config], typed for a partitioned index at the serial concurrency.
+    /// Like [variable_config], but initializes serially.
     pub(crate) fn variable_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> Config<T, VConfig<((), ())>, Sequential, NonZeroUsize> {
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         variable_config_full(partition_prefix, NZUsize!(1))
     }
 
@@ -2081,7 +2076,6 @@ pub mod tests {
                 merkle: MerkleConfig {
                     partition: "forged-exclusion-metadata".to_string(),
                     replay_buffer: NZUsize!(1024),
-                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
                     resident_height: Default::default(),
                 },

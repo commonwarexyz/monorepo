@@ -579,7 +579,6 @@ mod tests {
         MerkleConfig {
             partition: "stateful-full-metadata".into(),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: Default::default(),
         }
@@ -614,6 +613,7 @@ mod tests {
             let config = keyless::fixed::Config {
                 merkle: full_merkle_config(),
                 log: full_log_config(page_cache),
+                init_concurrency: NZUsize!(2),
             };
             let mut source = FullKeylessDb::init(context, config, None).await.unwrap();
             let mut targets = Vec::new();
@@ -665,6 +665,7 @@ mod tests {
                 log: full_log_config(page_cache),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(2),
             };
             let mut source = FullImmutableDb::init(context, config, None).await.unwrap();
             let mut targets = Vec::new();

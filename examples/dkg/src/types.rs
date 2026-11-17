@@ -568,7 +568,6 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Se
         merkle: MerkleConfig {
             partition: format!("{prefix}-qmdb-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: Default::default(),
         },
@@ -582,7 +581,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Se
         translator: TwoCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

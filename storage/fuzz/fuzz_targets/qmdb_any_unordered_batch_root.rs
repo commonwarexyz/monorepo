@@ -116,7 +116,6 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
         merkle: MerkleConfig {
             partition: format!("{name}-meta"),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: Default::default(),
         },
@@ -130,7 +129,7 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
         translator: OneCap,
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

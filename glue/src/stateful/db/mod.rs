@@ -2161,7 +2161,6 @@ mod tests {
             MerkleConfig {
                 partition: format!("initial-target-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: Default::default(),
             }
@@ -2198,7 +2197,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2211,7 +2210,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2225,7 +2224,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2239,7 +2238,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2251,6 +2250,7 @@ mod tests {
                 log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2262,6 +2262,7 @@ mod tests {
                 log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2269,6 +2270,7 @@ mod tests {
             storage_keyless::Config {
                 merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2278,6 +2280,7 @@ mod tests {
             storage_keyless::Config {
                 merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ()),
+                init_concurrency: NZUsize!(2),
             }
         }
 

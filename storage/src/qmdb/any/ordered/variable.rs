@@ -50,7 +50,6 @@ pub mod partitioned {
         index::partitioned::ordered::Index, journal::contiguous::variable::Journal,
         merkle::Location,
     };
-    use core::num::NonZeroUsize;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -74,7 +73,7 @@ pub mod partitioned {
     >;
 
     /// Configuration for a [Db].
-    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S, NonZeroUsize>;
+    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -120,29 +119,28 @@ pub(crate) mod test {
         deterministic::{self, Context},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, sequence::FixedBytes};
+    use core::num::NonZeroUsize;
     use rand::Rng;
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig<B = ()> = any::Config<
+    pub(crate) type VarConfig = any::Config<
         TwoCap,
         JournalConfig<((), (commonware_codec::RangeCfg<usize>, ()))>,
         Sequential,
-        B,
     >;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
-    pub(crate) fn create_test_config<B>(seed: u64, init_concurrency: B) -> VarConfig<B> {
+    pub(crate) fn create_test_config(seed: u64, init_concurrency: NonZeroUsize) -> VarConfig {
         let page_cache = CacheRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         any::Config {
             merkle: crate::journal::authenticated::Config {
                 partition: format!("mmr-metadata-{seed}"),
                 replay_buffer: NZUsize!(64),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: Default::default(),
             },
@@ -165,7 +163,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, ());
+        let config = create_test_config(seed, NZUsize!(2));
         AnyTest::init(context, config, None).await.unwrap()
     }
 

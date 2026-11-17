@@ -54,7 +54,7 @@ use std::{num::NonZeroU64, sync::Arc};
 #[cfg(test)]
 pub(crate) mod tests;
 
-impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, B> {
+impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -78,7 +78,7 @@ async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
@@ -211,12 +211,7 @@ where
     type Op = Operation<F, U>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<
-        I::Translator,
-        <C as crate::qmdb::sync::Journal<F>>::Config,
-        S,
-        <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
-    >;
+    type Config = super::Config<I::Translator, <C as crate::qmdb::sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
 
     async fn mark_sync_incomplete(

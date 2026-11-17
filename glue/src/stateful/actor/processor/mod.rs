@@ -1896,7 +1896,6 @@ mod tests {
             merkle: MerkleConfig {
                 partition: format!("{prefix}_mmr_metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: Default::default(),
             },
@@ -1910,7 +1909,7 @@ mod tests {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         }
     }
 

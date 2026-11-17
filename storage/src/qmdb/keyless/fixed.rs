@@ -40,7 +40,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        Clock as _, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{
             self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
@@ -65,7 +65,6 @@ mod tests {
             merkle: crate::journal::authenticated::Config {
                 partition: format!("fixed-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy,
                 resident_height: crate::journal::authenticated::low_resident_height(),
             },
@@ -76,6 +75,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -1353,6 +1353,63 @@ mod tests {
         });
     }
 
+    /// Initialization replays the log on `init_concurrency` tasks, and with 1 it spawns none.
+    #[test_traced]
+    fn test_init_concurrency_counts_replay_tasks() {
+        /// The sum of the runtime's `metric` samples for tasks whose labels contain `label`.
+        fn tasks(metrics: &str, metric: &str, label: &str) -> u64 {
+            metrics
+                .lines()
+                .filter(|line| line.starts_with(metric) && line.contains(label))
+                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
+                .sum()
+        }
+
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = |concurrency| Config {
+                init_concurrency: NonZeroUsize::new(concurrency).unwrap(),
+                ..db_config("replay-tasks", Sequential)
+            };
+            let db = TestDb::<mmr::Family>::init(context.child("initial"), cfg(1), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for value in 0..200u64 {
+                batch = batch.append(U64::new(value));
+            }
+            let batch = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
+            drop(db);
+
+            // Two tasks replay.
+            let init = TestDb::<mmr::Family>::init(context.child("two"), cfg(2), None);
+            futures::pin_mut!(init);
+            let mut replaying = 0;
+            let db = loop {
+                if let core::task::Poll::Ready(db) = futures::poll!(&mut init) {
+                    break db.unwrap();
+                }
+                let metrics = context.encode();
+                let running = tasks(&metrics, "runtime_tasks_running{", "replay_chunk");
+                replaying = replaying.max(running);
+                context.sleep(core::time::Duration::from_millis(1)).await;
+            };
+            assert_eq!(replaying, 2);
+            drop(db);
+
+            // One task: nothing is spawned.
+            let spawned = tasks(&context.encode(), "runtime_tasks_spawned_total{", "");
+            let db = TestDb::<mmr::Family>::init(context.child("one"), cfg(1), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                tasks(&context.encode(), "runtime_tasks_spawned_total{", ""),
+                spawned
+            );
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Reopen at an earlier commit, apply an uncommitted batch over the discarded suffix, then
     /// crash before any sync. Recovery must yield one legitimate history and never splice the new
     /// batch onto the discarded suffix.
@@ -1367,7 +1424,6 @@ mod tests {
                 merkle: crate::journal::authenticated::Config {
                     partition: "rebranch-merkle-metadata".into(),
                     replay_buffer: NZUsize!(1024),
-                    replay_concurrency: NZUsize!(2),
                     strategy: Sequential,
                     resident_height: Default::default(),
                 },
@@ -1378,6 +1434,7 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
+                init_concurrency: NZUsize!(2),
             }
         }
 

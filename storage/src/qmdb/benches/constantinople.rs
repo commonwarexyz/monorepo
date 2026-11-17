@@ -437,7 +437,6 @@ fn main() {
         let merkle_config = MerkleConfig {
             partition: "constantinople-merkle-metadata".into(),
             replay_buffer: REPLAY_BUFFER,
-            replay_concurrency: threads,
             strategy: ctx.strategy(threads),
             resident_height: Default::default(),
         };
@@ -457,7 +456,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = CurrentDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(
@@ -475,7 +474,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = CurrentOrderedDb::init(ctx.child("db"), cfg, None)
                     .await
@@ -494,7 +493,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg, None)
                     .await
@@ -516,7 +515,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
@@ -528,7 +527,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)

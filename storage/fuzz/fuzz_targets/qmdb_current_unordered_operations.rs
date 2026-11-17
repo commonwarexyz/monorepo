@@ -148,7 +148,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             merkle: MerkleConfig {
                 partition: format!("fuzz-current-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: commonware_storage_fuzz::low_resident_height(),
             },
@@ -163,7 +162,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             translator: TwoCap,
             init_cache: Some(NZUsize!(3)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         };
 
         let mut db: Db<F> = Db::init(context.child("storage"), cfg, None)

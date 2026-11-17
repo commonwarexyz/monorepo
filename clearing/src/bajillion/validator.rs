@@ -1357,15 +1357,9 @@ mod tests {
             let (_, _, roots) = replay(Store { balances, log }, parent.clone(), &closes).await;
             assert_eq!(roots, expected);
 
-            let base = config("partitioned", OneCap);
             let partitioned = fixed::partitioned::Config {
-                merkle: base.merkle,
-                log: base.log,
-                grafted_metadata_partition: base.grafted_metadata_partition,
-                translator: base.translator,
-                init_cache: base.init_cache,
-                init_buffer: base.init_buffer,
                 init_concurrency: NZUsize!(1),
+                ..config("partitioned", OneCap)
             };
             let balances = TestDb::<Partitioned<OneCap, Location<mmb::Family>, 1>>::init(
                 context.child("partitioned"),

@@ -1625,7 +1625,7 @@ mod harnesses {
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
     use commonware_runtime::deterministic::Context;
-    use commonware_utils::TestRng;
+    use commonware_utils::{NZUsize, TestRng};
     use rand::Rng;
 
     // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
@@ -1822,7 +1822,7 @@ mod harnesses {
         fn config(suffix: &str) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                (),
+                NZUsize!(2),
             )
         }
 
@@ -1845,7 +1845,8 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, ());
+            let config =
+                crate::qmdb::any::ordered::variable::test::create_test_config(seed, NZUsize!(2));
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 

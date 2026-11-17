@@ -40,7 +40,7 @@ async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as SnapshotBuild<F>>::Concurrency,
+    init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, N, S>, qmdb::Error<F>>
@@ -103,12 +103,7 @@ where
     type Op = Operation<F, U>;
     type Journal = C;
     type Hasher = H;
-    type Config = Config<
-        I::Translator,
-        <C as sync::Journal<F>>::Config,
-        S,
-        <I as SnapshotBuild<F>>::Concurrency,
-    >;
+    type Config = Config<I::Translator, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
 
     async fn mark_sync_incomplete(

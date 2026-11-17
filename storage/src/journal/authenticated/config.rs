@@ -39,12 +39,9 @@ pub struct Config<S: Strategy> {
     pub partition: String,
     /// Lowest Merkle node height kept in memory.
     pub resident_height: ResidentHeight,
-    /// Read buffer size for replaying operations.
+    /// Read buffer size for replaying operations. A snapshot build that hashes the operations as
+    /// it reads them uses its own buffer instead.
     pub replay_buffer: NonZeroUsize,
-    /// Chunks of operations a startup replay reads and hashes at once, each on a task of its own,
-    /// including when a snapshot build's decode tasks hash them. Set it to the cores startup may
-    /// use.
-    pub replay_concurrency: NonZeroUsize,
     /// Strategy used for Merkle hashing.
     pub strategy: S,
 }

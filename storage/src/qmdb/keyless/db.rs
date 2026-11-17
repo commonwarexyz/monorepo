@@ -120,7 +120,7 @@ where
             .unwrap_or(Location::new(0));
         // With no snapshot to build, the Merkle replay is all of initialization's work.
         let (mut journal, ()) = pending
-            .finish_with(|_| async { Ok::<_, Error<F>>(()) })
+            .finish_with(cfg.init_concurrency, |_| async { Ok::<_, Error<F>>(()) })
             .await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {

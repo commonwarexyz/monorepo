@@ -751,7 +751,6 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
             partition: format!("transfers-metadata-{suffix}"),
             resident_height: Default::default(),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
         },
         log: FixedJournalConfig {
@@ -764,7 +763,7 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
         translator: TwoCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -777,7 +776,7 @@ fn current_config(suffix: &str) -> current::Config<TwoCap, FixedJournalConfig, S
         translator: TwoCap,
         init_cache: any.init_cache,
         init_buffer: any.init_buffer,
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -797,7 +796,7 @@ fn variable_config(suffix: &str) -> any::unordered::variable::Config<TwoCap, (()
         translator: TwoCap,
         init_cache: any.init_cache,
         init_buffer: any.init_buffer,
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

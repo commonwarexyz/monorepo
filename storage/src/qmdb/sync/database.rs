@@ -23,7 +23,7 @@ pub trait Config {
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
-impl<T: Translator, J: Clone, S: Strategy, B> Config for crate::qmdb::any::Config<T, J, S, B> {
+impl<T: Translator, J: Clone, S: Strategy> Config for crate::qmdb::any::Config<T, J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -228,7 +228,6 @@ mod tests {
             partition: "local-pins-metadata".into(),
             resident_height: Default::default(),
             replay_buffer: NZUsize!(1024),
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
         }
     }
@@ -250,6 +249,7 @@ mod tests {
         let mut config = keyless::Config {
             merkle: merkle_config(),
             log: journal_config(),
+            init_concurrency: NZUsize!(2),
         };
         config.merkle.partition.push_str(suffix);
         config.log.partition.push_str(suffix);

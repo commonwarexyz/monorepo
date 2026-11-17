@@ -258,7 +258,6 @@ fn config_for<O: commonware_cryptography::PublicKey>(
     let merkle = |name: String| MerkleConfig {
         partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
-        replay_concurrency: NZUsize!(2),
         strategy: Sequential,
         resident_height: Default::default(),
     };
@@ -281,11 +280,12 @@ fn config_for<O: commonware_cryptography::PublicKey>(
             translator: EightCap,
             init_cache: None,
             init_buffer: NZUsize!(1024),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         },
         payouts: keyless::fixed::Config {
             merkle: merkle(payouts.clone()),
             log: log(payouts),
+            init_concurrency: NZUsize!(2),
         },
     }
 }

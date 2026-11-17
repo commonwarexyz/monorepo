@@ -153,7 +153,6 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
         merkle: MerkleConfig {
             partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
             replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: Default::default(),
         },
@@ -168,7 +167,7 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
         translator: TwoCap,
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

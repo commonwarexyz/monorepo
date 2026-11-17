@@ -122,7 +122,6 @@ fn merkle_cfg(suffix: &str, ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
     MerkleConfig {
         partition: format!("metadata-{suffix}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
-        replay_concurrency: THREADS,
         strategy: ctx.strategy(THREADS),
         resident_height: Default::default(),
     }
@@ -164,16 +163,16 @@ pub fn any_fix_cfg_with(
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
 ) -> AnyConfig<EightCap, FConfig, Rayon> {
-    any_fix_cfg_full(ctx, items_per_blob, page_cache_size, ())
+    any_fix_cfg_full(ctx, items_per_blob, page_cache_size, THREADS)
 }
 
-/// Shared fixed-value config construction, generic over the index's snapshot-build concurrency.
-pub fn any_fix_cfg_full<B>(
+/// Shared fixed-value config construction.
+pub fn any_fix_cfg_full(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
-    init_concurrency: B,
-) -> AnyConfig<EightCap, FConfig, Rayon, B> {
+    init_concurrency: NonZeroUsize,
+) -> AnyConfig<EightCap, FConfig, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, page_cache_size);
     AnyConfig {
         merkle: merkle_cfg(PARTITION_FIX, ctx),
@@ -195,6 +194,7 @@ pub fn imm_fix_cfg_with(
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: THREADS,
     }
 }
 
@@ -214,7 +214,7 @@ pub fn cur_fix_cfg_with(
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -233,7 +233,7 @@ pub fn any_var_digest_cfg_with(
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -255,7 +255,7 @@ pub fn cur_var_digest_cfg_with(
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -282,7 +282,7 @@ pub fn any_var_vec_cfg_with(
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -309,7 +309,7 @@ pub fn cur_var_vec_cfg_with(
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -332,6 +332,7 @@ pub fn keyless_cfg_with(
             ((0..=10000).into(), ()),
             items_per_blob,
         ),
+        init_concurrency: THREADS,
     }
 }
 

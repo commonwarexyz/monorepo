@@ -108,7 +108,6 @@ fn make_config(suffix: &str, params: ConfigParams) -> Config<TwoCap, ((), ()), S
         merkle: MerkleConfig {
             partition: format!("crash-merkle-metadata-{suffix}"),
             replay_buffer,
-            replay_concurrency: NZUsize!(2),
             strategy: Sequential,
             resident_height: commonware_storage_fuzz::low_resident_height(),
         },
@@ -125,7 +124,7 @@ fn make_config(suffix: &str, params: ConfigParams) -> Config<TwoCap, ((), ()), S
         translator: TwoCap,
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

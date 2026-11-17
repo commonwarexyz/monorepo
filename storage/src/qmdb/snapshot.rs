@@ -337,9 +337,6 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkVisitor<F, Item
 trait Scan<F: Family, Item>: Send + Sync {
     type Visitor: ChunkVisitor<F, Item>;
 
-    /// Decode tasks the build runs at least.
-    fn decoders(&self) -> usize;
-
     /// The chunks to decode, in position order, for a build from `floor` to `end`.
     fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static;
 
@@ -359,10 +356,6 @@ struct IndexOnly;
 impl<F: Family, Item> Scan<F, Item> for IndexOnly {
     type Visitor = ();
 
-    fn decoders(&self) -> usize {
-        0
-    }
-
     fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         (floor..end)
             .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"))
@@ -379,12 +372,6 @@ impl<F: Family, Item> Scan<F, Item> for IndexOnly {
 /// A build that also hashes every operation from the journal's boundary, in the journal's chunks.
 impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for LeafSink<F, H> {
     type Visitor = ChunkHasher<F, H>;
-
-    // Hashing needs chunk boundaries, which only decode tasks keep, so the journal's replay
-    // concurrency sizes them.
-    fn decoders(&self) -> usize {
-        self.concurrency()
-    }
 
     // Starts at the journal's pruning boundary, which initialization keeps at or before the floor.
     fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
@@ -634,6 +621,21 @@ impl ParallelPlan {
         })
     }
 
+    /// Like [Self::new], but for a build whose decode tasks also hash the journal's operations.
+    /// Hashing costs more than routing, so all `init_concurrency` tasks decode, beside the insert
+    /// workers [Self::new] plans.
+    fn hashing(
+        partitions: usize,
+        init_concurrency: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Option<Self> {
+        let plan = Self::new(partitions, init_concurrency, cache_size)?;
+        Some(Self {
+            decoders: init_concurrency.get(),
+            ..plan
+        })
+    }
+
     /// Each worker's starting partition and partition count, in worker order.
     fn ranges(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
         (0..self.workers).map(|worker| {
@@ -666,7 +668,6 @@ where
 {
     let floor = *inactivity_floor_loc;
     let end = log.bounds().end;
-    let decoders = plan.decoders.max(scan.decoders());
 
     // All workers share one atomic bitmap to track the activity bits.
     let active = Arc::new(Atomic::zeroes(end - floor));
@@ -719,7 +720,7 @@ where
     let routing_result: Result<(), Error<F>> = async {
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
-        if decoders == 0 {
+        if plan.decoders == 0 {
             let senders = &senders;
             return route_snapshot::<F, C, _, _>(
                 &**log,
@@ -765,8 +766,8 @@ where
             true
         };
 
-        // Start decoding ahead of forwarding, with at most `decoders` chunks in flight.
-        for _ in 0..decoders {
+        // Start decoding ahead of forwarding, with at most `plan.decoders` chunks in flight.
+        for _ in 0..plan.decoders {
             if !spawn_next(&mut pending) {
                 break;
             }
@@ -839,10 +840,6 @@ where
 pub trait SnapshotBuild<F: Family>:
     sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
 {
-    /// The concurrency configuration the build consumes. Index types that always build serially
-    /// declare `()`, so a setting they cannot use is unrepresentable.
-    type Concurrency: Copy + Send + Sync + 'static;
-
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
@@ -854,7 +851,7 @@ pub trait SnapshotBuild<F: Family>:
         _context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        _init_concurrency: Self::Concurrency,
+        _init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
@@ -875,7 +872,7 @@ pub trait SnapshotBuild<F: Family>:
     /// journal's operations as they decode them, or `None` if this index builds without them.
     fn hashing_plan(
         &self,
-        _init_concurrency: Self::Concurrency,
+        _init_concurrency: NonZeroUsize,
         _cache_size: Option<NonZeroUsize>,
     ) -> Option<Self::HashingPlan> {
         None
@@ -955,7 +952,6 @@ mod sealed {
 }
 
 impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
-    type Concurrency = ();
     type HashingPlan = Infallible;
 
     async fn build_snapshot_hashing<E, C, H>(
@@ -977,7 +973,6 @@ impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Ind
 }
 
 impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
-    type Concurrency = ();
     type HashingPlan = Infallible;
 
     async fn build_snapshot_hashing<E, C, H>(
@@ -1001,7 +996,6 @@ impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
-    type Concurrency = NonZeroUsize;
     type HashingPlan = ParallelPlan;
 
     async fn build_snapshot<E, C>(
@@ -1034,7 +1028,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         init_concurrency: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Option<ParallelPlan> {
-        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size)
+        ParallelPlan::hashing(self.partition_count(), init_concurrency, cache_size)
     }
 
     async fn build_snapshot_hashing<E, C, H>(
@@ -1067,7 +1061,6 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
-    type Concurrency = NonZeroUsize;
     type HashingPlan = ParallelPlan;
 
     async fn build_snapshot<E, C>(
@@ -1100,7 +1093,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         init_concurrency: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Option<ParallelPlan> {
-        ParallelPlan::new(self.partition_count(), init_concurrency, cache_size)
+        ParallelPlan::hashing(self.partition_count(), init_concurrency, cache_size)
     }
 
     async fn build_snapshot_hashing<E, C, H>(
@@ -1166,6 +1159,24 @@ mod tests {
                     }
                 }
                 assert_eq!(end, partitions);
+            }
+        }
+    }
+
+    #[test]
+    fn test_hashing_plan_decodes_on_the_whole_budget() {
+        for partitions in 0..=64 {
+            for budget in 1..=64 {
+                let budget = NonZeroUsize::new(budget).unwrap();
+                let plan = ParallelPlan::new(partitions, budget, None);
+                let hashing = ParallelPlan::hashing(partitions, budget, None);
+                assert_eq!(hashing.is_none(), plan.is_none());
+                let (Some(plan), Some(hashing)) = (plan, hashing) else {
+                    continue;
+                };
+                assert_eq!(hashing.decoders, budget.get());
+                assert_eq!(hashing.workers, plan.workers);
+                assert!(hashing.workers < budget.get());
             }
         }
     }

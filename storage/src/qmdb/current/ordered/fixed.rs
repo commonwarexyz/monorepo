@@ -48,7 +48,6 @@ pub mod partitioned {
     use super::*;
     pub use super::{Operation, Update};
     use crate::index::partitioned::ordered::Index;
-    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -70,7 +69,7 @@ pub mod partitioned {
         >;
 
     /// Configuration for a [Db].
-    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
+    pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {

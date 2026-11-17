@@ -302,7 +302,6 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> AnyConfig<EightCap, Rayon> {
         merkle: authenticated::Config {
             partition: "cold-merkle-meta".into(),
             replay_buffer: REPLAY_BUFFER,
-            replay_concurrency: NZUsize!(args.threads),
             strategy: ctx.strategy(NZUsize!(args.threads)),
             resident_height: Default::default(),
         },
@@ -316,7 +315,7 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> AnyConfig<EightCap, Rayon> {
         translator: EightCap,
         init_cache: Some(NZUsize!(1 << 20)),
         init_buffer: NZUsize!(1 << 22),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(args.threads),
     }
 }
 

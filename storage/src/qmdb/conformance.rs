@@ -128,7 +128,6 @@ fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
     MerkleConfig {
         partition: format!("{suffix}-mm"),
         replay_buffer: NZUsize!(1024),
-        replay_concurrency: NZUsize!(2),
         strategy: Sequential,
         resident_height: Default::default(),
     }
@@ -164,7 +163,7 @@ fn any_fixed_config(suffix: &str) -> any::Config<OneCap, FConfig, Sequential> {
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -176,7 +175,7 @@ fn any_variable_config(suffix: &str) -> any::Config<OneCap, VConfig<((), ())>, S
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -189,7 +188,7 @@ fn current_fixed_config(suffix: &str) -> current::Config<OneCap, FConfig, Sequen
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -202,7 +201,7 @@ fn current_variable_config(suffix: &str) -> current::Config<OneCap, VConfig<((),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -213,6 +212,7 @@ fn immutable_fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequ
         log: fixed_log_config(suffix, pc),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -225,6 +225,7 @@ fn immutable_variable_config(
         log: variable_log_config(suffix, pc, ((), ())),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -322,6 +323,7 @@ mod tests {
         keyless::Config {
             merkle: merkle_config(suffix),
             log: fixed_log_config(suffix, pc),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -332,6 +334,7 @@ mod tests {
         keyless::Config {
             merkle: merkle_config(suffix),
             log: variable_log_config(suffix, pc, ((0..=10000).into(), ())),
+            init_concurrency: NZUsize!(2),
         }
     }
 

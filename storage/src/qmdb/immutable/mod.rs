@@ -130,6 +130,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
+
+    /// Tasks that initialization spawns to scan the log at once, beside the calling task's index
+    /// build. With 1, initialization spawns nothing, and the calling task scans the log while the
+    /// strategy hashes it.
+    pub init_concurrency: NonZeroUsize,
 }
 
 #[cfg(test)]

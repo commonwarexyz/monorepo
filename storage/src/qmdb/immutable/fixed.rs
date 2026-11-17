@@ -63,7 +63,6 @@ mod tests {
             merkle: MerkleConfig {
                 partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
-                replay_concurrency: NZUsize!(2),
                 strategy: Sequential,
                 resident_height: crate::journal::authenticated::low_resident_height(),
             },
@@ -76,6 +75,7 @@ mod tests {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 

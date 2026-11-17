@@ -56,7 +56,6 @@ fn merkle_cfg(ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
     MerkleConfig {
         partition: format!("metadata-{PARTITION}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
-        replay_concurrency: THREADS,
         strategy: ctx.strategy(THREADS),
         resident_height: Default::default(),
     }
@@ -85,7 +84,7 @@ fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentConfig<EightCap, FConfig, Rayon
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
