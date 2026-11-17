@@ -1363,7 +1363,7 @@ mod tests {
                 log: base.log,
                 grafted_metadata_partition: base.grafted_metadata_partition,
                 translator: base.translator,
-                init_cache: base.init_cache,
+                init_scratch_partition: base.init_scratch_partition,
                 init_buffer: base.init_buffer,
                 init_concurrency: NZUsize!(1),
             };

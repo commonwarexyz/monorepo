@@ -454,7 +454,7 @@ fn main() {
                     log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
-                    init_cache: Some(NZUsize!(1 << 18)),
+                    init_scratch_partition: "constantinople-scratch".into(),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -472,7 +472,7 @@ fn main() {
                     log: journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
-                    init_cache: Some(NZUsize!(1 << 18)),
+                    init_scratch_partition: "constantinople-scratch".into(),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -491,7 +491,7 @@ fn main() {
                     merkle: merkle_config,
                     log: journal_config,
                     translator: EightCap,
-                    init_cache: Some(NZUsize!(1 << 18)),
+                    init_scratch_partition: "constantinople-scratch".into(),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -513,7 +513,7 @@ fn main() {
                         replay_buffer: REPLAY_BUFFER,
                     },
                     translator: EightCap,
-                    init_cache: Some(NZUsize!(1 << 18)),
+                    init_scratch_partition: "constantinople-var-scratch".into(),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
@@ -525,7 +525,7 @@ fn main() {
                     merkle: merkle_config,
                     log: journal_config,
                     translator: EightCap,
-                    init_cache: Some(NZUsize!(1 << 18)),
+                    init_scratch_partition: "constantinople-var-scratch".into(),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };

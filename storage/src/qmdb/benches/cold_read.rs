@@ -316,7 +316,7 @@ fn config<E: Strategizer>(ctx: &E, args: &Args) -> AnyConfig<EightCap, Rayon> {
             replay_buffer: REPLAY_BUFFER,
         },
         translator: EightCap,
-        init_cache: Some(NZUsize!(1 << 20)),
+        init_scratch_partition: "cold-log-scratch".into(),
         init_buffer: NZUsize!(1 << 22),
         init_concurrency: (),
     }

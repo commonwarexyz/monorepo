@@ -237,7 +237,7 @@ pub(crate) fn config<T: Translator>(name: &str, translator: T) -> fixed::Config<
         log,
         grafted_metadata_partition: format!("{name}-grafted-metadata"),
         translator,
-        init_cache: None,
+        init_scratch_partition: format!("{name}-scratch"),
         init_buffer: NZUsize!(1024),
         init_concurrency: (),
     }

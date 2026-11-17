@@ -188,18 +188,18 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// [OrderedTranslator](crate::translator::OrderedTranslator).
     pub translator: T,
 
-    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
-    pub init_cache: Option<NonZeroUsize>,
+    /// The partition init keeps temporary data in when it rebuilds the index from more operations
+    /// than it holds in memory. Init removes that data before it returns, along with any an
+    /// interrupted init left behind. The partition must not be shared with another database or
+    /// used for anything else.
+    pub init_scratch_partition: String,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
     /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
     /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
-    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
+    /// build in parallel. A value of `1` builds the index entirely on the init task.
     pub init_concurrency: B,
 }
 
@@ -327,7 +327,7 @@ where
         bitmap,
         cfg.init_concurrency,
         cfg.init_buffer,
-        cfg.init_cache,
+        &cfg.init_scratch_partition,
         metrics,
     )
     .await
@@ -421,17 +421,18 @@ pub(crate) mod test {
                 replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("scratch-{suffix}"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
     }
 
-    /// Like [fixed_db_config], typed for a partitioned index at the serial concurrency.
+    /// Like [fixed_db_config], typed for a partitioned index that builds its snapshot on three
+    /// tasks. The variable configuration builds on one, so the shared tests cover both.
     pub(crate) fn fixed_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
     ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
-        fixed_db_config_full(suffix, Sequential, NZUsize!(1))
+        fixed_db_config_full(suffix, Sequential, NZUsize!(3))
     }
 
     /// Like [variable_db_config], typed for a partitioned index at the serial concurrency.
@@ -474,7 +475,7 @@ pub(crate) mod test {
                 replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("scratch-{suffix}"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -6024,8 +6025,7 @@ pub(crate) mod test {
     }
 
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
-    /// its snapshot workers and decoders rather than leaving them running until they happen
-    /// to observe a closed channel.
+    /// its snapshot build tasks rather than leaving them running.
     #[test_traced("INFO")]
     fn test_parallel_init_aborted_on_cancel() {
         /// Sum of the runtime's running-task gauges for snapshot build tasks.
@@ -6034,7 +6034,7 @@ pub(crate) mod test {
                 .lines()
                 .filter(|line| {
                     line.starts_with("runtime_tasks_running{")
-                        && (line.contains("snapshot_worker") || line.contains("snapshot_decoder"))
+                        && (line.contains("snapshot_decoder") || line.contains("snapshot_sorter"))
                 })
                 .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
                 .sum()

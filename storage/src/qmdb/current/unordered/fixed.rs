@@ -476,10 +476,10 @@ pub mod test {
 
     /// Build a `P`-partitioned current db with churny ops across two commits (so the second commit's
     /// updates and deletes inactivate locations from the first), prune it, then assert that
-    /// reopening it at a range of worker counts reconstructs the identical root and key-value
+    /// reopening it at a range of task counts reconstructs the identical root and key-value
     /// state. Unlike the `any` equivalence tests, the current root commits to the activity bitmap,
-    /// so this exercises the parallel build's bitmap reconstruction (`for_each_value` +
-    /// last-commit) over a pruned prefix, not just the snapshot index and MMR.
+    /// so this exercises the build's bitmap reconstruction (each surviving key's bit and the
+    /// last commit's) over a pruned prefix, not just the snapshot index and MMR.
     #[commonware_macros::boxed]
     async fn check_current_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
@@ -627,7 +627,7 @@ pub mod test {
                 },
                 grafted_metadata_partition: "rebranch-current-metadata".into(),
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: "rebranch-ops-journal-scratch".into(),
                 init_buffer: NZUsize!(1 << 16),
                 init_concurrency: (),
             }

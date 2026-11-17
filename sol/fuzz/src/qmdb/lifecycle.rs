@@ -83,7 +83,7 @@ fn config() -> Config<OneCap, Sequential> {
         },
         grafted_metadata_partition: "lifecycle-grafted-metadata".into(),
         translator: OneCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: "lifecycle-operations-scratch".into(),
         init_buffer: NZUsize!(4096),
         init_concurrency: (),
     }

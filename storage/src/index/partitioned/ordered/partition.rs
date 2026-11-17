@@ -13,11 +13,6 @@ use super::SPILL_THRESHOLD;
 use commonware_utils::prefetch;
 use std::ops::Range;
 
-/// The most cache lines [`Partition::prefetch_arrays`] requests per array. Partitions hold a few
-/// dozen entries at large key counts, so this covers a typical partition whole.
-#[commonware_macros::stability(ALPHA)]
-const PREFETCH_LINES: usize = 8;
-
 /// A single partition's values as sorted parallel arrays keyed by translated key.
 pub(super) struct Partition<K, V> {
     /// Translated keys in ascending order. Equal keys are adjacent (a value run).
@@ -46,13 +41,32 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         self.keys.len()
     }
 
-    /// Prefetch up to [PREFETCH_LINES] cache lines of each of the keys and values arrays ahead of a
-    /// search and update of this partition. This reads the partition's header, so it should follow
-    /// an earlier hint for that header.
+    /// Fill the partition, which must be empty, with `keys` and their aligned `vals`. Entries
+    /// are put in key order if they are not already, keeping those of equal keys in the order
+    /// given. Returns the number of distinct keys.
     #[commonware_macros::stability(ALPHA)]
-    pub(super) fn prefetch_arrays(&self) {
-        prefetch::prefetch_lines(self.keys.as_ptr(), self.keys.len(), PREFETCH_LINES);
-        prefetch::prefetch_lines(self.vals.as_ptr(), self.vals.len(), PREFETCH_LINES);
+    pub(super) fn fill(&mut self, mut keys: Vec<K>, mut vals: Vec<V>) -> usize {
+        assert!(self.keys.is_empty(), "fill target must be empty");
+        assert_eq!(keys.len(), vals.len(), "keys and values must align");
+        if !keys.is_sorted() {
+            let mut order: Vec<usize> = (0..keys.len()).collect();
+            order.sort_by_key(|&i| keys[i]);
+            let mut taken: Vec<Option<V>> = vals.into_iter().map(Some).collect();
+            vals = order
+                .iter()
+                .map(|&i| taken[i].take().expect("each entry moves once"))
+                .collect();
+            keys = order.iter().map(|&i| keys[i]).collect();
+        }
+        let distinct = keys
+            .iter()
+            .zip(keys.iter().skip(1))
+            .filter(|(a, b)| a != b)
+            .count()
+            + usize::from(!keys.is_empty());
+        self.keys = keys;
+        self.vals = vals;
+        distinct
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
@@ -138,12 +152,6 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         &self.vals[idx]
     }
 
-    /// Iterate every value held by the partition (in array order, all runs).
-    #[commonware_macros::stability(ALPHA)]
-    pub(super) fn values_iter(&self) -> std::slice::Iter<'_, V> {
-        self.vals.iter()
-    }
-
     /// Insert `(key, value)` at array index `idx`. The caller must pass an `idx` that keeps `keys`
     /// sorted (i.e. within or adjacent to `key`'s run).
     pub(super) fn insert_at(&mut self, idx: usize, key: K, value: V) {
@@ -223,6 +231,25 @@ mod tests {
         assert!(p.last_values().is_none());
         assert!(p.next_values_after(&5).is_none());
         assert!(p.prev_values_before(&5).is_none());
+    }
+
+    #[test]
+    fn test_partition_fill() {
+        // Keys already in order are kept as given.
+        let mut p = Partition::<u16, u64>::default();
+        assert_eq!(p.fill(vec![10, 10, 20], vec![1, 2, 3]), 2);
+        assert_eq!(p.keys, vec![10, 10, 20]);
+        assert_eq!(p.vals, vec![1, 2, 3]);
+
+        // Keys out of order are sorted, and the values of equal keys keep their order.
+        let mut p = Partition::<u16, u64>::default();
+        assert_eq!(p.fill(vec![30, 10, 20, 10], vec![1, 2, 3, 4]), 3);
+        assert_eq!(p.keys, vec![10, 10, 20, 30]);
+        assert_eq!(p.vals, vec![2, 4, 3, 1]);
+
+        let mut p = Partition::<u16, u64>::default();
+        assert_eq!(p.fill(Vec::new(), Vec::new()), 0);
+        assert!(p.is_empty());
     }
 
     #[test]

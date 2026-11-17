@@ -582,7 +582,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Se
             replay_buffer: IO_BUFFER_SIZE,
         },
         translator: TwoCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: format!("{prefix}-qmdb-log-journal-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }

@@ -32,7 +32,7 @@
 //!             page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
-//!         init_cache: Some(NZUsize!(1 << 16)),
+//!         init_scratch_partition: "test-partition-scratch".into(),
 //!         init_buffer: NZUsize!(1 << 21),
 //!     };
 //!     let db =

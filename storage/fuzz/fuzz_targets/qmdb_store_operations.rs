@@ -132,7 +132,7 @@ fn test_config(test_name: &str) -> Config<TwoCap, ((), (commonware_codec::RangeC
             page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,
-        init_cache: Some(NZUsize!(3)),
+        init_scratch_partition: format!("{test_name}-log-scratch"),
         init_buffer: NZUsize!(1 << 21),
     }
 }

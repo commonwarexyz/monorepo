@@ -1,13 +1,11 @@
 //! Standalone, opt-in large-scale measurement of QMDB operations at multi-GB scale: building a
-//! database (`generate`), reopening it, i.e. rebuilding the snapshot (`init`), at a chosen
-//! init-time `(location -> key)` cache size and build concurrency, and random point reads against
-//! it (`get`/`get_many`).
+//! database (`generate`), reopening it, i.e. rebuilding the snapshot (`init`), at a chosen build
+//! concurrency, and random point reads against it (`get`/`get_many`).
 //!
 //! The criterion init benchmark ([init](super::init)) can't reach these sizes: it resamples, and the
 //! database is multi-GB. This binary instead builds a *real* on-disk database once and then times a
-//! *real* reopen ([`Db::init`]) and *real* reads, so the cache's effect on the redundant
-//! collision-resolution log reads, the parallel build's speedup, and cold read latency all show at
-//! scale.
+//! *real* reopen ([`Db::init`]) and *real* reads, so the parallel build's speedup and cold read
+//! latency both show at scale.
 //!
 //! Generation and benchmarking are split so the (multi-minute, multi-GB) database is built once and
 //! reused across many runs -- but generation is itself an interesting benchmark: building a database
@@ -16,7 +14,7 @@
 //!
 //! ```text
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- generate /tmp/db <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]
-//! cargo bench -p commonware-storage --bench scale --features test-traits -- init     /tmp/db <cache> <concurrency> [ordered|unordered]
+//! cargo bench -p commonware-storage --bench scale --features test-traits -- init     /tmp/db <concurrency> [ordered|unordered]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- get      /tmp/db <keyspace> <num_gets> <concurrency>[,<concurrency>...] [ordered|unordered] [cache_pages]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- get_many /tmp/db <keyspace> <num_gets> <concurrency>[,<concurrency>...] <batch> [ordered|unordered] [cache_pages]
 //! cargo bench -p commonware-storage --bench scale --features test-traits -- destroy  /tmp/db
@@ -29,11 +27,9 @@
 //! -- so a uniform and a skewed database differ only in that distribution. It then prunes and syncs,
 //! reporting the total build time.
 //!
-//! `init` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
-//! `0` = off) and `concurrency` (`1` = serial, `2` and `3` decode on the init task with one or
-//! two insert workers, and larger values split between spawned decode and insert tasks while the
-//! init task merely forwards). It reports the replay-region size `R` and the elapsed time.
-//! A capacity of `R` entries can still evict locations when too many map to the same cache set.
+//! `init` reopens it (read-only) and times one `init` at the given `concurrency` (`1` builds on
+//! the init task, larger values are the number of build tasks). It reports the replay-region size
+//! `R` and the elapsed time.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
 //! opens the database (untimed), then for each entry in the comma-separated concurrency list drops
@@ -87,8 +83,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DE
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
 /// Page cache size, realistic for a multi-GB database rather than the shared bench default of
-/// 2 MiB (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top
-/// of a realistic page cache instead of an unrealistically tiny one. 262144 * 4 KiB = 1 GiB.
+/// 2 MiB (512 pages). `generate` and `init` use it, so init is measured on top of a realistic
+/// page cache instead of an unrealistically tiny one. 262144 * 4 KiB = 1 GiB.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(262144);
 
 /// Page cache size for the get modes when `cache_pages` is not given: small enough that
@@ -137,16 +133,15 @@ impl IndexKind {
     }
 }
 
-/// Parse a `concurrency` CLI argument into a snapshot-build concurrency (`1` = serial on the
-/// init task, larger values follow the decode/insert split in the module docs). `None` is a
-/// parse failure.
+/// Parse a `concurrency` CLI argument into a snapshot-build concurrency (`1` = on the init
+/// task, larger values = that many build tasks). `None` is a parse failure.
 fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
     arg.parse::<usize>().ok().and_then(NonZeroUsize::new)
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <concurrency> [ordered|unordered]   reopen + time one init (concurrency=1 on the init task / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
     );
 }
 
@@ -185,14 +180,11 @@ fn main() {
         },
         Some("init") => match (
             argv.get(1),
-            argv.get(2).and_then(|a| a.parse().ok()),
-            argv.get(3).and_then(|a| parse_concurrency(a)),
-            argv.get(4)
+            argv.get(2).and_then(|a| parse_concurrency(a)),
+            argv.get(3)
                 .map_or(Some(IndexKind::Ordered), |a| IndexKind::parse(a)),
         ) {
-            (Some(folder), Some(cache), Some(concurrency), Some(index)) => {
-                init(folder, cache, concurrency, index)
-            }
+            (Some(folder), Some(concurrency), Some(index)) => init(folder, concurrency, index),
             _ => usage(),
         },
         Some(mode @ ("get" | "get_many")) => match (
@@ -331,9 +323,8 @@ fn generate(
 }
 
 /// Reopen the database at `folder` (read-only) and time one `init` of the selected index flavor
-/// at the given init cache size (`cache` entries; `0` = off) and worker count. Reports the
-/// replay-region size `R` and the elapsed time.
-fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind) {
+/// at the given build concurrency. Reports the replay-region size `R` and the elapsed time.
+fn init(folder: &str, concurrency: NonZeroUsize, index: IndexKind) {
     if !db_dir_nonempty(folder) {
         eprintln!(
             "no database at {folder}; run `generate {folder} <keyspace> <num_updates>` first"
@@ -341,7 +332,7 @@ fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind)
         return;
     }
     let cfg = Config::default().with_storage_directory(folder);
-    let (elapsed, region) = time_init(&cfg, NonZeroUsize::new(cache), concurrency, index);
+    let (elapsed, region) = time_init(&cfg, concurrency, index);
     if region == 0 {
         eprintln!(
             "database at {folder} is empty; run `generate {folder} <keyspace> <num_updates>` first"
@@ -349,9 +340,7 @@ fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind)
         return;
     }
     let label = index.label();
-    println!(
-        "init ({label}) {folder} cache={cache} concurrency={concurrency} region={region} time={elapsed:?}"
-    );
+    println!("init ({label}) {folder} concurrency={concurrency} region={region} time={elapsed:?}");
 }
 
 /// Time random point reads against the database at `folder`: open it (untimed), then for each
@@ -556,15 +545,10 @@ fn destroy(folder: &str) {
     }
 }
 
-/// Time a single `init` of the database at `cfg`'s folder with the given cache size, worker
-/// count, and index flavor, returning the elapsed time and the replay-region size (`0` if the
-/// database is empty/absent).
-fn time_init(
-    cfg: &Config,
-    cache_size: Option<NonZeroUsize>,
-    concurrency: NonZeroUsize,
-    index: IndexKind,
-) -> (Duration, u64) {
+/// Time a single `init` of the database at `cfg`'s folder with the given build concurrency and
+/// index flavor, returning the elapsed time and the replay-region size (`0` if the database is
+/// empty/absent).
+fn time_init(cfg: &Config, concurrency: NonZeroUsize, index: IndexKind) -> (Duration, u64) {
     /// The elapsed time since `start` and the db's replay-region size.
     fn measure<M: DbAny<Family = Mmr, Key = Digest, Value = Digest>>(
         db: &M,
@@ -577,8 +561,7 @@ fn time_init(
     }
 
     Runner::new(cfg.clone()).start(|ctx| async move {
-        let mut config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, concurrency);
-        config.init_cache = cache_size;
+        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, concurrency);
         let start = Instant::now();
         match index {
             IndexKind::Ordered => {

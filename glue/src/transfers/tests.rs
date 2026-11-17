@@ -760,7 +760,7 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
             replay_buffer: NZUsize!(1024),
         },
         translator: TwoCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: format!("transfers-log-{suffix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -773,7 +773,7 @@ fn current_config(suffix: &str) -> current::Config<TwoCap, FixedJournalConfig, S
         log: any.log,
         grafted_metadata_partition: format!("transfers-grafted-{suffix}"),
         translator: TwoCap,
-        init_cache: any.init_cache,
+        init_scratch_partition: any.init_scratch_partition,
         init_buffer: any.init_buffer,
         init_concurrency: (),
     }
@@ -793,7 +793,7 @@ fn variable_config(suffix: &str) -> any::unordered::variable::Config<TwoCap, (()
             replay_buffer: NZUsize!(1024),
         },
         translator: TwoCap,
-        init_cache: any.init_cache,
+        init_scratch_partition: any.init_scratch_partition,
         init_buffer: any.init_buffer,
         init_concurrency: (),
     }

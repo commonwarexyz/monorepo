@@ -54,8 +54,7 @@ where
             .expect("operations since the floor must fit in usize"),
     );
 
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache.
     let stream = log
         .replay(
             *inactivity_floor_loc..end,

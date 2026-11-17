@@ -161,7 +161,7 @@ fn any_fixed_config(suffix: &str) -> any::Config<OneCap, FConfig, Sequential> {
         merkle: merkle_config(suffix, &pc),
         log: fixed_log_config(suffix, pc),
         translator: OneCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: format!("{suffix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -173,7 +173,7 @@ fn any_variable_config(suffix: &str) -> any::Config<OneCap, VConfig<((), ())>, S
         merkle: merkle_config(suffix, &pc),
         log: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: format!("{suffix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -186,7 +186,7 @@ fn current_fixed_config(suffix: &str) -> current::Config<OneCap, FConfig, Sequen
         log: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: format!("{suffix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -199,7 +199,7 @@ fn current_variable_config(suffix: &str) -> current::Config<OneCap, VConfig<((),
         log: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
-        init_cache: Some(NZUsize!(1024)),
+        init_scratch_partition: format!("{suffix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -357,7 +357,7 @@ mod tests {
         store::Config {
             log: variable_log_config(suffix, pc, ((), ())),
             translator: OneCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("{suffix}-scratch"),
             init_buffer: NZUsize!(1 << 21),
         }
     }

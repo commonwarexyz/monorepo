@@ -10,12 +10,13 @@ use crate::{
     },
     merkle::mmr::Location,
     qmdb::{
+        SnapshotBuild as _,
         any::{
             BITMAP_CHUNK_BYTES,
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
-        build_snapshot_from_log, delete_known_loc,
+        delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         operation::{Committable as _, Floored as _, Key, Operation as _},
         update_known_loc,
@@ -25,10 +26,13 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::{Widen, bitmap, iter::zip_eq};
 use core::{borrow::Borrow, num::NonZeroUsize};
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
@@ -42,9 +46,11 @@ pub struct Config<T: Translator, C> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
-    pub init_cache: Option<NonZeroUsize>,
+    /// The partition init keeps temporary data in when it rebuilds the index from more operations
+    /// than it holds in memory. Init removes that data before it returns, along with any an
+    /// interrupted init left behind. The partition must not be shared with another database or
+    /// used for anything else.
+    pub init_scratch_partition: String,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -376,7 +382,10 @@ where
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
         max_size: Option<Location>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        E: Spawner,
+    {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
         // recovery owner unpublished until that commit and its replay floor are validated.
         crate::qmdb::validate_initialization_bound(max_size)?;
@@ -427,7 +436,6 @@ where
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
         // Build the snapshot only from the durable selected prefix.
-        let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let op = log.read(*last_commit_loc).await?;
@@ -442,23 +450,22 @@ where
             .expect("pruned chunk count fits in u64 bits");
         bitmap.extend_to(*inactivity_floor_loc);
 
-        // Replay the log from the floor, appending each operation's status and clearing the bit
-        // of any location it supersedes. The state after the last operation is each location's
-        // final status.
-        let active_keys = build_snapshot_from_log(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            init_buffer,
-            cache_size,
-            |is_active, old_loc| {
-                bitmap.push(is_active);
-                if let Some(loc) = old_loc {
-                    bitmap.set_bit(*loc, false);
-                }
-            },
-        )
-        .await?;
+        // Build the snapshot from the operations at and above the floor, then append their
+        // statuses. The build shares the log with its tasks and drops every clone before it
+        // returns.
+        let log = Arc::new(log);
+        let (active_keys, activity) = snapshot
+            .build_snapshot(
+                context.child("build"),
+                inactivity_floor_loc,
+                &log,
+                (),
+                init_buffer,
+                &cfg.init_scratch_partition,
+            )
+            .await?;
+        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
+        bitmap.extend_from_bitmap(&activity);
         assert_eq!(bitmap.len(), bounds.end);
 
         Ok(Self {
@@ -772,7 +779,7 @@ mod test {
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_math::algebra::Random;
     use commonware_runtime::{
-        Runner, Spawner as _, Supervisor as _,
+        Runner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -813,7 +820,7 @@ mod test {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: "journal-scratch".into(),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -1013,7 +1020,7 @@ mod test {
                 page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("journal-{suffix}-scratch"),
             init_buffer: NZUsize!(1 << 21),
         };
         DelayedStore::init(
@@ -2148,7 +2155,7 @@ mod test {
                     page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: "journal-scratch".into(),
                 init_buffer: NZUsize!(1 << 21),
             };
 
@@ -2202,7 +2209,7 @@ mod test {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: OneCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("{partition}-scratch"),
             init_buffer: NZUsize!(1 << 21),
         };
         PolicyStore::init(context, cfg, None).await.unwrap()
@@ -2352,7 +2359,7 @@ mod test {
                 Config {
                     log: cfg.log,
                     translator: CountingTranslator(lookups.clone()),
-                    init_cache: cfg.init_cache,
+                    init_scratch_partition: cfg.init_scratch_partition,
                     init_buffer: cfg.init_buffer,
                 },
                 None,

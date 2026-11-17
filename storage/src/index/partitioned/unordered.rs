@@ -62,8 +62,8 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         partition_index_and_sub_key::<P>(key).0
     }
 
-    /// The range allocates only `count` slots, so per-worker memory is the range rather than
-    /// the full `2^(8*P)`.
+    /// The range allocates only `count` slots, so its memory is the range rather than the
+    /// full `2^(8*P)`.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
             .map(|i| self.partitions[offset + i].empty())
@@ -81,41 +81,31 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
-/// parallel snapshot-build worker (created by [Index::new_range], folded back into a full index by
-/// [Index::install_range]). It exposes only the cursor operations, which map a key's global
-/// partition index to the worker's local slot. The other [UnorderedTrait] operations index
-/// partitions globally and are deliberately unavailable, so they cannot be miscalled on a worker.
+/// snapshot-build task (created by [Index::new_range], folded back into a full index by
+/// [Index::install_range]). It accepts only bulk loads, which map a key's global partition index
+/// to the range's local slot. The [UnorderedTrait] operations index partitions globally and are
+/// deliberately unavailable, so they cannot be miscalled on a range.
 #[commonware_macros::stability(ALPHA)]
 pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
-    /// The worker's partition slots, addressed by local slot (`global partition - offset`).
+    /// The range's partition slots, addressed by local slot (`global partition - offset`).
     partitions: Vec<UnorderedIndex<T, V>>,
 
-    /// The first global partition index the worker covers.
+    /// The first global partition index the range covers.
     offset: usize,
 }
 
 #[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
-    type Cursor<'a>
-        = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
-    where
-        Self: 'a;
 
-    fn get_mut(&mut self, key: &[u8]) -> Option<Self::Cursor<'_>> {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        self.partitions[i - self.offset].get_mut(sub)
-    }
-
-    fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Self::Cursor<'_>> {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        self.partitions[i - self.offset].get_mut_or_insert(sub, value)
-    }
-
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for partition in &self.partitions {
-            partition.for_each_value(&mut f);
-        }
+    fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
+        let mut entries = entries.peekable();
+        let Some((first, _)) = entries.peek() else {
+            return;
+        };
+        let (i, _) = partition_index_and_sub_key::<P>(first);
+        self.partitions[i - self.offset]
+            .load(entries.map(|(key, value)| (partition_index_and_sub_key::<P>(key).1, value)));
     }
 }
 
@@ -216,7 +206,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{index::Cursor as _, translator::OneCap};
+    use crate::translator::OneCap;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Runner as _, Supervisor as _, deterministic, telemetry::metrics::metric_samples,
@@ -228,35 +218,47 @@ mod tests {
         Index::new(ctx, OneCap)
     }
 
-    /// A worker's value walk must visit every value it holds exactly once (inline values and
-    /// overflow chains alike), since the snapshot build derives the activity bitmap and
-    /// active-key counts from it.
+    /// Loading a range must leave the index as inserting the same entries one at a time would,
+    /// whether a partition is loaded once or again, and whether or not its keys collide.
     #[test_traced]
-    fn test_range_for_each_value_visits_all_values_once() {
+    fn test_range_load_matches_inserts() {
         deterministic::Runner::default().start(|context| async move {
-            let full = new_index(context.child("full"));
+            let mut loaded = new_index(context.child("loaded"));
+            let mut inserted = new_index(context.child("inserted"));
 
-            // Two keys in partition 0x80 that collide on the one-byte translated sub-key (an
-            // overflow chain), one distinct key beside them, and one key in partition 0x81.
-            let mut worker = full.new_range(0x80, 2);
-            assert!(worker.get_mut_or_insert(&[0x80, 0x01, 0xAA], 1).is_none());
-            assert!(worker.get_mut_or_insert(&[0x80, 0x01, 0xBB], 2).is_some());
-            {
-                let mut cursor = worker.get_mut(&[0x80, 0x01, 0xBB]).unwrap();
-                cursor.next();
-                cursor.insert(2);
+            // Each load holds one partition's entries in ascending key order. Partition 0x80
+            // has keys that share a translated sub-key and is loaded twice.
+            let loads: [&[(&[u8], u64)]; 4] = [
+                &[
+                    (&[0x80, 0x01], 1),
+                    (&[0x80, 0x01, 0xAA], 2),
+                    (&[0x80, 0x01, 0xBB], 3),
+                    (&[0x80, 0x02], 4),
+                ],
+                &[(&[0x81, 0x07], 5)],
+                &[],
+                &[(&[0x80, 0x01, 0xCC], 6), (&[0x80, 0x03], 7)],
+            ];
+            let mut range = loaded.new_range(0x80, 2);
+            for entries in loads {
+                range.load(entries.iter().copied());
+                for &(key, value) in entries {
+                    inserted.insert(key, value);
+                }
             }
-            assert!(worker.get_mut_or_insert(&[0x80, 0x02], 3).is_none());
-            assert!(worker.get_mut_or_insert(&[0x81, 0x07], 4).is_none());
-
-            let mut seen = Vec::new();
-            worker.for_each_value(|v| seen.push(*v));
-            seen.sort_unstable();
-            assert_eq!(seen, vec![1, 2, 3, 4]);
+            loaded.install_range(range);
+            assert_eq!(loaded.keys(), inserted.keys());
+            assert_eq!(loaded.items(), inserted.items());
+            for &(key, _) in loads.iter().copied().flatten() {
+                assert_eq!(
+                    loaded.get(key).collect::<Vec<_>>(),
+                    inserted.get(key).collect::<Vec<_>>()
+                );
+            }
         });
     }
 
-    /// Installing a worker with a nonzero offset must land its slots, with their inline values and
+    /// Installing a range with a nonzero offset must land its slots, with their inline values and
     /// overflow chains, at the global partitions `offset + local`. The key and item counts are
     /// live through the shared metrics, so the `get` asserts are what pin the moved contents.
     #[test_traced]
@@ -264,30 +266,26 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let mut full = new_index(context.child("full"));
 
-            // A worker covering global partitions [0x80, 0x82): two keys in partition 0x80, one
-            // in 0x81.
-            let mut worker = full.new_range(0x80, 2);
-            assert!(worker.get_mut_or_insert(&[0x80, 0x01], 1).is_none());
-            assert!(worker.get_mut_or_insert(&[0x80, 0x02], 2).is_none());
-            assert!(worker.get_mut_or_insert(&[0x81, 0x07], 3).is_none());
+            // A range covering global partitions [0x80, 0x82): three keys in partition 0x80,
+            // two of which share a translated sub-key, and one key in 0x81.
+            let mut range = full.new_range(0x80, 2);
+            let entries: [(&[u8], u64); 3] = [
+                (&[0x80, 0x01], 1),
+                (&[0x80, 0x01, 0xFF], 4),
+                (&[0x80, 0x02], 2),
+            ];
+            range.load(entries.into_iter());
+            let entries: [(&[u8], u64); 1] = [(&[0x81, 0x07], 3)];
+            range.load(entries.into_iter());
 
-            // A colliding key (same partition and translated sub-key as the first) joins the
-            // first key's chain through the cursor, the same path the build worker's collision
-            // resolution takes.
-            {
-                let mut cursor = worker.get_mut_or_insert(&[0x80, 0x01, 0xFF], 4).unwrap();
-                while cursor.next().is_some() {}
-                cursor.insert(4);
-            }
-
-            // Installing must remap the slots to the worker's global range and preserve every
-            // value, including the chained one.
-            full.install_range(worker);
+            // Installing must remap the slots to the range's global partitions and preserve
+            // every value, including the chained one.
+            full.install_range(range);
             assert_eq!(full.keys(), 3);
             assert_eq!(full.items(), 4);
             assert_eq!(
                 full.get(&[0x80, 0x01]).copied().collect::<Vec<_>>(),
-                vec![1, 4]
+                vec![4, 1]
             );
             assert_eq!(
                 full.get(&[0x80, 0x02]).copied().collect::<Vec<_>>(),
@@ -300,54 +298,21 @@ mod tests {
         });
     }
 
-    /// A worker's cursor deletes (the parallel build's delete path) count on the covered
-    /// partition's `pruned` metric as they happen, matching what the serial build records.
-    #[test_traced]
-    fn test_worker_prunes_count_live() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut full = new_index(context.child("full"));
-            assert_eq!(full.pruned(), 0);
-
-            // Give one translated key two values, then delete both through a cursor. The worker
-            // slots update their partitions' metrics directly, so the prunes count on the full
-            // index immediately.
-            let mut worker = full.new_range(0, full.partition_count());
-            assert!(worker.get_mut_or_insert(&[0x10, 0x01], 1).is_none());
-            {
-                let mut cursor = worker.get_mut_or_insert(&[0x10, 0x01, 0xFF], 2).unwrap();
-                while cursor.next().is_some() {}
-                cursor.insert(2);
-            }
-            {
-                let mut cursor = worker.get_mut(&[0x10, 0x01]).unwrap();
-                while cursor.next().is_some() {
-                    cursor.delete();
-                }
-            }
-            assert_eq!(full.pruned(), 2);
-
-            // Installing moves the structures without touching the already-live counts.
-            full.install_range(worker);
-            assert_eq!(full.pruned(), 2);
-            assert_eq!(full.keys(), 0);
-            assert_eq!(full.items(), 0);
-        });
-    }
-
-    /// A worker's slots update their partitions' metrics without holding their registrations,
-    /// so dropping the full index unregisters those metrics while the worker's range lives on.
+    /// A range's slots update their partitions' metrics without holding their registrations,
+    /// so dropping the full index unregisters those metrics while the range lives on.
     #[test_traced]
     fn test_range_does_not_hold_registrations() {
         deterministic::Runner::default().start(|context| async move {
-            // The worker's insert counts on the full index's metrics as it happens.
+            // The range's load counts on the full index's metrics as it happens.
             let full = new_index(context.child("full"));
-            let mut worker = full.new_range(0, full.partition_count());
-            assert!(worker.get_mut_or_insert(&[0x10, 0x01], 1).is_none());
+            let mut range = full.new_range(0, full.partition_count());
+            let entries: [(&[u8], u64); 1] = [(&[0x10, 0x01], 1)];
+            range.load(entries.into_iter());
             assert_eq!(full.keys(), 1);
 
-            // Dropping the full index unregisters its metrics while the worker still holds its
+            // Dropping the full index unregisters its metrics while the range still holds its
             // slots. An index created again under the same names starts from zero and misses the
-            // worker's later inserts.
+            // range's later loads.
             drop(full);
             let encoded = context.encode();
             for name in ["keys", "items", "pruned_total"] {
@@ -357,7 +322,8 @@ mod tests {
                 );
             }
             let fresh = new_index(context.child("full"));
-            assert!(worker.get_mut_or_insert(&[0x20, 0x01], 2).is_none());
+            let entries: [(&[u8], u64); 1] = [(&[0x20, 0x01], 2)];
+            range.load(entries.into_iter());
             assert_eq!(fresh.keys(), 0);
         });
     }

@@ -111,7 +111,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
-                init_cache: Some(NZUsize!(3)),
+                init_scratch_partition: format!("test-qmdb-log-journal-{suffix}-scratch"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };

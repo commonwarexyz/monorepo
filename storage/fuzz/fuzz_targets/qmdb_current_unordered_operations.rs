@@ -164,7 +164,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             },
             grafted_metadata_partition: format!("fuzz-current-{suffix}-grafted-merkle-metadata"),
             translator: TwoCap,
-            init_cache: Some(NZUsize!(3)),
+            init_scratch_partition: format!("fuzz-current-{suffix}-log-journal-scratch"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         };
