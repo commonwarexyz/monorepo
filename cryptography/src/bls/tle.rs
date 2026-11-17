@@ -1,6 +1,6 @@
-//! Timelock Encryption (TLE) over BLS12-381.
+//! Timelock Encryption (TLE) from BLS signatures.
 //!
-//! This crate implements Timelock Encryption (TLE) over BLS12-381 using
+//! This module implements Timelock Encryption (TLE) over any [Variant] using
 //! Identity-Based Encryption (IBE) with the Boneh-Franklin scheme. TLE enables
 //! encrypting messages that can only be decrypted when a valid signature over
 //! a specific target (e.g., timestamp or round number) becomes available.
@@ -34,11 +34,11 @@
 //!
 //! ```rust
 //! use commonware_cryptography::{
-//!     bls::ops::{keypair, sign_message},
-//!     bls12381::{
+//!     bls::{
+//!         ops::{keypair, sign_message},
 //!         tle::{encrypt, decrypt, Block},
-//!         primitives::variant::MinPk,
 //!     },
+//!     bls12381::primitives::variant::MinPk,
 //! };
 //! use commonware_utils::test_rng;
 //!
@@ -84,8 +84,6 @@
 
 use crate::{
     bls::{ops::hash_with_namespace, variant::Variant},
-    bls12381::primitives::group::Scalar,
-    curve::DST,
     sha256::Digest,
 };
 #[cfg(not(feature = "std"))]
@@ -97,9 +95,6 @@ use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
 use thiserror::Error;
 use zeroize::Zeroizing;
-
-/// Domain separation tag for hashing the `h3` message to a scalar.
-const DST: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
 
 /// Block size for encryption operations.
 const BLOCK_SIZE: usize = Digest::SIZE;
@@ -187,14 +182,14 @@ mod hash {
     /// H3: (sigma, M) -> Scalar
     ///
     /// Used to derive the random scalar r using RFC9380 hash-to-field.
-    pub fn h3(sigma: &Block, message: &[u8]) -> Scalar {
+    pub fn h3<V: Variant>(sigma: &Block, message: &[u8]) -> V::Scalar {
         // Combine sigma and message
         let mut combined = Zeroizing::new(Vec::with_capacity(sigma.len() + message.len()));
         combined.extend_from_slice(sigma.as_ref());
         combined.extend_from_slice(message);
 
         // Map the combined bytes to a scalar via RFC9380 hash-to-field.
-        Scalar::hash_to_field(DST, &combined)
+        V::Scalar::hash_to_field(V::TLE, &combined)
     }
 
     /// H4: sigma -> Block
@@ -230,7 +225,7 @@ fn xor(a: &Block, b: &Block) -> Block {
 ///
 /// # Returns
 /// * `Result<Ciphertext<V>, Error>` - The encrypted ciphertext, or an encryption error
-pub fn encrypt<R: CryptoRng, V: Variant<Scalar = Scalar>>(
+pub fn encrypt<R: CryptoRng, V: Variant>(
     rng: &mut R,
     public: V::Public,
     target: (&[u8], &[u8]),
@@ -251,7 +246,7 @@ pub fn encrypt<R: CryptoRng, V: Variant<Scalar = Scalar>>(
     let sigma = Zeroizing::new(Block::new(*sigma_array));
 
     // Derive scalar r from sigma and message
-    let r = hash::h3(&sigma, message.as_ref());
+    let r = hash::h3::<V>(&sigma, message.as_ref());
 
     // Compute U = r * Public::generator()
     let mut u = V::Public::generator();
@@ -290,10 +285,7 @@ pub fn encrypt<R: CryptoRng, V: Variant<Scalar = Scalar>>(
 ///
 /// # Returns
 /// * `Option<Block>` - The decrypted message
-pub fn decrypt<V: Variant<Scalar = Scalar>>(
-    signature: &V::Signature,
-    ciphertext: &Ciphertext<V>,
-) -> Option<Block> {
+pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>) -> Option<Block> {
     // An identity signature collapses the pairing to a public constant and bypasses target binding.
     if signature == &V::Signature::zero() {
         return None;
@@ -311,7 +303,7 @@ pub fn decrypt<V: Variant<Scalar = Scalar>>(
     let message = xor(&ciphertext.w, &h4_value);
 
     // Recompute r and verify U = r * Public::generator()
-    let r = hash::h3(&sigma, &message);
+    let r = hash::h3::<V>(&sigma, &message);
     let mut expected_u = V::Public::generator();
     expected_u *= &r;
     if ciphertext.u != expected_u {
@@ -326,15 +318,18 @@ mod tests {
     use super::*;
     use crate::{
         bls::ops,
-        bls12381::primitives::variant::{MinPk, MinSig},
+        bls12381::primitives::{
+            group::Scalar,
+            variant::{MinPk, MinSig},
+        },
     };
     use commonware_math::algebra::Random as _;
     use commonware_utils::test_rng;
 
-    fn identity_signature_cannot_decrypt<V: Variant<Scalar = Scalar>>() {
+    fn identity_signature_cannot_decrypt<V: Variant>() {
         let sigma = Block::new([1; BLOCK_SIZE]);
         let message = Block::new([2; BLOCK_SIZE]);
-        let r = hash::h3(&sigma, message.as_ref());
+        let r = hash::h3::<V>(&sigma, message.as_ref());
 
         let mut u = V::Public::generator();
         u *= &r;
@@ -354,7 +349,7 @@ mod tests {
         identity_signature_cannot_decrypt::<MinSig>();
     }
 
-    fn identity_public_key_cannot_encrypt<V: Variant<Scalar = Scalar>>() {
+    fn identity_public_key_cannot_encrypt<V: Variant>() {
         let result = encrypt::<_, V>(
             &mut test_rng(),
             V::Public::zero(),

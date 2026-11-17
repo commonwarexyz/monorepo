@@ -390,7 +390,6 @@ use rand_core::CryptoRng;
 use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use thiserror::Error;
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG";
 const SIG_ACK: &[u8] = b"ack";
 const SIG_LOG: &[u8] = b"log";
 const NOISE_PRE_VERIFY: &[u8] = b"pre_verify";
@@ -996,7 +995,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             }
         }
         let summary = {
-            let mut transcript = Transcript::new(NAMESPACE, TRANSCRIPT_VERSION);
+            let mut transcript = Transcript::new(V::DKG, TRANSCRIPT_VERSION);
             transcript
                 .commit(namespace)
                 .commit(round.encode())

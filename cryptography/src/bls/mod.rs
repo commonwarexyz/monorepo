@@ -55,6 +55,7 @@ pub mod dkg;
 pub mod key;
 pub mod ops;
 pub mod sharing;
+pub mod tle;
 pub mod variant;
 
 use thiserror::Error;
