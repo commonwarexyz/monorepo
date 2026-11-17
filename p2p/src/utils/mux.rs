@@ -574,11 +574,9 @@ mod tests {
     }
 
     /// Start the network and return the oracle.
-    fn start_network(
-        context: &deterministic::Context,
-    ) -> Oracle<PublicKey, deterministic::Context> {
+    fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
-            context.child("network"),
+            context,
             simulated::Config {
                 max_size: MAX_SIZE,
                 max_peers_per_set: NZUsize!(2),
@@ -762,8 +760,7 @@ mod tests {
     fn test_sub_sender_accepts_limit_less_prefix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
@@ -788,8 +785,7 @@ mod tests {
     fn test_sub_sender_panics_above_limit_less_prefix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, _) = create_peer(&context, &mut oracle, 0).await;
             let (_, mut handle2) = create_peer(&context, &mut oracle, 1).await;
@@ -808,8 +804,7 @@ mod tests {
         // Can register a subchannel and send messages to it.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
@@ -832,8 +827,7 @@ mod tests {
         // Can register multiple subchannels and send messages to each.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
@@ -906,8 +900,7 @@ mod tests {
         // messages to that subchannel are dropped.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
@@ -937,8 +930,7 @@ mod tests {
         // The unregistered subchannel does not affect the registered one.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
@@ -966,8 +958,7 @@ mod tests {
         // is not registered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2, mut backup2, _) =
@@ -995,8 +986,7 @@ mod tests {
         // is not registered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, _handle2, mut backup2, mut global_sender2) =
@@ -1033,8 +1023,7 @@ mod tests {
         // the subchannel on drop, but is included for completeness.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
@@ -1065,8 +1054,7 @@ mod tests {
         // Messages to unregistered subchannels are simply dropped.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
             let (pk2, mut handle2, backup2, _) =
@@ -1097,8 +1085,7 @@ mod tests {
         // Returns an error if the subchannel is already registered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (_pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
 
@@ -1118,8 +1105,7 @@ mod tests {
         // Can register a channel after it has been deregistered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let network_context = context.child("network");
-            let mut oracle = start_network(&network_context);
+            let mut oracle = start_network(context.child("network"));
 
             let (_, mut handle) = create_peer(&context, &mut oracle, 0).await;
             let (_, rx) = handle.register(7).await.unwrap();

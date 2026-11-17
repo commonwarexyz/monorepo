@@ -559,8 +559,13 @@ mod tests {
         provider: ConstantProvider<S, Epoch>,
     ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256> {
         let me = participants[0].clone();
-        let oracle =
-            setup_network_with_participants(context, NZUsize!(1), participants, 1024 * 1024).await;
+        let oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants,
+            1024 * 1024,
+        )
+        .await;
         let control = oracle.control(me.clone());
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider,
@@ -1615,9 +1620,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1701,9 +1705,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1794,9 +1797,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1919,9 +1921,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2182,9 +2183,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2278,9 +2278,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2433,9 +2432,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants[..2].iter().cloned(),
                 1024 * 1024,
@@ -2536,9 +2534,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2631,9 +2628,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2733,9 +2729,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2834,9 +2829,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2907,9 +2901,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3021,9 +3014,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3126,9 +3118,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3295,9 +3286,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3388,9 +3378,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3487,9 +3476,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3638,9 +3626,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3840,9 +3827,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3937,9 +3923,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -4071,9 +4056,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants[..2].iter().cloned(),
                 1024 * 1024,
@@ -5484,9 +5468,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -5554,9 +5537,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -5680,9 +5662,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -5808,9 +5789,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6206,9 +6186,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6293,9 +6272,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6382,9 +6360,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6556,9 +6533,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6663,9 +6639,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6776,9 +6751,8 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,

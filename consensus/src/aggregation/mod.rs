@@ -237,7 +237,7 @@ mod tests {
 
     /// Initialize a simulated network sized from [max_payload_size].
     async fn initialize_simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
-        context: &Context,
+        context: Context,
         fixture: &Fixture<S>,
         link: Link,
     ) -> (
@@ -245,7 +245,7 @@ mod tests {
         Registrations<PublicKey>,
     ) {
         let (network, mut oracle) = Network::new_with_peers(
-            context.child("network"),
+            context,
             commonware_p2p::simulated::Config {
                 max_size: max_message_size([max_payload_size::<S, Sha256Digest>()]),
                 max_peers_per_set: NZUsize!(fixture.participants.len()),
@@ -412,9 +412,8 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
-            let simulation_context = context.child("simulation");
             let (mut oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let validator_context = context.child("validator");
             let (_participant_contexts, reporters) = spawn_validator_engines(
@@ -453,9 +452,8 @@ mod tests {
                 fixture.participants[..4].to_vec().try_into().unwrap();
             let current: commonware_utils::ordered::Set<PublicKey> =
                 fixture.participants[1..].to_vec().try_into().unwrap();
-            let simulation_context = context.child("simulation");
             let (oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             // Start the joining validator first and keep one current member offline.
             // All three running validators must contribute their acks to reach quorum.
@@ -564,9 +562,8 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
-            let simulation_context = context.child("simulation");
             let (mut oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let validator_context = context.child("validator");
             let (_participant_contexts, reporters) = spawn_validator_engines(
@@ -619,9 +616,9 @@ mod tests {
                 async move {
                     let epoch = Epoch::new(111);
 
-                    let simulation_context = context.child("simulation");
                     let (oracle, mut registrations) =
-                        initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                        initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
+                            .await;
 
                     // Create a shared reporter
                     //
@@ -763,9 +760,9 @@ mod tests {
                 let epoch = Epoch::new(111);
 
                 // Set up simulated network
-                let simulation_context = context.child("simulation");
                 let (oracle, mut registrations) =
-                    initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                    initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
+                        .await;
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
@@ -848,9 +845,9 @@ mod tests {
                 let epoch = Epoch::new(111);
 
                 // Set up simulated network
-                let simulation_context = context.child("simulation");
                 let (oracle, mut registrations) =
-                    initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                    initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
+                        .await;
 
                 // Create a shared reporter
                 let (reporter, mut reporter_mailbox) =
@@ -951,9 +948,8 @@ mod tests {
                 success_rate: probability!(0.5),
             };
 
-            let simulation_context = context.child("simulation");
             let (mut oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, degraded_link).await;
+                initialize_simulation(context.child("simulation"), &fixture, degraded_link).await;
 
             let validator_context = context.child("validator");
             let (_participant_contexts, reporters) = spawn_validator_engines(
@@ -1044,9 +1040,8 @@ mod tests {
             fixture.participants.truncate(4);
             fixture.schemes.truncate(4);
 
-            let simulation_context = context.child("simulation");
             let (mut oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let validator_context = context.child("validator");
             let (_participant_contexts, reporters) = spawn_validator_engines(
@@ -1084,9 +1079,8 @@ mod tests {
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
-            let simulation_context = context.child("simulation");
             let (mut oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK).await;
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
             let validator_context = context.child("validator");
             let (_participant_contexts, reporters) = spawn_validator_engines(
@@ -1149,9 +1143,8 @@ mod tests {
             let epoch = Epoch::new(111);
 
             // Set up simulated network
-            let simulation_context = context.child("simulation");
             let (oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, RELIABLE_LINK)
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK)
                     .await;
 
             // Create reporters (one per online validator)
@@ -1264,9 +1257,8 @@ mod tests {
             };
 
             // Initialize the simulated network
-            let simulation_context = context.child("simulation");
             let (mut oracle, mut registrations) =
-                initialize_simulation(&simulation_context, &fixture, delayed_link).await;
+                initialize_simulation(context.child("simulation"), &fixture, delayed_link).await;
 
             // Start all validators
             let validator_context = context.child("validator");

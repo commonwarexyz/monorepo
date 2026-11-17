@@ -48,9 +48,8 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = harness::setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,

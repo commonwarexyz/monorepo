@@ -209,7 +209,7 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
 
 /// Sets up a test network with an initial participant peer set and a message limit of `max_size`.
 pub async fn setup_network_with_participants<I>(
-    context: &deterministic::Context,
+    context: deterministic::Context,
     tracked_peer_sets: NonZeroUsize,
     participants: I,
     max_size: u32,
@@ -219,7 +219,7 @@ where
 {
     let participants: Vec<_> = participants.into_iter().collect();
     let (network, oracle) = Network::new_with_peers(
-        context.child("network"),
+        context,
         simulated::Config {
             max_size,
             max_peers_per_set: NZUsize!(participants.len()),
@@ -830,9 +830,8 @@ pub fn hailstorm<H: TestHarness>(
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(3),
             participants.clone(),
             1024 * 1024,
@@ -1070,9 +1069,8 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
             let me = me.clone();
             let provider = provider.clone();
             move |context| async move {
-                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    &network_context,
+                    context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -1100,9 +1098,8 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                     let me = me.clone();
                     let provider = provider.clone();
                     move |context| async move {
-                        let network_context = context.child("network");
                         let mut oracle = setup_network_with_participants(
-                            &network_context,
+                            context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
                             1024 * 1024,
@@ -1173,9 +1170,8 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
             let me = me.clone();
             let provider = provider.clone();
             move |context| async move {
-                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    &network_context,
+                    context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -1204,9 +1200,8 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                     let me = me.clone();
                     let provider = provider.clone();
                     move |context| async move {
-                        let network_context = context.child("network");
                         let mut oracle = setup_network_with_participants(
-                            &network_context,
+                            context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
                             1024 * 1024,
@@ -1291,9 +1286,8 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
             let me = me.clone();
             let provider = provider.clone();
             move |context| async move {
-                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    &network_context,
+                    context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -1324,9 +1318,8 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                     let me = me.clone();
                     let provider = provider.clone();
                     move |context| async move {
-                        let network_context = context.child("network");
                         let mut oracle = setup_network_with_participants(
-                            &network_context,
+                            context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
                             1024 * 1024,
@@ -1384,9 +1377,8 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -1522,9 +1514,8 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -1684,9 +1675,8 @@ where
         let provider = provider.clone();
         let block_a = block_a.clone();
         move |context| async move {
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1716,9 +1706,8 @@ where
         let me = me.clone();
         let provider = provider.clone();
         move |context| async move {
-            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                &network_context,
+                context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1744,9 +1733,8 @@ where
 
     // Phase 3: both same-round candidates must be recoverable.
     deterministic::Runner::from(checkpoint).start(move |context| async move {
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -1815,9 +1803,8 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
             let provider = provider.clone();
             let finalization = finalization.clone();
             move |context| async move {
-                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    &network_context,
+                    context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -1864,9 +1851,8 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                     let me = me.clone();
                     let provider = provider.clone();
                     move |context| async move {
-                        let network_context = context.child("network");
                         let mut oracle = setup_network_with_participants(
-                            &network_context,
+                            context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
                             1024 * 1024,
@@ -3154,9 +3140,8 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let payload = crate::marshal::max_payload_size::<H::Variant, S>(NUM_VALIDATORS, &());
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(3),
             participants.clone(),
             commonware_p2p::max_message_size([payload]),
@@ -3297,9 +3282,8 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -3396,9 +3380,8 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -3502,9 +3485,8 @@ pub fn genesis_emitted_once<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -3576,9 +3558,8 @@ pub fn sync_height_floor<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(3),
             participants.clone(),
             1024 * 1024,
@@ -3749,9 +3730,8 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -3938,9 +3918,8 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -4049,9 +4028,8 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let victim = participants[0].clone();
         let attacker = participants[1].clone();
         let peers = vec![victim.clone(), attacker.clone()];
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             peers.clone(),
             1024 * 1024,
@@ -4205,9 +4183,8 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
         let victim = participants[0].clone();
         let server = participants[1].clone();
         let peers = vec![victim.clone(), server.clone()];
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             peers.clone(),
             1024 * 1024,
@@ -4338,9 +4315,8 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -4420,9 +4396,8 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -4525,9 +4500,8 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -4619,9 +4593,8 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -4828,9 +4801,8 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -4929,9 +4901,8 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -5009,9 +4980,8 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -5110,9 +5080,8 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -5177,9 +5146,8 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -5271,9 +5239,8 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(3),
             participants.clone(),
             1024 * 1024,
@@ -5390,9 +5357,8 @@ where
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -5480,9 +5446,8 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -5617,9 +5582,8 @@ pub fn init_processed_height<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -5710,9 +5674,8 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            &network_context,
+            context.child("network"),
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,

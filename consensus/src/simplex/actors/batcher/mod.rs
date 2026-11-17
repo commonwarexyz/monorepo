@@ -135,7 +135,7 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
     async fn start_test_network_with_peers<I>(
-        context: &deterministic::Context,
+        context: deterministic::Context,
         peers: I,
     ) -> Oracle<PublicKey, deterministic::Context>
     where
@@ -143,7 +143,7 @@ mod tests {
     {
         let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
-            context.child("network"),
+            context,
             NConfig {
                 max_size: 1024 * 1024,
                 // Certificate-injection tests add one secondary peer to the committee.
@@ -1680,9 +1680,8 @@ mod tests {
                 ..
             } = ed25519::fixture(&mut context, namespace, n);
 
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
             let reporter = test_reporter(&mut context, &schemes[0]);
             let me = participants[0].clone();
             let batcher_cfg = test_config(
@@ -1891,8 +1890,6 @@ mod tests {
     /// buffered but not yet verifiable, since the leader's proposal is not
     /// yet known.
     struct BufferedFinalization {
-        /// Keeps the simulated network running for the life of the test.
-        _network_context: deterministic::Context,
         oracle: Oracle<PublicKey, deterministic::Context>,
         participants: Vec<PublicKey>,
         schemes: Vec<ed25519::Scheme>,
@@ -1926,8 +1923,8 @@ mod tests {
             schemes,
             ..
         } = ed25519::fixture(context, &namespace, n);
-        let network_context = context.child("network");
-        let oracle = start_test_network_with_peers(&network_context, participants.clone()).await;
+        let oracle =
+            start_test_network_with_peers(context.child("network"), participants.clone()).await;
         let reporter = test_reporter(context, &schemes[0]);
 
         let me = participants[0].clone();
@@ -1998,7 +1995,6 @@ mod tests {
         context.sleep(Duration::from_millis(10)).await;
 
         BufferedFinalization {
-            _network_context: network_context,
             oracle,
             participants,
             schemes,
@@ -2192,8 +2188,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2356,9 +2351,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock.
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -2542,8 +2536,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2687,9 +2680,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -2823,8 +2815,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -2961,8 +2952,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -3169,9 +3159,8 @@ mod tests {
 
             // Observe peer blocking, voter deliveries, and attempt metrics through
             // the actor's normal network and mailbox inputs.
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
             let reporter = test_reporter(&mut context, &schemes[0]);
             let blocked = Arc::new(Mutex::new(Vec::new()));
             let blocker = RecordingBlocker(blocked.clone());
@@ -3393,9 +3382,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -3565,9 +3553,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -3794,9 +3781,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -4012,9 +3998,8 @@ mod tests {
             } = fixture;
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -4204,9 +4189,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -4414,9 +4398,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -4604,8 +4587,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -4792,8 +4774,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -4990,8 +4971,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -5113,8 +5093,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -5233,9 +5212,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -5349,9 +5327,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -5485,9 +5462,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -5613,9 +5589,8 @@ mod tests {
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
 
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -5739,9 +5714,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -5891,9 +5865,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -6052,9 +6025,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -6186,9 +6158,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -6292,9 +6263,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -6424,9 +6394,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -6569,9 +6538,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -6742,9 +6710,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -6886,9 +6853,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -7038,9 +7004,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             // Setup reporter mock
             let reporter = test_reporter(&mut context, &schemes[0]);
@@ -7186,8 +7151,7 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
-            let oracle = start_test_network_with_peers(&network_context,
+            let oracle = start_test_network_with_peers(context.child("network"),
                 participants.clone(),
             )
             .await;
@@ -7419,9 +7383,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -7613,9 +7576,8 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let network_context = context.child("network");
             let oracle =
-                start_test_network_with_peers(&network_context, participants.clone()).await;
+                start_test_network_with_peers(context.child("network"), participants.clone()).await;
 
             let reporter = test_reporter(&mut context, &schemes[0]);
 
@@ -7884,7 +7846,6 @@ mod tests {
         current: View,
         leader: Participant,
     ) -> (
-        deterministic::Context,
         Oracle<PublicKey, deterministic::Context>,
         Vec<PublicKey>,
         Vec<ed25519::Scheme>,
@@ -7905,8 +7866,8 @@ mod tests {
         } = ed25519::fixture(context, b"batcher_below_current", 5);
 
         // Create simulated network and reporter mock
-        let network_context = context.child("network");
-        let oracle = start_test_network_with_peers(&network_context, participants.clone()).await;
+        let oracle =
+            start_test_network_with_peers(context.child("network"), participants.clone()).await;
         let reporter = test_reporter(context, &schemes[0]);
 
         // Initialize batcher actor (participant 0)
@@ -7960,7 +7921,6 @@ mod tests {
         );
         batcher_mailbox.update(Span::none(), current, leader, View::zero(), None);
         (
-            network_context,
             oracle,
             participants,
             schemes,
@@ -7978,22 +7938,14 @@ mod tests {
     fn test_network_votes_below_current_are_not_assembled() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (
-                _network_context,
-                _,
-                participants,
-                schemes,
-                mut senders,
-                _mailbox,
-                mut voter_receiver,
-                reporter,
-            ) = start_batcher_at(
-                &mut context,
-                BatcherOptions::default(),
-                View::new(10),
-                Participant::new(0),
-            )
-            .await;
+            let (_, participants, schemes, mut senders, _mailbox, mut voter_receiver, reporter) =
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions::default(),
+                    View::new(10),
+                    Participant::new(0),
+                )
+                .await;
             let me = participants[0].clone();
 
             // Send a nullify quorum for a view the batcher never tracked
@@ -8029,25 +7981,17 @@ mod tests {
     fn test_historical_votes_detect_conflicts_below_current() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (
-                _network_context,
-                oracle,
-                participants,
-                schemes,
-                mut senders,
-                _mailbox,
-                _receiver,
-                reporter,
-            ) = start_batcher_at(
-                &mut context,
-                BatcherOptions {
-                    track_historical_votes: true,
-                    ..Default::default()
-                },
-                View::new(10),
-                Participant::new(0),
-            )
-            .await;
+            let (oracle, participants, schemes, mut senders, _mailbox, _receiver, reporter) =
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions {
+                        track_historical_votes: true,
+                        ..Default::default()
+                    },
+                    View::new(10),
+                    Participant::new(0),
+                )
+                .await;
             let me = participants[0].clone();
 
             // Send two notarizes for different proposals from the same signer
@@ -8085,28 +8029,20 @@ mod tests {
         executor.start(|mut context| async move {
             // Term 1..=10 with two optimistic views, so from view 9 the lane admits
             // views 12 to 14 of the next term
-            let (
-                _network_context,
-                _,
-                participants,
-                schemes,
-                mut senders,
-                mut batcher_mailbox,
-                mut voter_receiver,
-                _,
-            ) = start_batcher_at(
-                &mut context,
-                BatcherOptions {
-                    lookahead: Lookahead {
-                        term_length: TermLength::new(commonware_utils::NZU32!(10)),
-                        optimistic_views: ViewDelta::new(2),
+            let (_, participants, schemes, mut senders, mut batcher_mailbox, mut voter_receiver, _) =
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions {
+                        lookahead: Lookahead {
+                            term_length: TermLength::new(commonware_utils::NZU32!(10)),
+                            optimistic_views: ViewDelta::new(2),
+                        },
+                        ..Default::default()
                     },
-                    ..Default::default()
-                },
-                View::new(9),
-                Participant::new(1),
-            )
-            .await;
+                    View::new(9),
+                    Participant::new(1),
+                )
+                .await;
             let me = participants[0].clone();
 
             // A quorum notarizes lane view 14, including the next term's leader
@@ -8124,21 +8060,12 @@ mod tests {
             assert!(voter_receiver.try_recv().is_err());
 
             // Entering the next term forwards the proposal and the notarization
-            batcher_mailbox.update(
-                Span::none(),
-                View::new(11),
-                Participant::new(2),
-                View::zero(),
-                None,
-            );
+            batcher_mailbox.update(Span::none(), View::new(11), Participant::new(2), View::zero(), None);
             context.sleep(Duration::from_millis(50)).await;
             let (mut proposed, mut notarized) = (false, false);
             while let Ok(message) = voter_receiver.try_recv() {
                 match message {
-                    voter::Message::Proposal {
-                        proposal: forwarded,
-                        ..
-                    } => {
+                    voter::Message::Proposal { proposal: forwarded, .. } => {
                         assert_eq!(forwarded, proposal);
                         proposed = true;
                     }
