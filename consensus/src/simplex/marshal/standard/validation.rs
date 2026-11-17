@@ -4,8 +4,8 @@ use crate::{
     simplex::{
         marshal::{
             application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
-            core::Mailbox,
-            standard::Standard,
+            core::{Mailbox, RoundBounded as _},
+            standard::{Bounded, Standard},
         },
         types::Context,
     },
@@ -186,17 +186,17 @@ where
 {
     /// Returns a stream over the ancestry of `initial` (see [`AncestorStream::new`]).
     ///
-    /// The stream passes `bound`, the round of the consensus request it serves, to limit how long
-    /// the provider fetches each missing parent. The round is needed because the only other limit
-    /// is the height the parent's child claims, and an unchecked child can claim any height.
+    /// The stream's parent requests are bounded by `bound`, the round of the consensus request it
+    /// serves. The round is needed because the only other limit is the height the parent's child
+    /// claims, and an unchecked child can claim any height.
     pub(super) fn bounded_ancestry<C: Clock>(
         &self,
         clock: Arc<C>,
         initial: impl IntoIterator<Item = Digested<B>>,
         bound: Round,
         fetch_duration: Timed,
-    ) -> AncestorStream<Self, C> {
-        AncestorStream::new(clock, self.clone(), initial, Some(bound), fetch_duration)
+    ) -> AncestorStream<Bounded<S, B>, C> {
+        AncestorStream::start(clock, self.bounded(bound), initial, fetch_duration)
     }
 }
 

@@ -776,7 +776,7 @@ mod tests {
             };
             let child = make_coding_block(child_ctx, parent.digest(), Height::new(2), 200);
             let child = Digested::precomputed(child.clone(), child.digest());
-            let subscription = marshal.subscribe_parent(&child, None);
+            let subscription = marshal.subscribe_parent(&child);
 
             // The provider subscribes to the parent by the commitment in the child's context.
             context.sleep(Duration::from_millis(100)).await;
