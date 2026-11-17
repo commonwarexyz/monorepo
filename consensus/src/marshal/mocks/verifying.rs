@@ -4,7 +4,10 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
+use crate::{
+    Block, CertifiableBlock, Epochable, Handoff, Heightable, marshal::ancestry::Ancestry,
+    types::Height,
+};
 use commonware_cryptography::{Digested, Digestible};
 use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
@@ -12,6 +15,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
+use futures::StreamExt;
 use std::{future::pending, marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
@@ -311,5 +315,66 @@ where
             observed: self.observed.clone(),
         };
         pending().await
+    }
+}
+
+/// A mock application that reads the ancestry it is given block by block. It accepts a block
+/// only if that ancestry reaches the height-zero block, and it never builds one.
+#[derive(Clone)]
+pub struct WalkingVerifyingApp<B: Digestible, S> {
+    /// The digest of each block the application and its clones have read, in order.
+    pub blocks: Arc<Mutex<Vec<B::Digest>>>,
+    _phantom: PhantomData<S>,
+}
+
+impl<B: Digestible, S> Default for WalkingVerifyingApp<B, S> {
+    fn default() -> Self {
+        Self {
+            blocks: Arc::default(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<B: Block, S> WalkingVerifyingApp<B, S> {
+    /// Reads `ancestry` until it ends and returns whether it reached the height-zero block.
+    async fn walk(&self, mut ancestry: impl Ancestry<B>) -> bool {
+        while let Some(block) = ancestry.next().await {
+            self.blocks.lock().push(block.digest());
+            if block.height() == Height::zero() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl<B, S> crate::Application<deterministic::Context> for WalkingVerifyingApp<B, S>
+where
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
+{
+    type Block = B;
+    type Context = B::Context;
+    type SigningScheme = S;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
+    ) -> Option<Digested<Self::Block>> {
+        self.walk(ancestry).await;
+        None
+    }
+
+    async fn verify(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        self.walk(ancestry).await
     }
 }

@@ -123,6 +123,10 @@ struct ReplayPath<B: Block> {
     /// Parent of the next block to process.
     parent: Digested<B>,
 
+    /// Round of the block the path leads to. Every request for the path's ancestry carries it
+    /// as its bound.
+    bound: Round,
+
     /// Recovery timer and path depth, recorded once the path is exhausted.
     measurement: Option<(Timer, usize)>,
 }
@@ -691,9 +695,12 @@ where
             let batches = self.execution.databases.new_batches().await;
 
             // The finalized block must reproduce its committed state.
-            let ancestry = self
-                .execution
-                .ancestry(context, provider.clone(), [block.clone()]);
+            let ancestry = self.execution.ancestry(
+                context,
+                provider.clone(),
+                [block.clone()],
+                block_context.round(),
+            );
             let batch = self
                 .app
                 .process(
@@ -805,12 +812,14 @@ where
     }
 
     /// Returns the ancestry the application reads while processing the newest of `blocks`:
-    /// `blocks` themselves, then earlier ancestors fetched from `provider` on demand.
+    /// `blocks` themselves, then earlier ancestors fetched from `provider` on demand. `bound` is
+    /// the round that ends the need for those ancestors.
     fn ancestry<P, I>(
         &self,
         context: &E,
         provider: P,
         blocks: I,
+        bound: Round,
     ) -> impl Ancestry<A::Block> + use<E, A, P, I>
     where
         P: BlockProvider<Block = A::Block> + Clone,
@@ -820,6 +829,7 @@ where
             Arc::new(context.child("ancestry")),
             provider,
             blocks,
+            Some(bound),
             self.metrics.ancestor_fetch_duration.clone(),
         )
     }
@@ -984,6 +994,9 @@ where
     /// meeting the branch anchor, or if `provider` returns a block that is not the parent at the
     /// preceding height. Returns [`PrepareBatchesError::Incomplete`] if `provider` stops before
     /// delivering a parent.
+    ///
+    /// Each parent is requested under `target`'s round. Once marshal's processed round floor
+    /// covers that round, every ancestor of `target` is processed or can never be finalized.
     async fn prepare_replay<P>(
         &self,
         context: &E,
@@ -995,6 +1008,7 @@ where
     {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
         let target_digest = target.digest();
+        let bound = target.context().round();
 
         let mut replay_path = Vec::new();
         let mut cursor = target;
@@ -1024,7 +1038,7 @@ where
                 return Err(PrepareBatchesError::Invalid);
             }
 
-            let Some(parent) = provider.subscribe_parent(&cursor).await else {
+            let Some(parent) = provider.subscribe_parent(&cursor, Some(bound)).await else {
                 debug!(
                     ?target_digest,
                     cursor = ?cursor.digest(),
@@ -1056,6 +1070,7 @@ where
         Ok(ReplayPath {
             blocks: replay_path,
             parent: cursor,
+            bound,
             measurement: Some((timer, depth)),
         })
     }
@@ -1086,6 +1101,7 @@ where
             context,
             provider.clone(),
             [block, parent],
+            path.bound,
         )))
     }
 
@@ -1645,6 +1661,8 @@ mod tests {
     struct MapProvider {
         blocks: Arc<Mutex<BTreeMap<Digest, Block>>>,
         fetches: Arc<AtomicUsize>,
+        /// The bound of each parent request, in order.
+        bounds: Arc<Mutex<Vec<Option<Round>>>>,
     }
 
     impl MapProvider {
@@ -1660,6 +1678,10 @@ mod tests {
         fn fetches(&self) -> usize {
             self.fetches.load(Ordering::SeqCst)
         }
+
+        fn bounds(&self) -> Vec<Option<Round>> {
+            self.bounds.lock().clone()
+        }
     }
 
     impl BlockProvider for MapProvider {
@@ -1668,7 +1690,9 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Digested<Self::Block>,
+            bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+            self.bounds.lock().push(bound);
             let provider = self.clone();
             let parent = block.parent();
             async move { provider.fetch_by_digest(parent).map(digested) }
@@ -1699,6 +1723,7 @@ mod tests {
         fn subscribe_parent(
             &self,
             block: &Digested<Self::Block>,
+            _bound: Option<Round>,
         ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
             let provider = self.clone();
             let child = block.digest();
@@ -2549,6 +2574,43 @@ mod tests {
     }
 
     #[test]
+    fn execution_rebuild_pending_bounds_parent_requests_by_round() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
+
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+            harness.processor.clear_pending();
+            harness.provider.insert(block2.clone());
+            harness.provider.insert(block3.clone());
+            let requested_before = harness.provider.bounds().len();
+
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    &harness.provider,
+                    digested(block3.clone()),
+                )
+                .await;
+            assert_eq!(result, Ok(()), "rebuild must succeed");
+
+            // The walk requests the parents of block3 and block2. Both serve block3, so both carry
+            // its round.
+            let bounds = harness.provider.bounds().split_off(requested_before);
+            let bound = Some(Round::new(Epoch::zero(), View::new(3)));
+            assert!(bounds.len() >= 2, "the walk must request both parents");
+            assert!(
+                bounds.iter().all(|requested| *requested == bound),
+                "every parent request must carry the requested block's round: {bounds:?}"
+            );
+        });
+    }
+
+    #[test]
     fn execution_process_ancestry_survives_recovery_and_finalization() {
         deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
             |context| async move {
@@ -2560,6 +2622,8 @@ mod tests {
                 assert!(harness.finalize(block2.clone()).await);
                 let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
                 harness.processor.clear_pending();
+                let bound = Some(block3.context.round);
+                let requested_before = harness.provider.bounds().len();
 
                 // Recovery processes block3 as a candidate, and its ancestry reaches past the
                 // parent to an earlier ancestor.
@@ -2579,6 +2643,11 @@ mod tests {
                 let expected = [block3.digest(), block2.digest(), block1.digest()];
                 assert_eq!(*observations.lock(), [(Finality::Candidate, expected)]);
                 assert!(harness.processor.pending_contains(&block3.digest()));
+                let recovery_requests = harness.provider.bounds().len() - requested_before;
+                assert!(
+                    recovery_requests >= 2,
+                    "recovery must request block3's parent and an earlier ancestor"
+                );
 
                 // The cached state answers a later request without processing block3 again.
                 assert_eq!(
@@ -2605,6 +2674,18 @@ mod tests {
                 );
                 assert_eq!(harness.counter_value().await, Some(3));
                 assert_eq!(harness.view_at_height(Height::new(3)).await, Some(3));
+
+                // The recovery and the finalization read past block3 for block3 alone, so every
+                // parent they requested carries block3's round.
+                let bounds = harness.provider.bounds().split_off(requested_before);
+                assert!(
+                    bounds.len() > recovery_requests,
+                    "finalization must request block3's ancestors"
+                );
+                assert!(
+                    bounds.iter().all(|requested| *requested == bound),
+                    "every parent request must carry block3's round: {bounds:?}"
+                );
             },
         );
     }
