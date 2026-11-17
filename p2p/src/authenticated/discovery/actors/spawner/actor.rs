@@ -271,7 +271,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn setup(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         local: PublicKey,
     ) -> (
         Mailbox<Message<Sender, Receiver, PublicKey>>,
@@ -318,8 +318,9 @@ mod tests {
             let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
                 connections(&context, peer_signer, signer).await;
+            let setup_context = context.child("setup");
             let (mut spawner, mut tracker_receiver, _router_receiver, releaser, _handle) =
-                setup(context.child("setup"), local);
+                setup(&setup_context, local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
 
             assert_eq!(
@@ -361,8 +362,9 @@ mod tests {
             let local = signer.public_key();
             let ((_, mut peer_receiver), spawner_connection) =
                 connections(&context, peer_signer, signer.clone()).await;
+            let setup_context = context.child("setup");
             let (mut spawner, mut tracker_receiver, mut router_receiver, releaser, _handle) =
-                setup(context.child("setup"), local);
+                setup(&setup_context, local);
             let reservation = tracker::Reservation::new(Metadata::Listener(peer.clone()), releaser);
 
             assert_eq!(

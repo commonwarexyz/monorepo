@@ -42,7 +42,7 @@ use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock, Metrics as _, Quota, Runner, Supervisor as _,
+    Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::metrics::{
@@ -229,7 +229,10 @@ where
         participants,
     )
     .await;
-    network.start();
+    let handle = network.start();
+    context.spawn(move |_| async move {
+        let _ = handle.await;
+    });
     oracle
 }
 
@@ -1927,7 +1930,7 @@ impl TestHarness for StandardHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        mut application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider,
@@ -2063,6 +2066,7 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
+        application.retain_context(context);
         let actor_handle = actor.start(application.clone(), buffer.clone(), resolver);
 
         ValidatorSetup {
@@ -2261,7 +2265,8 @@ impl TestHarness for StandardHarness {
             config,
         )
         .await;
-        let application = Application::<B>::default();
+        let mut application = Application::<B>::default();
+        application.retain_context(context);
         actor.start(application.clone(), buffer.clone(), resolver);
 
         (mailbox, buffer, application)
@@ -2727,7 +2732,7 @@ impl TestHarness for CodingHarness {
         validator: K,
         provider: P,
         max_pending_acks: NonZeroUsize,
-        application: Application<Self::ApplicationBlock>,
+        mut application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider: provider.clone(),
@@ -2864,6 +2869,7 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
+        application.retain_context(context);
         let actor_handle = actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         ValidatorSetup {
@@ -3093,7 +3099,8 @@ impl TestHarness for CodingHarness {
             config,
         )
         .await;
-        let application = Application::<CodingB>::default();
+        let mut application = Application::<CodingB>::default();
+        application.retain_context(context);
         actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
         (mailbox, shard_mailbox, application)

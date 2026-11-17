@@ -357,7 +357,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
     scheme: P::Scheme,
     input: &FuzzInput,
     channels: NetworkChannels,
-) {
+) -> deterministic::Context {
     let (vote_network, certificate_network, resolver_network) = channels;
     start_disrupter::<P>(
         context.child("disrupter"),
@@ -367,6 +367,7 @@ fn spawn_disrupter<P: simplex::Simplex>(
         certificate_network,
         resolver_network,
     );
+    context
 }
 
 /// Spawn an honest validator with application, reporter, and engine.
@@ -455,7 +456,10 @@ where
         track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
-    engine.start(pending, recovered, resolver);
+    let handle = engine.start(pending, recovered, resolver);
+    context.spawn(move |_| async move {
+        handle.await.expect("validator engine failed");
+    });
 
     reporter
 }
@@ -472,6 +476,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         let mut reporters = Vec::new();
         let config = input.configuration;
 
+        let mut disrupter_contexts = Vec::new();
+
         // Spawn Byzantine nodes (Disrupters only)
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
@@ -479,7 +485,12 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-            spawn_disrupter::<P>(ctx, schemes[i].clone(), &input, channels);
+            disrupter_contexts.push(spawn_disrupter::<P>(
+                ctx,
+                schemes[i].clone(),
+                &input,
+                channels,
+            ));
         }
 
         // Spawn honest validators
@@ -705,7 +716,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 track_historical_votes: false,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);
-            engine.start(
+            let handle = engine.start(
                 (vote_sender_primary, vote_receiver_primary),
                 (certificate_sender_primary, certificate_receiver_primary),
                 (resolver_sender_primary, resolver_receiver_primary),
@@ -720,6 +731,12 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 (certificate_sender_secondary, certificate_receiver_secondary),
                 (resolver_sender_secondary, resolver_receiver_secondary),
             );
+            let handle = primary_context.spawn(move |_| async move {
+                handle.await.expect("primary engine failed");
+            });
+            context.spawn(move |_| async move {
+                handle.await.expect("twin engine failed");
+            });
         }
 
         // Spawn honest validators

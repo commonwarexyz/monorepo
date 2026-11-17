@@ -209,7 +209,10 @@ mod tests {
             peers,
         )
         .await;
-        network.start();
+        let handle = network.start();
+        context.spawn(move |_| async move {
+            let _ = handle.await;
+        });
         oracle
     }
 
@@ -4458,6 +4461,8 @@ mod tests {
     /// `C` is the handoff [`Candidate`] the test answers, or `()` when the test does not take
     /// the application's handoff response.
     struct HandoffFixture<C = Candidate> {
+        _context: DelayedSyncContext<deterministic::Context>,
+        restarted_context: Option<deterministic::Context>,
         participants: Vec<PublicKey>,
         schemes: Vec<ed25519::Scheme>,
         oracle: Oracle<PublicKey, deterministic::Context>,
@@ -4550,6 +4555,8 @@ mod tests {
             .await;
 
             Self {
+                _context: voter_context,
+                restarted_context: None,
                 participants,
                 schemes,
                 oracle,
@@ -4575,6 +4582,8 @@ mod tests {
         /// returns for the view 3 handoff request, leaving the test to answer it.
         async fn new(context: &mut deterministic::Context, decision: Handoff<()>) -> Self {
             let HandoffFixture {
+                _context,
+                restarted_context,
                 participants,
                 schemes,
                 oracle,
@@ -4609,6 +4618,8 @@ mod tests {
             );
 
             Self {
+                _context,
+                restarted_context,
                 participants,
                 schemes,
                 oracle,
@@ -4788,6 +4799,7 @@ mod tests {
                 },
             )
             .await;
+            self.restarted_context = Some(restarted_context);
             (mailbox, batcher, relay)
         }
     }
@@ -6113,15 +6125,16 @@ mod tests {
             assert!(reporter.notarizations.lock().is_empty());
             assert!(reporter.certifications.lock().is_empty());
 
+            let _restarted_context;
             if restart {
                 let handle = actor_handle.lock().take().unwrap();
                 handle.abort();
                 assert!(handle.await.is_err());
                 assert!(response.is_closed());
                 requests.lock().clear();
-                let restarted_context = context.child("restarted");
+                _restarted_context = context.child("restarted");
                 (mailbox, batcher, _resolver, relay, reporter) = setup_voter(
-                    &restarted_context,
+                    &_restarted_context,
                     &oracle,
                     &participants,
                     &schemes,
@@ -14505,6 +14518,7 @@ mod tests {
         )
         .await;
         assert!(reporter.finalizations.lock().contains_key(&floor_view));
+        reporter.retain_context(restarted);
         handle
     }
 

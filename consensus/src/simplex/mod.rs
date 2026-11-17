@@ -1222,7 +1222,10 @@ mod tests {
             peers,
         )
         .await;
-        network.start();
+        let handle = network.start();
+        context.spawn(move |_| async move {
+            let _ = handle.await;
+        });
         oracle
     }
 
@@ -1255,7 +1258,10 @@ mod tests {
             secondary,
         )
         .await;
-        network.start();
+        let handle = network.start();
+        context.spawn(move |_| async move {
+            let _ = handle.await;
+        });
         oracle
     }
 
@@ -1412,7 +1418,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: strategy.clone(),
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -1442,6 +1448,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -1706,6 +1713,7 @@ mod tests {
                 let engine = Engine::new(validator_context.child("engine"), cfg);
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
+                reporter.retain_context(validator_context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -1825,6 +1833,7 @@ mod tests {
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
             let (pending, recovered, resolver) = register_validator(&mut oracle, joiner).await;
+            joiner_reporter.retain_context(joiner_context);
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             let (mut joiner_latest, mut joiner_monitor) = joiner_reporter.subscribe().await;
@@ -1954,7 +1963,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -1982,6 +1991,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -2110,7 +2120,7 @@ mod tests {
                 blocker,
                 automaton: application.clone(),
                 relay: application,
-                reporter,
+                reporter: reporter.clone(),
                 strategy: Sequential,
                 partition: validator.to_string(),
                 mailbox_size: NZUsize!(1024),
@@ -2136,6 +2146,7 @@ mod tests {
             let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
+            reporter.retain_context(context);
             engine.start(pending, recovered, resolver);
         }
 
@@ -2431,7 +2442,7 @@ mod tests {
                     blocker: oracle.control(validator.clone()),
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -2457,6 +2468,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -2688,7 +2700,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -2718,6 +2730,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -2855,7 +2868,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application,
-                        reporter,
+                        reporter: reporter.clone(),
                         strategy: Sequential,
                         partition: validator.to_string(),
                         mailbox_size: NZUsize!(1024),
@@ -2887,6 +2900,7 @@ mod tests {
                     let (pending, recovered, resolver) = registrations
                         .remove(validator)
                         .expect("validator should be registered");
+                    reporter.retain_context(context);
                     engine_handlers.push(engine.start(pending, recovered, resolver));
                 }
 
@@ -3059,7 +3073,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3089,6 +3103,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3214,6 +3229,7 @@ mod tests {
             let (pending, recovered, resolver) = registrations
                 .remove(&me)
                 .expect("validator should be registered");
+            reporter.retain_context(context);
             engine_handlers.push(engine.start(pending, recovered, resolver));
 
             // Wait for new engine to finalize required
@@ -3342,7 +3358,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3372,6 +3388,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3586,7 +3603,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3616,6 +3633,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3753,7 +3771,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3783,6 +3801,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -3952,7 +3971,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -3982,6 +4001,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -4102,6 +4122,7 @@ mod tests {
                 // Start engine
                 let (pending, recovered, resolver) =
                     register_validator(&mut oracle, validator.clone()).await;
+                reporter.retain_context(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -4208,7 +4229,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -4238,6 +4259,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -4427,7 +4449,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -4457,6 +4479,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -4619,6 +4642,7 @@ mod tests {
 
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256> =
                         mocks::conflicter::Conflicter::new(context.child("byzantine_engine"), cfg);
+                    reporter.retain_context(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -4817,7 +4841,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -4845,6 +4869,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -4984,7 +5009,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.clone().to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -5012,6 +5037,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine.start(pending, recovered, resolver);
             }
             // Wait for an honest node to observe the finalizations
@@ -5280,6 +5306,7 @@ mod tests {
                             context.child("byzantine_engine"),
                             cfg,
                         );
+                    reporter.retain_context(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -5449,6 +5476,7 @@ mod tests {
                         context.child("byzantine_engine"),
                         cfg,
                     );
+                    reporter.retain_context(context);
                     engines.push(engine.start(pending, recovered));
                 } else {
                     let application_cfg = mocks::application::Config::<Sha256, _> {
@@ -5593,17 +5621,23 @@ mod tests {
                 track_historical_votes: false,
             };
             let engine = Engine::new(context.child("engine"), cfg);
+            let finalizer_context = context.child("finalizer");
+            reporter.retain_context(context);
             engine.start(pending, recovered, resolver);
 
             // Wait for all engines to hit required containers
             let mut finalizers = Vec::new();
             for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.child("finalizer").spawn(move |_| async move {
-                    while latest < View::new(required_containers.get() * 3) {
-                        latest = monitor.recv().await.expect("event missing");
-                    }
-                }));
+                finalizers.push(
+                    finalizer_context
+                        .child("watcher")
+                        .spawn(move |_| async move {
+                            while latest < View::new(required_containers.get() * 3) {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        }),
+                );
             }
             join_all(finalizers).await;
 
@@ -5724,6 +5758,7 @@ mod tests {
                             context.child("byzantine_engine"),
                             cfg,
                         );
+                    reporter.retain_context(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -5875,6 +5910,7 @@ mod tests {
                     };
                     let engine: mocks::nuller::Nuller<_, _, Sha256> =
                         mocks::nuller::Nuller::new(context.child("byzantine_engine"), cfg);
+                    reporter.retain_context(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -6043,6 +6079,7 @@ mod tests {
                     };
                     let engine: mocks::outdated::Outdated<_, _, Sha256> =
                         mocks::outdated::Outdated::new(context.child("byzantine_engine"), cfg);
+                    reporter.retain_context(context);
                     engine.start(pending);
                 } else {
                     reporters.push(reporter.clone());
@@ -6200,7 +6237,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -6230,6 +6267,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -6484,7 +6522,7 @@ mod tests {
                     Sequential,
                     true, // Enable verification
                 );
-                reporters.push(mock_reporter);
+                reporters.push(mock_reporter.clone());
 
                 let application_cfg = mocks::application::Config::<Sha256, _> {
                     relay: relay.clone(),
@@ -6536,6 +6574,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                mock_reporter.retain_context(context);
                 engine.start(pending, recovered, resolver);
             }
 
@@ -8176,7 +8215,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -8206,6 +8245,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.push(engine.start(pending, recovered, resolver));
             }
 
@@ -8330,7 +8370,7 @@ mod tests {
                     blocker,
                     automaton: application.clone(),
                     relay: application,
-                    reporter,
+                    reporter: reporter.clone(),
                     strategy: Sequential,
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
@@ -8360,6 +8400,7 @@ mod tests {
                 let (pending, recovered, resolver) = registrations
                     .remove(validator)
                     .expect("validator should be registered");
+                reporter.retain_context(context);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
             }
 
@@ -8460,17 +8501,21 @@ mod tests {
                     track_historical_votes: false,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
+                let finalizer_context = context.child("finalizer");
+                reporters[&idx].retain_context(context);
                 engine_handlers.insert(idx, engine.start(pending, recovered, resolver));
 
                 // Wait for all engines to hit required containers
                 let mut finalizers = Vec::new();
                 for reporter in reporters.values_mut() {
                     let (mut latest, mut monitor) = reporter.subscribe().await;
-                    finalizers.push(context.child("finalizer").spawn(move |_| async move {
-                        while latest < target {
-                            latest = monitor.recv().await.expect("event missing");
-                        }
-                    }));
+                    finalizers.push(finalizer_context.child("watcher").spawn(
+                        move |_| async move {
+                            while latest < target {
+                                latest = monitor.recv().await.expect("event missing");
+                            }
+                        },
+                    ));
                 }
                 join_all(finalizers).await;
                 info!(idx, ?validator, "validator recovered");
@@ -8909,7 +8954,7 @@ mod tests {
                             blocker,
                             automaton: application.clone(),
                             relay: application,
-                            reporter,
+                            reporter: reporter.clone(),
                             strategy: Sequential,
                             partition,
                             mailbox_size: NZUsize!(1024),
@@ -8934,6 +8979,7 @@ mod tests {
                             track_historical_votes: false,
                         };
                         let engine = Engine::new(context.child("engine"), cfg);
+                        reporter.retain_context(context);
                         engine_handlers.push(engine.start(
                             pending,
                             recovered,
@@ -8985,7 +9031,7 @@ mod tests {
                         blocker,
                         automaton: application.clone(),
                         relay: application,
-                        reporter,
+                        reporter: reporter.clone(),
                         strategy: Sequential,
                         partition,
                         mailbox_size: NZUsize!(1024),
@@ -9018,6 +9064,7 @@ mod tests {
                     ) = registrations
                         .remove(validator)
                         .expect("validator should be registered");
+                    reporter.retain_context(context);
                     engine_handlers.push(engine.start(
                         (pending_sender, pending_receiver),
                         (recovered_sender, recovered_receiver),

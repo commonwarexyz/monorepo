@@ -140,6 +140,8 @@ pub struct PeerInfo {
 
 /// Per-peer network stack.
 pub struct PeerNetwork<S, R, O> {
+    /// Owns the supervision subtree containing the network task.
+    _context: Context,
     /// Sender for sending messages to other peers.
     pub sender: S,
     /// Receiver for receiving messages from other peers.
@@ -287,6 +289,7 @@ impl NetworkScheme for Discovery {
         let handle = network.start();
 
         PeerNetwork {
+            _context: context,
             sender,
             receiver,
             oracle,
@@ -387,6 +390,7 @@ impl NetworkScheme for Lookup {
         let handle = network.start();
 
         PeerNetwork {
+            _context: context,
             sender,
             receiver,
             oracle,
@@ -667,4 +671,53 @@ pub fn fuzz<N: NetworkScheme>(input: FuzzInput) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::FutureExt as _;
+
+    fn check_network_context<N: NetworkScheme>() {
+        deterministic::Runner::default().start(|context| async move {
+            let peers: Vec<_> = (0..4)
+                .map(|id| {
+                    let signer = ed25519::PrivateKey::from_seed(id);
+                    PeerInfo {
+                        public_key: signer.public_key(),
+                        signer,
+                        address: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 63000 + id as u16),
+                    }
+                })
+                .collect();
+            let peer = PeerCtx {
+                id: 0,
+                info: peers[0].clone(),
+                topo: Arc::new(Topology {
+                    pk_to_id: peers
+                        .iter()
+                        .enumerate()
+                        .map(|(id, peer)| (peer.public_key.clone(), id as PeerId))
+                        .collect(),
+                    peers,
+                    base_port: 63000,
+                    tracked_peer_sets: TRACKED_PEER_SETS,
+                }),
+            };
+            let mut network = N::create_network(context.child("peer"), &peer).await;
+            context.sleep(Duration::from_secs(1)).await;
+            assert!((&mut network.handle).now_or_never().is_none());
+            network.handle.abort();
+        });
+    }
+
+    #[test]
+    fn test_discovery_retains_peer_context() {
+        check_network_context::<Discovery>();
+    }
+
+    #[test]
+    fn test_lookup_retains_peer_context() {
+        check_network_context::<Lookup>();
+    }
 }

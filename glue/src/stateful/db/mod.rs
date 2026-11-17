@@ -5094,7 +5094,7 @@ mod tests {
     /// Starts a single-database sync of [`LaggingReportSyncDb`] and returns once it is running, so
     /// the coordinator is parked before the test sends anything.
     async fn start_lagging_sync(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         tip_rx: ring::Receiver<TipUpdate<sha256::Digest, u64>>,
         report: mpsc::Receiver<()>,
     ) -> Handle<(Shared<LaggingReportSyncDb>, Anchor<sha256::Digest>)> {
@@ -5146,7 +5146,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(2));
             let (report_tx, report_rx) = mpsc::channel(1);
-            let sync = start_lagging_sync(context, tip_rx, report_rx).await;
+            let sync = start_lagging_sync(&context, tip_rx, report_rx).await;
 
             // Each burst overflows the two-slot tip ring, and the two dispatches overflow the
             // one-slot target ring before the database takes a target.
@@ -5177,7 +5177,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(1));
             let (report_tx, report_rx) = mpsc::channel(1);
-            let sync = start_lagging_sync(context, tip_rx, report_rx).await;
+            let sync = start_lagging_sync(&context, tip_rx, report_rx).await;
 
             // A report of the initial target and a newer tip reach the coordinator in the same
             // step. The report matches the target it last sent, but the queued tip is adopted

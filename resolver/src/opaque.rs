@@ -182,14 +182,19 @@ where
     P: PublicKey,
 {
     let (mailbox_tx, mailbox_rx) = mailbox::new(context.child("mailbox"), mailbox_size);
-    Actor::new(
+    let actor = Actor::new(
         context.child("actor"),
         fetcher,
         mailbox_rx,
         consumer,
         fetch_retry_delay,
-    )
-    .start();
+    );
+    // The actor runs under a child of `context`, so a task keeps `context` open for as
+    // long as the actor runs.
+    let actor = actor.start();
+    context.spawn(move |_| async move {
+        let _ = actor.await;
+    });
     Resolver::new(mailbox_tx)
 }
 

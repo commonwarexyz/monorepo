@@ -46,6 +46,7 @@ pub struct Config<S: Scheme, L: elector::Config<S>> {
 
 pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
     context: Arc<Mutex<E>>,
+    owners: Arc<Mutex<Vec<commonware_runtime::deterministic::Context>>>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
@@ -77,6 +78,7 @@ where
     fn clone(&self) -> Self {
         Self {
             context: self.context.clone(),
+            owners: self.owners.clone(),
             participants: self.participants.clone(),
             scheme: self.scheme.clone(),
             elector: self.elector.clone(),
@@ -110,6 +112,7 @@ where
 
         Self {
             context: Arc::new(Mutex::new(context)),
+            owners: Arc::new(Mutex::new(Vec::new())),
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
@@ -128,6 +131,12 @@ where
             latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Retains an owner shared by the test actors reporting through this instance.
+    #[cfg(test)]
+    pub(crate) fn retain_context(&self, context: commonware_runtime::deterministic::Context) {
+        self.owners.lock().push(context);
     }
 
     fn certified(&self, round: Round, next_view: View, certificate: &S::Certificate) {

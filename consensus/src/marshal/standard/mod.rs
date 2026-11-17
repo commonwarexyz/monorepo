@@ -6789,6 +6789,7 @@ mod tests {
     /// actor's corresponding receiver stays alive when nothing else owns it.
     #[derive(Clone, Default)]
     struct RecordingResolver {
+        _owner: Option<Arc<deterministic::Context>>,
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
         active_fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
@@ -6810,6 +6811,7 @@ mod tests {
                     retains: Arc::new(Mutex::new(0)),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
+                    _owner: None,
                     sender: Some(sender),
                 },
             )
@@ -7173,7 +7175,8 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
+        let (resolver_rx, mut resolver) = RecordingResolver::holding(context.child("mailbox"));
+        resolver._owner = Some(Arc::new(context));
         let actor_handle = if let Some(buffer) = buffer.clone() {
             actor.start(application, buffer, (resolver_rx, resolver.clone()))
         } else {

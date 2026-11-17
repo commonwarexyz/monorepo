@@ -2378,9 +2378,10 @@ mod tests {
                     });
                 }
 
+                // Keep the fixture alive even when the callback ignores its context.
                 f(
                     self,
-                    context,
+                    context.child("test"),
                     oracle,
                     peers,
                     non_participants,

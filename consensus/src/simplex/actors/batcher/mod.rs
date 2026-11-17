@@ -88,7 +88,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Metrics as _, Quota, Runner, Strategizer as _, Supervisor as _, deterministic,
+        Clock, Metrics as _, Quota, Runner, Spawner as _, Strategizer as _, Supervisor as _,
+        deterministic,
         telemetry::traces::{TracedExt as _, collector::TraceStorage},
         tokio,
     };
@@ -154,7 +155,10 @@ mod tests {
             peers,
         )
         .await;
-        network.start();
+        let handle = network.start();
+        context.spawn(move |_| async move {
+            let _ = handle.await;
+        });
         oracle
     }
 

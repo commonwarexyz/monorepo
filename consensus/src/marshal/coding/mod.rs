@@ -128,14 +128,13 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Metrics, Runner, Supervisor as _,
+        Clock, Metrics, Runner, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         telemetry::metrics::{
             MetricsExt as _,
             histogram::{Buckets, Timed},
-        },
-        utils::reschedule,
+        }, utils::reschedule,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -249,6 +248,7 @@ mod tests {
     /// dropped.
     #[derive(Clone, Default)]
     struct RecordingResolver {
+        _owner: Option<Arc<deterministic::Context>>,
         fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
         active_fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
         targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
@@ -268,6 +268,7 @@ mod tests {
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
+                    _owner: None,
                     sender: Some(sender),
                 },
             )
@@ -544,7 +545,8 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let (resolver_rx, mut resolver) = RecordingResolver::holding(context.child("resolver"));
+        resolver._owner = Some(Arc::new(context));
         let actor_handle = actor.start(
             Application::<CodingB>::default(),
             buffer,
@@ -580,7 +582,10 @@ mod tests {
         let (shard_engine, shard_mailbox) =
             shards::Engine::new(context.child("shards"), shard_config);
         let network = control.register(0, TEST_QUOTA).await.unwrap();
-        shard_engine.start(network);
+        let handle = shard_engine.start(network);
+        context.spawn(move |_| async move {
+            handle.await.expect("shard engine failed");
+        });
         shard_mailbox
     }
 

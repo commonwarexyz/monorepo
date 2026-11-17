@@ -308,6 +308,7 @@ mod tests {
     };
 
     struct Harness {
+        _marshal_context: deterministic::Context,
         participants: Vec<mocks::TestPublicKey>,
         schemes: Vec<mocks::TestScheme>,
         source_boundary_sender: SimSender<mocks::TestPublicKey, deterministic::Context>,
@@ -393,8 +394,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
+            let marshal_context = context.child("source_marshal");
             let (source_marshal, marshal_handle) = start_marshal(
-                context.child("source_marshal"),
+                &marshal_context,
                 &oracle,
                 &fixture.participants,
                 &fixture.schemes,
@@ -466,6 +468,7 @@ mod tests {
                 .expect("failed to register backup boundaries");
 
             Self {
+                _marshal_context: marshal_context,
                 participants,
                 schemes: fixture.schemes,
                 source_boundary_sender,
@@ -582,7 +585,7 @@ mod tests {
     }
 
     async fn start_marshal(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
         participants: &[mocks::TestPublicKey],
         schemes: &[mocks::TestScheme],

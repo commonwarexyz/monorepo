@@ -255,7 +255,10 @@ mod tests {
             fixture.participants.clone(),
         )
         .await;
-        network.start();
+        let handle = network.start();
+        context.spawn(move |_| async move {
+            let _ = handle.await;
+        });
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
         link_participants(&mut oracle, &fixture.participants, link).await;
@@ -265,7 +268,7 @@ mod tests {
 
     /// Spawn aggregation engines for all validators.
     fn spawn_validator_engines<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
-        context: Context,
+        context: &Context,
         fixture: &Fixture<S>,
         registrations: &mut Registrations<PublicKey>,
         oracle: &mut Oracle<PublicKey, deterministic::Context>,
@@ -329,7 +332,10 @@ mod tests {
             );
 
             let (sender, receiver) = registrations.remove(participant).unwrap();
-            engine.start((sender, receiver));
+            let handle = engine.start((sender, receiver));
+            context.spawn(move |_| async move {
+                handle.await.expect("engine failed");
+            });
         }
 
         reporters
@@ -408,8 +414,10 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
+            let validators_context = context.child("validator");
+
             let reporters = spawn_validator_engines(
-                context.child("validator"),
+                &validators_context,
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -512,17 +520,21 @@ mod tests {
                         strategy: Sequential,
                     },
                 );
-                engine.start(registrations.remove(participant).unwrap());
+                let observer = context.child("observer");
+                let handle = engine.start(registrations.remove(participant).unwrap());
+                context.spawn(move |_| async move {
+                    handle.await.expect("engine failed");
+                });
 
                 // Wait for both digests to be verified without signing authority
                 // before changing epochs or starting peers that could send acks.
                 if index == 4 {
-                    while !context
+                    while !observer
                         .encode()
                         .lines()
                         .any(|line| line.contains("digest_duration_count") && line.ends_with(" 2"))
                     {
-                        context.sleep(Duration::from_millis(10)).await;
+                        observer.sleep(Duration::from_millis(10)).await;
                     }
                     admitted.update(next_epoch);
                 }
@@ -555,8 +567,10 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
+            let validators_context = context.child("validator");
+
             let reporters = spawn_validator_engines(
-                context.child("validator"),
+                &validators_context,
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -665,7 +679,10 @@ mod tests {
                         );
 
                         let (sender, receiver) = registrations.remove(participant).unwrap();
-                        engine.start((sender, receiver));
+                        let handle = engine.start((sender, receiver));
+                        validator_context.spawn(move |_| async move {
+                            handle.await.expect("engine failed");
+                        });
                     }
 
                     // Create a single completion watcher for the shared reporter
@@ -804,7 +821,10 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(participant).unwrap();
-                    engine.start((sender, receiver));
+                    let handle = engine.start((sender, receiver));
+                    validator_context.spawn(move |_| async move {
+                        handle.await.expect("engine failed");
+                    });
                 }
 
                 // Wait for validators to reach target_height (past skip_height)
@@ -885,7 +905,10 @@ mod tests {
                     );
 
                     let (sender, receiver) = registrations.remove(participant).unwrap();
-                    engine.start((sender, receiver));
+                    let handle = engine.start((sender, receiver));
+                    validator_context.spawn(move |_| async move {
+                        handle.await.expect("engine failed");
+                    });
                 }
 
                 // Wait for skip_height to be confirmed (should happen on replay)
@@ -934,8 +957,10 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, degraded_link).await;
 
+            let validators_context = context.child("validator");
+
             let reporters = spawn_validator_engines(
-                context.child("validator"),
+                &validators_context,
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -1025,8 +1050,10 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
+            let validators_context = context.child("validator");
+
             let reporters = spawn_validator_engines(
-                context.child("validator"),
+                &validators_context,
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -1063,8 +1090,10 @@ mod tests {
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
 
+            let validators_context = context.child("validator");
+
             let reporters = spawn_validator_engines(
-                context.child("validator"),
+                &validators_context,
                 &fixture,
                 &mut registrations,
                 &mut oracle,
@@ -1179,7 +1208,10 @@ mod tests {
                 );
 
                 let (sender, receiver) = registrations.remove(participant).unwrap();
-                engine.start((sender, receiver));
+                let handle = engine.start((sender, receiver));
+                context.spawn(move |_| async move {
+                    handle.await.expect("engine failed");
+                });
             }
 
             // With insufficient validators, consensus should not be achievable
@@ -1239,8 +1271,9 @@ mod tests {
                 initialize_simulation(context.child("simulation"), &fixture, delayed_link).await;
 
             // Start all validators
+            let validators_context = context.child("validator");
             let reporters = spawn_validator_engines(
-                context.child("validator"),
+                &validators_context,
                 &fixture,
                 &mut registrations,
                 &mut oracle,
