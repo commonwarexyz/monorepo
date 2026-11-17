@@ -27,6 +27,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
+use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
 
@@ -252,8 +253,7 @@ where
             metrics,
             strategy: self.strategy,
         };
-        syncer.start();
-        syncing.run().await;
+        let _ = join!(syncer.start(), syncing.run());
     }
 
     /// Opens the database set from marshal, records completion, then runs processing.

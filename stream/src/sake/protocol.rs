@@ -127,7 +127,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
 
     async fn dial<E, I, O>(
         self,
-        mut context: E,
+        context: E,
         namespace: &[u8],
         peer: S::PublicKey,
         stream: &mut I,
@@ -143,7 +143,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
         send_handshake_frame(sink, self.signer.public_key()).await?;
 
         let sake = self.context(&context, namespace, peer);
-        let (state, syn) = dial_start(&mut context, sake);
+        let (state, syn) = dial_start(context, sake);
         send_handshake_frame(sink, syn).await?;
 
         let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(stream).await?;
@@ -155,7 +155,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
 
     async fn listen<E, I, O, B, F>(
         self,
-        mut context: E,
+        context: E,
         namespace: &[u8],
         bouncer: B,
         stream: &mut I,
@@ -180,7 +180,7 @@ impl<S: Signer> crate::Handshake for Sake<S> {
         // Read the clock only after the Syn arrives, so the acceptance window and the SynAck
         // timestamp reflect when the Syn is checked.
         let sake = self.context(&context, namespace, peer.clone());
-        let (state, syn_ack) = listen_start(&mut context, sake, msg1)?;
+        let (state, syn_ack) = listen_start(context, sake, msg1)?;
         send_handshake_frame(sink, syn_ack).await?;
 
         let ack = recv_handshake_frame::<Ack, _>(stream).await?;
@@ -420,7 +420,7 @@ mod test {
                     let (mut dialer_sender, mut dialer_receiver) =
                         Timeout::new(dialer_handshake, Duration::from_secs(1))
                             .dial(
-                                context.child("dialer"),
+                                context,
                                 NAMESPACE,
                                 max_message_size,
                                 listener_signer.public_key(),
@@ -602,7 +602,7 @@ mod test {
                 let (mut dialer_sender, _dialer_receiver) =
                     Timeout::new(dialer_handshake, Duration::from_secs(1))
                         .dial(
-                            context.child("dialer"),
+                            context,
                             NAMESPACE,
                             MAX_MESSAGE_SIZE,
                             listener_signer.public_key(),
@@ -670,7 +670,7 @@ mod test {
                 let (mut dialer_sender, _dialer_receiver) =
                     Timeout::new(dialer_handshake, Duration::from_secs(1))
                         .dial(
-                            context.child("dialer"),
+                            context,
                             NAMESPACE,
                             MAX_MESSAGE_SIZE,
                             listener_signer.public_key(),
@@ -749,7 +749,7 @@ mod test {
                 let (mut dialer_sender, _dialer_receiver) =
                     Timeout::new(dialer_handshake, Duration::from_secs(1))
                         .dial(
-                            context.child("dialer"),
+                            context,
                             NAMESPACE,
                             MAX_MESSAGE_SIZE,
                             listener_signer.public_key(),

@@ -23,7 +23,7 @@ use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, Metrics, Spawner,
+    Clock, Handle, Metrics, Spawner,
     telemetry::metrics::{MetricsExt as _, status, status::Status},
 };
 use commonware_utils::{
@@ -182,14 +182,14 @@ where
     P: PublicKey,
 {
     let (mailbox_tx, mailbox_rx) = mailbox::new(context.child("mailbox"), mailbox_size);
-    let actor = Actor::new(
+    Actor::new(
         context.child("actor"),
         fetcher,
         mailbox_rx,
         consumer,
         fetch_retry_delay,
-    );
-    context.spawn(move |_| actor.run());
+    )
+    .start(context);
     Resolver::new(mailbox_tx)
 }
 
@@ -260,6 +260,18 @@ where
             retry_schedule: BTreeSet::new(),
             fetch_retry_delay,
         }
+    }
+
+    /// Runs the actor on its own node. The task keeps `parent`, the context [init] was
+    /// given, because the actor's node sits below it.
+    fn start(self, parent: E) -> Handle<()> {
+        self.context.spawn(move |context| {
+            let actor = Self { context, ..self };
+            async move {
+                let _parent = parent;
+                actor.run().await;
+            }
+        })
     }
 
     async fn run(mut self) {
