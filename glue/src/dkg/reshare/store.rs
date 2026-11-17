@@ -21,7 +21,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    BatchVerifier, Digestible, PublicKey, Signer,
+    BatchVerifier, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerMessageError as DkgDealerMessageError,
@@ -207,13 +207,11 @@ where
                     Event::Dealing(dealer, public) => {
                         // A journaled message is restored only with the private
                         // half that was received with it, because the secret
-                        // store finds that half by the digest of its public
+                        // store returns a private half only for its own public
                         // message. One dealer can have several journaled
                         // messages, because an interrupted dealing leaves its
                         // public message behind.
-                        let private = secret_store
-                            .get_dealing(epoch, &dealer, public.digest())
-                            .await;
+                        let private = secret_store.get_dealing(epoch, &dealer, &public).await;
                         if let Some(private) = private {
                             cache.dealings.insert(dealer, (public, private));
                         }
@@ -383,7 +381,7 @@ where
         .await
         .expect("failed to record reshare dealing");
         self.secret_store
-            .put_dealing(epoch, dealer.clone(), public.digest(), private.clone())
+            .put_dealing(epoch, dealer.clone(), &public, private.clone())
             .await;
         self.cache(epoch).dealings.insert(dealer, (public, private));
         true
@@ -1361,8 +1359,8 @@ mod tests {
         }
     }
 
-    /// A private half stored with the digest of another public message is not restored with a
-    /// journaled message from the same dealer.
+    /// A private half stored with another public message is not restored with a journaled
+    /// message from the same dealer.
     #[test]
     fn replay_skips_private_half_of_another_dealing() {
         let [first, second] = [2, 3].map(dealing);
@@ -1387,12 +1385,7 @@ mod tests {
             secrets.park_dealings(false);
             secrets
                 .clone()
-                .put_dealing(
-                    Epoch::zero(),
-                    signers[0].public_key(),
-                    public.digest(),
-                    private,
-                )
+                .put_dealing(Epoch::zero(), signers[0].public_key(), &public, private)
                 .await;
 
             // The restarted store restores no dealing, and the player resumes without one.

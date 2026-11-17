@@ -10,7 +10,7 @@ use crate::{
     },
     simulate::{reporter::MonitorReporter, tracker::ProgressTracker},
 };
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use commonware_actor::Feedback;
 use commonware_codec::{
     Buf, Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
@@ -33,7 +33,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
     bls12381::{
-        dkg::feldman_desmedt::DealerPrivMsg,
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
         primitives::{
             group::Share,
             variant::{MinPk, Variant},
@@ -837,7 +837,7 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
 ///
 /// Storing a second dealing for the same dealer and epoch panics. The panic
 /// checks that the reshare store stores at most one private dealing per dealer
-/// and epoch. A dealing is returned only for the public digest it was stored
+/// and epoch. A dealing is returned only for the public message it was stored
 /// with.
 #[derive(Clone, Default)]
 pub(crate) struct MemorySecretStore {
@@ -848,7 +848,7 @@ pub(crate) struct MemorySecretStore {
 struct MemorySecretStoreInner {
     shares: BTreeMap<Epoch, Share>,
     seeds: BTreeMap<Epoch, Summary>,
-    dealings: BTreeMap<(Epoch, Vec<u8>), (Sha256Digest, DealerPrivMsg)>,
+    dealings: BTreeMap<(Epoch, Vec<u8>), (Bytes, DealerPrivMsg)>,
     prunes: Vec<Epoch>,
     stall: bool,
     park_dealings: bool,
@@ -908,39 +908,38 @@ impl SecretStore for MemorySecretStore {
         self.inner.lock().seeds.get(&epoch).cloned()
     }
 
-    async fn put_dealing<P: CryptoPublicKey>(
+    async fn put_dealing<V: Variant, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
-        public: Sha256Digest,
+        public: &DealerPubMsg<V>,
         private: DealerPrivMsg,
     ) {
         let park = self.inner.lock().park_dealings;
         if park {
             std::future::pending::<()>().await;
         }
-        let replaced = self
-            .inner
-            .lock()
-            .dealings
-            .insert((epoch, dealer.encode().to_vec()), (public, private));
+        let replaced = self.inner.lock().dealings.insert(
+            (epoch, dealer.encode().to_vec()),
+            (public.encode(), private),
+        );
         assert!(
             replaced.is_none(),
             "private dealing must be stored at most once per dealer and epoch"
         );
     }
 
-    async fn get_dealing<P: CryptoPublicKey>(
+    async fn get_dealing<V: Variant, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
-        public: Sha256Digest,
+        public: &DealerPubMsg<V>,
     ) -> Option<DealerPrivMsg> {
         self.inner
             .lock()
             .dealings
             .get(&(epoch, dealer.encode().to_vec()))
-            .filter(|(stored, _)| *stored == public)
+            .filter(|(stored, _)| *stored == public.encode())
             .map(|(_, private)| private.clone())
     }
 
