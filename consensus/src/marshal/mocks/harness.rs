@@ -450,7 +450,7 @@ pub trait TestHarness: 'static + Sized {
     /// Setup validator for pruning test with prunable archives.
     #[allow(clippy::type_complexity)]
     fn setup_prunable_validator(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<K, deterministic::Context>,
         validator: K,
         schemes: &[S],
@@ -458,7 +458,6 @@ pub trait TestHarness: 'static + Sized {
         page_cache: CacheRef,
     ) -> impl Future<
         Output = (
-            deterministic::Context,
             Mailbox<S, Self::Variant>,
             Self::ValidatorExtra,
             Application<Self::ApplicationBlock>,
@@ -2160,14 +2159,13 @@ impl TestHarness for StandardHarness {
     }
 
     async fn setup_prunable_validator(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<K, deterministic::Context>,
         validator: K,
         schemes: &[S],
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        deterministic::Context,
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<B>,
@@ -2271,7 +2269,7 @@ impl TestHarness for StandardHarness {
         let application = Application::<B>::default();
         actor.start(application.clone(), buffer.clone(), resolver);
 
-        (context, mailbox, buffer, application)
+        (mailbox, buffer, application)
     }
 
     async fn verify_for_prune(
@@ -2438,14 +2436,13 @@ impl TestHarness for InlineHarness {
     }
 
     async fn setup_prunable_validator(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<K, deterministic::Context>,
         validator: K,
         schemes: &[S],
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        deterministic::Context,
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<Self::ApplicationBlock>,
@@ -2633,14 +2630,13 @@ impl TestHarness for DeferredHarness {
     }
 
     async fn setup_prunable_validator(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<K, deterministic::Context>,
         validator: K,
         schemes: &[S],
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        deterministic::Context,
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<Self::ApplicationBlock>,
@@ -3000,14 +2996,13 @@ impl TestHarness for CodingHarness {
     }
 
     async fn setup_prunable_validator(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<K, deterministic::Context>,
         validator: K,
         schemes: &[S],
         partition_prefix: &str,
         page_cache: CacheRef,
     ) -> (
-        deterministic::Context,
         Mailbox<S, Self::Variant>,
         Self::ValidatorExtra,
         Application<CodingB>,
@@ -3111,7 +3106,7 @@ impl TestHarness for CodingHarness {
         let application = Application::<CodingB>::default();
         actor.start(application.clone(), shard_mailbox.clone(), resolver);
 
-        (context, mailbox, shard_mailbox, application)
+        (mailbox, shard_mailbox, application)
     }
 
     async fn verify_for_prune(
@@ -3742,27 +3737,20 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         let partition_prefix = format!("prune-test-{}", validator.clone());
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
-        let init_marshal = |ctx: deterministic::Context| {
-            let validator = validator.clone();
-            let schemes = schemes.clone();
-            let partition_prefix = partition_prefix.clone();
-            let page_cache = page_cache.clone();
-            let oracle = &oracle;
-            async move {
-                H::setup_prunable_validator(
-                    ctx,
-                    oracle,
-                    validator,
-                    &schemes,
-                    &partition_prefix,
-                    page_cache,
-                )
-                .await
-            }
+        let init_marshal = async |ctx: &deterministic::Context| {
+            H::setup_prunable_validator(
+                ctx,
+                &oracle,
+                validator.clone(),
+                &schemes,
+                &partition_prefix,
+                page_cache.clone(),
+            )
+            .await
         };
 
-        let (_initial_context, mut mailbox, extra, application) =
-            init_marshal(context.child("init")).await;
+        let init_context = context.child("init");
+        let (mut mailbox, extra, application) = init_marshal(&init_context).await;
         let _ = extra; // Used by CodingHarness, silence warning for StandardHarness
 
         let mut parent = Sha256::hash(&[b""]);
@@ -3876,8 +3864,8 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         drop(mailbox);
         drop(extra);
-        let (_restart_context, mailbox, _extra, _application) =
-            init_marshal(context.child("restart")).await;
+        let restart_context = context.child("restart");
+        let (mailbox, _extra, _application) = init_marshal(&restart_context).await;
 
         // Startup classifies the stored processed block.
         assert_eq!(
@@ -3928,8 +3916,9 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
 
         // Prunable archives use ten-item sections, so a floor at 20 starts a new section.
         let validator = participants[0].clone();
-        let (_validator_context, mut mailbox, extra, _application) = H::setup_prunable_validator(
-            context.child("validator"),
+        let validator_context = context.child("validator");
+        let (mut mailbox, extra, _application) = H::setup_prunable_validator(
+            &validator_context,
             &oracle,
             validator.clone(),
             &schemes,
@@ -4037,19 +4026,20 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         .await;
 
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
-        let (_victim_context, mut victim_mailbox, victim_extra, _victim_application) =
+        let victim_context = context.child("victim");
+        let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
+            &victim_context,
+            &oracle,
+            victim.clone(),
+            &schemes,
+            &format!("stale-floor-victim-{}", victim),
+            page_cache.clone(),
+        )
+        .await;
+        let attacker_context = context.child("attacker");
+        let (attacker_mailbox, attacker_extra, _attacker_application) =
             H::setup_prunable_validator(
-                context.child("victim"),
-                &oracle,
-                victim.clone(),
-                &schemes,
-                &format!("stale-floor-victim-{}", victim),
-                page_cache.clone(),
-            )
-            .await;
-        let (_attacker_context, attacker_mailbox, attacker_extra, _attacker_application) =
-            H::setup_prunable_validator(
-                context.child("attacker"),
+                &attacker_context,
                 &oracle,
                 attacker.clone(),
                 &schemes,
