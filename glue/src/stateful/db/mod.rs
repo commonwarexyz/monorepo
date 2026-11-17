@@ -364,8 +364,8 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// State beyond the selected checkpoint must be durably discarded before this returns.
     /// Returns [`InitError::TargetMismatch`] if the recovered target is not `expected`.
     ///
-    /// `context` is for metrics and storage and may already be closed. Implementations must not
-    /// spawn tasks from it.
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
     fn init(
         context: E,
         config: Self::Config,
@@ -537,6 +537,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Opens every database in the set, each at its target in `expected` when supplied.
     ///
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
+    ///
     /// # Panics
     ///
     /// Panics if a database fails to open, including when it does not match its expected target.
@@ -620,8 +623,8 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
 
     /// Syncs a new database from `source` to `target` and returns it.
     ///
-    /// `context` is for metrics and storage and may already be closed. Implementations must not
-    /// spawn tasks from it.
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
     ///
     /// The caller sends valid targets of the same database on `tip_updates` in advancing order; a
     /// target may be superseded by a newer one before it is read.
@@ -727,6 +730,9 @@ pub trait StateSyncSet<E, R>: DatabaseSet<E> {
     ///
     /// Updates on `tip_updates` follow the [module rules](crate::stateful::db#anchors). The
     /// returned anchor, not the latest tip delivered, identifies the synced state.
+    ///
+    /// `context` stays open until this returns and may close right after (a closed context still
+    /// serves metrics and storage), so join anything spawned from it before returning.
     ///
     /// `D` is the block digest type of each [`Anchor`].
     fn sync<D: Digest>(

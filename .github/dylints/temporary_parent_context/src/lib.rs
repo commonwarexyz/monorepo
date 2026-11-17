@@ -5,37 +5,44 @@ extern crate rustc_errors;
 extern crate rustc_hir;
 
 use rustc_errors::DiagDecorator;
-use rustc_hir::{
-    Expr, ExprKind, MatchSource, Node,
-    intravisit::{self, Visitor},
-};
+use rustc_hir::{Expr, ExprKind, Node};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
     ///
-    /// Detects `Spawner::spawn` on a `Supervisor::child` of a temporary
-    /// `Supervisor::child`, in a statement that awaits nothing. Calls must resolve
-    /// to the traits in `commonware_runtime`.
+    /// Detects a `Spawner::spawn` on a `Supervisor::child` of a temporary
+    /// `Supervisor::child` whose handle goes unused in its statement: discarded, bound
+    /// with `let`, or returned from the enclosing block, closure, or function.
+    /// The chain may pass through `with_attribute`, `shared` and `dedicated`.
+    /// Calls must resolve to the traits in `commonware_runtime`.
     ///
     /// ### Why is this bad?
     ///
-    /// The temporary parent is dropped at the end of the statement and aborts
-    /// the spawned task. A statement that awaits may wait for the task while
-    /// the parent is alive, so the lint stays silent there, as it does for
-    /// chains that do not spawn.
+    /// The temporary parent is dropped at the end of the statement or tail
+    /// expression, which closes it and aborts the spawned task before anything
+    /// can wait for it.
+    ///
+    /// ### Known problems
+    ///
+    /// The lint stays silent when the handle is used in the same statement
+    /// (awaited, passed to a function, pushed into a collection, or wrapped with
+    /// `abort_on_drop`), since some of those uses keep the parent alive long
+    /// enough. It also misses a parent moved into the chain, as in
+    /// `context.with_attribute(..).child("b").spawn(f)`, and a closed context bound by
+    /// one statement and spawned from by a later one.
     ///
     /// ### Example
     ///
     /// ```rust
-    /// let worker = context.child("service").child("worker").spawn(f);
+    /// context.child("service").child("worker").spawn(f);
     /// ```
     ///
     /// Use instead:
     ///
     /// ```rust
     /// let service = context.child("service");
-    /// let worker = service.child("worker").spawn(f);
+    /// service.child("worker").spawn(f);
     /// ```
     pub TEMPORARY_PARENT_CONTEXT,
     Deny,
@@ -51,17 +58,17 @@ impl<'tcx> LateLintPass<'tcx> for TemporaryParentContext {
         let ExprKind::MethodCall(_, receiver, ..) = expr.kind else {
             return;
         };
-        if !is_runtime_method(cx, expr, "Spawner", "spawn") || statement_awaits(cx, expr) {
+        if !is_runtime_method(cx, expr, "Spawner", "spawn") || !handle_unused(cx, expr) {
             return;
         }
 
-        let Some(child) = first_child_call(cx, receiver) else {
+        let Some(child) = child_call(cx, receiver) else {
             return;
         };
         let ExprKind::MethodCall(_, parent, ..) = child.kind else {
             return;
         };
-        if let Some(temporary) = first_child_call(cx, parent) {
+        if let Some(temporary) = child_call(cx, parent) {
             let span = temporary.span;
             cx.emit_span_lint(TEMPORARY_PARENT_CONTEXT, span, DiagDecorator(|diag| {
                 diag.primary_message("temporary parent context");
@@ -73,12 +80,10 @@ impl<'tcx> LateLintPass<'tcx> for TemporaryParentContext {
     }
 }
 
-fn first_child_call<'tcx>(
-    cx: &LateContext<'tcx>,
-    expr: &'tcx Expr<'tcx>,
-) -> Option<&'tcx Expr<'tcx>> {
+/// Follows `expr` through methods that return the context they consume and returns
+/// the `Supervisor::child` call it reaches, if any.
+fn child_call<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
     let mut current = expr;
-
     while let ExprKind::MethodCall(_, receiver, ..) = current.kind {
         if current.span.from_expansion() {
             return None;
@@ -86,47 +91,30 @@ fn first_child_call<'tcx>(
         if is_runtime_method(cx, current, "Supervisor", "child") {
             return Some(current);
         }
+        if !keeps_node(cx, current) {
+            return None;
+        }
         current = receiver;
     }
-
     None
 }
 
-/// Returns whether the statement around `expr` awaits anything, in which case the
-/// temporaries it creates may outlive the work it spawned.
-fn statement_awaits(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
-    let mut id = expr.hir_id;
-    loop {
-        match cx.tcx.parent_hir_node(id) {
-            Node::Expr(parent) => match parent.kind {
-                ExprKind::Closure(..) => return false,
-                ExprKind::Match(_, _, MatchSource::AwaitDesugar) => return true,
-                _ => id = parent.hir_id,
-            },
-            Node::Stmt(stmt) => return contains_await(|finder| finder.visit_stmt(stmt)),
-            Node::LetStmt(local) => return contains_await(|finder| finder.visit_local(local)),
-            _ => return false,
-        }
-    }
+/// Returns whether `expr` calls a runtime method that returns the context it consumed.
+fn keeps_node(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    is_runtime_method(cx, expr, "Supervisor", "with_attribute")
+        || is_runtime_method(cx, expr, "Spawner", "shared")
+        || is_runtime_method(cx, expr, "Spawner", "dedicated")
 }
 
-/// Runs `visit` with a finder that records any `.await` outside nested bodies.
-fn contains_await(visit: impl FnOnce(&mut FindsAwait)) -> bool {
-    let mut finder = FindsAwait(false);
-    visit(&mut finder);
-    finder.0
-}
-
-/// Records whether a visited expression awaits.
-struct FindsAwait(bool);
-
-impl<'tcx> Visitor<'tcx> for FindsAwait {
-    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
-        if matches!(expr.kind, ExprKind::Match(_, _, MatchSource::AwaitDesugar)) {
-            self.0 = true;
-            return;
-        }
-        intravisit::walk_expr(self, expr);
+/// Returns whether the handle `spawn` returns leaves its statement unused: discarded,
+/// bound with `let`, or returned from the enclosing block, closure, or function.
+fn handle_unused(cx: &LateContext<'_>, spawn: &Expr<'_>) -> bool {
+    match cx.tcx.parent_hir_node(spawn.hir_id) {
+        Node::Stmt(_) => true,
+        Node::LetStmt(local) => local.init.is_some_and(|init| init.hir_id == spawn.hir_id),
+        Node::Block(block) => block.expr.is_some_and(|tail| tail.hir_id == spawn.hir_id),
+        Node::Expr(parent) => matches!(parent.kind, ExprKind::Ret(_) | ExprKind::Closure(..)),
+        _ => false,
     }
 }
 

@@ -141,11 +141,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
     /// and verifying payloads proposed by other participants.
-    ///
-    /// When a hook receives a runtime context, it closes when the hook future completes or is
-    /// dropped, aborting work spawned under its children. Work that must outlive the hook must
-    /// consume the runtime context itself with `context.0.spawn(..)` when supplied in a tuple,
-    /// handing its node to the task.
     pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
@@ -442,9 +437,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
     ///
-    /// Each hook's runtime context closes when its future completes or is dropped, aborting work
-    /// spawned under its children. Work that must outlive the hook must consume the context itself
-    /// with `context.0.spawn(..)`, handing its node to the task.
+    /// The runtime context passed to `prepare`, `propose` and `verify` belongs to the request: it
+    /// closes when the request completes or is dropped, aborting everything spawned from it. Work
+    /// that must outlive a request must be spawned from a context the application owns.
     pub trait Application<E>: Clone + Send + 'static {
         /// The signing scheme used by the application.
         type SigningScheme: Scheme;

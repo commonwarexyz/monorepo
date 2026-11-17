@@ -1,14 +1,15 @@
 // aux-build:commonware_runtime.rs
 // compile-flags: --edition=2024
-#![allow(unused_must_use)]
+#![allow(unused_must_use, dead_code)]
 extern crate commonware_runtime;
 
 use commonware_runtime::{Spawner, Supervisor};
+use std::future::{Ready, ready};
 
 #[derive(Clone)]
 struct Context;
 
-impl Context {
+impl Spawner for Context {
     fn shared(self, _: bool) -> Self {
         self
     }
@@ -16,12 +17,10 @@ impl Context {
     fn dedicated(self) -> Self {
         self
     }
-}
 
-impl Spawner for Context {
-    fn spawn(self, f: impl FnOnce()) -> std::future::Ready<()> {
+    fn spawn(self, f: impl FnOnce()) -> Ready<()> {
         f();
-        std::future::ready(())
+        ready(())
     }
 }
 
@@ -35,23 +34,39 @@ impl Supervisor for Context {
     }
 }
 
+/// A `child` method that is not the runtime's.
 struct Unrelated;
 
 impl Unrelated {
     fn child(&self, _: &'static str) -> Self {
         Self
     }
+
+    fn spawn(self, _: impl FnOnce()) {}
 }
 
-trait Other {
-    fn child(&self, _: &'static str) -> Self;
-}
+/// A `Supervisor` without a `Spawner`, as metrics-only mocks are.
+struct MetricsOnly;
 
-struct OtherContext;
-
-impl Other for OtherContext {
+impl Supervisor for MetricsOnly {
     fn child(&self, _: &'static str) -> Self {
         Self
+    }
+
+    fn with_attribute(self, _: &'static str, _: &'static str) -> Self {
+        self
+    }
+}
+
+/// Moves the context somewhere that outlives the statement.
+trait Keep: Sized {
+    fn keep(self, kept: &mut Vec<Self>) -> &Self;
+}
+
+impl Keep for Context {
+    fn keep(self, kept: &mut Vec<Self>) -> &Self {
+        kept.push(self);
+        kept.last().unwrap()
     }
 }
 
@@ -59,66 +74,96 @@ struct Holder {
     context: Context,
 }
 
+struct Wrapper {
+    handle: Ready<()>,
+}
+
+impl Wrapper {
+    async fn wait(self) {
+        self.handle.await
+    }
+}
+
+fn block_on<F: Future>(_: F) {}
+
+// The handle goes unused while the temporary parent closes: each of these fires.
+
+fn discarded(ctx: &Context) {
+    ctx.child("a").child("b").spawn(|| {});
+}
+
+fn bound(ctx: &Context) {
+    let _handle = ctx.child("a").child("b").spawn(|| {});
+}
+
+fn tail(ctx: &Context) -> Ready<()> {
+    ctx.child("a").child("b").spawn(|| {})
+}
+
+fn returned(ctx: &Context) -> Ready<()> {
+    return ctx.child("a").child("b").spawn(|| {});
+}
+
+fn closure(ctx: &Context) {
+    let _spawn = || ctx.child("a").child("b").spawn(|| {});
+}
+
+fn modifiers(ctx: &Context) {
+    ctx.child("a")
+        .with_attribute("k", "v")
+        .child("b")
+        .spawn(|| {});
+    ctx.child("a").shared(true).child("b").spawn(|| {});
+    ctx.child("a").child("b").dedicated().spawn(|| {});
+}
+
+fn generic<E: Spawner + Supervisor>(ctx: &E) {
+    ctx.child("a").child("b").spawn(|| {});
+}
+
 impl Holder {
-    fn child(&self) -> Context {
-        self.context.child("field")
+    fn field(&self) {
+        self.context.child("a").child("b").spawn(|| {});
     }
 }
 
-struct MetricsOnly;
+// Correct code: none of these fire.
 
-impl Supervisor for MetricsOnly {
-    fn child(&self, _: &'static str) -> Self {
-        Self
+async fn awaited(ctx: &Context) {
+    ctx.child("a").child("b").spawn(|| {}).await;
+    let _ = (ctx.child("a").child("b").spawn(|| {}), ready(())).1.await;
+    Wrapper {
+        handle: ctx.child("a").child("b").spawn(|| {}),
     }
-    fn with_attribute(self, _: &'static str, _: &'static str) -> Self {
-        self
+    .wait()
+    .await;
+    match ctx.child("a").child("b").spawn(|| {}) {
+        handle => handle.await,
+    }
+    if let Some(handle) = Some(ctx.child("a").child("b").spawn(|| {})) {
+        handle.await;
     }
 }
 
-impl Holder {
-    fn start(&self) {
-        self.context.child("a").spawn(|| {});
-    }
+fn blocked(ctx: &Context) {
+    block_on(ctx.child("a").child("b").spawn(|| {}));
 }
 
-async fn correct_generic<E: Spawner + Supervisor>(context: E) {
-    context.child("a").child("b").spawn(|| {}).await;
-    context.child("a").spawn(|| {});
-}
-
-async fn awaited(context: Context) {
-    context.child("a").child("b").spawn(|| {}).await;
-    let _ = (
-        context.child("a").child("b").spawn(|| {}),
-        std::future::ready(()),
-    )
-        .1
-        .await;
-    let _ = (
-        context.child("a").child("b").spawn(|| {}),
-        std::future::ready(()).await,
-    );
-}
-
-#[rustfmt::skip]
-fn main() {
-    let _ = Unrelated.child("first").child("second");
-    let _ = OtherContext.child("first").child("second");
-    let _ = MetricsOnly.child("first").child("second");
-    let ctx = Context;
+fn not_spawned(ctx: &Context) {
     let bound = ctx.child("a").child("b");
+    let _metrics = ctx.child("a").child("b").with_attribute("k", "v");
+    let _ = MetricsOnly.child("a").child("b");
+    Unrelated.child("a").child("b").spawn(|| {});
     bound.spawn(|| {});
-    let _ = ctx.child("metrics").child("only").with_attribute("key", "value");
-    let holder = Holder { context: Context };
-    let _ = holder.child();
-    holder.start();
-    let _ = correct_generic(Context);
-    let _ = awaited(Context);
-
-    ctx.child("statement").child("worker").spawn(|| {});
-    let _handle = ctx.child("handle").child("worker").spawn(|| {});
-    ctx.child("attributed").with_attribute("key", "value").child("worker").spawn(|| {});
-    ctx.child("shared").shared(true).child("worker").spawn(|| {});
-    ctx.child("dedicated").dedicated().child("worker").spawn(|| {});
 }
+
+fn single_child(holder: &Holder, ctx: &Context) {
+    holder.context.child("a").spawn(|| {});
+    ctx.clone().child("a").spawn(|| {});
+}
+
+fn kept(ctx: &Context, kept: &mut Vec<Context>) {
+    ctx.child("a").keep(kept).child("b").spawn(|| {});
+}
+
+fn main() {}

@@ -206,8 +206,8 @@ fn prunable_archive_config(page_cache: CacheRef, partition: &str) -> prunable::C
 pub(crate) struct MarshalFixture {
     pub(crate) mailbox: MarshalMailbox<TestScheme, TestVariant>,
     pub(crate) floor: Floor,
-    /// Keeps the fixture alive: the unstarted actor (its mailbox dead-letters once this
-    /// drops) or the started actor's context, resolver handler, and task handle.
+    /// Keeps the fixture alive: the unstarted actor and its context (its mailbox dead-letters
+    /// once this drops) or the started actor's context, resolver handler, and task handle.
     pub(crate) guards: Box<dyn std::any::Any>,
 }
 

@@ -177,9 +177,12 @@ pub struct Input<Upstream, Provider> {
 /// every clone must produce the same state transition. Mutable state that affects execution
 /// must live in the supplied database batches.
 ///
-/// Each hook's runtime context closes when its future completes or is dropped, aborting work
-/// spawned under its children. Work that must outlive the hook must consume the context itself
-/// with `context.0.spawn(..)`, handing its node to the task.
+/// The runtime context passed to `prepare` and `propose` belongs to the request: it closes
+/// when the request completes or is dropped, aborting everything spawned from it, so work that
+/// must outlive a request must be spawned from a context the application owns. `process`,
+/// `capture` and `finalized` receive a child of [`Stateful`]'s context that closes when the hook
+/// completes. Work spawned from that context itself (`context.0.spawn(..)`) takes over its node
+/// and runs until it ends or [`Stateful`] stops, while work under a child of it ends with the hook.
 pub trait Application<E>: Clone + Send + 'static {
     /// The signing scheme used by the application and by the marshal supplied through
     /// [`Config::marshal`](crate::stateful::Config::marshal).

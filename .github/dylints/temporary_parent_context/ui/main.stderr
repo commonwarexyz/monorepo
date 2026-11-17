@@ -1,43 +1,83 @@
 error: temporary parent context
-  --> $DIR/main.rs:119:5
+  --> $DIR/main.rs:92:5
    |
-LL |     ctx.child("statement").child("worker").spawn(|| {});
-   |     ^^^^^^^^^^^^^^^^^^^^^^
+LL |     ctx.child("a").child("b").spawn(|| {});
+   |     ^^^^^^^^^^^^^^
    |
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
    = note: `#[deny(temporary_parent_context)]` on by default
 
 error: temporary parent context
-  --> $DIR/main.rs:120:19
+  --> $DIR/main.rs:96:19
    |
-LL |     let _handle = ctx.child("handle").child("worker").spawn(|| {});
-   |                   ^^^^^^^^^^^^^^^^^^^
+LL |     let _handle = ctx.child("a").child("b").spawn(|| {});
+   |                   ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
+
+error: temporary parent context
+  --> $DIR/main.rs:100:5
+   |
+LL |     ctx.child("a").child("b").spawn(|| {})
+   |     ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
+
+error: temporary parent context
+  --> $DIR/main.rs:104:12
+   |
+LL |     return ctx.child("a").child("b").spawn(|| {});
+   |            ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
+
+error: temporary parent context
+  --> $DIR/main.rs:108:21
+   |
+LL |     let _spawn = || ctx.child("a").child("b").spawn(|| {});
+   |                     ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
+
+error: temporary parent context
+  --> $DIR/main.rs:112:5
+   |
+LL |     ctx.child("a")
+   |     ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
+
+error: temporary parent context
+  --> $DIR/main.rs:116:5
+   |
+LL |     ctx.child("a").shared(true).child("b").spawn(|| {});
+   |     ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
+
+error: temporary parent context
+  --> $DIR/main.rs:117:5
+   |
+LL |     ctx.child("a").child("b").dedicated().spawn(|| {});
+   |     ^^^^^^^^^^^^^^
    |
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
   --> $DIR/main.rs:121:5
    |
-LL |     ctx.child("attributed").with_attribute("key", "value").child("worker").spawn(|| {});
-   |     ^^^^^^^^^^^^^^^^^^^^^^^
+LL |     ctx.child("a").child("b").spawn(|| {});
+   |     ^^^^^^^^^^^^^^
    |
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:122:5
+  --> $DIR/main.rs:126:9
    |
-LL |     ctx.child("shared").shared(true).child("worker").spawn(|| {});
-   |     ^^^^^^^^^^^^^^^^^^^
-   |
-   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
-
-error: temporary parent context
-  --> $DIR/main.rs:123:5
-   |
-LL |     ctx.child("dedicated").dedicated().child("worker").spawn(|| {});
-   |     ^^^^^^^^^^^^^^^^^^^^^^
+LL |         self.context.child("a").child("b").spawn(|| {});
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
-error: aborting due to 5 previous errors
+error: aborting due to 10 previous errors
 

@@ -4,5 +4,7 @@ pub trait Supervisor: Sized {
 }
 
 pub trait Spawner: Sized {
+    fn shared(self, blocking: bool) -> Self;
+    fn dedicated(self) -> Self;
     fn spawn(self, f: impl FnOnce()) -> std::future::Ready<()>;
 }
