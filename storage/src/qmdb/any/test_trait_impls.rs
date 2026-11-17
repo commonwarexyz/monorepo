@@ -171,7 +171,7 @@ where
         Self::get_many(self, keys).await
     }
 
-    fn prefetch(&self, keys: &[&U::Key]) -> impl Future<Output = ()> + Send + 'static {
+    fn prefetch<Q: Borrow<U::Key>>(&self, keys: &[Q]) -> impl Future<Output = ()> + Send + 'static {
         Self::prefetch(self, keys)
     }
 

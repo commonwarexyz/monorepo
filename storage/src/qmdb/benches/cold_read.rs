@@ -518,14 +518,14 @@ async fn read_phase<E: Ctx + Spawner>(ctx: &E, mut db: AnyDb<E>, args: &Args) ->
                 // active operations above the floor this batch builds on. A walk spans its entries
                 // plus the keys its batch updates.
                 let warm = (iter + 1 < args.iters).then(|| {
-                    let next_refs: Vec<&Digest> = batches[iter + 1].iter().collect();
+                    let next_keys = &batches[iter + 1];
                     let span = |updates: usize| {
                         Policy::<mmb::Family, Digest, Digest>::limits(&Proportional, updates)
                             .entries
                             + updates
                     };
-                    let floor = db.prefetch_floor(span(keys.len()) + span(next_refs.len()));
-                    let keys = db.prefetch(&next_refs);
+                    let floor = db.prefetch_floor(span(keys.len()) + span(next_keys.len()));
+                    let keys = db.prefetch(next_keys);
                     async move {
                         join!(keys, floor);
                     }

@@ -334,10 +334,10 @@ where
     /// Return a future that reads the storage holding the applied operations of `keys` into
     /// the page cache. Merkleizing a change to the keys reads no Merkle node from storage. See
     /// [any::db::Db::prefetch].
-    pub fn prefetch(
+    pub fn prefetch<Q: Borrow<U::Key>>(
         &self,
-        keys: &[&U::Key],
-    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        keys: &[Q],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S, Q> {
         self.any.prefetch(keys)
     }
 

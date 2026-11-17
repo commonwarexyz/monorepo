@@ -19,7 +19,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use core::{future::Future, ops::RangeBounds};
+use core::{borrow::Borrow, future::Future, ops::RangeBounds};
 use futures::stream::Stream;
 
 /// The generic Db type for ordered Current QMDB variants.
@@ -73,11 +73,11 @@ where
     /// Return a future that reads into the page cache the applied operations a batch reads to
     /// link the keys it creates or deletes into the key order. See
     /// [crate::qmdb::any::db::Db::prefetch_neighbors].
-    pub fn prefetch_neighbors(
+    pub fn prefetch_neighbors<W: Borrow<K>, D: Borrow<K>>(
         &self,
-        writes: &[&K],
-        deletes: &[&K],
-    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, K, V, I, H, N, S> {
+        writes: &[W],
+        deletes: &[D],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, K, V, I, H, N, S, W, D> {
         self.any.prefetch_neighbors(writes, deletes)
     }
 

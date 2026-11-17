@@ -423,12 +423,15 @@ where
     /// not prefetching. Warmed pages also displace Main residents not read since the eviction sweep
     /// last passed them, so prefetching many cold keys evicts the existing working set faster
     /// than reading them on demand would.
-    pub fn prefetch(
+    pub fn prefetch<Q: Borrow<U::Key>>(
         &self,
-        keys: &[&U::Key],
-    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        keys: &[Q],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S, Q> {
         let mut positions = Vec::with_capacity(keys.len());
-        self.snapshot.get_many(keys, |_, &loc| positions.push(*loc));
+        self.snapshot
+            .get_many(keys.iter().map(Borrow::borrow), |_, &loc| {
+                positions.push(*loc)
+            });
         positions.sort_unstable();
         positions.dedup();
         self.log.prefetch(&positions)
