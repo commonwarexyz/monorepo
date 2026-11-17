@@ -4,6 +4,7 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   merge_group:
 
 permissions:
@@ -25,6 +26,11 @@ jobs:
   # cargo-llvm-cov with the same workspace, Cargo home, and target directory as the build so the
   # report excludes the same paths.
   Build:
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: "Coverage (build)"
     runs-on: ubuntu-latest-16
     timeout-minutes: 90
@@ -140,13 +146,16 @@ jobs:
         path: lcov-${{ matrix.partition }}.info
         retention-days: 1
 
-  # Branch protection requires this check, and a skipped job would satisfy it, so it always runs
-  # and fails unless every coverage partition succeeded.
+  # On selected PRs and non-PR runs, fail unless every coverage partition succeeded.
   Upload:
     name: Upload
     runs-on: ubuntu-latest
     needs: Coverage
-    if: always()
+    if: >-
+      always() && (github.event_name != 'pull_request'
+      || github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
     steps:
     - name: Check coverage results
       run: |

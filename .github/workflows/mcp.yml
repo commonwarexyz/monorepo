@@ -4,6 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   merge_group:
 
 permissions:
@@ -44,6 +45,11 @@ jobs:
         run: npm run lint
 
   Build:
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -66,6 +72,11 @@ jobs:
         run: npm run build
 
   Test:
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -117,6 +128,11 @@ jobs:
           echo "✓ package-lock.json remained unchanged after npm ci"
 
   Integration:
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

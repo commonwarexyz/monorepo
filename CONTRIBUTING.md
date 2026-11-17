@@ -42,6 +42,15 @@ Without rustup (for example, Nix), set `COMMONWARE_NO_RUSTUP=1` to use tools fro
 
 Use `just test -p <crate>` for routine development and reserve workspace-wide tests for changes that need them. The root [agent guidance](AGENTS.md) records the always-applicable repository constraints.
 
+Expensive CI jobs run for standalone PRs, the lowest unmerged PR in a stack (its base
+branch matches the stack base), and the top PR in a stack. Intermediate stack PRs
+keep lint and other inexpensive checks, including stability and public API checks.
+Missing stack metadata falls back to full CI. Non-PR runs retain full CI, and Slow
+continues to skip draft PRs. Retargeting events reevaluate this policy; selected PRs
+still require every dependency of an aggregate gate to succeed. A grouped stack
+merge can land intermediate commits without independent expensive CI; the bottom
+PR and full stack receive those checks. Merge queue runs retain full CI.
+
 When creating a new crate, follow the `lib.rs` header conventions used across the workspace: crates that support `no_std` gate `std` behind a feature flag or `cfg(test)` (e.g. `#![cfg_attr(not(any(feature = "std", test)), no_std)]`), and every crate sets the Commonware logos:
 
 ```rust
