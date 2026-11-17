@@ -96,7 +96,7 @@ fn system_thread_stack_size_impl() -> Option<usize> {
 }
 
 #[cfg(not(unix))]
-fn system_thread_stack_size_impl() -> Option<usize> {
+const fn system_thread_stack_size_impl() -> Option<usize> {
     None
 }
 
