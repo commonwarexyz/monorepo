@@ -176,7 +176,7 @@ impl BatchVerifier for PublicKey {
             })
             .unzip();
 
-        MinPk::batch_verify(rng, &publics, &hms, &signatures, strategy).is_ok()
+        ops::batch::verify_hashed::<MinPk>(rng, &publics, &hms, &signatures, strategy).is_ok()
     }
 }
 

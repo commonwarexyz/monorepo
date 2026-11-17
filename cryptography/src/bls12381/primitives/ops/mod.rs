@@ -28,7 +28,8 @@ use super::{
     variant::Variant,
 };
 use commonware_codec::Encode;
-use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, PairingGroup, Random};
+use commonware_parallel::Sequential;
 use commonware_utils::union_unique;
 
 /// Computes the public key from the private key.
@@ -68,7 +69,34 @@ pub fn verify<V: Variant>(
     signature: &V::Signature,
 ) -> Result<(), Error> {
     let hm = hash::<V>(dst, message);
-    V::verify(public, &hm, signature)
+    verify_hashed::<V>(public, &hm, signature)
+}
+
+/// Verifies the signature from the provided public key and pre-hashed message.
+///
+/// Identity signatures are invalid.
+pub fn verify_hashed<V: Variant>(
+    public: &V::Public,
+    hm: &V::Signature,
+    signature: &V::Signature,
+) -> Result<(), Error> {
+    // Raw multi-pairing only evaluates the equation, so reject identity signatures at this
+    // verification boundary.
+    if *signature == V::Signature::zero() {
+        return Err(Error::InvalidSignature);
+    }
+
+    // e(pk, hm) == e(g, sig), checked as e(pk, hm) + e(-g, sig) == 0 with one final
+    // exponentiation.
+    let sum = V::Public::multi_pairing(
+        &[*public, -V::Public::generator()],
+        &[*hm, *signature],
+        &Sequential,
+    );
+    if sum != <V::Public as PairingGroup>::Target::zero() {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
 }
 
 /// Signs the provided message with the private key.
@@ -121,7 +149,7 @@ pub fn verify_proof_of_possession<V: Variant>(
     signature: &V::Signature,
 ) -> Result<(), Error> {
     let hm = hash_with_namespace::<V>(V::PROOF_OF_POSSESSION, namespace, &public.encode());
-    V::verify(public, &hm, signature)
+    verify_hashed::<V>(public, &hm, signature)
 }
 
 #[cfg(test)]
@@ -314,13 +342,26 @@ mod tests {
         }
 
         assert!(
-            MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok()
+            batch::verify_hashed::<MinSig>(
+                &mut test_rng(),
+                &publics,
+                &hms,
+                &signatures,
+                &Sequential
+            )
+            .is_ok()
         );
 
         signatures[0] += &<MinSig as Variant>::Signature::generator();
         assert!(
-            MinSig::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential)
-                .is_err()
+            batch::verify_hashed::<MinSig>(
+                &mut test_rng(),
+                &publics,
+                &hms,
+                &signatures,
+                &Sequential
+            )
+            .is_err()
         );
     }
 
@@ -358,12 +399,26 @@ mod tests {
         }
 
         assert!(
-            MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_ok()
+            batch::verify_hashed::<MinPk>(
+                &mut test_rng(),
+                &publics,
+                &hms,
+                &signatures,
+                &Sequential
+            )
+            .is_ok()
         );
 
         signatures[0] += &<MinPk as Variant>::Signature::generator();
         assert!(
-            MinPk::batch_verify(&mut test_rng(), &publics, &hms, &signatures, &Sequential).is_err()
+            batch::verify_hashed::<MinPk>(
+                &mut test_rng(),
+                &publics,
+                &hms,
+                &signatures,
+                &Sequential
+            )
+            .is_err()
         );
     }
 
@@ -375,7 +430,7 @@ mod tests {
         let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
         assert!(matches!(
-            V::batch_verify(
+            batch::verify_hashed::<V>(
                 &mut rng,
                 &[public],
                 &[hm],
@@ -519,7 +574,7 @@ mod tests {
 
             // Verify using batch verification
             let hm = hash::<MinPk>(MinPk::MESSAGE, &message);
-            let batch_result = MinPk::batch_verify(
+            let batch_result = batch::verify_hashed::<MinPk>(
                 &mut test_rng(),
                 &[public_key],
                 &[hm],
@@ -592,7 +647,7 @@ mod tests {
             all_signatures.push(signature);
         }
 
-        MinPk::batch_verify(
+        batch::verify_hashed::<MinPk>(
             &mut test_rng(),
             &valid_publics,
             &valid_hms,
@@ -602,7 +657,7 @@ mod tests {
         .expect("batch verify of valid vectors should succeed");
 
         assert!(
-            MinPk::batch_verify(
+            batch::verify_hashed::<MinPk>(
                 &mut test_rng(),
                 &all_publics,
                 &all_hms,

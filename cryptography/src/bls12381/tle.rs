@@ -84,7 +84,7 @@
 
 use crate::{
     bls12381::primitives::{
-        group::{DST, GT, Scalar},
+        group::{DST, Scalar},
         ops::hash_with_namespace,
         variant::Variant,
     },
@@ -93,8 +93,8 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_math::algebra::{Additive, CryptoGroup};
+use commonware_codec::{Buf, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::{Additive, CryptoGroup, PairingGroup};
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
 use thiserror::Error;
@@ -177,12 +177,13 @@ mod hash {
     use super::*;
     use crate::{Hasher, Sha256};
 
-    /// H2: GT -> Block
+    /// H2: GT -> Block, over the encoding of the pairing output.
     ///
     /// Used to mask the random sigma value.
-    pub fn h2(gt: &GT) -> Block {
-        let gt = Zeroizing::new(gt.as_slice());
-        Sha256::hash(&[b"h2", gt.as_ref()]).into()
+    pub fn h2(gt: &impl Encode) -> Block {
+        let mut encoded = Zeroizing::new(Vec::with_capacity(gt.encode_size()));
+        gt.write(&mut *encoded);
+        Sha256::hash(&[b"h2", encoded.as_slice()]).into()
     }
 
     /// H3: (sigma, M) -> Scalar
@@ -263,7 +264,7 @@ pub fn encrypt<R: CryptoRng, V: Variant>(
     // The latter expression is more efficient to compute.
     let mut r_pub = public;
     r_pub *= &r;
-    let gt = V::pairing(&r_pub, &q_id);
+    let gt = r_pub.pairing(&q_id);
 
     // Compute V = sigma XOR H2(e(P_pub, Q_id)^r)
     let h2_value = Zeroizing::new(hash::h2(&gt));
@@ -298,7 +299,7 @@ pub fn decrypt<V: Variant>(signature: &V::Signature, ciphertext: &Ciphertext<V>)
     }
 
     // Compute e(U, signature)
-    let gt = V::pairing(&ciphertext.u, signature);
+    let gt = ciphertext.u.pairing(signature);
 
     // Recover sigma = V XOR H2(e(U, signature))
     let h2_value = hash::h2(&gt);
@@ -336,7 +337,7 @@ mod tests {
 
         let mut u = V::Public::generator();
         u *= &r;
-        let identity_pairing = V::pairing(&V::Public::zero(), &V::Signature::generator());
+        let identity_pairing = V::Public::zero().pairing(&V::Signature::generator());
         let ciphertext = Ciphertext {
             u,
             v: xor(&sigma, &hash::h2(&identity_pairing)),
