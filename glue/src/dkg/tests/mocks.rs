@@ -837,7 +837,8 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
 ///
 /// Storing a second dealing for the same dealer and epoch panics. The panic
 /// checks that the reshare store stores at most one private dealing per dealer
-/// and epoch.
+/// and epoch. A dealing is returned only for the public digest it was stored
+/// with.
 #[derive(Clone, Default)]
 pub(crate) struct MemorySecretStore {
     inner: Arc<Mutex<MemorySecretStoreInner>>,
@@ -847,7 +848,7 @@ pub(crate) struct MemorySecretStore {
 struct MemorySecretStoreInner {
     shares: BTreeMap<Epoch, Share>,
     seeds: BTreeMap<Epoch, Summary>,
-    dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
+    dealings: BTreeMap<(Epoch, Vec<u8>), (Sha256Digest, DealerPrivMsg)>,
     prunes: Vec<Epoch>,
     stall: bool,
     park_dealings: bool,
@@ -911,6 +912,7 @@ impl SecretStore for MemorySecretStore {
         &mut self,
         epoch: Epoch,
         dealer: P,
+        public: Sha256Digest,
         private: DealerPrivMsg,
     ) {
         let park = self.inner.lock().park_dealings;
@@ -921,7 +923,7 @@ impl SecretStore for MemorySecretStore {
             .inner
             .lock()
             .dealings
-            .insert((epoch, dealer.encode().to_vec()), private);
+            .insert((epoch, dealer.encode().to_vec()), (public, private));
         assert!(
             replaced.is_none(),
             "private dealing must be stored at most once per dealer and epoch"
@@ -932,12 +934,14 @@ impl SecretStore for MemorySecretStore {
         &mut self,
         epoch: Epoch,
         dealer: &P,
+        public: Sha256Digest,
     ) -> Option<DealerPrivMsg> {
         self.inner
             .lock()
             .dealings
             .get(&(epoch, dealer.encode().to_vec()))
-            .cloned()
+            .filter(|(stored, _)| *stored == public)
+            .map(|(_, private)| private.clone())
     }
 
     async fn prune(&mut self, min: Epoch) {
