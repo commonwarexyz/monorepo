@@ -28,9 +28,15 @@ dylint_linting::declare_late_lint! {
     /// The lint stays silent when the handle is used in the same statement
     /// (awaited, passed to a function, pushed into a collection, or wrapped with
     /// `abort_on_drop`), since some of those uses keep the parent alive long
-    /// enough. It also misses a parent moved into the chain, as in
+    /// enough. It also misses handles that always lose their task: one assigned
+    /// to a place, wrapped in a struct, tuple or reference inside a `let`, or
+    /// used as a match arm or `break` value without a block. It misses
+    /// `Spawner::spawn(..)` written as a function call, chains produced by a
+    /// macro, a parent moved into the chain, as in
     /// `context.with_attribute(..).child("b").spawn(f)`, and a closed context bound by
-    /// one statement and spawned from by a later one.
+    /// one statement and spawned from by a later one. Block tails from crates before
+    /// edition 2024 and `super let` initializers keep their temporaries until the
+    /// end of the enclosing statement, so the lint skips them.
     ///
     /// ### Example
     ///
@@ -111,8 +117,15 @@ fn keeps_node(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 fn handle_unused(cx: &LateContext<'_>, spawn: &Expr<'_>) -> bool {
     match cx.tcx.parent_hir_node(spawn.hir_id) {
         Node::Stmt(_) => true,
-        Node::LetStmt(local) => local.init.is_some_and(|init| init.hir_id == spawn.hir_id),
-        Node::Block(block) => block.expr.is_some_and(|tail| tail.hir_id == spawn.hir_id),
+        // The temporaries of a `super let` initializer outlive its statement.
+        Node::LetStmt(local) => {
+            local.super_.is_none() && local.init.is_some_and(|init| init.hir_id == spawn.hir_id)
+        }
+        // Before edition 2024, the temporaries of a block's tail outlive the block.
+        Node::Block(block) => {
+            block.span.at_least_rust_2024()
+                && block.expr.is_some_and(|tail| tail.hir_id == spawn.hir_id)
+        }
         Node::Expr(parent) => matches!(parent.kind, ExprKind::Ret(_) | ExprKind::Closure(..)),
         _ => false,
     }

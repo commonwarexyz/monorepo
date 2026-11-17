@@ -180,9 +180,10 @@ pub struct Input<Upstream, Provider> {
 /// The runtime context passed to `prepare` and `propose` belongs to the request: it closes
 /// when the request completes or is dropped, aborting everything spawned from it, so work that
 /// must outlive a request must be spawned from a context the application owns. `process`,
-/// `capture` and `finalized` receive a child of [`Stateful`]'s context that closes when the hook
-/// completes. Work spawned from that context itself (`context.0.spawn(..)`) takes over its node
-/// and runs until it ends or [`Stateful`] stops, while work under a child of it ends with the hook.
+/// `capture` and `finalized` receive a context below [`Stateful`]'s that closes when the hook
+/// completes or is dropped. Work spawned from that context itself (`context.0.spawn(..)`) takes
+/// over its node and runs until it ends or [`Stateful`] stops, while work under a child of it
+/// ends with the hook.
 pub trait Application<E>: Clone + Send + 'static {
     /// The signing scheme used by the application and by the marshal supplied through
     /// [`Config::marshal`](crate::stateful::Config::marshal).
