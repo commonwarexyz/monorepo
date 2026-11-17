@@ -346,7 +346,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     links: HashMap<(P, P), Link>,
 
     // A map from a public key to a peer
-    peers: BTreeMap<P, Peer<P, E>>,
+    peers: BTreeMap<P, Peer<E, P>>,
 
     // Peer sets tracked through the network-wide manager. A new peer starts with a copy.
     network_tracker: Tracker<P>,
@@ -1381,7 +1381,7 @@ impl<P: PublicKey> Receiver<P> {
 /// A peer in the simulated network.
 ///
 /// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
-struct Peer<P: PublicKey, E> {
+struct Peer<E, P: PublicKey> {
     // Keeps the router and listener scope open for the lifetime of the peer.
     _context: E,
 
@@ -1395,7 +1395,7 @@ struct Peer<P: PublicKey, E> {
     tracker: Tracker<P>,
 }
 
-impl<P: PublicKey, E: Spawner + RNetwork + Metrics + Clock> Peer<P, E> {
+impl<E: Spawner + RNetwork + Metrics + Clock, P: PublicKey> Peer<E, P> {
     /// Create and return a new peer.
     ///
     /// The peer will listen for incoming connections on the given `socket` address.

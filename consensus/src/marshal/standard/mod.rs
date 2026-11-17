@@ -195,8 +195,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -390,8 +391,9 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let buffer = RecordingBuffer::default();
+            let validator_context = context.child("validator");
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "standard-provider-parent-commitment",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -855,8 +857,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -955,8 +958,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -1079,8 +1083,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -1173,8 +1178,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -1294,8 +1300,9 @@ mod tests {
                 buffer.insert(block.clone());
             }
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mut mailbox, _buffer, _resolver, _handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "late-finalization-repaired",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -1385,8 +1392,9 @@ mod tests {
             buffer.insert(one.clone());
             buffer.insert(two.clone());
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mut mailbox, _buffer, _resolver, _handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "finalization-below-floor",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -1657,8 +1665,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -1770,8 +1779,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -1886,8 +1896,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -1965,8 +1976,9 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             // No network links: forces repair to rely on local cache only.
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(3),
                 participants.clone(),
                 1024 * 1024,
@@ -2162,8 +2174,9 @@ mod tests {
             );
 
             // The anchor is never served, so the floor stays pending.
+            let first_context = context.child("first");
             let (mailbox, _buffer, resolver, handle) = start_standard_actor(
-                context.child("first"),
+                &first_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2178,14 +2191,15 @@ mod tests {
                 || !resolver.fetches().is_empty(),
             )
             .await;
-            assert_eq!(opened_cache_epochs(&context, "first_cache"), vec![64]);
+            assert_eq!(opened_cache_epochs(&context, "first_actor_cache"), vec![64]);
             handle.abort();
             let _ = handle.await;
             drop(mailbox);
 
             // The restart reissues the floor fetch with the same cache on disk.
+            let restarted_context = context.child("restarted");
             let (_mailbox, _buffer, resolver, _handle) = start_standard_actor(
-                context.child("restarted"),
+                &restarted_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -2201,7 +2215,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                opened_cache_epochs(&context, "restarted_cache"),
+                opened_cache_epochs(&context, "restarted_actor_cache"),
                 vec![64],
                 "restart must open only the floor's epoch"
             );
@@ -2623,8 +2637,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2714,8 +2729,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2809,8 +2825,9 @@ mod tests {
             );
             let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
             let buffer = RecordingBuffer::default();
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "start-floor-buffered-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -2844,8 +2861,9 @@ mod tests {
             let commitment = anchor.digest();
             let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
             let buffer = RecordingBuffer::default();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "closed-floor-waiter",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -2903,8 +2921,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3040,8 +3059,9 @@ mod tests {
             let victim = participants[0].clone();
             let server = participants[1].clone();
             let peers = vec![victim.clone(), server.clone()];
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 peers.clone(),
                 1024 * 1024,
@@ -3146,8 +3166,9 @@ mod tests {
             let victim = participants[0].clone();
             let server = participants[1].clone();
             let peers = vec![victim.clone(), server.clone()];
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 peers.clone(),
                 1024 * 1024,
@@ -3417,8 +3438,9 @@ mod tests {
                 NAMESPACE,
                 NUM_VALIDATORS,
             );
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3563,8 +3585,9 @@ mod tests {
                 Some(&byzantine),
             );
 
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3826,8 +3849,9 @@ mod tests {
                 );
             }
 
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -4032,8 +4056,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -4203,8 +4228,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -4308,8 +4334,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -4390,8 +4417,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -4551,8 +4579,9 @@ mod tests {
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let validator_context = context.child("validator");
                 let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
-                    context.child("validator"),
+                    &validator_context,
                     &format!("missing-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
@@ -4627,8 +4656,9 @@ mod tests {
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let validator_context = context.child("validator");
                 let (marshal, buffer, resolver, _actor_handle) = start_standard_actor(
-                    context.child("validator"),
+                    &validator_context,
                     &format!("missing-certify-candidate-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
@@ -4687,6 +4717,7 @@ mod tests {
     }
 
     struct CertificationCase {
+        _validator_context: deterministic::Context,
         wrapper: Wrapper,
         marshal: Mailbox<S, Standard<B>>,
         buffer: RecordingBuffer,
@@ -4709,8 +4740,9 @@ mod tests {
         let me = participants[0].clone();
 
         let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+        let validator_context = context.child("validator");
         let (marshal, buffer, resolver, _) = start_standard_actor(
-            context.child("validator"),
+            &validator_context,
             &partition_prefix,
             ConstantProvider::new(schemes[0].clone()),
             Application::<B>::manual_ack(),
@@ -4735,6 +4767,7 @@ mod tests {
         let block = B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
 
         CertificationCase {
+            _validator_context: validator_context,
             wrapper,
             marshal,
             buffer,
@@ -4902,8 +4935,9 @@ mod tests {
             let me = participants[0].clone();
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let validator_context = context.child("validator");
             let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "deferred-certify-canceled-verify",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -4983,8 +5017,9 @@ mod tests {
                     NUM_VALIDATORS,
                 );
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let validator_context = context.child("validator");
                 let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
-                    context.child("validator"),
+                    &validator_context,
                     &format!("propose-ancestry-round-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::default(),
@@ -5073,8 +5108,9 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let validator_context = context.child("validator");
             let (mut marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "issue-5718",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::default(),
@@ -5209,8 +5245,9 @@ mod tests {
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let validator_context = context.child("validator");
                 let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
-                    context.child("validator"),
+                    &validator_context,
                     &format!("height-lie-{kind:?}"),
                     ConstantProvider::new(schemes[0].clone()),
                     Application::<B>::manual_ack(),
@@ -5317,8 +5354,9 @@ mod tests {
                 let malicious = participants[1].clone();
                 let honest = participants[2].clone();
 
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(2),
                     [victim.clone(), malicious.clone()],
                     1024 * 1024,
@@ -5487,8 +5525,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -5668,8 +5707,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -5816,8 +5856,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -5954,8 +5995,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -6100,8 +6142,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let network_context = context.child("network");
                 let mut oracle = setup_network_with_participants(
-                    context.child("network"),
+                    &network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -6292,7 +6335,8 @@ mod tests {
                     ..
                 } =
                     bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-                let mut oracle = setup_network_with_participants(context.child("network"),
+                let network_context = context.child("network");
+                let mut oracle = setup_network_with_participants(&network_context,
                     NZUsize!(1),
                     participants.clone(),
                     1024 * 1024,
@@ -6383,8 +6427,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6440,8 +6485,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6494,8 +6540,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6555,8 +6602,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6602,8 +6650,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -7074,7 +7123,7 @@ mod tests {
     }
 
     async fn start_standard_actor<R, Buf, P>(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         partition_prefix: &str,
         provider: P,
         application: R,
@@ -7166,9 +7215,14 @@ mod tests {
         )
         .await
         .expect("failed to initialize finalized blocks archive");
-        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-        let (actor, mailbox, _) =
-            Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
+        let (actor, mailbox, _) = Actor::init(
+            context.child("actor"),
+            finalizations_by_height,
+            finalized_blocks,
+            config,
+        )
+        .await;
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
         let actor_handle = if let Some(buffer) = buffer.clone() {
             actor.start(application, buffer, (resolver_rx, resolver.clone()))
         } else {
@@ -7216,8 +7270,9 @@ mod tests {
 
             // Retain marshal's mailbox, buffer, and resolver until the exit assertion so no other
             // input closing can account for the actor's exit.
+            let validator_context = context.child("validator");
             let (mut mailbox, _buffer, _resolver, marshal_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 PARTITION_PREFIX,
                 provider.clone(),
                 ApplicationReporter { updates },
@@ -7259,8 +7314,9 @@ mod tests {
             // The canceled acknowledgement must leave the processed floor behind the block so the
             // recovered application receives the same finalized block again.
             let restart_application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator").with_attribute("restart", 0);
             let (_mailbox, _buffer, _resolver, _marshal_handle) = start_standard_actor(
-                context.child("validator").with_attribute("restart", 0),
+                &validator_context,
                 PARTITION_PREFIX,
                 provider,
                 restart_application.clone(),
@@ -7297,8 +7353,9 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "standard-no-buffer",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -7350,8 +7407,9 @@ mod tests {
                 QUORUM,
             );
             let (application, _started_rx) = HoldingBlockReporter::new();
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "start-floor-invalid",
                 ConstantProvider::new(wrong_schemes[0].clone()),
                 application,
@@ -7382,8 +7440,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "set-floor-invalid",
                 ConstantProvider::new(wrong_schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -7411,8 +7470,9 @@ mod tests {
                 QUORUM,
             );
             let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "start-floor-async",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -7484,8 +7544,9 @@ mod tests {
             buffer.insert(floor_block.clone());
 
             let (application, started_rx) = HoldingBlockReporter::new();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "start-floor-local-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -7542,8 +7603,9 @@ mod tests {
             actor_handle.abort();
             let _ = actor_handle.await;
             let (application, _started_rx) = HoldingBlockReporter::new();
+            let restart_context = context.child("restart");
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("restart"),
+                &restart_context,
                 "start-floor-local-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -7592,8 +7654,9 @@ mod tests {
             .await;
 
             let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -7636,8 +7699,9 @@ mod tests {
                 QUORUM,
             );
             let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "set-floor-holds-dispatch",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -7721,8 +7785,9 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "floor-jump-ignores-stale-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -7822,8 +7887,9 @@ mod tests {
 
             let application = Application::<B>::manual_ack();
             let buffer = RecordingBuffer::default();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "local-floor-jump-ignores-stale-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -7914,8 +7980,9 @@ mod tests {
                 QUORUM,
             );
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "set-floor-repairs-gap-after-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -8022,8 +8089,9 @@ mod tests {
             .await;
 
             let (application, _started_rx) = HoldingBlockReporter::new();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -8075,8 +8143,9 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "set-floor-supersedes-pending",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -8255,8 +8324,9 @@ mod tests {
                 StandardHarness::make_finalization(floor_proposal.clone(), &schemes, QUORUM);
             let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
             let buffer = RecordingBuffer::default();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "set-floor-buffered-anchor-notarization",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -8327,8 +8397,9 @@ mod tests {
             );
             let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
             let buffer = RecordingBuffer::default();
+            let validator_context = context.child("validator");
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "pending-floor-releases-waiter",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -8416,8 +8487,9 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "pending-floor-drops-in-flight-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -8520,8 +8592,9 @@ mod tests {
 
             let application = Application::<B>::manual_ack();
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "local-floor-below-in-flight-keeps-pending-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -8589,8 +8662,9 @@ mod tests {
 
             let application = Application::<B>::manual_ack();
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "set-floor-below-processed-height-preserves-in-flight-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -8711,8 +8785,9 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "floor-stored-predecessor",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -8773,8 +8848,9 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "same-height-floor-keeps-pending-ack",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -8854,8 +8930,9 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "stale-floor-anchor-round-floor",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -8946,8 +9023,9 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "standard-floor-parent-digest-commitment",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -9026,8 +9104,9 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), block.digest());
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "notarized-delivery-wakes-subscriber",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -9106,8 +9185,9 @@ mod tests {
             let proposal = Proposal::new(delivered_round, View::zero(), block.digest());
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "notarized-delivery-wrong-round",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -9154,8 +9234,9 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "notarized-delivery-stale-certificate-only",
                 VerifierProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -9206,8 +9287,9 @@ mod tests {
             let verifier = schemes[0].clone();
             let application = Application::<B>::manual_ack();
 
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 PARTITION_PREFIX,
                 VerifierProvider::new(verifier.clone()),
                 application.clone(),
@@ -9253,8 +9335,9 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let (verifier, block, finalization) = fixture;
+            let recovered_context = context.child("recovered");
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("recovered"),
+                &recovered_context,
                 PARTITION_PREFIX,
                 VerifierProvider::new(verifier),
                 Application::<B>::default(),
@@ -9298,8 +9381,9 @@ mod tests {
                 QUORUM,
             );
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "finalized-delivery-different-bytes",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -9507,8 +9591,9 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "finalized-delivery-epoch-mismatch",
                 VerifierProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -9560,8 +9645,9 @@ mod tests {
             // The scope survives exactly the admission lookup, so it is gone by
             // the time the batched verification runs.
             let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "finalized-delivery-scope-retires",
                 provider.clone(),
                 application.clone(),
@@ -9625,8 +9711,9 @@ mod tests {
             // The scope survives exactly the admission lookup, so it is gone by
             // the time the batched verification runs.
             let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "notarized-delivery-scope-retires",
                 provider.clone(),
                 Application::<B>::manual_ack(),
@@ -9696,8 +9783,9 @@ mod tests {
             // Retiring the scope after admission must not turn the rejection into
             // an acceptance: the retained scope still verifies the certificate.
             let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let validator_context = context.child("validator");
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "finalized-delivery-foreign-certificate-scope-retires",
                 provider.clone(),
                 Application::<B>::manual_ack(),
@@ -9782,8 +9870,9 @@ mod tests {
             let provider = RetiringProvider::default()
                 .with(Epoch::zero(), first[0].clone(), 1)
                 .with(Epoch::new(1), second[0].clone(), usize::MAX);
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "finalized-batch-mixed-scopes",
                 provider.clone(),
                 application.clone(),
@@ -9857,8 +9946,9 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), block.digest());
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "fetch-notarized-processed-round",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -9939,8 +10029,9 @@ mod tests {
                 QUORUM,
             );
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "finalization-processed-round-fetch",
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -10006,8 +10097,9 @@ mod tests {
                 make_raw_block(Sha256::hash(&[b"replacement-genesis"]), Height::zero(), 1);
             assert_ne!(original_genesis.digest(), replacement_genesis.digest());
 
+            let validator_context = context.child("validator");
             let (mailbox, buffer, resolver, actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -10026,8 +10118,9 @@ mod tests {
             drop(buffer);
             drop(resolver);
 
+            let validator_restart_context = context.child("validator_restart");
             let (_mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator_restart"),
+                &validator_restart_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -10058,8 +10151,9 @@ mod tests {
                 QUORUM,
             );
             let application = Application::<B>::manual_ack();
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -10091,10 +10185,11 @@ mod tests {
             let _ = actor_handle.await;
             drop(mailbox);
 
+            let validator_restart_context = context
+                .child("validator_restart")
+                .with_attribute("index", 0);
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
-                context
-                    .child("validator_restart")
-                    .with_attribute("index", 0),
+                &validator_restart_context,
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -10169,8 +10264,9 @@ mod tests {
             )
             .await;
 
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -10256,8 +10352,9 @@ mod tests {
             );
 
             let (application, started) = HoldingBlockReporter::new_after(Height::zero());
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, resolver, actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -10291,10 +10388,11 @@ mod tests {
             drop(buffer);
             drop(resolver);
 
+            let validator_restart_context = context
+                .child("validator_restart")
+                .with_attribute("index", 0);
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context
-                    .child("validator_restart")
-                    .with_attribute("index", 0),
+                &validator_restart_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -10342,8 +10440,9 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 "set-floor-round-prune",
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -10461,8 +10560,9 @@ mod tests {
             // recovered round floor, so marshal fetches it as a pending anchor.
             let application = Application::<B>::manual_ack();
             let buffer = RecordingBuffer::default();
+            let validator_context = context.child("validator");
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
+                &validator_context,
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
@@ -10563,8 +10663,9 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let me = default_leader();
+            let network_context = context.child("network");
             let oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 [me.clone()],
                 1024 * 1024,
@@ -10734,8 +10835,9 @@ mod tests {
             );
 
             let (application, started) = HoldingBlockReporter::new_after(Height::zero());
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mut mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application,
@@ -10764,10 +10866,11 @@ mod tests {
             let _ = actor_handle.await;
             drop(mailbox);
 
+            let validator_restart_context = context
+                .child("validator_restart")
+                .with_attribute("index", 0);
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context
-                    .child("validator_restart")
-                    .with_attribute("index", 0),
+                &validator_restart_context,
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12120,8 +12223,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -12234,8 +12338,9 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let unknown = Sha256::hash(&[b"unknown-block"]);
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("forward-unknown-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12277,8 +12382,9 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("proposed-cache-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12375,8 +12481,9 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("relay-claim-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12443,8 +12550,9 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("relay-restage-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12513,8 +12621,9 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("relay-hit-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12575,8 +12684,9 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("relay-prepare-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12659,8 +12769,9 @@ mod tests {
                 let outgoing = participants[0].clone();
                 let incoming = participants[1].clone();
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let validator_context = context.child("validator").with_attribute("index", 1);
                 let (mut marshal, buffer, _resolver, _actor_handle) = start_standard_actor(
-                    context.child("validator").with_attribute("index", 1),
+                    &validator_context,
                     "boundary-restage",
                     ConstantProvider::new(schemes[1].clone()),
                     Application::<B>::manual_ack(),
@@ -12821,8 +12932,9 @@ mod tests {
             let block_b = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 200);
             assert_ne!(block_a.digest(), block_b.digest());
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("proposed-conflict-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12867,8 +12979,9 @@ mod tests {
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let digest = block.digest();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("forward-cached-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12912,8 +13025,9 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("hint-below-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -12971,8 +13085,9 @@ mod tests {
                 QUORUM,
             );
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("hint-already-final-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -13012,8 +13127,9 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("hint-targets-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -13062,8 +13178,9 @@ mod tests {
                 QUORUM,
             );
 
+            let validator_context = context.child("validator").with_attribute("index", 0);
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
+                &validator_context,
                 &format!("prune-above-floor-{me}"),
                 ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
@@ -13184,8 +13301,9 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let victim = participants[3].clone();
             let peer = participants[2].clone();
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,

@@ -766,8 +766,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -848,8 +849,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -923,8 +925,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1012,8 +1015,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1108,8 +1112,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1217,8 +1222,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1323,8 +1329,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1398,8 +1405,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1503,8 +1511,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,

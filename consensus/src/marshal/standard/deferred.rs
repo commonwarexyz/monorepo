@@ -949,8 +949,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1084,8 +1085,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1192,8 +1194,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1288,8 +1291,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1363,8 +1367,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1488,8 +1493,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1622,8 +1628,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1714,8 +1721,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1817,13 +1825,14 @@ mod tests {
     /// context names the certified view-1 block as parent, which this
     /// validator's parent selection accepts (view 1 certified, view 2 nullified).
     struct EquivocationFixture {
+        _network_context: deterministic::Context,
+        _validator_context: deterministic::Context,
         marshaled: Deferred<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher>,
         round: Round,
         digest: <B as Digestible>::Digest,
         embedded_ctx: Ctx,
         equivocating_ctx: Ctx,
         _extra: <StandardHarness as TestHarness>::ValidatorExtra,
-        _context: deterministic::Context,
     }
 
     async fn equivocation_fixture(
@@ -1835,8 +1844,9 @@ mod tests {
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+        let network_context = context.child("network");
         let mut oracle = setup_network_with_participants(
-            context.child("network"),
+            &network_context,
             NZUsize!(1),
             participants.clone(),
             1024 * 1024,
@@ -1912,13 +1922,14 @@ mod tests {
         context.sleep(Duration::from_millis(10)).await;
 
         EquivocationFixture {
+            _network_context: network_context,
+            _validator_context: setup.context,
             marshaled,
             round,
             digest,
             embedded_ctx,
             equivocating_ctx,
             _extra: buffer,
-            _context: setup.context,
         }
     }
 

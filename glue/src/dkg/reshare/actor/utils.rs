@@ -22,7 +22,7 @@ pub(super) type TestMailbox =
 
 /// Builds an unstarted actor with deterministic storage, networking, and marshal fixtures.
 pub(super) async fn new_actor(
-    mut context: deterministic::Context,
+    context: &mut deterministic::Context,
     signer: mocks::TestSigner,
     participants: Set<mocks::TestPublicKey>,
     oracle: &Oracle<mocks::TestPublicKey, deterministic::Context>,
@@ -30,7 +30,7 @@ pub(super) async fn new_actor(
     partition_prefix: &str,
     blocks_per_epoch: NonZeroU64,
 ) -> (mocks::TestReshareActor, TestMailbox) {
-    let fixture = mocks::scheme_fixture_n(&mut context, 1);
+    let fixture = mocks::scheme_fixture_n(context, 1);
     let marshal = mocks::closed_marshal_mailbox(
         context.child("marshal"),
         &signer,
@@ -41,7 +41,7 @@ pub(super) async fn new_actor(
     .await;
     let (fence, _gate) = Fence::new();
     mocks::TestReshareActor::new(
-        context,
+        context.child("actor"),
         Config {
             signer: signer.clone(),
             manager: oracle.manager(),

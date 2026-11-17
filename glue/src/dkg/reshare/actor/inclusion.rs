@@ -3103,12 +3103,14 @@ mod tests {
         }
     }
 
+    /// Builds an unstarted actor for finalization tests. The actor runs under the returned
+    /// context, which must outlive it.
     async fn setup_finalization_actor(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         signer: PrivateKey,
         participants: Set<PublicKey>,
         partition: &str,
-    ) -> mocks::TestReshareActor {
+    ) -> (deterministic::Context, mocks::TestReshareActor) {
         let (_network, oracle) = Network::new_with_peers(
             context.child("network"),
             NetworkConfig {
@@ -3120,8 +3122,9 @@ mod tests {
             participants.iter().cloned(),
         )
         .await;
+        let mut actor_fixture_context = context.child("actor_fixture");
         let (actor, _mailbox) = utils::new_actor(
-            context,
+            &mut actor_fixture_context,
             signer,
             participants,
             &oracle,
@@ -3130,7 +3133,7 @@ mod tests {
             NZU64!(8),
         )
         .await;
-        actor
+        (actor_fixture_context, actor)
     }
 
     /// Recovered public logs remain usable when their private dealing snapshot is absent.
@@ -3189,8 +3192,9 @@ mod tests {
                     Some(fixture.share),
                 )
                 .await;
-            let mut actor = setup_finalization_actor(
-                context.child("artifact_actor"),
+            let artifact_actor_context = context.child("artifact_actor");
+            let (_actor_fixture_context, mut actor) = setup_finalization_actor(
+                &artifact_actor_context,
                 target,
                 players(),
                 "missing-dealing-artifact-actor",
@@ -3248,8 +3252,9 @@ mod tests {
                 .await;
 
             // An empty dealer-log view cannot produce a ceremony result.
-            let mut actor = setup_finalization_actor(
-                context.child("artifact_actor"),
+            let artifact_actor_context = context.child("artifact_actor");
+            let (_actor_fixture_context, mut actor) = setup_finalization_actor(
+                &artifact_actor_context,
                 signers()[0].clone(),
                 players(),
                 "finalization-failure-artifact-actor",
@@ -3338,8 +3343,9 @@ mod tests {
                     .append_log(Epoch::zero(), dealer.clone(), log.clone())
                     .await;
             }
-            let mut actor = setup_finalization_actor(
-                context.child("artifact_actor"),
+            let artifact_actor_context = context.child("artifact_actor");
+            let (_actor_fixture_context, mut actor) = setup_finalization_actor(
+                &artifact_actor_context,
                 target,
                 players(),
                 "finalization-error-artifact-actor",

@@ -353,11 +353,11 @@ fn start_disrupter<P: simplex::Simplex>(
 
 /// Spawn a Disrupter for a Byzantine node.
 fn spawn_disrupter<P: simplex::Simplex>(
-    context: deterministic::Context,
+    context: &deterministic::Context,
     scheme: P::Scheme,
     input: &FuzzInput,
     channels: NetworkChannels,
-) -> deterministic::Context {
+) {
     let (vote_network, certificate_network, resolver_network) = channels;
     start_disrupter::<P>(
         context.child("disrupter"),
@@ -367,7 +367,6 @@ fn spawn_disrupter<P: simplex::Simplex>(
         certificate_network,
         resolver_network,
     );
-    context
 }
 
 /// Spawn an honest validator with application, reporter, and engine.
@@ -481,13 +480,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let ctx = context
                 .child("validator")
                 .with_attribute("public_key", &validator);
-
-            validator_contexts.push(spawn_disrupter::<P>(
-                ctx,
-                schemes[i].clone(),
-                &input,
-                channels,
-            ));
+            spawn_disrupter::<P>(&ctx, schemes[i].clone(), &input, channels);
+            validator_contexts.push(ctx);
         }
 
         // Spawn honest validators

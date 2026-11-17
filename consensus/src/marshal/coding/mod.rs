@@ -525,7 +525,7 @@ mod tests {
     }
 
     async fn start_coding_actor_with_recording(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         partition_prefix: &str,
         provider: ConstantProvider<S, Epoch>,
         buffer: RecordingCodingBuffer,
@@ -536,10 +536,15 @@ mod tests {
     ) {
         let config = test_config(partition_prefix, provider);
         let (finalizations_by_height, finalized_blocks) =
-            immutable_finalized_stores(&context, partition_prefix, &config).await;
+            immutable_finalized_stores(context, partition_prefix, &config).await;
+        let (actor, mailbox, _) = core::Actor::init(
+            context.child("actor"),
+            finalizations_by_height,
+            finalized_blocks,
+            config,
+        )
+        .await;
         let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-        let (actor, mailbox, _) =
-            core::Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
         let actor_handle = actor.start(
             Application::<CodingB>::default(),
             buffer,
@@ -548,24 +553,14 @@ mod tests {
         (mailbox, resolver, actor_handle)
     }
 
-    /// Starts a shard engine on its own network. The engine and network run until the returned
-    /// context is dropped.
     async fn start_shard_mailbox(
-        context: deterministic::Context,
+        context: &deterministic::Context,
         participants: Vec<K>,
         provider: ConstantProvider<S, Epoch>,
-    ) -> (
-        shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256>,
-        deterministic::Context,
-    ) {
+    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256> {
         let me = participants[0].clone();
-        let oracle = setup_network_with_participants(
-            context.child("network"),
-            NZUsize!(1),
-            participants,
-            1024 * 1024,
-        )
-        .await;
+        let oracle =
+            setup_network_with_participants(context, NZUsize!(1), participants, 1024 * 1024).await;
         let control = oracle.control(me.clone());
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider,
@@ -581,7 +576,7 @@ mod tests {
             shards::Engine::new(context.child("shards"), shard_config);
         let network = control.register(0, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
-        (shard_mailbox, context)
+        shard_mailbox
     }
 
     fn genesis_block() -> CodingB {
@@ -681,8 +676,9 @@ mod tests {
             assert_ne!(honest_config, dishonest_config);
 
             let buffer = RecordingCodingBuffer::default();
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-dishonest-payload-config",
                 provider,
                 buffer,
@@ -757,8 +753,9 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
             let buffer = RecordingCodingBuffer::default();
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-provider-parent-commitment",
                 provider,
                 buffer.clone(),
@@ -825,8 +822,9 @@ mod tests {
                     NUM_VALIDATORS,
                 );
                 let provider = ConstantProvider::new(schemes[0].clone());
+                let validator_context = context.child("validator");
                 let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                    context.child("validator"),
+                    &validator_context,
                     "walk-mismatched-parent-digest",
                     provider.clone(),
                     RecordingCodingBuffer::default(),
@@ -875,9 +873,9 @@ mod tests {
 
                 // Verify the candidate with an application that reads its ancestry down to
                 // genesis and accepts only if it gets there.
-                let (shards, _shards_context) =
-                    start_shard_mailbox(context.child("shards"), participants, provider.clone())
-                        .await;
+                let shards_context = context.child("shards");
+                let shards =
+                    start_shard_mailbox(&shards_context, participants, provider.clone()).await;
                 let application = WalkingVerifyingApp::default();
                 let mut marshaled = Marshaled::new(
                     context.child("marshaled"),
@@ -934,16 +932,17 @@ mod tests {
             let provider = ConstantProvider::new(schemes[0].clone());
             let me = participants[0].clone();
             let buffer = RecordingCodingBuffer::default();
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-verify-missing-candidate",
                 provider.clone(),
                 buffer.clone(),
             )
             .await;
-            let (shards, _shards_context) =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
-                    .await;
+            let shard_stack_context = context.child("shard_stack");
+            let shards =
+                start_shard_mailbox(&shard_stack_context, participants, provider.clone()).await;
             let (candidate_ctx, candidate) = missing_candidate(me);
             let commitment = candidate.commitment();
 
@@ -1001,16 +1000,17 @@ mod tests {
             .expect("fixture participant must be a member");
             assert!(matches!(member.me(), Some(Membership::Member(_))));
             let provider = ConstantProvider::new(member);
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-verify-member",
                 provider.clone(),
                 RecordingCodingBuffer::default(),
             )
             .await;
-            let (shards, _shards_context) =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
-                    .await;
+            let shard_stack_context = context.child("shard_stack");
+            let shards =
+                start_shard_mailbox(&shard_stack_context, participants, provider.clone()).await;
             let (candidate_ctx, candidate) = missing_candidate(me);
             let commitment = candidate.commitment();
 
@@ -1058,16 +1058,17 @@ mod tests {
             let provider = ConstantProvider::new(schemes[0].clone());
             let me = participants[0].clone();
             let buffer = RecordingCodingBuffer::default();
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-certify-missing-candidate",
                 provider.clone(),
                 buffer.clone(),
             )
             .await;
-            let (shards, _shards_context) =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
-                    .await;
+            let shard_stack_context = context.child("shard_stack");
+            let shards =
+                start_shard_mailbox(&shard_stack_context, participants, provider.clone()).await;
 
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new(),
@@ -1127,16 +1128,17 @@ mod tests {
             let provider = ConstantProvider::new(schemes[0].clone());
             let me = participants[0].clone();
             let buffer = RecordingCodingBuffer::default();
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-certify-pending-verify",
                 provider.clone(),
                 buffer,
             )
             .await;
-            let (shards, _shards_context) =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
-                    .await;
+            let shard_stack_context = context.child("shard_stack");
+            let shards =
+                start_shard_mailbox(&shard_stack_context, participants, provider.clone()).await;
 
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new(),
@@ -1197,16 +1199,17 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
             let me = participants[0].clone();
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-epoch-gates",
                 provider.clone(),
                 RecordingCodingBuffer::default(),
             )
             .await;
-            let (shards, _shards_context) =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
-                    .await;
+            let shard_stack_context = context.child("shard_stack");
+            let shards =
+                start_shard_mailbox(&shard_stack_context, participants, provider.clone()).await;
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new(),
                 marshal,
@@ -1270,16 +1273,17 @@ mod tests {
             let provider = ConstantProvider::new(schemes[0].clone());
             let me = participants[0].clone();
             let buffer = RecordingCodingBuffer::default();
+            let actor_stack_context = context.child("actor_stack");
             let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("actor_stack"),
+                &actor_stack_context,
                 "coding-certify-transient-buffer",
                 provider.clone(),
                 buffer.clone(),
             )
             .await;
-            let (shards, _shards_context) =
-                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
-                    .await;
+            let shard_stack_context = context.child("shard_stack");
+            let shards =
+                start_shard_mailbox(&shard_stack_context, participants, provider.clone()).await;
 
             let cfg = MarshaledConfig {
                 application: MockVerifyingApp::<CodingB, S>::new(),
@@ -1611,8 +1615,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1696,8 +1701,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1788,8 +1794,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -1912,8 +1919,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2174,8 +2182,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2269,8 +2278,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2423,8 +2433,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants[..2].iter().cloned(),
                 1024 * 1024,
@@ -2525,8 +2536,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2619,8 +2631,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2720,8 +2733,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2820,8 +2834,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -2892,8 +2907,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3005,8 +3021,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3109,8 +3126,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3277,8 +3295,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3369,8 +3388,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3467,8 +3487,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3617,8 +3638,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3818,8 +3840,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -3914,8 +3937,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -4047,8 +4071,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants[..2].iter().cloned(),
                 1024 * 1024,
@@ -4157,8 +4182,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "finalized-block-delivery",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -4214,8 +4240,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "coalesced-block-delivery",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -4286,8 +4313,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "finalized-block-digest-mismatch",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -4445,8 +4473,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "ancestry-block-delivery",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -4511,8 +4540,9 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
+            let validator_context = context.child("validator");
             let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "optimistic-ancestry-conflict",
                 provider.clone(),
                 RecordingCodingBuffer::default(),
@@ -4592,8 +4622,8 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(cached.commitment(), parent.commitment());
-            let (shards, _shards_context) =
-                start_shard_mailbox(context.child("shards"), participants, provider.clone()).await;
+            let shards_context = context.child("shards");
+            let shards = start_shard_mailbox(&shards_context, participants, provider.clone()).await;
             let application = WalkingVerifyingApp::default();
             let mut marshaled = Marshaled::new(
                 context.child("marshaled"),
@@ -4709,8 +4739,9 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
+            let validator_context = context.child("validator");
             let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "issue-5716",
                 provider.clone(),
                 RecordingCodingBuffer::default(),
@@ -4750,12 +4781,9 @@ mod tests {
             assert!(mailbox.verified(round, candidate.clone()).await);
 
             // Verify both with an application that reads a block's ancestry down to genesis.
-            let (shards, _shards_context) = start_shard_mailbox(
-                context.child("shards"),
-                participants.clone(),
-                provider.clone(),
-            )
-            .await;
+            let shards_context = context.child("shards");
+            let shards =
+                start_shard_mailbox(&shards_context, participants.clone(), provider.clone()).await;
             let application = WalkingVerifyingApp::default();
             let mut marshaled = Marshaled::new(
                 context.child("marshaled"),
@@ -4853,8 +4881,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "pr-5717",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -4929,7 +4958,7 @@ mod tests {
             // Marshal answers a query only after it has finished with the delivery. It did not
             // cache the parent, and epoch 0 is still the only epoch with a cache.
             assert!(mailbox.get_block(&parent.digest()).await.is_none());
-            assert_eq!(opened_cache_epochs(&context, "validator_cache"), [0]);
+            assert_eq!(opened_cache_epochs(&context, "validator_actor_cache"), [0]);
 
             // Consensus then reaches epoch 64, and the validator stores a candidate of that epoch.
             let reached = Round::new(Epoch::new(64), View::new(1));
@@ -4956,7 +4985,7 @@ mod tests {
             );
             assert!(mailbox.get_block(&parent.digest()).await.is_some());
             assert_eq!(
-                opened_cache_epochs(&context, "validator_cache"),
+                opened_cache_epochs(&context, "validator_actor_cache"),
                 [0, 64]
             );
         });
@@ -4976,8 +5005,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let validator_context = context.child("validator");
                 let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                    context.child("validator"),
+                    &validator_context,
                     "certified-ancestry-delivery",
                     ConstantProvider::new(schemes[0].clone()),
                     RecordingCodingBuffer::default(),
@@ -5073,8 +5103,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "certification-retention",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -5202,8 +5233,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "notarized-block-delivery",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -5254,8 +5286,9 @@ mod tests {
                     NAMESPACE,
                     NUM_VALIDATORS,
                 );
+                let validator_context = context.child("validator");
                 let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                    context.child("validator"),
+                    &validator_context,
                     "untrusted-delivery-mismatched-root",
                     ConstantProvider::new(schemes[0].clone()),
                     RecordingCodingBuffer::default(),
@@ -5343,8 +5376,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let validator_context = context.child("validator");
             let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "floor-parent-commitment-mismatch",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
@@ -5397,19 +5431,17 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
+            let validator_context = context.child("validator");
             let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "default-prepare",
                 provider.clone(),
                 RecordingCodingBuffer::default(),
             )
             .await;
-            let (shards, _shards_context) = start_shard_mailbox(
-                context.child("shards"),
-                participants.clone(),
-                provider.clone(),
-            )
-            .await;
+            let shards_context = context.child("shards");
+            let shards =
+                start_shard_mailbox(&shards_context, participants.clone(), provider.clone()).await;
             let cfg = MarshaledConfig {
                 application: WalkingVerifyingApp::default(),
                 marshal,
@@ -5452,8 +5484,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -5521,8 +5554,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -5646,8 +5680,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -5773,8 +5808,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -5882,19 +5918,17 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
             let buffer = RecordingCodingBuffer::default();
+            let validator_context = context.child("validator");
             let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "prepare-relay",
                 provider.clone(),
                 buffer.clone(),
             )
             .await;
-            let (shards, _shards_context) = start_shard_mailbox(
-                context.child("shards"),
-                participants.clone(),
-                provider.clone(),
-            )
-            .await;
+            let shards_context = context.child("shards");
+            let shards =
+                start_shard_mailbox(&shards_context, participants.clone(), provider.clone()).await;
 
             let me = participants[0].clone();
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
@@ -6002,19 +6036,17 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
             let buffer = RecordingCodingBuffer::default();
+            let validator_context = context.child("validator");
             let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "propose-relay-claim",
                 provider.clone(),
                 buffer.clone(),
             )
             .await;
-            let (shards, _shards_context) = start_shard_mailbox(
-                context.child("shards"),
-                participants.clone(),
-                provider.clone(),
-            )
-            .await;
+            let shards_context = context.child("shards");
+            let shards =
+                start_shard_mailbox(&shards_context, participants.clone(), provider.clone()).await;
             let (ctx, candidate) = missing_candidate(participants[0].clone());
             let round = ctx.round;
             let cfg = MarshaledConfig {
@@ -6088,19 +6120,17 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
             let buffer = RecordingCodingBuffer::default();
+            let validator_context = context.child("validator");
             let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
-                context.child("validator"),
+                &validator_context,
                 "prepare-parent-wait",
                 provider.clone(),
                 buffer.clone(),
             )
             .await;
-            let (shards, _shards_context) = start_shard_mailbox(
-                context.child("shards"),
-                participants.clone(),
-                provider.clone(),
-            )
-            .await;
+            let shards_context = context.child("shards");
+            let shards =
+                start_shard_mailbox(&shards_context, participants.clone(), provider.clone()).await;
             let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
             let (parent_ctx, parent) = missing_candidate(participants[1].clone());
             let parent_round = parent_ctx.round;
@@ -6176,8 +6206,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6262,8 +6293,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6350,8 +6382,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6523,8 +6556,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6629,8 +6663,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,
@@ -6741,8 +6776,9 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let network_context = context.child("network");
             let mut oracle = setup_network_with_participants(
-                context.child("network"),
+                &network_context,
                 NZUsize!(1),
                 participants.clone(),
                 1024 * 1024,

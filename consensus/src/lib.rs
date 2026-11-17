@@ -436,10 +436,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
-    ///
-    /// The runtime context passed to `prepare`, `propose` and `verify` belongs to the request: it
-    /// closes when the request completes or is dropped, aborting everything spawned from it. Work
-    /// that must outlive a request must be spawned from a context the application owns.
     pub trait Application<E>: Clone + Send + 'static {
         /// The signing scheme used by the application.
         type SigningScheme: Scheme;

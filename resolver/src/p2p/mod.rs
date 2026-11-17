@@ -4885,7 +4885,7 @@ mod tests {
     }
 
     fn spawn_actors_with_handles(
-        actor_context: &deterministic::Context,
+        context: &deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         schemes: Vec<PrivateKey>,
         connections: Vec<(
@@ -4907,7 +4907,7 @@ mod tests {
             .zip(consumers.into_iter().zip(producers))
             .enumerate()
         {
-            let ctx = actor_context.child("peer").with_attribute("index", idx);
+            let ctx = context.child("peer").with_attribute("index", idx);
             let public_key = scheme.public_key();
             let (engine, mailbox) = Engine::new(
                 ctx,
@@ -5066,13 +5066,13 @@ mod tests {
         }
     }
 
-    /// Mailbox, oracle, and task handles (engine, network) of a peer started by
+    /// Context, mailbox, oracle, and task handles (engine, network) of a peer started by
     /// [`start_lookup_peer`].
     type LookupPeer = (
+        deterministic::Context,
         Mailbox<Key, PublicKey, ()>,
         lookup::Oracle<PublicKey>,
         [Handle<()>; 2],
-        deterministic::Context,
     );
 
     /// Starts an authenticated lookup network and a resolver engine on it.
@@ -5133,7 +5133,7 @@ mod tests {
             },
         );
         let engine = engine.start(connection);
-        (mailbox, oracle, [engine, network], context)
+        (context, mailbox, oracle, [engine, network])
     }
 
     /// A delayed response must not answer a different request after the requester restarts.
@@ -5162,7 +5162,7 @@ mod tests {
 
             // Start a server that holds each response until the test releases it.
             let (producer, mut requests) = GatedProducer::new();
-            let (_server_mailbox, mut server_oracle, _server_handles, _server_context) =
+            let (_server_context, _server_mailbox, mut server_oracle, _server_handles) =
                 start_lookup_peer(
                     &context,
                     "server",
@@ -5175,7 +5175,7 @@ mod tests {
 
             // Allow the peers to connect before fetching so the held response belongs to
             // the requester's first request ID.
-            let (mut mailbox, _oracle, handles, _requester_context) = start_lookup_peer(
+            let (_requester_context, mut mailbox, _oracle, handles) = start_lookup_peer(
                 &context,
                 "requester",
                 requester.clone(),
@@ -5199,7 +5199,7 @@ mod tests {
             server_oracle.track(1, peers(restarted_addr));
             let (mut consumer, mut delivered) = consumer();
             consumer.add_expected(new_key.clone(), new_value.clone());
-            let (mut mailbox, mut oracle, _handles, _restarted_context) = start_lookup_peer(
+            let (_restarted_context, mut mailbox, mut oracle, _handles) = start_lookup_peer(
                 &context,
                 "requester_restarted",
                 requester.clone(),
