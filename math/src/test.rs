@@ -517,8 +517,8 @@ mod test {
     }
 }
 
-// `Twin`'s `msm` and batch pairing methods view a slice of twins as a slice of
-// `G2` through an unsafe cast, which Miri checks here.
+// `Twin`'s `msm`, `mul_each`, and batch pairing methods view a slice of twins as a
+// slice of `G2` through an unsafe cast, which Miri checks here.
 #[cfg(test)]
 #[commonware_macros::test_group("miri")]
 mod twin {
@@ -547,6 +547,22 @@ mod twin {
         assert_eq!(
             Twin::<G>::msm(&lefts, &scalars, &Sequential),
             msm_naive(&lefts, &scalars)
+        );
+
+        // `Twin`'s `scaled_multi_pairing` multiplies `G`'s elements, so only a
+        // direct `mul_each` call runs the mutable cast.
+        let mut products = lefts.clone();
+        Twin::<G>::mul_each(&mut products, &scalars, &Sequential);
+        let expected_products: Vec<Twin<G>> = lefts
+            .iter()
+            .zip(&scalars)
+            .map(|(x, s)| x.clone() * s)
+            .collect();
+        assert_eq!(products, expected_products);
+
+        assert_eq!(
+            Twin::<G>::scaled_multi_pairing(&lefts, &rights, &scalars, &Sequential),
+            Twin::<G>::multi_pairing(&products, &rights, &Sequential)
         );
     }
 }

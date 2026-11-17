@@ -213,6 +213,8 @@ pub trait Multiplicative:
 /// - `*=` agrees with `*`,
 /// - scalar multiplication satisfies `(a + b) * x = a * x + b * x`,
 /// - [`Space::msm`] satisfies `msm(points, scalars) = sum_i points[i] * scalars[i]`,
+/// - [`Space::mul_each`] multiplies each `elements[i]` that has a scalar by
+///   `scalars[i]`,
 /// - when `R: Multiplicative`, `((a * x) * y) = a * (x * y)`,
 /// - when `R: Ring`, `a * 1 = a` and `a * 0 = 0`.
 ///
@@ -242,6 +244,28 @@ pub trait Space<R>:
     /// For empty slices, the result should be [`Additive::zero`];
     fn msm(points: &[Self], scalars: &[R], _strategy: &impl Strategy) -> Self {
         msm_naive(points, scalars)
+    }
+
+    /// Multiplies `elements[i]` by `scalars[i]` in place, for each index `i`
+    /// that both slices have.
+    ///
+    /// Elements beyond the scalars are unchanged, and scalars beyond the
+    /// elements are ignored.
+    //
+    // The default runs the multiplications on `strategy`. An override can use
+    // batch instructions or share work across elements.
+    fn mul_each(elements: &mut [Self], scalars: &[R], strategy: &impl Strategy)
+    where
+        R: Sync,
+    {
+        // `Strategy` has no for-each operation, so this `fold` carries a `()`
+        // accumulator and only multiplies elements in place.
+        strategy.fold(
+            elements.iter_mut().zip(scalars),
+            || (),
+            |(), (element, scalar)| *element *= scalar,
+            |(), ()| (),
+        );
     }
 }
 
@@ -453,6 +477,10 @@ pub trait HashToGroup: CryptoGroup {
 /// implementations, which an implementation can override to share work across
 /// pairs, such as the single final exponentiation that a sum of Tate pairings
 /// needs.
+///
+/// [`Self::scaled_multi_pairing`] computes a sum of pairings, each multiplied by
+/// its own scalar. It runs faster when this trait is implemented on the group
+/// whose scalar multiplication is cheaper.
 pub trait PairingGroup: CryptoGroup {
     /// The group that this group pairs with.
     type Twin: CryptoGroup<Scalar = Self::Scalar>;
@@ -535,6 +563,55 @@ pub trait PairingGroup: CryptoGroup {
             },
         )
     }
+
+    /// Returns the sum of `scalars[i] * (lefts[i] o rights[i])` over each index
+    /// `i`, or zero if the slices are empty.
+    ///
+    /// With a random scalar for each pairing equation, the sum checks all the
+    /// equations at once, as batch verification does. Callers must not pass
+    /// secret scalars, because an implementation may run in time that depends
+    /// on them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lefts`, `rights`, and `scalars` differ in length.
+    //
+    // The default multiplies `lefts` by the scalars with `Space::mul_each`, then
+    // calls `multi_pairing`. Bilinearity lets the scalars multiply either side
+    // of each pairing, and `lefts` is the cheaper side when the trait is
+    // implemented on the group whose scalar multiplication is cheaper.
+    //
+    // Implementations should not need to override this method. Its cost lies in
+    // the scalar multiplications and the multi-pairing, which implementations
+    // speed up by overriding `Space::mul_each` and `multi_pairing`. A kernel
+    // that fused the two steps would save only one pass over the scaled copies.
+    //
+    // The bound on `Self::Twin` lets an implementation multiply `rights` instead,
+    // when the twin is the cheaper side.
+    fn scaled_multi_pairing<R: Sync>(
+        lefts: &[Self],
+        rights: &[Self::Twin],
+        scalars: &[R],
+        strategy: &impl Strategy,
+    ) -> Self::Target
+    where
+        Self: Space<R>,
+        Self::Twin: Space<R>,
+    {
+        assert_eq!(
+            lefts.len(),
+            rights.len(),
+            "lefts and rights must have the same length"
+        );
+        assert_eq!(
+            lefts.len(),
+            scalars.len(),
+            "lefts and scalars must have the same length"
+        );
+        let mut scaled = lefts.to_vec();
+        Self::mul_each(&mut scaled, scalars, strategy);
+        Self::multi_pairing(&scaled, rights, strategy)
+    }
 }
 
 /// An element of the group that `G` pairs with, as a [`PairingGroup`] whose
@@ -568,6 +645,17 @@ impl<G: PairingGroup> Twin<G> {
         // The pointer and length therefore describe `twins.len()` initialized
         // `G::Twin` values, borrowed for the lifetime of `twins`.
         unsafe { core::slice::from_raw_parts(twins.as_ptr().cast(), twins.len()) }
+    }
+
+    /// Returns `twins` as a mutable slice of the elements they wrap, without
+    /// copying.
+    const fn as_inner_slice_mut(twins: &mut [Self]) -> &mut [G::Twin] {
+        // SAFETY: `Twin<G>` is `#[repr(transparent)]` over its only field, of type
+        // `G::Twin`, so both types have the same size, alignment, and valid values.
+        // The pointer and length therefore describe `twins.len()` initialized
+        // `G::Twin` values. The result reborrows `twins` exclusively for its
+        // lifetime, and every `G::Twin` written through it is a valid `Twin<G>`.
+        unsafe { core::slice::from_raw_parts_mut(twins.as_mut_ptr().cast(), twins.len()) }
     }
 }
 
@@ -625,27 +713,43 @@ impl<G: PairingGroup> Additive for Twin<G> {
     }
 }
 
-impl<'a, G: PairingGroup> Mul<&'a G::Scalar> for Twin<G> {
+impl<'a, G: PairingGroup, R> Mul<&'a R> for Twin<G>
+where
+    G::Twin: Space<R>,
+{
     type Output = Self;
 
-    fn mul(self, rhs: &'a G::Scalar) -> Self::Output {
+    fn mul(self, rhs: &'a R) -> Self::Output {
         Self(self.0 * rhs)
     }
 }
 
-impl<'a, G: PairingGroup> MulAssign<&'a G::Scalar> for Twin<G> {
-    fn mul_assign(&mut self, rhs: &'a G::Scalar) {
+impl<'a, G: PairingGroup, R> MulAssign<&'a R> for Twin<G>
+where
+    G::Twin: Space<R>,
+{
+    fn mul_assign(&mut self, rhs: &'a R) {
         self.0 *= rhs;
     }
 }
 
-impl<G: PairingGroup> Space<G::Scalar> for Twin<G> {
-    fn msm(points: &[Self], scalars: &[G::Scalar], strategy: &impl Strategy) -> Self {
+impl<G: PairingGroup, R> Space<R> for Twin<G>
+where
+    G::Twin: Space<R>,
+{
+    fn msm(points: &[Self], scalars: &[R], strategy: &impl Strategy) -> Self {
         Self(G::Twin::msm(
             Self::as_inner_slice(points),
             scalars,
             strategy,
         ))
+    }
+
+    fn mul_each(elements: &mut [Self], scalars: &[R], strategy: &impl Strategy)
+    where
+        R: Sync,
+    {
+        G::Twin::mul_each(Self::as_inner_slice_mut(elements), scalars, strategy);
     }
 }
 
@@ -673,6 +777,35 @@ impl<G: PairingGroup> PairingGroup for Twin<G> {
 
     fn multi_pairing(lefts: &[Self], rights: &[G], strategy: &impl Strategy) -> G::Target {
         G::multi_pairing(rights, Self::as_inner_slice(lefts), strategy)
+    }
+
+    // `G` is the cheaper side by convention, so this override multiplies `rights`
+    // and passes both slices to `G` in the other order. It cannot delegate to
+    // `G::scaled_multi_pairing`, because that call needs `G::Twin: Space<R>`,
+    // which the compiler does not infer from `Twin<G>: Space<R>`.
+    fn scaled_multi_pairing<R: Sync>(
+        lefts: &[Self],
+        rights: &[G],
+        scalars: &[R],
+        strategy: &impl Strategy,
+    ) -> G::Target
+    where
+        Self: Space<R>,
+        G: Space<R>,
+    {
+        assert_eq!(
+            lefts.len(),
+            rights.len(),
+            "lefts and rights must have the same length"
+        );
+        assert_eq!(
+            lefts.len(),
+            scalars.len(),
+            "lefts and scalars must have the same length"
+        );
+        let mut scaled = rights.to_vec();
+        G::mul_each(&mut scaled, scalars, strategy);
+        G::multi_pairing(&scaled, Self::as_inner_slice(lefts), strategy)
     }
 }
 
@@ -872,10 +1005,29 @@ pub mod test_suites {
         );
     }
 
+    fn check_mul_each_eq_naive<R: Sync, K: Space<R>>(points: &[K], scalars: &[R]) {
+        use commonware_parallel::Sequential;
+        // Points without a scalar keep their value.
+        let expected: Vec<K> = points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| scalars.get(i).map_or_else(|| p.clone(), |s| p.clone() * s))
+            .collect();
+        let mut products = points.to_vec();
+        K::mul_each(&mut products, scalars, &Sequential);
+        assert_eq!(
+            products, expected,
+            "mul_each does not match multiplying each point"
+        );
+    }
+
     /// Fuzz the [`Space`] trait properties, assuming nothing about the scalar `R`.
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
-    pub fn fuzz_space<R: Debug + for<'a> Arbitrary<'a>, K: Space<R> + for<'a> Arbitrary<'a>>(
+    pub fn fuzz_space<
+        R: Debug + Sync + for<'a> Arbitrary<'a>,
+        K: Space<R> + for<'a> Arbitrary<'a>,
+    >(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
         let a: K = u.arbitrary()?;
@@ -886,6 +1038,10 @@ pub mod test_suites {
         check_scale_assign(a, c);
         let (points, scalars): (Vec<K>, Vec<R>) = u.arbitrary::<Vec<(K, R)>>()?.into_iter().unzip();
         check_msm_eq_naive(&points, &scalars);
+        // Draw the scalars separately, so the lengths can differ.
+        let points: Vec<K> = u.arbitrary()?;
+        let scalars: Vec<R> = u.arbitrary()?;
+        check_mul_each_eq_naive(&points, &scalars);
         Ok(())
     }
 
@@ -1029,11 +1185,31 @@ pub mod test_suites {
         );
     }
 
+    fn check_scaled_multi_pairing_eq_naive<G: PairingGroup>(
+        lefts: &[G],
+        rights: &[G::Twin],
+        scalars: &[G::Scalar],
+    ) {
+        use commonware_parallel::Sequential;
+        // Bilinearity lets the scalars multiply either side, so the expected sum
+        // multiplies the left elements.
+        let mut expected = G::Target::zero();
+        for ((a, x), s) in lefts.iter().zip(rights).zip(scalars) {
+            expected += &(a.clone() * s).pairing(x);
+        }
+        assert_eq!(
+            G::scaled_multi_pairing(lefts, rights, scalars, &Sequential),
+            expected,
+            "scaled_multi_pairing does not match the sum of scaled pairings"
+        );
+    }
+
     /// Checks the [`PairingGroup`] laws on arbitrary inputs.
     ///
     /// Each call runs one check, since pairings are expensive: that the pairing is
-    /// bilinear, or that [`PairingGroup::pairings`] or
-    /// [`PairingGroup::multi_pairing`] agrees with [`PairingGroup::pairing`].
+    /// bilinear, or that [`PairingGroup::pairings`],
+    /// [`PairingGroup::multi_pairing`], or [`PairingGroup::scaled_multi_pairing`]
+    /// agrees with [`PairingGroup::pairing`].
     ///
     /// It does not check that the pairing is non-degenerate. The [`Space`] suites
     /// cover [`PairingGroup::Twin`] and [`PairingGroup::Target`] as groups.
@@ -1043,7 +1219,7 @@ pub mod test_suites {
         G::Twin: for<'a> Arbitrary<'a>,
         G::Scalar: for<'a> Arbitrary<'a>,
     {
-        match u.int_in_range(0u8..=5)? {
+        match u.int_in_range(0u8..=6)? {
             0 => check_pairing_zero::<G>(u.arbitrary()?, u.arbitrary()?),
             1 => check_pairing_linear_left::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
             2 => check_pairing_linear_right::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
@@ -1053,10 +1229,23 @@ pub mod test_suites {
                     u.arbitrary::<Vec<_>>()?.into_iter().unzip();
                 check_pairings_eq_naive(&lefts, &rights);
             }
-            _ => {
+            5 => {
                 let (lefts, rights): (Vec<G>, Vec<G::Twin>) =
                     u.arbitrary::<Vec<_>>()?.into_iter().unzip();
                 check_multi_pairing_eq_naive(&lefts, &rights);
+            }
+            _ => {
+                let len = u.arbitrary_len::<(G, G::Twin, G::Scalar)>()?;
+                let lefts = (0..len)
+                    .map(|_| u.arbitrary())
+                    .collect::<arbitrary::Result<Vec<G>>>()?;
+                let rights = (0..len)
+                    .map(|_| u.arbitrary())
+                    .collect::<arbitrary::Result<Vec<G::Twin>>>()?;
+                let scalars = (0..len)
+                    .map(|_| u.arbitrary())
+                    .collect::<arbitrary::Result<Vec<G::Scalar>>>()?;
+                check_scaled_multi_pairing_eq_naive(&lefts, &rights, &scalars);
             }
         }
         Ok(())
