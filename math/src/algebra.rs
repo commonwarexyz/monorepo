@@ -438,6 +438,9 @@ pub trait HashToGroup: CryptoGroup {
 /// pairing is written `A o X` rather than the more familiar `e(A, X)`.
 /// The implementor is `G1`, [`Self::Twin`] is `G2`, and [`Self::Target`] is
 /// `GT`.
+/// To run code generic over a [`PairingGroup`] `G` with the two groups swapped,
+/// pass [`Twin<G>`] in place of `G`, as BLS signatures do when they choose which
+/// group holds the public keys.
 ///
 /// The pairing is bilinear:
 ///
@@ -531,6 +534,155 @@ pub trait PairingGroup: CryptoGroup {
                 a
             },
         )
+    }
+}
+
+/// An element of the group that `G` pairs with, as a [`PairingGroup`] whose
+/// twin is `G`.
+///
+/// [`Twin::new`] wraps an element `X` of `G::Twin`, and [`Twin::into_inner`]
+/// and [`AsRef`] return it. `Twin::new(X).pairing(&A)` returns
+/// `A.pairing(&X)`. `Twin<Twin<G>>` wraps `G` rather than being `G`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Twin<G: PairingGroup>(G::Twin);
+
+// Generic `From` impls cannot replace these methods. `From<G::Twin> for Twin<G>`
+// conflicts with core's `From<T> for T`, because `G::Twin` may be `Twin<G>`, and
+// `From<Twin<G>> for G::Twin` breaks the orphan rule.
+impl<G: PairingGroup> Twin<G> {
+    /// Wraps `x`.
+    pub const fn new(x: G::Twin) -> Self {
+        Self(x)
+    }
+
+    /// Returns the wrapped element.
+    pub fn into_inner(self) -> G::Twin {
+        self.0
+    }
+
+    /// Returns `twins` as a slice of the elements they wrap, without copying.
+    const fn as_inner_slice(twins: &[Self]) -> &[G::Twin] {
+        // SAFETY: `Twin<G>` is `#[repr(transparent)]` over its only field, of type
+        // `G::Twin`, so both types have the same size, alignment, and valid values.
+        // The pointer and length therefore describe `twins.len()` initialized
+        // `G::Twin` values, borrowed for the lifetime of `twins`.
+        unsafe { core::slice::from_raw_parts(twins.as_ptr().cast(), twins.len()) }
+    }
+}
+
+impl<G: PairingGroup> AsRef<G::Twin> for Twin<G> {
+    fn as_ref(&self) -> &G::Twin {
+        &self.0
+    }
+}
+
+impl<G: PairingGroup> Object for Twin<G> {}
+
+impl<'a, G: PairingGroup> Add<&'a Self> for Twin<G> {
+    type Output = Self;
+
+    fn add(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 + &rhs.0)
+    }
+}
+
+impl<'a, G: PairingGroup> AddAssign<&'a Self> for Twin<G> {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.0 += &rhs.0;
+    }
+}
+
+impl<'a, G: PairingGroup> Sub<&'a Self> for Twin<G> {
+    type Output = Self;
+
+    fn sub(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 - &rhs.0)
+    }
+}
+
+impl<'a, G: PairingGroup> SubAssign<&'a Self> for Twin<G> {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        self.0 -= &rhs.0;
+    }
+}
+
+impl<G: PairingGroup> Neg for Twin<G> {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self(-self.0)
+    }
+}
+
+impl<G: PairingGroup> Additive for Twin<G> {
+    fn zero() -> Self {
+        Self(G::Twin::zero())
+    }
+
+    fn double(&mut self) {
+        self.0.double();
+    }
+}
+
+impl<'a, G: PairingGroup> Mul<&'a G::Scalar> for Twin<G> {
+    type Output = Self;
+
+    fn mul(self, rhs: &'a G::Scalar) -> Self::Output {
+        Self(self.0 * rhs)
+    }
+}
+
+impl<'a, G: PairingGroup> MulAssign<&'a G::Scalar> for Twin<G> {
+    fn mul_assign(&mut self, rhs: &'a G::Scalar) {
+        self.0 *= rhs;
+    }
+}
+
+impl<G: PairingGroup> Space<G::Scalar> for Twin<G> {
+    fn msm(points: &[Self], scalars: &[G::Scalar], strategy: &impl Strategy) -> Self {
+        Self(G::Twin::msm(
+            Self::as_inner_slice(points),
+            scalars,
+            strategy,
+        ))
+    }
+}
+
+impl<G: PairingGroup> CryptoGroup for Twin<G> {
+    type Scalar = G::Scalar;
+
+    fn generator() -> Self {
+        Self(G::Twin::generator())
+    }
+}
+
+// The batch methods pass their slices to `G`'s in the other order, so they use
+// any faster versions that `G` overrides them with, without copying elements.
+impl<G: PairingGroup> PairingGroup for Twin<G> {
+    type Twin = G;
+    type Target = G::Target;
+
+    fn pairing(&self, other: &G) -> G::Target {
+        other.pairing(&self.0)
+    }
+
+    fn pairings(lefts: &[Self], rights: &[G], outputs: &mut [G::Target], strategy: &impl Strategy) {
+        G::pairings(rights, Self::as_inner_slice(lefts), outputs, strategy);
+    }
+
+    fn multi_pairing(lefts: &[Self], rights: &[G], strategy: &impl Strategy) -> G::Target {
+        G::multi_pairing(rights, Self::as_inner_slice(lefts), strategy)
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl<'a, G: PairingGroup> arbitrary::Arbitrary<'a> for Twin<G>
+where
+    G::Twin: arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(u.arbitrary()?))
     }
 }
 
