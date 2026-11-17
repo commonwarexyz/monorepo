@@ -872,8 +872,8 @@ impl crate::Blob for Blob {
         });
 
         // A worker that closed before accepting the request leaves the mutation uncovered. One
-        // that accepted it settles the mutation at the CQE during shutdown. Name every failure
-        // like the caller sees it, keeping the kernel's errno.
+        // that accepted it settles the mutation at the CQE during shutdown. Report every failure
+        // as `BlobResizeFailed`, keeping the kernel's errno when there is one.
         result.map_err(|error| {
             let (partition, name) = &self.shared.key;
             let error = match error {
