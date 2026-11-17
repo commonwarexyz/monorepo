@@ -352,7 +352,7 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
+    use commonware_math::algebra::{CryptoGroup, Field as _, One, Random, Space};
     use commonware_parallel::{Sequential, mocks::explore};
     use commonware_utils::{Faults, N3f1, NZU32, non_empty, test_rng, union_unique};
 

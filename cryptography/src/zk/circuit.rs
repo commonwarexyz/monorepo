@@ -51,7 +51,7 @@
 //! with no error when building. Generic code relying on `inv(0) = 0` will
 //! produce circuits that can never be satisfied.
 
-use commonware_math::algebra::{Additive, Field, Multiplicative, Object, Ring};
+use commonware_math::algebra::{Additive, Field, Multiplicative, Object, One, Ring};
 use commonware_utils::sync::Mutex;
 use std::{
     fmt,
@@ -343,7 +343,7 @@ enum VarInner<'ctx, F> {
 /// [`commonware_math`], so code written against [`Ring`] or [`Field`] runs
 /// unchanged over circuit values.
 ///
-/// Values produced by [`Additive::zero`] and [`Ring::one`] are "native":
+/// Values produced by [`Additive::zero`] and [`One::one`] are "native":
 /// they live outside the circuit until combined with a circuit value. This
 /// is visible in two places: equality compares what vars refer to, not what
 /// they evaluate to (a native var is never equal to a circuit-backed var,
@@ -404,7 +404,7 @@ impl<'ctx, F> Var<'ctx, F> {
 
     /// Create a "native" var holding a value outside any circuit.
     ///
-    /// Like the vars produced by [`Additive::zero`] and [`Ring::one`], a
+    /// Like the vars produced by [`Additive::zero`] and [`One::one`], a
     /// native var lives outside the circuit until it is combined with a
     /// circuit-backed var, at which point it is folded in as a constant. This
     /// is convenient for fixed constants (such as curve parameters) that are
@@ -623,13 +623,15 @@ impl<'ctx, F: Ring> Additive for Var<'ctx, F> {
 
 impl<'ctx, F: Multiplicative> Multiplicative for Var<'ctx, F> {}
 
-impl<'ctx, F: Ring> Ring for Var<'ctx, F> {
+impl<'ctx, F: One> One for Var<'ctx, F> {
     fn one() -> Self {
         Self {
             inner: VarInner::Native(F::one()),
         }
     }
 }
+
+impl<'ctx, F: Ring> Ring for Var<'ctx, F> {}
 
 /// Unlike the [`Field::inv`] contract, inverting a circuit-backed zero does
 /// not produce zero: it adds an unsatisfiable constraint to the circuit.

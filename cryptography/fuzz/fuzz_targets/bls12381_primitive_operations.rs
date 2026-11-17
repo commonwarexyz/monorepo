@@ -8,7 +8,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
-    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
+    algebra::{Additive, CryptoGroup, Field, HashToGroup, One, Space},
     poly::Poly,
 };
 use commonware_parallel::Sequential;

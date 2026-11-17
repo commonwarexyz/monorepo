@@ -1290,7 +1290,7 @@ pub fn lagrange_coefficients<F: FieldNTT>(
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
-    use crate::{algebra::Ring, fields::goldilocks::F};
+    use crate::{algebra::One, fields::goldilocks::F};
     use arbitrary::{Arbitrary, Unstructured};
 
     fn arb_polynomial_vector(
@@ -1473,7 +1473,7 @@ pub mod fuzz {
 mod test {
     use super::*;
     use crate::{
-        algebra::{Random, Ring},
+        algebra::{One, Random},
         fields::goldilocks::F,
     };
     use commonware_utils::test_rng;

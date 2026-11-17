@@ -9,7 +9,7 @@ use commonware_codec::{
 };
 use commonware_macros::stability;
 #[stability(ALPHA)]
-use commonware_math::algebra::{FieldNTT, Ring};
+use commonware_math::algebra::{FieldNTT, One, Ring};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
 use commonware_utils::{NZU32, Participant, Widen, ordered::Set};

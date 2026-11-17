@@ -370,7 +370,7 @@ use commonware_codec::{
     Write, mode, modes,
 };
 use commonware_math::{
-    algebra::{Additive, CryptoGroup, Random, Ring as _},
+    algebra::{Additive, CryptoGroup, One as _, Random},
     poly::{Interpolator, Poly},
 };
 use commonware_parallel::{Sequential, Strategy};

@@ -260,26 +260,31 @@ pub fn msm_naive<R, K: Space<R>>(points: &[K], scalars: &[R]) -> K {
 
 impl<R: Additive + Multiplicative> Space<R> for R {}
 
+/// A type with a neutral element for multiplication.
+///
+/// For a [`Ring`], [`One::one`] satisfies `1 * a = a`. A scalar type `R` that is not a
+/// ring but acts on a [`Space<R>`], such as a short random challenge, satisfies `k * 1 = k`
+/// for every element `k` of the space.
+pub trait One {
+    /// The neutral element for multiplication.
+    fn one() -> Self;
+}
+
 /// An instance of a mathematical Ring.
 ///
-/// This combines [`Additive`] and [`Multiplicative`], and introduces a
-/// neutral element for multiplication, [`Ring::one`].
+/// This combines [`Additive`] and [`Multiplicative`] with a neutral element
+/// for multiplication, [`One::one`].
 ///
 /// # Properties
 ///
 /// Implementations are expected to be commutative rings:
 ///
 /// - [`Additive`] and [`Multiplicative`] laws both hold,
-/// - [`Ring::one`] satisfies `1 * a = a`,
+/// - [`One::one`] satisfies `1 * a = a`,
 /// - multiplication satisfies `(a + b) * c = a * c + b * c`,
 /// - [`Ring::exp`] satisfies `a.exp(&[]) = 1`,
 ///   `a.exp(&[1]) = a`, and `a.exp(m + n) = a.exp(m) * a.exp(n)`.
-pub trait Ring: Additive + Multiplicative {
-    /// The neutral element for multiplication.
-    ///
-    /// Multiplying by this element does nothing.
-    fn one() -> Self;
-
+pub trait Ring: Additive + Multiplicative + One {
     /// Exponentiate this number by a positive integer.
     ///
     /// To support arbitrary positive integers, we expect to see 64 bit limbs
@@ -310,7 +315,7 @@ pub trait Field: Ring {
     /// For [`Additive::zero`], this should return [`Additive::zero`].
     ///
     /// For any other element `x`, this should return an element `y` such that
-    /// `x * y` is equal to [`Ring::one`].
+    /// `x * y` is equal to [`One::one`].
     fn inv(&self) -> Self;
 }
 
@@ -672,7 +677,7 @@ pub mod test_suites {
     ///
     /// Takes arbitrary data and checks that algebraic laws hold.
     /// This also checks [`fuzz_space_multiplicative`] properties plus compatibility
-    /// with [`Ring::one()`] and [`Additive::zero()`].
+    /// with [`One::one()`] and [`Additive::zero()`].
     pub fn fuzz_space_ring<R: Ring + for<'a> Arbitrary<'a>, K: Space<R> + for<'a> Arbitrary<'a>>(
         u: &mut Unstructured<'_>,
     ) -> arbitrary::Result<()> {
