@@ -10,10 +10,23 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes = { workspace = true, features = ["std"] }
+commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
-commonware-utils.workspace = true
+commonware-utils = { workspace = true, features = ["arbitrary"] }
+futures.workspace = true
 libfuzzer-sys.workspace = true
+rand.workspace = true
+
+[features]
+default = []
+storage-differential = []
+iobuf = []
+runtime-all = [ "iobuf", "storage-differential" ]
+
+[lib]
+bench = false
 
 [[bin]]
 name = "buffer"
@@ -30,5 +43,19 @@ doc = false
 [[bin]]
 name = "blob_creation"
 path = "fuzz_targets/blob_creation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "storage_differential"
+path = "fuzz_targets/storage_differential.rs"
+required-features = ["storage-differential"]
+test = false
+doc = false
+
+[[bin]]
+name = "iobuf"
+path = "fuzz_targets/iobuf.rs"
+required-features = ["iobuf"]
 test = false
 doc = false
