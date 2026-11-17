@@ -1,10 +1,7 @@
 //! Registration, threshold material, and certificate verifiers of the BLS12-381 suites.
 
 use super::*;
-use commonware_cryptography::bls12381::primitives::{
-    group::Share,
-    ops::{self, sas},
-};
+use commonware_cryptography::bls12381::primitives::{group::Share, ops};
 use commonware_math::algebra::Additive;
 use commonware_utils::ordered::Set;
 use std::sync::Arc;
@@ -716,12 +713,6 @@ bls_family_tests!(multisig, bls12381, ops, |rng, identity, private| {
     bls12381::Roster::<Ed25519PublicKey, V>::proof_of_possession(NAMESPACE, identity, private)
 });
 
-bls_family_tests!(synchronized, bls12381_sas, sas, |rng, identity, private| {
-    bls12381_sas::Roster::<Ed25519PublicKey, V>::proof_of_knowledge(
-        rng, NAMESPACE, identity, private,
-    )
-});
-
 fn multisig_roster_rejects_rogue_and_zero_keys<V: Variant>() {
     let mut rng = TestRng::new(4_242);
     let (_, identities) = setting(2);
@@ -791,93 +782,4 @@ fn multisig_roster_rejects_rogue_and_zero_keys<V: Variant>() {
 fn multisig_roster_rejects_rogue_keys_for_both_variants() {
     multisig_roster_rejects_rogue_and_zero_keys::<MinPk>();
     multisig_roster_rejects_rogue_and_zero_keys::<MinSig>();
-}
-
-fn synchronized_roster_rejects_rogue_and_degenerate_keys<V: Variant>() {
-    let mut rng = TestRng::new(4_242);
-    let (_, identities) = setting(2);
-    let (honest_private, honest_public) = sas::keypair::<_, V>(&mut rng);
-    let (attacker_private, attacker_public) = sas::keypair::<_, V>(&mut rng);
-    let rogue_public = sas::PublicKey::<V>::new(
-        *attacker_public.x() - honest_public.x(),
-        *attacker_public.y() - honest_public.y(),
-    );
-
-    // Without a proof of knowledge, the attacker alone produces an aggregate over both keys.
-    let period = b"rogue-key-period";
-    let namespace = b"rogue-key-vector";
-    let message = b"same vote";
-    let claim = sas::Claim::<V> {
-        period,
-        signature: sas::sign_message::<V>(&attacker_private, period, namespace, message),
-        terms: vec![
-            sas::Term {
-                public: honest_public,
-                namespace,
-                message,
-            },
-            sas::Term {
-                public: rogue_public,
-                namespace,
-                message,
-            },
-        ],
-    };
-    assert!(sas::verify_claims(&mut rng, &[claim], &Sequential).is_empty());
-
-    // The attacker cannot prove knowledge of the rogue key's secrets.
-    let honest = (
-        identities[0].clone(),
-        honest_public,
-        bls12381_sas::Roster::<Ed25519PublicKey, V>::proof_of_knowledge(
-            &mut rng,
-            NAMESPACE,
-            &identities[0],
-            &honest_private,
-        ),
-    );
-    let attacker_proof = bls12381_sas::Roster::<Ed25519PublicKey, V>::proof_of_knowledge(
-        &mut rng,
-        NAMESPACE,
-        &identities[1],
-        &attacker_private,
-    );
-    assert_eq!(
-        bls12381_sas::Roster::<Ed25519PublicKey, V>::verify(
-            NAMESPACE,
-            2,
-            vec![
-                honest.clone(),
-                (identities[1].clone(), rogue_public, attacker_proof.clone()),
-            ],
-            &Sequential,
-        )
-        .unwrap_err(),
-        Error::ProofOfKnowledge
-    );
-    // Keys with a zero component are rejected before their proofs are checked.
-    for degenerate in [
-        sas::PublicKey::<V>::new(V::Public::zero(), *attacker_public.y()),
-        sas::PublicKey::<V>::new(*attacker_public.x(), V::Public::zero()),
-    ] {
-        assert_eq!(
-            bls12381_sas::Roster::<Ed25519PublicKey, V>::verify(
-                NAMESPACE,
-                2,
-                vec![
-                    honest.clone(),
-                    (identities[1].clone(), degenerate, attacker_proof.clone()),
-                ],
-                &Sequential,
-            )
-            .unwrap_err(),
-            Error::ProofOfKnowledge
-        );
-    }
-}
-
-#[test]
-fn roster_rejects_rogue_keys_for_both_variants() {
-    synchronized_roster_rejects_rogue_and_degenerate_keys::<MinPk>();
-    synchronized_roster_rejects_rogue_and_degenerate_keys::<MinSig>();
 }

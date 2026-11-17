@@ -2,7 +2,7 @@
 
 use super::common::{Fixture, MultimmitScheme, PARTICIPANTS, Workload, bench_strategies};
 use commonware_consensus::multimmit::{
-    mocks::{Bls, Fixture as Suite, Sas},
+    mocks::{Bls, Fixture as Suite},
     types::{Lqc, Vqc},
 };
 use commonware_cryptography::{
@@ -85,8 +85,6 @@ fn register<S: Suite>(c: &mut Criterion, suite: &str, variant: &str) {
 fn bench_aggregate(c: &mut Criterion) {
     register::<Bls<MinPk>>(c, "bls12381", "minpk");
     register::<Bls<MinSig>>(c, "bls12381", "minsig");
-    register::<Sas<MinPk>>(c, "bls12381_sas", "minpk");
-    register::<Sas<MinSig>>(c, "bls12381_sas", "minsig");
 }
 
 criterion_group! {

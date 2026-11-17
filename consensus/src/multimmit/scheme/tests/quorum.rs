@@ -227,10 +227,6 @@ bls_payments_test!(
     bls12381_runs_payment_epochs_only_with_aggregate_da,
     bls12381
 );
-bls_payments_test!(
-    bls12381_sas_runs_payment_epochs_only_with_aggregate_da,
-    bls12381_sas
-);
 
 /// Checks that an attributable suite forms receipts from exactly `n - f` votes, and that a receipt
 /// verifies as a certificate while a certificate below `n - f` signers is no receipt.
@@ -308,8 +304,6 @@ fn receipts_count_n_minus_f_signers<S: Suite>() {
 fn attributable_suites_form_receipts_from_n_minus_f_votes() {
     receipts_count_n_minus_f_signers::<Bls<MinPk, bls12381::Aggregate>>();
     receipts_count_n_minus_f_signers::<Bls<MinSig, bls12381::Aggregate>>();
-    receipts_count_n_minus_f_signers::<Sas<MinPk, bls12381::Aggregate>>();
-    receipts_count_n_minus_f_signers::<Sas<MinSig, bls12381::Aggregate>>();
     receipts_count_n_minus_f_signers::<Ed25519>();
     receipts_count_n_minus_f_signers::<Mock>();
 }
@@ -349,6 +343,4 @@ fn threshold_suites_form_no_receipts<S: Suite>() {
 fn threshold_suites_form_no_receipts_for_both_variants() {
     threshold_suites_form_no_receipts::<Bls<MinPk>>();
     threshold_suites_form_no_receipts::<Bls<MinSig>>();
-    threshold_suites_form_no_receipts::<Sas<MinPk>>();
-    threshold_suites_form_no_receipts::<Sas<MinSig>>();
 }

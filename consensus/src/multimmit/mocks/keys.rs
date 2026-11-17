@@ -9,7 +9,7 @@ use crate::{
         scheme::{
             Generic, Scheme,
             bls12381::{self, Aggregate, Threshold},
-            bls12381_sas, ed25519 as ed25519_suite,
+            ed25519 as ed25519_suite,
         },
         types::{BlockRef, CertificateId, ChainId, EpochGenesis, PathLimits},
     },
@@ -24,9 +24,6 @@ use std::sync::Arc;
 
 /// The BLS12-381 multisig suite over Ed25519 identities, with the DA role `R`.
 pub type Bls<V, R = Threshold> = bls12381::Scheme<ed25519::PublicKey, V, R>;
-
-/// The synchronized aggregate suite over Ed25519 identities, with the DA role `R`.
-pub type Sas<V, R = Threshold> = bls12381_sas::Scheme<ed25519::PublicKey, V, R>;
 
 /// The Ed25519 suite.
 pub type Ed25519 = ed25519_suite::Scheme;
@@ -69,30 +66,6 @@ impl<V: Variant> Fixture for Bls<V, Threshold> {
 }
 
 impl<V: Variant> Fixture for Bls<V, Aggregate> {
-    fn committee(
-        rng: &mut TestRng,
-        parameters: &Arc<Parameters>,
-        network_keys: &[ed25519::PrivateKey],
-    ) -> (Vec<Generic<Self>>, Generic<Self>) {
-        let dealt = Self::deal(rng, parameters, &identities(network_keys))
-            .expect("mock committee material is consistent");
-        (dealt.signers, dealt.verifier)
-    }
-}
-
-impl<V: Variant> Fixture for Sas<V, Threshold> {
-    fn committee(
-        rng: &mut TestRng,
-        parameters: &Arc<Parameters>,
-        network_keys: &[ed25519::PrivateKey],
-    ) -> (Vec<Generic<Self>>, Generic<Self>) {
-        let dealt = Self::deal(rng, parameters, &identities(network_keys))
-            .expect("mock committee material is consistent");
-        (dealt.signers, dealt.verifier)
-    }
-}
-
-impl<V: Variant> Fixture for Sas<V, Aggregate> {
     fn committee(
         rng: &mut TestRng,
         parameters: &Arc<Parameters>,

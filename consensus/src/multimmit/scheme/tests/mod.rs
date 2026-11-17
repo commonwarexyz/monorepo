@@ -10,10 +10,7 @@ macro_rules! for_each_suite {
     ($test:ident) => {{
         $test::<Bls<MinPk>>();
         $test::<Bls<MinSig>>();
-        $test::<Sas<MinPk>>();
-        $test::<Sas<MinSig>>();
         $test::<Bls<MinPk, bls12381::Aggregate>>();
-        $test::<Sas<MinSig, bls12381::Aggregate>>();
         $test::<Ed25519>();
         $test::<Mock>();
     }};
@@ -36,8 +33,8 @@ mod threshold;
 
 use super::{
     Available, DaCertificateOf, DaRecoveryError, Error, Generic, Namespace, NullifyFaults,
-    OrdinarySignature, OrdinarySubject, Period, Scheme, SignatureVerification, Verified, bls12381,
-    bls12381_sas, ed25519 as ed25519_suite,
+    OrdinarySignature, OrdinarySubject, Scheme, SignatureVerification, Verified, bls12381,
+    ed25519 as ed25519_suite,
 };
 use crate::{
     Epochable as _, Viewable as _,
@@ -48,7 +45,7 @@ use crate::{
         },
         config::{Parameters, Protocol},
         mocks::{
-            Bls, Committee, Ed25519, Fixture as Suite, Mock, Sas,
+            Bls, Committee, Ed25519, Fixture as Suite, Mock,
             keys::{self, digest},
         },
         types::{
@@ -66,7 +63,7 @@ use commonware_codec::{Decode, Encode, EncodeSize as _, FixedSize, Read, types::
 use commonware_cryptography::{
     Hasher, Sha256, Signer as _,
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    certificate::{self, Aggregator, Subject as _, Synchronized as _, Verifier},
+    certificate::{self, Aggregator, Subject as _, Verifier},
     ed25519::{PrivateKey as Ed25519PrivateKey, PublicKey as Ed25519PublicKey},
     sha256::Digest,
 };
