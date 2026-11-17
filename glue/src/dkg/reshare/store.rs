@@ -21,7 +21,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digestible, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
             Dealer as CryptoDealer, DealerLog, DealerMessageError as DkgDealerMessageError,
@@ -205,12 +205,15 @@ where
                 let cache = epochs.entry(epoch).or_default();
                 match event {
                     Event::Dealing(dealer, public) => {
-                        // An interrupted dealing can leave its public message
-                        // in the journal, so one dealer can have several. The
-                        // cache is keyed by dealer, so the last message
-                        // replaces the earlier ones. `append_dealing` ensures
-                        // the stored private half belongs to that message.
-                        let private = secret_store.get_dealing(epoch, &dealer).await;
+                        // A journaled message is restored only with the private
+                        // half that was received with it, because the secret
+                        // store finds that half by the digest of its public
+                        // message. One dealer can have several journaled
+                        // messages, because an interrupted dealing leaves its
+                        // public message behind.
+                        let private = secret_store
+                            .get_dealing(epoch, &dealer, public.digest())
+                            .await;
                         if let Some(private) = private {
                             cache.dealings.insert(dealer, (public, private));
                         }
@@ -367,16 +370,12 @@ where
         }
 
         // The public message is journaled and synced before the private half is
-        // stored, and replay restores a dealing only when it finds that half. A
-        // dealing interrupted before its private half is stored leaves at most
-        // its public message in the journal, and a later dealing from the same
-        // dealer journals its own message after that one.
-        //
-        // Once a private half is stored, the dealer is in the cache in this
-        // process and after every replay, so the check above returns before
-        // anything more is written for that dealer. The stored private half
-        // therefore belongs to the dealer's last journaled message, and the
-        // secret store is never asked to replace it.
+        // stored, so a dealing interrupted in between leaves only its public
+        // message, which replay skips. Once a private half is stored, the dealer
+        // is in the cache in this process and after every replay, so the check
+        // above returns before anything more is written for that dealer. The
+        // secret store is therefore asked to store at most one private half for
+        // each dealer and epoch.
         let event = Event::Dealing(dealer.clone(), public.clone());
         rebind(&mut self.events, |events| {
             append_synced(events, epoch, &event)
@@ -384,7 +383,7 @@ where
         .await
         .expect("failed to record reshare dealing");
         self.secret_store
-            .put_dealing(epoch, dealer.clone(), private.clone())
+            .put_dealing(epoch, dealer.clone(), public.digest(), private.clone())
             .await;
         self.cache(epoch).dealings.insert(dealer, (public, private));
         true
@@ -1360,6 +1359,54 @@ mod tests {
                 assert_eq!(replayed, Some(ack));
             }
         }
+    }
+
+    /// A private half stored with the digest of another public message is not restored with a
+    /// journaled message from the same dealer.
+    #[test]
+    fn replay_skips_private_half_of_another_dealing() {
+        let [first, second] = [2, 3].map(dealing);
+
+        // The first dealing stops before its private half is stored, so only its public message
+        // is journaled.
+        let secrets = MemorySecretStore::default();
+        let (_, ack, checkpoint) = handle_dealing(
+            deterministic::Runner::default(),
+            &secrets,
+            first,
+            Some(Interruption::SecretStore),
+        );
+        assert!(ack.is_none());
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            // The secret store holds the private half of a different dealing from the same
+            // dealer, as it would if a write that an earlier run of the player started were
+            // completed after the restart.
+            let signers = signers();
+            let (public, private) = second;
+            secrets.park_dealings(false);
+            secrets
+                .clone()
+                .put_dealing(
+                    Epoch::zero(),
+                    signers[0].public_key(),
+                    public.digest(),
+                    private,
+                )
+                .await;
+
+            // The restarted store restores no dealing, and the player resumes without one.
+            let store: TestStore<_> =
+                init_store(context.child("store"), "interrupted", secrets).await;
+            assert!(store.dealings(Epoch::zero()).is_empty());
+            store
+                .create_player::<PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    signers[1].clone(),
+                    reshare_info(&signers),
+                )
+                .expect("player must resume");
+        });
     }
 }
 

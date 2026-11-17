@@ -207,6 +207,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::DealerPrivMsg,
         primitives::{group::Share, variant::Variant},
     },
+    sha256,
     transcript::Summary,
 };
 use commonware_utils::ordered::Set;
@@ -288,18 +289,26 @@ pub trait SecretStore: Send + Sync + 'static {
     fn get_seed(&mut self, epoch: Epoch) -> impl Future<Output = Option<Summary>> + Send;
 
     /// Stores a private dealing received from `dealer` during `epoch`.
+    ///
+    /// `public`, the digest of the public message that `private` was received with,
+    /// distinguishes the dealings of one dealer, because a dealer can send several
+    /// dealings in an epoch and a private dealing is valid only with its own public
+    /// message.
     fn put_dealing<P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
+        public: sha256::Digest,
         private: DealerPrivMsg,
     ) -> impl Future<Output = ()> + Send;
 
-    /// Returns the private dealing received from `dealer` during `epoch`, if stored.
+    /// Returns the private dealing received from `dealer` during `epoch` with the public
+    /// message whose digest is `public`, if stored.
     fn get_dealing<P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
+        public: sha256::Digest,
     ) -> impl Future<Output = Option<DealerPrivMsg>> + Send;
 
     /// Prunes secrets older than `min`.
