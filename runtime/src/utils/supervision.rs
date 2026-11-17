@@ -153,10 +153,11 @@ impl Tree {
         }
 
         // Suspend every task in the subtree before aborting any of them. A
-        // suspended task stops polling its future without ending, so no task in
-        // the subtree is aborted, and none can observe another one's abort (a
-        // closed channel, a handle resolving to closed), before all of them
-        // stopped polling.
+        // suspended task stops polling its future without ending, so a task in
+        // the subtree can only observe another one's abort (a closed channel, a
+        // handle resolving to closed) in a poll it started before it was
+        // suspended. Tasks still see closed for other reasons, such as a spawn
+        // under a node this walk already closed.
         // The walk is iterative so deep chains do not exhaust the thread stack.
         // Each node's list was drained when it closed, so every live descendant
         // is visited once.

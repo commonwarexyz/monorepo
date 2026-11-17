@@ -9,8 +9,8 @@
 //! [AbortHandle::suspend] marks the state suspended instead: the wrapper stops polling its future
 //! but stays pending, so the task neither makes progress nor ends, until an abort follows. A
 //! closing supervision subtree suspends every task in it before it aborts any (see
-//! [super::supervision::Tree]), so no task in the subtree is aborted, and no other task can
-//! observe such an abort, while a task in the subtree still polls its future.
+//! [super::supervision::Tree]), so a task in the subtree can only observe another one's abort in
+//! a poll it started before it was suspended.
 //!
 //! Each poll of the wrapper checks the state, polls the future unless it is suspended and, if the
 //! wrapper stays pending, registers the poll's waker in the slot and checks the state again:
