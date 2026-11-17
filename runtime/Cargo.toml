@@ -67,9 +67,11 @@ opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
+
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
-commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-parallel = { workspace = true, features = ["test-utils"] }
 rstest.workspace = true
 serde_json.workspace = true
