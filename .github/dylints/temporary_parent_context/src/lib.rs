@@ -25,7 +25,7 @@ dylint_linting::declare_late_lint! {
     ///
     /// ### Known problems
     ///
-    /// The lint stays silent when the handle is used in the same statement
+    /// The lint stays silent when the spawn expression itself is used
     /// (awaited, passed to a function, pushed into a collection, or wrapped with
     /// `abort_on_drop`), since some of those uses keep the parent alive long
     /// enough. It also misses handles that always lose their task: one assigned
