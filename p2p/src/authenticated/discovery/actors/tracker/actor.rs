@@ -344,7 +344,7 @@ mod tests {
     }
 
     fn new_peer_mailbox() -> peer::Mailbox<PublicKey> {
-        let (mailbox, _receiver) = peer::Mailbox::new(crate::utils::mocks::Metrics, NZUsize!(1));
+        let (mailbox, _receiver, _) = peer::Mailbox::new(crate::utils::mocks::Metrics, NZUsize!(1));
         mailbox
     }
 
@@ -507,7 +507,7 @@ mod tests {
                 ..
             } = setup_actor(context.child("actor"), cfg_with_boot);
 
-            let (peer_mailbox, mut peer_receiver) =
+            let (peer_mailbox, mut peer_receiver, _) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let _reservation = connect_to_peer(&new_mailbox, &boot_pk, peer_mailbox).await;
             new_mailbox.construct(boot_pk.clone());
@@ -543,7 +543,7 @@ mod tests {
             oracle.track(0, Set::try_from([tracker_pk, pk1.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) =
+            let (peer_mailbox_pk1, mut peer_receiver_pk1, _) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let bit_vec_unknown_idx = types::BitVec {
                 index: 99,
@@ -576,17 +576,14 @@ mod tests {
             oracle.track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) =
+            let (peer_mailbox_pk1, _, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let _reservation = connect_to_peer(&mailbox, &pk1, peer_mailbox_pk1).await;
 
             crate::block_peer(&mut oracle, pk1.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(matches!(
-                peer_receiver_pk1.recv().await,
-                Some(peer::Message::Kill)
-            ));
+            assert!(matches!(killed.recv().await, Some(())));
 
             let dialable_peers = mailbox.dialable().await;
             assert!(!dialable_peers.peers.iter().any(|peer| peer == &pk1));
@@ -615,7 +612,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) =
+            let (peer_mailbox, mut peer_receiver, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let reservation = connect_to_peer(&mailbox, &peer1_pk, peer_mailbox.clone()).await;
             mailbox.construct(peer1_pk.clone());
@@ -629,10 +626,7 @@ mod tests {
 
             // Peer1 should be killed after losing tracked-set membership
             assert!(
-                matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(killed.recv().now_or_never(), Some(Some(()))),
                 "connected peer should be killed after losing tracked-set membership"
             );
             assert_eq!(reservation.metadata().public_key(), &peer1_pk);
@@ -669,7 +663,7 @@ mod tests {
             oracle.track(1, Set::try_from([tracker_pk, peer2_pk]).unwrap());
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) =
+            let (peer_mailbox, _, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             assert!(
                 mailbox
@@ -680,8 +674,8 @@ mod tests {
             );
             assert!(
                 !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
+                    killed.recv().now_or_never(),
+                    Some(Some(()))
                 ),
                 "discovery connect rejection is signaled by a missing greeting"
             );
@@ -717,7 +711,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) =
+            let (peer_mailbox, mut peer_receiver, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let reservation = connect_to_peer(&mailbox, &peer1_pk, peer_mailbox.clone()).await;
 
@@ -729,8 +723,8 @@ mod tests {
 
             assert!(
                 !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
+                    killed.recv().now_or_never(),
+                    Some(Some(()))
                 ),
                 "connected peer present in the new set should not be killed when the old set rolls off"
             );
@@ -766,7 +760,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) =
+            let (peer_mailbox, _, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let reservation = connect_to_peer(&mailbox, &peer_pk, peer_mailbox).await;
 
@@ -774,20 +768,19 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(
-                matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(killed.recv().now_or_never(), Some(Some(()))),
                 "connected peer should be killed when blocked"
+            );
+            assert_eq!(
+                killed.recv().now_or_never(),
+                Some(None),
+                "handle must be cleared by the first Block"
             );
 
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                !matches!(
-                    peer_receiver.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(killed.recv().now_or_never(), Some(None)),
                 "no kill after handle has been cleared"
             );
             assert_eq!(reservation.metadata().public_key(), &peer_pk);
@@ -872,7 +865,7 @@ mod tests {
             crate::block_peer(&mut oracle, pk1.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_pk1, mut peer_receiver_pk1) =
+            let (peer_mailbox_pk1, _, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             assert!(
                 mailbox
@@ -882,10 +875,7 @@ mod tests {
                 "blocked peer should not receive a greeting"
             );
             assert!(
-                !matches!(
-                    peer_receiver_pk1.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(killed.recv().now_or_never(), Some(Some(()))),
                 "connect rejection is signaled by a missing greeting"
             );
         });
@@ -941,7 +931,7 @@ mod tests {
             oracle.track(1, set1.clone());
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox_s1, mut peer_receiver_s1) =
+            let (peer_mailbox_s1, mut peer_receiver_s1, _) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             mailbox.peers(vec![pk2_info.clone()]);
             context.sleep(Duration::from_millis(10)).await;
@@ -1004,7 +994,7 @@ mod tests {
                 false,
             );
 
-            let (peer_mailbox_s1, mut peer_receiver_s1) =
+            let (peer_mailbox_s1, mut peer_receiver_s1, _) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let _r1 = connect_to_peer(&mailbox, &pk1, peer_mailbox_s1.clone()).await;
 
@@ -1290,7 +1280,7 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            let (peer_mailbox, mut peer_receiver) =
+            let (peer_mailbox, _, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let _reservation = connect_to_peer(&mailbox, &pk1, peer_mailbox).await;
             let invalid_bit_vec = types::BitVec {
@@ -1298,10 +1288,7 @@ mod tests {
                 bits: BitMap::ones(2),
             };
             mailbox.bit_vec(pk1.clone(), invalid_bit_vec);
-            assert!(matches!(
-                peer_receiver.recv().await,
-                Some(peer::Message::Kill)
-            ));
+            assert!(matches!(killed.recv().await, Some(())));
         });
     }
 
@@ -1323,7 +1310,7 @@ mod tests {
             let (_signer2, peer2_pk) = new_signer_and_pk(2);
 
             // --- Initial Connect for unauthorized peer ---
-            let (peer_mailbox1, mut peer_receiver1) =
+            let (peer_mailbox1, mut peer_receiver1, mut killed) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             assert!(
                 mailbox
@@ -1333,10 +1320,7 @@ mod tests {
                 "unauthorized peer should not receive a greeting"
             );
             assert!(
-                !matches!(
-                    peer_receiver1.recv().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(killed.recv().now_or_never(), Some(Some(()))),
                 "connect rejection is signaled by a missing greeting"
             );
 
@@ -1421,12 +1405,12 @@ mod tests {
 
             // Peer1 was only in set 0, which is now evicted.
             assert!(
-                matches!(peer_receiver1.recv().await, Some(peer::Message::Kill)),
+                matches!(killed.recv().await, Some(())),
                 "Peer1 should be killed after its only set was evicted"
             );
 
             // Peer2 is in set1 (still active)
-            let (peer_mailbox2, mut peer_receiver2) =
+            let (peer_mailbox2, mut peer_receiver2, _) =
                 peer::Mailbox::new(context.child("peer_mailbox"), NZUsize!(1));
             let _r2 = connect_to_peer(&mailbox, &peer2_pk, peer_mailbox2.clone()).await;
 

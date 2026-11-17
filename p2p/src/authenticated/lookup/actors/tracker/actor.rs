@@ -331,12 +331,12 @@ mod tests {
             let TestHarness { mailbox, .. } = setup_actor(context.child("actor"), cfg);
 
             let (_unauth_signer, unauth_pk) = new_signer_and_pk(1);
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::new();
 
             // Connect as listener
             let _ = mailbox.connect(unauth_pk.clone(), peer_mailbox);
             assert!(
-                matches!(peer_receiver.next().await, Some(peer::Message::Kill)),
+                matches!(peer_receiver.next().await, Some(())),
                 "Unauthorized peer should be killed on Connect"
             );
         });
@@ -801,25 +801,27 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone(), peer_addr.ip()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(peer_pk.clone(), peer_mailbox);
 
-            // 3) Block it → should see exactly one Kill
+            // 3) Block it -> should see exactly one kill
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                matches!(peer_rx.next().await, Some(())),
                 "connected peer must be killed on first Block"
             );
+            assert_eq!(
+                peer_rx.next().now_or_never(),
+                Some(None),
+                "handle must be cleared by the first Block"
+            );
 
-            // 4) Block again → mailbox was removed, so no new Kill
+            // 4) Block again -> mailbox was removed, so no new kill
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                !matches!(
-                    peer_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                matches!(peer_rx.next().now_or_never(), Some(None)),
                 "no kill after handle has been cleared"
             );
         });
@@ -869,7 +871,7 @@ mod tests {
             let reservation = mailbox.listen(pk_1.clone(), addr_1.ip()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk_1.clone(), peer_mailbox);
 
             // Register another set which doesn't include first peer
@@ -884,9 +886,9 @@ mod tests {
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
 
-            // The first peer should have received a kill message because its
-            // peer set was removed when `tracked_peer_sets` is 1.
-            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)),)
+            // The first peer should have been killed because its peer set was removed when
+            // `tracked_peer_sets` is 1.
+            assert!(matches!(peer_rx.next().await, Some(())),)
         });
     }
 
@@ -920,7 +922,7 @@ mod tests {
                 .listen(pk_1.clone(), addr_1.ip())
                 .await
                 .expect("peer should reserve");
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk_1.clone(), peer_mailbox);
 
             oracle.track(
@@ -936,7 +938,7 @@ mod tests {
             assert!(registered_ips.contains(&addr_2.ip()));
 
             assert!(
-                !matches!(peer_rx.next().now_or_never(), Some(Some(peer::Message::Kill))),
+                peer_rx.next().now_or_never().is_none(),
                 "connected peer present in the new set should not be killed when the old set rolls off"
             );
             assert_eq!(reservation.metadata().public_key(), &pk_1);
@@ -983,10 +985,10 @@ mod tests {
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk_1.clone(), peer_mailbox);
             assert!(
-                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                matches!(peer_rx.next().await, Some(())),
                 "connect rejection is signaled by killing the peer"
             );
         });
@@ -1029,10 +1031,10 @@ mod tests {
             assert!(!registered_ips.contains(&addr_a.ip()));
             assert!(registered_ips.contains(&addr_b.ip()));
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk.clone(), peer_mailbox);
             assert!(
-                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                matches!(peer_rx.next().await, Some(())),
                 "connect rejection is signaled by killing the peer"
             );
         });
@@ -1071,10 +1073,10 @@ mod tests {
             assert!(!registered_ips.contains(&addr_a.ip()));
             assert!(registered_ips.contains(&addr_b.ip()));
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk.clone(), peer_mailbox);
             assert!(
-                matches!(peer_rx.next().await, Some(peer::Message::Kill)),
+                matches!(peer_rx.next().await, Some(())),
                 "connect rejection is signaled by killing the peer"
             );
         });
@@ -1301,14 +1303,14 @@ mod tests {
             let reservation = mailbox.listen(pk.clone(), addr_1.ip()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk.clone(), peer_mailbox);
 
             // Update address - should kill the connection
             oracle.overwrite([(pk.clone(), addr_2.into())].try_into().unwrap());
 
-            // Peer should receive kill message
-            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)));
+            // Peer should be killed
+            assert!(matches!(peer_rx.next().await, Some(())));
         });
     }
 
@@ -1339,7 +1341,7 @@ mod tests {
             let reservation = mailbox.listen(pk.clone(), addr_a.ip()).await;
             assert!(reservation.is_some());
 
-            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (peer_mailbox, mut peer_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk.clone(), peer_mailbox);
 
             // Register new peer set with same peer at address B
@@ -1348,8 +1350,8 @@ mod tests {
                 Map::<_, crate::Address>::try_from([(pk.clone(), addr_b.into())]).unwrap(),
             );
 
-            // Peer should receive Kill message (connection severed due to address change)
-            assert!(matches!(peer_rx.next().await, Some(peer::Message::Kill)));
+            // Peer should be killed (connection severed due to address change)
+            assert!(matches!(peer_rx.next().await, Some(())));
 
             // Verify listenable IPs updated to new address
             let registered_ips = listener_receiver.next().await.unwrap();
@@ -1391,7 +1393,7 @@ mod tests {
             // Establish connection to pk_tracked
             let reservation = mailbox.listen(pk_tracked.clone(), addr_1.ip()).await;
             assert!(reservation.is_some());
-            let (tracked_mailbox, mut tracked_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (tracked_mailbox, mut tracked_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk_tracked.clone(), tracked_mailbox);
 
             // Establish connection to pk_unchanged
@@ -1399,7 +1401,7 @@ mod tests {
                 .listen(pk_unchanged.clone(), addr_unchanged.ip())
                 .await;
             assert!(reservation.is_some());
-            let (unchanged_mailbox, mut unchanged_rx) = peer::Mailbox::new(NZUsize!(1));
+            let (unchanged_mailbox, mut unchanged_rx) = peer::Mailbox::new();
             let _ = mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);
 
             // Call overwrite with mix of tracked+changed, tracked+unchanged, and unknown peers
@@ -1414,14 +1416,11 @@ mod tests {
             );
 
             // Only tracked+changed peer (pk_tracked) gets killed
-            assert!(matches!(tracked_rx.next().await, Some(peer::Message::Kill)));
+            assert!(matches!(tracked_rx.next().await, Some(())));
 
             // Unchanged peer should NOT receive kill - verify the receiver has no pending messages.
             assert!(
-                !matches!(
-                    unchanged_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                unchanged_rx.next().now_or_never().is_none(),
                 "Unchanged peer should not receive kill"
             );
         });
