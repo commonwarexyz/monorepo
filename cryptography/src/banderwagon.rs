@@ -8,8 +8,8 @@ use blst::blst_fr;
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
-    msm_naive,
+    Additive, CryptoGroup, Field, HashToField as _, HashToGroup, Multiplicative, Object, Random,
+    Ring, Space, msm_naive,
 };
 use commonware_parallel::Strategy;
 use core::{
@@ -777,7 +777,7 @@ impl HashToGroup for G {
         loop {
             data[counter_at..].copy_from_slice(&counter.to_be_bytes());
             // `Scalar::map` is RFC 9380 hash-to-field, giving a uniform abscissa.
-            if let Some(p) = Self::from_x(Scalar::map(domain_separator, &data)) {
+            if let Some(p) = Self::from_x(Scalar::hash_to_field(domain_separator, &data)) {
                 return p;
             }
             counter += 1;

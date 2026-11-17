@@ -94,7 +94,7 @@ use crate::{
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{Buf, Encode, EncodeSize, FixedSize, Read, ReadExt, Write};
-use commonware_math::algebra::{Additive, CryptoGroup, PairingGroup};
+use commonware_math::algebra::{Additive, CryptoGroup, HashToField as _, PairingGroup};
 use commonware_utils::sequence::FixedBytes;
 use rand_core::CryptoRng;
 use thiserror::Error;
@@ -196,7 +196,7 @@ mod hash {
         combined.extend_from_slice(message);
 
         // Map the combined bytes to a scalar via RFC9380 hash-to-field.
-        Scalar::map(DST, &combined)
+        Scalar::hash_to_field(DST, &combined)
     }
 
     /// H4: sigma -> Block

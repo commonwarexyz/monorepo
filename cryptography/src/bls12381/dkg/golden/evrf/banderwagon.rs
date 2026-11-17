@@ -45,7 +45,7 @@ use crate::{
     },
 };
 use commonware_codec::Encode;
-use commonware_math::algebra::{CryptoGroup, HashToGroup};
+use commonware_math::algebra::{CryptoGroup, HashToField as _, HashToGroup};
 use rand::rngs::StdRng;
 use std::sync::LazyLock;
 
@@ -56,7 +56,7 @@ const SECRET_WINDOW: usize = 4;
 const OUTPUT_WINDOW: usize = 3;
 
 /// The fixed field element mixing the two hashed generators into the output.
-static BETA: LazyLock<Scalar> = LazyLock::new(|| Scalar::map(BETA_DST, b""));
+static BETA: LazyLock<Scalar> = LazyLock::new(|| Scalar::hash_to_field(BETA_DST, b""));
 
 /// Derive the two independent generators `(t0, t1)` for a triple.
 ///

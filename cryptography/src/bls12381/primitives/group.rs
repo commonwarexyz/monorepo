@@ -40,8 +40,8 @@ use commonware_codec::{
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, PairingGroup,
-    Random, Ring, Space,
+    Additive, CryptoGroup, Field, FieldNTT, HashToField, HashToGroup, Multiplicative, Object,
+    PairingGroup, Random, Ring, Space,
 };
 use commonware_parallel::{Grid, Strategy};
 use commonware_utils::{Participant, Widen};
@@ -626,47 +626,6 @@ impl Scalar {
         Self(ret)
     }
 
-    /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
-    pub fn map(dst: &[u8], msg: &[u8]) -> Self {
-        // The BLS12-381 scalar field has a modulus of approximately 255 bits.
-        // According to RFC9380, when mapping to a field element, we need to
-        // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
-        // where p is the field modulus and k is the security parameter.
-        //
-        // For BLS12-381's scalar field:
-        // - log2(p) is about 255 bits
-        // - k = 128 bits (for 128-bit security)
-        // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
-        //
-        // These 48 bytes provide sufficient entropy to ensure uniform distribution
-        // in the scalar field after modular reduction, maintaining the security
-        // properties required by the hash-to-field construction.
-        const L: usize = 48;
-        let mut uniform_bytes = Zeroizing::new([0u8; L]);
-        // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
-        unsafe {
-            blst_expand_message_xmd(
-                uniform_bytes.as_mut_ptr(),
-                L,
-                msg.as_ptr(),
-                msg.len(),
-                dst.as_ptr(),
-                dst.len(),
-            );
-        }
-
-        // Transform expanded bytes with modular reduction
-        let mut fr = blst_fr::default();
-        // SAFETY: uniform_bytes is a valid 48-byte buffer.
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-
-        Self(fr)
-    }
-
     /// Creates a new scalar from the given limbs in little-endian representation.
     ///
     /// The limbs represent an integer `l[0] + l[1]*2^64 + l[2]*2^128 + l[3]*2^192`, which is then
@@ -980,6 +939,49 @@ impl Field for Scalar {
         // SAFETY: Input is non-zero (checked above); blst_fr_inverse is defined for non-zero.
         unsafe { blst_fr_inverse(&mut ret, &self.0) };
         Self(ret)
+    }
+}
+
+impl HashToField for Scalar {
+    /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
+    fn hash_to_field(domain_separator: &[u8], message: &[u8]) -> Self {
+        // The BLS12-381 scalar field has a modulus of approximately 255 bits.
+        // According to RFC9380, when mapping to a field element, we need to
+        // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
+        // where p is the field modulus and k is the security parameter.
+        //
+        // For BLS12-381's scalar field:
+        // - log2(p) is about 255 bits
+        // - k = 128 bits (for 128-bit security)
+        // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
+        //
+        // These 48 bytes provide sufficient entropy to ensure uniform distribution
+        // in the scalar field after modular reduction, maintaining the security
+        // properties required by the hash-to-field construction.
+        const L: usize = 48;
+        let mut uniform_bytes = Zeroizing::new([0u8; L]);
+        // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
+        unsafe {
+            blst_expand_message_xmd(
+                uniform_bytes.as_mut_ptr(),
+                L,
+                message.as_ptr(),
+                message.len(),
+                domain_separator.as_ptr(),
+                domain_separator.len(),
+            );
+        }
+
+        // Transform expanded bytes with modular reduction
+        let mut fr = blst_fr::default();
+        // SAFETY: uniform_bytes is a valid 48-byte buffer.
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
+            blst_fr_from_scalar(&mut fr, &scalar);
+        }
+
+        Self(fr)
     }
 }
 
@@ -2043,6 +2045,11 @@ mod tests {
     }
 
     #[test]
+    fn test_scalar_hash_to_field() {
+        minifuzz::test(test_suites::fuzz_hash_to_field::<Scalar>);
+    }
+
+    #[test]
     fn test_g1_as_space() {
         minifuzz::test(test_suites::fuzz_space_ring::<Scalar, G1>);
     }
@@ -2505,13 +2512,13 @@ mod tests {
         // Test 1: Basic functionality
         let msg = b"test message";
         let dst = b"TEST_DST";
-        let scalar1 = Scalar::map(dst, msg);
-        let scalar2 = Scalar::map(dst, msg);
+        let scalar1 = Scalar::hash_to_field(dst, msg);
+        let scalar2 = Scalar::hash_to_field(dst, msg);
         assert_eq!(scalar1, scalar2, "Same input should produce same output");
 
         // Test 2: Different messages produce different scalars
         let msg2 = b"different message";
-        let scalar3 = Scalar::map(dst, msg2);
+        let scalar3 = Scalar::hash_to_field(dst, msg2);
         assert_ne!(
             scalar1, scalar3,
             "Different messages should produce different scalars"
@@ -2519,7 +2526,7 @@ mod tests {
 
         // Test 3: Different DSTs produce different scalars
         let dst2 = b"DIFFERENT_DST";
-        let scalar4 = Scalar::map(dst2, msg);
+        let scalar4 = Scalar::hash_to_field(dst2, msg);
         assert_ne!(
             scalar1, scalar4,
             "Different DSTs should produce different scalars"
@@ -2527,7 +2534,7 @@ mod tests {
 
         // Test 4: Empty message
         let empty_msg = b"";
-        let scalar_empty = Scalar::map(dst, empty_msg);
+        let scalar_empty = Scalar::hash_to_field(dst, empty_msg);
         assert_ne!(
             scalar_empty,
             Scalar::zero(),
@@ -2536,7 +2543,7 @@ mod tests {
 
         // Test 5: Large message
         let large_msg = vec![0x42u8; 1000];
-        let scalar_large = Scalar::map(dst, &large_msg);
+        let scalar_large = Scalar::hash_to_field(dst, &large_msg);
         assert_ne!(
             scalar_large,
             Scalar::zero(),
