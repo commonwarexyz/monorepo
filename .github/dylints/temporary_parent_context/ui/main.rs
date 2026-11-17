@@ -1,7 +1,10 @@
 // aux-build:commonware_runtime.rs
+// aux-build:old_macros.rs
 // compile-flags: --edition=2024
-#![allow(unused_must_use, dead_code)]
+#![feature(super_let)]
+#![allow(unused_must_use, dead_code, unused_braces)]
 extern crate commonware_runtime;
+extern crate old_macros;
 
 use commonware_runtime::{Spawner, Supervisor};
 use std::future::{Ready, ready};
@@ -164,6 +167,58 @@ fn single_child(holder: &Holder, ctx: &Context) {
 
 fn kept(ctx: &Context, kept: &mut Vec<Context>) {
     ctx.child("a").keep(kept).child("b").spawn(|| {});
+}
+
+// Temporaries and macros.
+
+/// Traits named like the runtime's, from another crate.
+mod local {
+    pub trait Supervisor: Sized {
+        fn child(&self, name: &'static str) -> Self;
+    }
+
+    pub trait Spawner: Sized {
+        fn spawn(self, f: impl FnOnce());
+    }
+
+    pub struct Local;
+
+    impl Supervisor for Local {
+        fn child(&self, _: &'static str) -> Self {
+            Self
+        }
+    }
+
+    impl Spawner for Local {
+        fn spawn(self, _: impl FnOnce()) {}
+    }
+
+    pub fn same_names(local: &Local) {
+        local.child("a").child("b").spawn(|| {});
+    }
+}
+
+macro_rules! chain {
+    ($ctx:expr) => {
+        $ctx.child("a").child("b").spawn(|| {})
+    };
+}
+
+#[rustfmt::skip]
+async fn temporaries(ctx: &Context) {
+    // Fires: an edition 2024 block drops the parent before `block_on` gets the handle.
+    block_on({ ctx.child("a").child("b").spawn(|| {}) });
+
+    // Silent: a block from an older edition and a `super let` keep their temporaries
+    // until the end of the statement.
+    old_macros::wrap!(ctx.child("a").child("b").spawn(|| {})).await;
+    block_on({
+        super let handle = ctx.child("a").child("b").spawn(|| {});
+        handle
+    });
+
+    // Silent: the chain comes from a macro.
+    chain!(ctx);
 }
 
 fn main() {}

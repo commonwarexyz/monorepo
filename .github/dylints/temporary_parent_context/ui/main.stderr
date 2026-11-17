@@ -1,5 +1,5 @@
 error: temporary parent context
-  --> $DIR/main.rs:92:5
+  --> $DIR/main.rs:95:5
    |
 LL |     ctx.child("a").child("b").spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -8,7 +8,7 @@ LL |     ctx.child("a").child("b").spawn(|| {});
    = note: `#[deny(temporary_parent_context)]` on by default
 
 error: temporary parent context
-  --> $DIR/main.rs:96:19
+  --> $DIR/main.rs:99:19
    |
 LL |     let _handle = ctx.child("a").child("b").spawn(|| {});
    |                   ^^^^^^^^^^^^^^
@@ -16,7 +16,7 @@ LL |     let _handle = ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:100:5
+  --> $DIR/main.rs:103:5
    |
 LL |     ctx.child("a").child("b").spawn(|| {})
    |     ^^^^^^^^^^^^^^
@@ -24,7 +24,7 @@ LL |     ctx.child("a").child("b").spawn(|| {})
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:104:12
+  --> $DIR/main.rs:107:12
    |
 LL |     return ctx.child("a").child("b").spawn(|| {});
    |            ^^^^^^^^^^^^^^
@@ -32,7 +32,7 @@ LL |     return ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:108:21
+  --> $DIR/main.rs:111:21
    |
 LL |     let _spawn = || ctx.child("a").child("b").spawn(|| {});
    |                     ^^^^^^^^^^^^^^
@@ -40,7 +40,7 @@ LL |     let _spawn = || ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:112:5
+  --> $DIR/main.rs:115:5
    |
 LL |     ctx.child("a")
    |     ^^^^^^^^^^^^^^
@@ -48,7 +48,7 @@ LL |     ctx.child("a")
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:116:5
+  --> $DIR/main.rs:119:5
    |
 LL |     ctx.child("a").shared(true).child("b").spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -56,7 +56,7 @@ LL |     ctx.child("a").shared(true).child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:117:5
+  --> $DIR/main.rs:120:5
    |
 LL |     ctx.child("a").child("b").dedicated().spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -64,7 +64,7 @@ LL |     ctx.child("a").child("b").dedicated().spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:121:5
+  --> $DIR/main.rs:124:5
    |
 LL |     ctx.child("a").child("b").spawn(|| {});
    |     ^^^^^^^^^^^^^^
@@ -72,12 +72,20 @@ LL |     ctx.child("a").child("b").spawn(|| {});
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
 error: temporary parent context
-  --> $DIR/main.rs:126:9
+  --> $DIR/main.rs:129:9
    |
 LL |         self.context.child("a").child("b").spawn(|| {});
    |         ^^^^^^^^^^^^^^^^^^^^^^^
    |
    = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
 
-error: aborting due to 10 previous errors
+error: temporary parent context
+  --> $DIR/main.rs:210:16
+   |
+LL |     block_on({ ctx.child("a").child("b").spawn(|| {}) });
+   |                ^^^^^^^^^^^^^^
+   |
+   = help: the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first
+
+error: aborting due to 11 previous errors
 
