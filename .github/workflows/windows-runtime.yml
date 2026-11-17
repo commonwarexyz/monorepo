@@ -27,4 +27,5 @@ jobs:
       - name: Lint runtime library
         run: cargo +stable clippy -p commonware-runtime --lib -- -D warnings
       - name: Exercise Windows positioned file operations
-        run: cargo +stable test -p commonware-runtime --lib storage::tokio::blob::windows_tests:: -- --nocapture
+        run: |
+          cargo +stable test -p commonware-runtime --lib storage::tokio::blob::windows_tests:: -- --nocapture

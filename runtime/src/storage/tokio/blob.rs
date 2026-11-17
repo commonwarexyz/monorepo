@@ -13,6 +13,10 @@ use commonware_utils::{
     sync::{Mutex, MutexGuard},
 };
 use futures::{StreamExt as _, stream};
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::fs::FileExt};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
@@ -26,10 +30,6 @@ use std::{
     },
 };
 use tokio::task;
-#[cfg(unix)]
-use std::os::{fd::AsRawFd, unix::fs::FileExt};
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
@@ -382,7 +382,9 @@ impl Blob {
                 Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()),
                 Ok(read) => {
                     buf = &mut buf[read..];
-                    offset = offset.checked_add(read as u64).ok_or(Error::OffsetOverflow)?;
+                    offset = offset
+                        .checked_add(read as u64)
+                        .ok_or(Error::OffsetOverflow)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error.into()),
@@ -398,7 +400,9 @@ impl Blob {
                 Ok(0) => return Err(Error::WriteFailed),
                 Ok(written) => {
                     buf = &buf[written..];
-                    offset = offset.checked_add(written as u64).ok_or(Error::OffsetOverflow)?;
+                    offset = offset
+                        .checked_add(written as u64)
+                        .ok_or(Error::OffsetOverflow)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error.into()),
@@ -432,7 +436,9 @@ impl Blob {
             Self::write_single_at(file, offset, &slices[0])?;
             let written = slices[0].len();
             bufs.advance(written);
-            offset = offset.checked_add(written as u64).ok_or(Error::OffsetOverflow)?;
+            offset = offset
+                .checked_add(written as u64)
+                .ok_or(Error::OffsetOverflow)?;
         }
         Ok(())
     }
@@ -2275,6 +2281,7 @@ mod tests {
         assert!(!cache.is_disabled(&supported));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cache_bypass_retry_decision() {
         let supported = AtomicBool::new(true);
@@ -2299,14 +2306,24 @@ mod tests {
 mod windows_tests {
     use super::Blob;
     use crate::{Buf as _, Error, IoBuf, IoBufs};
-    use std::{fs::OpenOptions, io::{Read as _, Seek as _, SeekFrom}};
+    use std::{
+        fs::OpenOptions,
+        io::{Read as _, Seek as _, SeekFrom},
+    };
 
     #[test]
     fn positioned_writes_preserve_other_ranges_and_exact_reads_report_eof() {
         let path = std::env::temp_dir().join(format!(
-            "commonware_windows_positioned_{}", std::process::id()
+            "commonware_windows_positioned_{}",
+            std::process::id()
         ));
-        let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
         Blob::write_single_at(&file, 0, b"0123456789").unwrap();
         Blob::write_single_at(&file, 3, b"ABC").unwrap();
         Blob::write_single_at(&file, 12, b"Z").unwrap();
@@ -2321,7 +2338,11 @@ mod windows_tests {
             Blob::read_exact_windows(&file, &mut range, 11),
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
         ));
-        let mut bufs = IoBufs::from(vec![IoBuf::from(b"abc"), IoBuf::from(b"d"), IoBuf::from(b"ef")]);
+        let mut bufs = IoBufs::from(vec![
+            IoBuf::from(b"abc"),
+            IoBuf::from(b"d"),
+            IoBuf::from(b"ef"),
+        ]);
         Blob::write_vectored_windows(&file, 1, &mut bufs, None).unwrap();
         assert!(!bufs.has_remaining());
         let mut vectored = [0; 6];
