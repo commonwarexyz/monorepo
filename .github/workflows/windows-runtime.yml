@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
       - name: Install Rust
-        run: rustup toolchain install 1.99.1 --profile minimal
+        run: rustup toolchain install 1.99.1 --profile minimal --component clippy
       - name: Check runtime library
         run: cargo +1.99.1 check -p commonware-runtime --lib
       - name: Lint runtime library
