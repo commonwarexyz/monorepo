@@ -13,9 +13,11 @@
 //!    producers stage their blocks with [`Mailbox::stage_block`], or run a consensus
 //!    [`Application`](crate::Application) as the engine's automaton through [`Inline`]; and
 //!    [`Service::relay`] gives the engine a [`Relay`] that broadcasts staged blocks.
-//! 5. The application receives one [`Update`] per block in [`OutputIndex`] order and acknowledges
-//!    each once it has durably applied it. An output's index is the sum of the producer-chain
-//!    heights once it is emitted, so it is the same on every node.
+//! 5. The application receives one [`Update::Block`] per block in [`OutputIndex`] order and
+//!    acknowledges each once it has durably applied it. An output's index is the sum of the
+//!    producer-chain heights once it is emitted, so it is the same on every node. Before that, it
+//!    receives an [`Update::Final`] for each final block in local custody (see
+//!    [Final blocks](#final-blocks)).
 //! 6. [`ServiceHandle::abort`] stops marshal; [`ServiceHandle::join`] returns its failure.
 //!
 //! # What authorizes delivery
@@ -45,6 +47,27 @@
 //!   that floor servable and every block the engine may still verify.
 //!
 //! A storage failure stops marshal; no store is used after a failed mutation.
+//!
+//! # Final blocks
+//!
+//! Finality precedes ordering: a leader finality fact names every chain's final block, and every
+//! block on its path is final, but a sweep can stop at a shortfall or an unsettled chain and order
+//! those blocks in a later view. So the application can start work early, such as warming storage,
+//! marshal reports each final block as an [`Update::Final`]:
+//!
+//! - Only blocks on the path below the newest final block a fact names on their chain are
+//!   reported, found by parent links through held headers. Blocks above it never are.
+//! - Each chain reports oldest first, from above what marshal already reported or delivered on it
+//!   in this run, once local custody holds the block. Marshal never fetches a block to report it;
+//!   a chain whose next block is missing waits until it is held.
+//! - Each chain hands out at most [`Limits::final_lookahead`] blocks at a time and keeps one
+//!   reference per that many heights on the way to a far final tip.
+//! - A block is never reported after its [`Update::Block`] in the same run, and reports never
+//!   hold back ordered delivery: their bodies are read from local custody into the same memory
+//!   delivery reads from, so a reported block is usually delivered without another read.
+//! - After a restart, each chain resumes above its height at the acknowledgement cursor, so a final
+//!   block not yet delivered in the new run may be reported again. After a floor install, it
+//!   resumes above the floor.
 //!
 //! [`OutputIndex`]: crate::types::OutputIndex
 
