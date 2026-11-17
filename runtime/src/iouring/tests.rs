@@ -602,15 +602,14 @@ where
 /// its predecessor polls, so each waits in the global queue alone. Each records
 /// `polls` when it starts, and the last sends the records through `done`.
 fn chain_foreign_spawns(
-    context: Arc<Context>,
+    context: Context,
     polls: Arc<AtomicUsize>,
     mut records: Vec<usize>,
     left: usize,
     done: oneshot::Sender<Vec<usize>>,
 ) {
     thread::spawn(move || {
-        // Each task keeps the chain's context, so dropping one task's share
-        // does not close the scope its successors run in.
+        // Each task hands the chain's context on, so its successors run in an open scope.
         context.child("foreign").spawn(move |_| async move {
             records.push(polls.load(Ordering::Relaxed));
             if left == 1 {
@@ -4212,13 +4211,7 @@ fn test_busy_worker_checks_the_global_queue_every_interval() {
             });
 
             let (done, records) = oneshot::channel();
-            chain_foreign_spawns(
-                Arc::new(context.child("chain")),
-                polls,
-                Vec::new(),
-                CHAIN,
-                done,
-            );
+            chain_foreign_spawns(context.child("chain"), polls, Vec::new(), CHAIN, done);
             let records = records.await.unwrap();
             stop.store(true, Ordering::Relaxed);
             yielder.await.unwrap();
