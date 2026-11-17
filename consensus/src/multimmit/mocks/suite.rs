@@ -25,8 +25,6 @@
 //!   and the limits derived from them differ from every real suite.
 //! - Certificate uniqueness: as with Ed25519, certificates over one subject from different signer
 //!   sets differ, unlike the threshold certificates of the BLS12-381 suites.
-//! - Periods: signatures ignore [`Synchronized`](commonware_cryptography::certificate::Synchronized)
-//!   periods.
 //! - Keys: there are no key pairs or registration proofs, so roster checks never run.
 //! - Cryptographic cost: verification is a ledger lookup, and batches verify item by item.
 //! - Persistence: ledgers live in memory, so artifacts another process stored never verify.

@@ -3,7 +3,7 @@
 use crate::{
     multimmit::{
         fuzz::ByteSchedule,
-        mocks::{Bls, Committee, Ed25519, Fixture, Sas},
+        mocks::{Bls, Committee, Ed25519, Fixture},
         scheme::Verified,
         types::{
             Artifact, DigestedLeader, Extension, LeaderBlock, Lqc, PathLimits, Position,
@@ -30,18 +30,14 @@ fn committee<S: Fixture>() -> Committee<S> {
 thread_local! {
     static BLS_MIN_PK: Committee<Bls<MinPk>> = committee();
     static BLS_MIN_SIG: Committee<Bls<MinSig>> = committee();
-    static SAS_MIN_PK: Committee<Sas<MinPk>> = committee();
-    static SAS_MIN_SIG: Committee<Sas<MinSig>> = committee();
     static ED25519: Committee<Ed25519> = committee();
 }
 
 /// Runs one campaign against the suite the first input byte selects.
 pub(crate) fn exercise(input: &[u8]) {
-    match input.first().copied().unwrap_or(0) % 5 {
+    match input.first().copied().unwrap_or(0) % 3 {
         0 => BLS_MIN_PK.with(|committee| campaign(committee, input)),
         1 => BLS_MIN_SIG.with(|committee| campaign(committee, input)),
-        2 => SAS_MIN_PK.with(|committee| campaign(committee, input)),
-        3 => SAS_MIN_SIG.with(|committee| campaign(committee, input)),
         _ => ED25519.with(|committee| campaign(committee, input)),
     }
 }

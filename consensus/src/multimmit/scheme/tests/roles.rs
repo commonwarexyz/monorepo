@@ -159,16 +159,13 @@ fn signatures_never_verify_across_roles_or_kinds_for_every_suite() {
     // aggregate DA certificates are left out.
     signatures_never_verify_across_roles_or_kinds::<Bls<MinPk>>();
     signatures_never_verify_across_roles_or_kinds::<Bls<MinSig>>();
-    signatures_never_verify_across_roles_or_kinds::<Sas<MinPk>>();
-    signatures_never_verify_across_roles_or_kinds::<Sas<MinSig>>();
     signatures_never_verify_across_roles_or_kinds::<Ed25519>();
     signatures_never_verify_across_roles_or_kinds::<Mock>();
 }
 
-/// A vote and novote for one view share their period but not their namespace, so neither
-/// signature verifies as the other, and an L-QC aggregate never verifies as a V-QC with the same
-/// signers abstaining.
-fn same_period_kinds_stay_separated<S: Suite>() {
+/// A vote and novote for one view sign under different namespaces, so neither signature verifies
+/// as the other, and an L-QC aggregate never verifies as a V-QC with the same signers abstaining.
+fn votes_and_novotes_stay_separated<S: Suite>() {
     let fixture = Fixture::<S>::new();
     let leader = fixture.leader(13);
     let votes = fixture.quorum_votes(&leader);
@@ -209,6 +206,6 @@ fn same_period_kinds_stay_separated<S: Suite>() {
 }
 
 #[test]
-fn same_period_kinds_stay_separated_for_every_suite() {
-    for_each_suite!(same_period_kinds_stay_separated);
+fn votes_and_novotes_stay_separated_for_every_suite() {
+    for_each_suite!(votes_and_novotes_stay_separated);
 }

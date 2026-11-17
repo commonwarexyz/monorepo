@@ -8,7 +8,7 @@ use super::*;
 use crate::{
     multimmit::{
         scheme::{
-            AggregateOf, DaCertificateOf, NullificationOf, Scheme, bls12381, bls12381_sas,
+            AggregateOf, DaCertificateOf, NullificationOf, Scheme, bls12381,
             ed25519 as ed25519_suite,
         },
         types::{CodecConfig, PathLimits},
@@ -107,7 +107,6 @@ macro_rules! impl_arbitrary_bls12381 {
 }
 
 impl_arbitrary_bls12381!(bls12381);
-impl_arbitrary_bls12381!(bls12381_sas);
 
 /// Generates an Ed25519 certificate whose signers fit the fixed codec profile.
 fn arbitrary_listed_certificate(
