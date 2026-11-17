@@ -674,11 +674,6 @@ jobs:
         echo "✓ Generated docs assets remained unchanged after running make"
 
   WASM:
-    if: >-
-      github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
-      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

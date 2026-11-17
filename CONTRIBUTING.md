@@ -44,7 +44,7 @@ Use `just test -p <crate>` for routine development and reserve workspace-wide te
 
 Expensive CI jobs run for standalone PRs, the lowest unmerged PR in a stack (its base
 branch matches the stack base), and the top PR in a stack. Intermediate stack PRs
-keep lint and other inexpensive checks, including stability and public API checks.
+keep lint, stability, public API, lockfile, WASM, MCP, and Quint checks.
 Missing stack metadata falls back to full CI. Non-PR runs retain full CI, and Slow
 continues to skip draft PRs. Retargeting events reevaluate this policy; selected PRs
 still require every dependency of an aggregate gate to succeed. A grouped stack

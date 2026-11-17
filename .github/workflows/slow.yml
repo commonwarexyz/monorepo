@@ -26,10 +26,9 @@ jobs:
     name: "Benchmarks (${{ matrix.package }}${{ matrix.test_flags && format(', {0}', matrix.test_flags) }}) (partition: ${{ matrix.partition || '1/1' }})"
     if: >-
       (github.event_name != 'pull_request'
-      || !github.event.pull_request.draft) && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)))
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -87,10 +86,9 @@ jobs:
     name: "Fuzz (${{ matrix.fuzz_dir }}${{ matrix.os && format(', os: {0}', matrix.os) }}) (partition: ${{ matrix.partition || '1/1' }})"
     if: >-
       (github.event_name != 'pull_request'
-      || !github.event.pull_request.draft) && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)))
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 180
     strategy:
@@ -217,10 +215,9 @@ jobs:
     name: "Miri Tests (partition: ${{ matrix.partition }}/12)"
     if: >-
       (github.event_name != 'pull_request'
-      || !github.event.pull_request.draft) && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -258,10 +255,9 @@ jobs:
     needs: Unsafe
     if: >-
       always() && (github.event_name != 'pull_request'
-      || !github.event.pull_request.draft) && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)))
     steps:
       - name: Check test results
         run: |
@@ -277,10 +273,9 @@ jobs:
     name: "Breaking Changes (${{ matrix.name }}) (build)"
     if: >-
       (github.event_name != 'pull_request'
-      || !github.event.pull_request.draft) && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)))
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -365,10 +360,9 @@ jobs:
     needs: conformance
     if: >-
       always() && (github.event_name != 'pull_request'
-      || !github.event.pull_request.draft) && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
       || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)))
     steps:
       - name: Check conformance results
         run: |
