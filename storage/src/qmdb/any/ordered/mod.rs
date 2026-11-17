@@ -15,6 +15,7 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::{futures::try_join_all, range::contains_cyclic};
 use core::{
+    borrow::Borrow,
     future::Future,
     mem,
     ops::{
@@ -200,16 +201,17 @@ where
     /// in the applied state, so keys that unapplied batches create or delete are not considered.
     ///
     /// Otherwise behaves like [Self::prefetch].
-    pub fn prefetch_neighbors(
+    pub fn prefetch_neighbors<W: Borrow<K>, D: Borrow<K>>(
         &self,
-        writes: &[&K],
-        deletes: &[&K],
-    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, K, V, C, I, H, N, S> {
+        writes: &[W],
+        deletes: &[D],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, K, V, C, I, H, N, S, W, D> {
         let creates = writes
             .iter()
+            .map(Borrow::borrow)
             .filter(|key| self.snapshot.get(key.as_ref()).next().is_none());
         let mut positions = Vec::new();
-        for key in creates.chain(deletes) {
+        for key in creates.chain(deletes.iter().map(Borrow::borrow)) {
             if let Some((locs, _)) = self.snapshot.prev_translated_key(key.as_ref()) {
                 positions.extend(locs.map(|loc| **loc));
             }

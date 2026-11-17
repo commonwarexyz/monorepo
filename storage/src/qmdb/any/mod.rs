@@ -2679,7 +2679,6 @@ pub(crate) mod test {
         let db = hold(db, &seed).await;
         let db = db.sync().await.unwrap();
         let keys: Vec<Digest> = (200..240).map(digest).collect();
-        let refs: Vec<&Digest> = keys.iter().collect();
         let batch = |db: &D| {
             keys.iter().fold(db.new_batch(), |batch, key| {
                 batch.write(*key, Some(digest(5000)))
@@ -2690,14 +2689,14 @@ pub(crate) mod test {
 
         // With only the keys prefetched, the walk reads its candidates from storage.
         cache.clear();
-        db.prefetch(&refs).await;
+        db.prefetch(&keys).await;
         let before = misses();
         drop(merkleize(&db, batch(&db), &mut Proportional).await.unwrap());
         assert!(misses() > before, "the walk must read cold candidates");
 
         // With the floor window prefetched too, merkleizing reads nothing from storage.
         cache.clear();
-        db.prefetch(&refs).await;
+        db.prefetch(&keys).await;
         db.prefetch_floor(entries + keys.len()).await;
         let before = misses();
         drop(merkleize(&db, batch(&db), &mut Proportional).await.unwrap());
@@ -2714,7 +2713,7 @@ pub(crate) mod test {
         context: Context,
         db: D,
         cache: CacheRef,
-        prefetch_neighbors: impl Fn(&D, &[&Digest], &[&Digest]) -> W,
+        prefetch_neighbors: impl Fn(&D, &[Digest], &[Digest]) -> W,
     ) where
         D: DbAny<Family = F, Key = Digest, Value = Digest>,
         W: Future<Output = ()>,
@@ -2741,7 +2740,7 @@ pub(crate) mod test {
             .map(|key| (*key, Some(digest(9000))))
             .chain(deletes.iter().map(|key| (*key, None)))
             .collect();
-        let keys: Vec<&Digest> = changes.iter().map(|(key, _)| key).collect();
+        let keys: Vec<Digest> = changes.iter().map(|(key, _)| *key).collect();
         let (writes, deletes) = keys.split_at(creates.len() + updates.len());
         let misses = || counter(&context, "log_journal_cache_misses_total");
 
@@ -2843,7 +2842,7 @@ pub(crate) mod test {
                         context.child("test"),
                         db,
                         cache,
-                        <$db>::prefetch_neighbors,
+                        <$db>::prefetch_neighbors::<Digest, Digest>,
                     )
                     .await;
                 });

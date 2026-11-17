@@ -118,7 +118,10 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     /// Prefetching is best effort and candidate-based. Keys absent from the index are skipped.
     /// An absent key whose translated key collides with an indexed key's may cause reads of
     /// unrelated operations. Failures are logged.
-    fn prefetch(&self, keys: &[&Self::Key]) -> impl Future<Output = ()> + Send + 'static;
+    fn prefetch<Q: Borrow<Self::Key>>(
+        &self,
+        keys: &[Q],
+    ) -> impl Future<Output = ()> + Send + 'static;
 
     /// Return a future that reads the first `candidates` active operations at or above the
     /// inactivity floor into the page cache, so a later batch can raise the floor without storage
