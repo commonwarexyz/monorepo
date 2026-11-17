@@ -5,81 +5,61 @@ extern crate rustc_errors;
 extern crate rustc_hir;
 
 use rustc_errors::DiagDecorator;
-use rustc_hir::{Expr, ExprKind, Node};
+use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
     ///
-    /// Detects a `Spawner::spawn` on a `Supervisor::child` of a temporary
-    /// `Supervisor::child` whose handle goes unused in its statement: discarded, bound
-    /// with `let`, or returned from the enclosing block, closure, or function.
-    /// The chain may pass through `with_attribute`, `shared` and `dedicated`.
-    /// Calls must resolve to the traits in `commonware_runtime`.
+    /// Detects a `Supervisor::child` call on a temporary `Supervisor::child`, such as
+    /// `context.child("a").child("b")`, including chains that pass through
+    /// `with_attribute`, `shared` or `dedicated`. Calls must resolve to the traits in
+    /// `commonware_runtime`.
     ///
     /// ### Why is this bad?
     ///
-    /// The temporary parent is dropped at the end of the statement or tail
-    /// expression, which closes it and aborts the spawned task before anything
-    /// can wait for it.
+    /// Dropping a context closes its node and every context derived from it. The
+    /// temporary parent is dropped at the end of the statement, so the child it
+    /// returns is already closed: anything spawned from it is aborted at once.
     ///
     /// ### Known problems
     ///
-    /// The lint stays silent when the spawn expression itself is used
-    /// (awaited, passed to a function, pushed into a collection, or wrapped with
-    /// `abort_on_drop`), since some of those uses keep the parent alive long
-    /// enough. It also misses handles that always lose their task: one assigned
-    /// to a place, wrapped in a struct, tuple or reference inside a `let`, or
-    /// used as a match arm or `break` value without a block. It misses
-    /// `Spawner::spawn(..)` written as a function call, chains produced by a
-    /// macro, a parent moved into the chain, as in
-    /// `context.with_attribute(..).child("b").spawn(f)`, and a closed context bound by
-    /// one statement and spawned from by a later one. `super let` initializers keep
-    /// their temporaries until the end of the enclosing statement, so the lint skips
-    /// them.
+    /// Like `borrowed_child_context`, the lint also rejects chains that happen to
+    /// work: a closed context still serves metrics, storage and time, and a spawn
+    /// awaited in the same statement finishes before the parent is dropped. Bind
+    /// the parent in those too. The lint misses a parent moved into the chain,
+    /// as in `context.with_attribute(..).child("b")`, and chains produced by a macro.
     ///
     /// ### Example
     ///
     /// ```rust
-    /// context.child("service").child("worker").spawn(f);
+    /// let worker = context.child("service").child("worker");
     /// ```
     ///
     /// Use instead:
     ///
     /// ```rust
     /// let service = context.child("service");
-    /// service.child("worker").spawn(f);
+    /// let worker = service.child("worker");
     /// ```
     pub TEMPORARY_PARENT_CONTEXT,
     Deny,
-    "temporary parent context"
+    "child of a temporary parent context"
 }
 
 impl<'tcx> LateLintPass<'tcx> for TemporaryParentContext {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        if expr.span.from_expansion() {
+        if expr.span.from_expansion() || !is_runtime_method(cx, expr, "Supervisor", "child") {
             return;
         }
-
         let ExprKind::MethodCall(_, receiver, ..) = expr.kind else {
             return;
         };
-        if !is_runtime_method(cx, expr, "Spawner", "spawn") || !handle_unused(cx, expr) {
-            return;
-        }
-
-        let Some(child) = child_call(cx, receiver) else {
-            return;
-        };
-        let ExprKind::MethodCall(_, parent, ..) = child.kind else {
-            return;
-        };
-        if let Some(temporary) = child_call(cx, parent) {
-            let span = temporary.span;
-            cx.emit_span_lint(TEMPORARY_PARENT_CONTEXT, span, DiagDecorator(|diag| {
-                diag.primary_message("temporary parent context");
+        if let Some(parent) = child_call(cx, receiver) {
+            cx.emit_span_lint(TEMPORARY_PARENT_CONTEXT, parent.span, DiagDecorator(|diag| {
+                diag.primary_message("child of a temporary parent context");
                 diag.help(
-                    "the temporary parent is dropped at the end of the statement, which closes it and every context derived from it, so bind the parent context first",
+                    "the temporary parent is dropped at the end of the statement, which closes the child, so bind the parent context first",
                 );
             }));
         }
@@ -110,21 +90,6 @@ fn keeps_node(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     is_runtime_method(cx, expr, "Supervisor", "with_attribute")
         || is_runtime_method(cx, expr, "Spawner", "shared")
         || is_runtime_method(cx, expr, "Spawner", "dedicated")
-}
-
-/// Returns whether the handle `spawn` returns leaves its statement unused: discarded,
-/// bound with `let`, or returned from the enclosing block, closure, or function.
-fn handle_unused(cx: &LateContext<'_>, spawn: &Expr<'_>) -> bool {
-    match cx.tcx.parent_hir_node(spawn.hir_id) {
-        Node::Stmt(_) => true,
-        // The temporaries of a `super let` initializer outlive its statement.
-        Node::LetStmt(local) => {
-            local.super_.is_none() && local.init.is_some_and(|init| init.hir_id == spawn.hir_id)
-        }
-        Node::Block(block) => block.expr.is_some_and(|tail| tail.hir_id == spawn.hir_id),
-        Node::Expr(parent) => matches!(parent.kind, ExprKind::Ret(_) | ExprKind::Closure(..)),
-        _ => false,
-    }
 }
 
 fn is_runtime_method(
