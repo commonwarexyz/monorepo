@@ -130,7 +130,7 @@ fn coalesced_runs(
 /// Appends do not extend this reader's bounds. Dropping the glob or removing its section does
 /// not invalidate the reader. Truncating into its extent makes reads of the affected bytes
 /// unspecified; callers must finish those reads before reusing their locations. While a reader
-/// is alive, reopening its section (for example through [Glob::init]) fails with
+/// is alive, reopening its section (for example through [Recovery::init]) fails with
 /// [RError::BlobAlreadyOpen] unless the section was removed first. Clone a reader to share it.
 #[commonware_macros::stability(ALPHA)]
 pub struct Reader<B: Blob, V: Codec> {
