@@ -205,7 +205,13 @@ where
                 let cache = epochs.entry(epoch).or_default();
                 match event {
                     Event::Dealing(dealer, public) => {
-                        let private = secret_store.get_dealing(epoch, &dealer).await;
+                        // A journaled message is restored only with the private
+                        // half that was received with it, because the secret
+                        // store returns a private half only for its own public
+                        // message. One dealer can have several journaled
+                        // messages, because an interrupted dealing leaves its
+                        // public message behind.
+                        let private = secret_store.get_dealing(epoch, &dealer, &public).await;
                         if let Some(private) = private {
                             cache.dealings.insert(dealer, (public, private));
                         }
@@ -366,7 +372,7 @@ where
         let event = Event::Dealing(dealer.clone(), public.clone());
         let secret = &mut self.secret_store;
         futures::join!(
-            secret.put_dealing(epoch, dealer.clone(), private.clone()),
+            secret.put_dealing(epoch, dealer.clone(), &public, private.clone()),
             async {
                 rebind(&mut self.events, |events| {
                     append_synced(events, epoch, &event)
@@ -711,8 +717,12 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Runner, Supervisor as _, deterministic,
+        mocks::{MutationFaultContext, MutationFaults},
+    };
     use commonware_utils::{N3f1, TestRng, ordered::Set};
+    use std::{task::Poll, time::Duration};
 
     type TestStore<E> = Store<E, MemorySecretStore, MinPk, PublicKey>;
 
@@ -1155,6 +1165,227 @@ mod tests {
             assert_eq!(secret_store.prunes(), vec![Epoch::new(1)]);
             assert!(!secret_store.has_share(Epoch::zero()));
         });
+    }
+
+    /// Where a player stops while it records a dealing.
+    #[derive(Clone, Copy, Debug)]
+    enum Interruption {
+        /// The journal completes this many mutations and never completes another.
+        Journal(u64),
+        /// `put_dealing` stores nothing and never returns.
+        SecretStore,
+    }
+
+    type TestDealing = (DealerPubMsg<MinPk>, DealerPrivMsg);
+
+    fn reshare_info(signers: &[PrivateKey]) -> Info<MinPk, PublicKey> {
+        let players = players(signers);
+        Info::new::<N3f1>(
+            b"_COMMONWARE_GLUE_DKG_RESHARE_STORE_TEST",
+            0,
+            None,
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            players.clone(),
+            players,
+        )
+        .expect("info must be valid")
+    }
+
+    /// Returns the dealing the first signer sends the second when it deals from `seed`.
+    /// Different seeds give different dealings.
+    fn dealing(seed: u8) -> TestDealing {
+        let signers = signers();
+        let player = signers[1].public_key();
+        let (_, public, private) = CryptoDealer::start::<N3f1>(
+            Transcript::resume(summary(seed), Version::V1).noise(b"dealer-rng"),
+            reshare_info(&signers),
+            signers[0].clone(),
+            None,
+        )
+        .expect("dealer must start");
+        let (_, private) = private
+            .into_iter()
+            .find(|(recipient, _)| *recipient == player)
+            .expect("dealer must deal to the player");
+        (public, private)
+    }
+
+    /// Runs the second signer's player from startup until it has handled `dealing` from the
+    /// first signer or stops at `interruption`.
+    ///
+    /// Returns the dealings restored at startup, the acknowledgement if the dealing was handled,
+    /// and the state a restart resumes from.
+    fn handle_dealing(
+        runner: deterministic::Runner,
+        secrets: &MemorySecretStore,
+        (public, private): TestDealing,
+        interruption: Option<Interruption>,
+    ) -> (
+        Vec<TestDealing>,
+        Option<PlayerAck<PublicKey>>,
+        deterministic::Checkpoint,
+    ) {
+        let secrets = secrets.clone();
+        let ((restored, ack), checkpoint) = runner.start_and_recover(|context| async move {
+            // Start the player from the journal and secret store as earlier runs left them, and
+            // record the dealings that replay restored. The journal's faults are armed only after
+            // startup, so replay is never interrupted.
+            let faults = MutationFaults::default();
+            let context = MutationFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let signers = signers();
+            let mut store: TestStore<_> =
+                init_store(context.child("store"), "interrupted", secrets.clone()).await;
+            let restored: Vec<_> = store
+                .dealings(Epoch::zero())
+                .into_iter()
+                .map(|(_, public, private)| (public, private))
+                .collect();
+            let mut player = store
+                .create_player::<PrivateKey, N3f1>(
+                    Epoch::zero(),
+                    signers[1].clone(),
+                    reshare_info(&signers),
+                )
+                .expect("player must resume");
+
+            // A storage failure is fatal to the store, so a dealing is stopped by parking one
+            // of its writes. Polling continues past the park, so a write that does not wait
+            // for the parked one still lands.
+            secrets.park_dealings(matches!(interruption, Some(Interruption::SecretStore)));
+            if let Some(Interruption::Journal(allowed)) = interruption {
+                faults.park_after(allowed);
+            }
+            let mut handle = Box::pin(player.handle(
+                &mut store,
+                Epoch::zero(),
+                signers[0].public_key(),
+                public,
+                private,
+            ));
+            let mut ack = None;
+            for _ in 0..16 {
+                if let Poll::Ready(result) = futures::poll!(handle.as_mut()) {
+                    ack = Some(result.expect("dealing must be valid"));
+                    break;
+                }
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // A dealing is acknowledged exactly when none of its writes was parked. A journal
+            // interruption past the dealing's last mutation parks nothing.
+            match interruption {
+                Some(Interruption::Journal(_)) => assert_eq!(ack.is_some(), !faults.parked()),
+                Some(Interruption::SecretStore) => assert!(ack.is_none()),
+                None => {}
+            }
+            (restored, ack)
+        });
+        (restored, ack, checkpoint)
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5721.
+    ///
+    /// A dealing interrupted while it is recorded is restored whole or not at all, also when the
+    /// dealer follows it with a different dealing that is interrupted too.
+    #[test]
+    fn issue_5721_regression() {
+        let [first, second, third] = [2, 3, 4].map(dealing);
+
+        // A dealing can stop in the secret store, or before each journal mutation of an
+        // uninterrupted dealing.
+        let mut interruptions = vec![Interruption::SecretStore];
+        for allowed in 0.. {
+            let (_, ack, _) = handle_dealing(
+                deterministic::Runner::default(),
+                &MemorySecretStore::default(),
+                first.clone(),
+                Some(Interruption::Journal(allowed)),
+            );
+            if ack.is_some() {
+                break;
+            }
+            interruptions.push(Interruption::Journal(allowed));
+        }
+        assert!(interruptions.len() > 1);
+
+        for &first_stop in &interruptions {
+            for &second_stop in &interruptions {
+                // The dealer sends one dealing, and after the player restarts, a different one.
+                let secrets = MemorySecretStore::default();
+                let (_, _, checkpoint) = handle_dealing(
+                    deterministic::Runner::default(),
+                    &secrets,
+                    first.clone(),
+                    Some(first_stop),
+                );
+                let (_, second_ack, checkpoint) = handle_dealing(
+                    checkpoint.into(),
+                    &secrets,
+                    second.clone(),
+                    Some(second_stop),
+                );
+
+                // The restarted player has the second dealing exactly when it acknowledged it.
+                // Otherwise it has none and acknowledges the next one it is sent.
+                let (restored, ack, checkpoint) =
+                    handle_dealing(checkpoint.into(), &secrets, third.clone(), None);
+                let ack = ack.expect("uninterrupted dealing must be handled");
+                let acknowledged = if second_ack.is_some() {
+                    &second
+                } else {
+                    &third
+                };
+                match second_ack {
+                    Some(second_ack) => {
+                        assert_eq!(restored, std::slice::from_ref(&second));
+                        assert_eq!(ack, second_ack);
+                    }
+                    None => assert!(restored.is_empty()),
+                }
+
+                // After another restart, the acknowledged dealing is restored whole and handling
+                // a dealing again returns the same acknowledgement.
+                let (restored, replayed, _) =
+                    handle_dealing(checkpoint.into(), &secrets, third.clone(), None);
+                assert_eq!(restored, std::slice::from_ref(acknowledged));
+                assert_eq!(replayed, Some(ack));
+            }
+        }
+    }
+
+    /// A dealing interrupted while it is recorded is recorded when the dealer sends it again.
+    #[test]
+    fn interrupted_dealing_is_recorded_when_resent() {
+        let sent = dealing(2);
+
+        // The first attempt leaves only the public message, or only the private half.
+        for stop in [Interruption::SecretStore, Interruption::Journal(0)] {
+            let secrets = MemorySecretStore::default();
+            let (_, ack, checkpoint) = handle_dealing(
+                deterministic::Runner::default(),
+                &secrets,
+                sent.clone(),
+                Some(stop),
+            );
+            assert!(ack.is_none());
+
+            // The restarted player has no dealing and acknowledges the one sent again.
+            let (restored, ack, checkpoint) =
+                handle_dealing(checkpoint.into(), &secrets, sent.clone(), None);
+            assert!(restored.is_empty());
+            let ack = ack.expect("uninterrupted dealing must be handled");
+
+            // After another restart, the dealing is restored whole and handling it again
+            // returns the same acknowledgement.
+            let (restored, replayed, _) =
+                handle_dealing(checkpoint.into(), &secrets, sent.clone(), None);
+            assert_eq!(restored, std::slice::from_ref(&sent));
+            assert_eq!(replayed, Some(ack));
+        }
     }
 }
 
