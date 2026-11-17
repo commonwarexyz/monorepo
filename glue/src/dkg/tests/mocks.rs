@@ -832,13 +832,12 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
 
 /// In-memory [`SecretStore`] for tests.
 ///
-/// Dealings are keyed by the encoded dealer key so the store works with any
-/// [`PublicKey`](CryptoPublicKey). Pruned epochs are recorded for assertions.
+/// Dealings are keyed by the encoded dealer key and public message so the store
+/// works with any [`PublicKey`](CryptoPublicKey) and [`Variant`]. Pruned epochs
+/// are recorded for assertions.
 ///
-/// Storing a second dealing for the same dealer and epoch panics. The panic
-/// checks that the reshare store stores at most one private dealing per dealer
-/// and epoch. A dealing is returned only for the public message it was stored
-/// with.
+/// Storing a different private dealing for a dealing that is already stored
+/// panics.
 #[derive(Clone, Default)]
 pub(crate) struct MemorySecretStore {
     inner: Arc<Mutex<MemorySecretStoreInner>>,
@@ -848,7 +847,7 @@ pub(crate) struct MemorySecretStore {
 struct MemorySecretStoreInner {
     shares: BTreeMap<Epoch, Share>,
     seeds: BTreeMap<Epoch, Summary>,
-    dealings: BTreeMap<(Epoch, Vec<u8>), (Bytes, DealerPrivMsg)>,
+    dealings: BTreeMap<(Epoch, Vec<u8>, Bytes), DealerPrivMsg>,
     prunes: Vec<Epoch>,
     stall: bool,
     park_dealings: bool,
@@ -919,13 +918,11 @@ impl SecretStore for MemorySecretStore {
         if park {
             std::future::pending::<()>().await;
         }
-        let replaced = self.inner.lock().dealings.insert(
-            (epoch, dealer.encode().to_vec()),
-            (public.encode(), private),
-        );
+        let key = (epoch, dealer.encode().to_vec(), public.encode());
+        let replaced = self.inner.lock().dealings.insert(key, private.clone());
         assert!(
-            replaced.is_none(),
-            "private dealing must be stored at most once per dealer and epoch"
+            replaced.is_none_or(|replaced| replaced == private),
+            "stored private dealing must not change"
         );
     }
 
@@ -938,9 +935,8 @@ impl SecretStore for MemorySecretStore {
         self.inner
             .lock()
             .dealings
-            .get(&(epoch, dealer.encode().to_vec()))
-            .filter(|(stored, _)| *stored == public.encode())
-            .map(|(_, private)| private.clone())
+            .get(&(epoch, dealer.encode().to_vec(), public.encode()))
+            .cloned()
     }
 
     async fn prune(&mut self, min: Epoch) {
@@ -948,7 +944,7 @@ impl SecretStore for MemorySecretStore {
         inner.prunes.push(min);
         inner.shares.retain(|epoch, _| *epoch >= min);
         inner.seeds.retain(|epoch, _| *epoch >= min);
-        inner.dealings.retain(|(epoch, _), _| *epoch >= min);
+        inner.dealings.retain(|(epoch, _, _), _| *epoch >= min);
     }
 }
 
