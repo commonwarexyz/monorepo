@@ -3247,10 +3247,8 @@ mod tests {
     {
         runner.start(|context| async move {
             // Create context with attribute, then nest a label
-            let ctx = context
-                .child("orchestrator")
-                .with_attribute("epoch", "e5")
-                .child("engine");
+            let orchestrator = context.child("orchestrator").with_attribute("epoch", "e5");
+            let ctx = orchestrator.child("engine");
 
             // Register a metric
             let counter = Counter::<u64>::default();
@@ -3266,12 +3264,9 @@ mod tests {
             );
 
             // Multiple levels of nesting with attributes at different levels
-            let ctx2 = context
-                .child("outer")
-                .with_attribute("region", "us")
-                .child("middle")
-                .with_attribute("az", "east")
-                .child("inner");
+            let outer = context.child("outer").with_attribute("region", "us");
+            let middle = outer.child("middle").with_attribute("az", "east");
+            let ctx2 = middle.child("inner");
 
             let counter2 = Counter::<u64>::default();
             let _registered2 = ctx2.register("requests", "request count", counter2.clone());
@@ -3496,16 +3491,14 @@ mod tests {
             let svc_a_v2 = context.child("service_a").with_attribute("version", 2);
 
             // Service B with nested label: service_b_worker
-            let svc_b_worker = context.child("service_b").child("worker");
+            let svc_b = context.child("service_b");
+            let svc_b_worker = svc_b.child("worker");
 
             // Service B with nested label AND attribute
-            let svc_b_worker_shard = context
-                .child("service_b")
-                .child("worker")
-                .with_attribute("shard", 99);
+            let svc_b_worker_shard = svc_b.child("worker").with_attribute("shard", 99);
 
             // Service B different nested label: service_b_manager
-            let svc_b_manager = context.child("service_b").child("manager");
+            let svc_b_manager = svc_b.child("manager");
 
             // Service C: plain, proves no cross-service contamination
             let svc_c = context.child("service_c");

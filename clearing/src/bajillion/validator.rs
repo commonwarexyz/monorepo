@@ -1142,10 +1142,9 @@ mod tests {
             // A second handle to the counter the balances database registered shares its count,
             // so it counts the balances batch of the close of epoch 1 and keeps counting after
             // apply drops the database.
-            let apply_calls = context
-                .child("opened")
-                .child("balances")
-                .counter("apply_batch_calls", "Number of apply-batch calls");
+            let opened = context.child("opened");
+            let balances = opened.child("balances");
+            let apply_calls = balances.counter("apply_batch_calls", "Number of apply-batch calls");
             let parent = genesis(store.balances.root());
             let queued = queue(1, &[(0, 10)], &[]);
             let close = sign_close(&operator, 1, Vec::new(), Vec::new(), 1, 0);
