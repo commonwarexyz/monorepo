@@ -1,6 +1,7 @@
 [package]
 name = "commonware-stream"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true

@@ -2796,7 +2796,7 @@ mod test_plan {
                                 transcript_for_ack(&t, &pk, &pub_msg)
                             };
                             let dealer = Dealer {
-                                me: sk.clone(),
+                                me: sk,
                                 info: info.clone(),
                                 pub_msg: pub_msg.clone(),
                                 results,
@@ -2804,7 +2804,7 @@ mod test_plan {
                             };
                             (dealer, pub_msg, priv_msgs)
                         } else {
-                            Dealer::start::<N3f1>(&mut rng, info.clone(), sk.clone(), share)?
+                            Dealer::start::<N3f1>(&mut rng, info.clone(), sk, share)?
                         };
 
                     // Apply BadShare perturbations
@@ -3148,7 +3148,7 @@ mod test_plan {
                         "Share should match public polynomial"
                     );
 
-                    shares.insert(player_pk.clone(), share);
+                    shares.insert(player_pk, share);
                 }
 
                 // Initialize or verify threshold public key

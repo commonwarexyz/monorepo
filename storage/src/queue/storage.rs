@@ -1513,7 +1513,7 @@ mod tests {
             let mut received = Vec::new();
             for _ in 0..10 {
                 let (pos, item) = reader.recv().await.unwrap().unwrap();
-                received.push((pos, item.clone()));
+                received.push((pos, item));
                 reader.ack(pos).unwrap();
             }
 
