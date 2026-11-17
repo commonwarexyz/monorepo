@@ -34,12 +34,10 @@ use commonware_cryptography::{
     Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
     bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
+        sharing::Share,
         variant::Variant,
     },
-    bls12381::primitives::{
-        group::{Scalar, Share},
-        variant::MinPk,
-    },
+    bls12381::primitives::{group::Scalar, variant::MinPk},
     certificate::{ConstantProvider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
@@ -846,7 +844,7 @@ pub(crate) struct MemorySecretStore {
 
 #[derive(Default)]
 struct MemorySecretStoreInner {
-    shares: BTreeMap<Epoch, Share>,
+    shares: BTreeMap<Epoch, Share<Scalar>>,
     seeds: BTreeMap<Epoch, Summary>,
     dealings: BTreeMap<(Epoch, Vec<u8>, Bytes), DealerPrivMsg<Scalar>>,
     prunes: Vec<Epoch>,
@@ -867,7 +865,7 @@ impl MemorySecretStore {
 
     /// Pre-seeds a share for `epoch`, for tests that install state before the
     /// actor starts.
-    pub(crate) fn seed_share(&self, epoch: Epoch, share: Share) {
+    pub(crate) fn seed_share(&self, epoch: Epoch, share: Share<Scalar>) {
         self.inner.lock().shares.insert(epoch, share);
     }
 
@@ -885,7 +883,7 @@ impl MemorySecretStore {
 }
 
 impl SecretStore<Scalar> for MemorySecretStore {
-    async fn put_share(&mut self, epoch: Epoch, share: Share) {
+    async fn put_share(&mut self, epoch: Epoch, share: Share<Scalar>) {
         let stall = {
             let mut inner = self.inner.lock();
             inner.shares.insert(epoch, share);
@@ -896,7 +894,7 @@ impl SecretStore<Scalar> for MemorySecretStore {
         }
     }
 
-    async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {
+    async fn get_share(&mut self, epoch: Epoch) -> Option<Share<Scalar>> {
         self.inner.lock().shares.get(&epoch).cloned()
     }
 

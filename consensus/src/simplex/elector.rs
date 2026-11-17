@@ -10,8 +10,8 @@
 //!
 //! - [`Random`]/[`RandomElector`]: Uses randomness derived from BLS threshold VRF signatures
 //!   for unpredictable leader selection. Falls back to round-robin for the first view
-//!   (no certificate available). Requires [`super::scheme::bls12381_threshold::vrf`]
-//!   (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
+//!   (no certificate available). Requires [`super::scheme::bls_threshold::vrf`]
+//!   (implements [`super::scheme::bls_threshold::vrf::Seedable`]).
 //!
 //! # Custom Electors
 //!
@@ -35,7 +35,7 @@
 //! the initialized [`Elector`] with the scheme participants before starting.
 
 use crate::{
-    simplex::scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+    simplex::scheme::bls_threshold::vrf as bls_threshold_vrf,
     types::{Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_codec::Encode;
@@ -442,8 +442,8 @@ pub enum RandomVersion {
 /// This elector does not support stable leaders: it has no term-length
 /// configuration and [`Elector::terms`] always returns [`Terms::rotating`].
 ///
-/// Only works with [`super::scheme::bls12381_threshold::vrf`]
-/// (implements [`super::scheme::bls12381_threshold::vrf::Seedable`]).
+/// Only works with [`super::scheme::bls_threshold::vrf`]
+/// (implements [`super::scheme::bls_threshold::vrf::Seedable`]).
 pub struct Random<H: Hasher = Sha256> {
     version: RandomVersion,
     _hasher: PhantomData<H>,
@@ -501,18 +501,15 @@ impl<H: Hasher> fmt::Debug for Random<H> {
     }
 }
 
-impl<P, V, H> Config<bls12381_threshold_vrf::Scheme<P, V>> for Random<H>
+impl<P, V, H> Config<bls_threshold_vrf::Scheme<P, V>> for Random<H>
 where
     P: PublicKey,
     V: Variant,
     H: Hasher,
 {
-    type Elector = RandomElector<bls12381_threshold_vrf::Scheme<P, V>, H>;
+    type Elector = RandomElector<bls_threshold_vrf::Scheme<P, V>, H>;
 
-    fn build(
-        self,
-        participants: &Set<P>,
-    ) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>, H> {
+    fn build(self, participants: &Set<P>) -> RandomElector<bls_threshold_vrf::Scheme<P, V>, H> {
         assert!(!participants.is_empty(), "no participants");
         RandomElector {
             n: participants.len() as u32,
@@ -550,8 +547,8 @@ impl<S: Scheme, H: Hasher> fmt::Debug for RandomElector<S, H> {
     }
 }
 
-impl<P, V, H> Elector<bls12381_threshold_vrf::Scheme<P, V>>
-    for RandomElector<bls12381_threshold_vrf::Scheme<P, V>, H>
+impl<P, V, H> Elector<bls_threshold_vrf::Scheme<P, V>>
+    for RandomElector<bls_threshold_vrf::Scheme<P, V>, H>
 where
     P: PublicKey,
     V: Variant,
@@ -573,7 +570,7 @@ where
     fn elect(
         &self,
         round: Round,
-        certificate: Option<&bls12381_threshold_vrf::Certificate<V>>,
+        certificate: Option<&bls_threshold_vrf::Certificate<V>>,
     ) -> Participant {
         self.version.select_leader::<V>(
             round,
@@ -592,7 +589,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
+            scheme::{bls_threshold::vrf as bls_threshold_vrf, ed25519},
             types::Subject,
         },
         types::{Epoch, View},
@@ -607,7 +604,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"test";
 
     type ThresholdScheme =
-        bls12381_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
+        bls_threshold_vrf::Scheme<commonware_cryptography::ed25519::PublicKey, MinPk>;
 
     #[test]
     fn stable_terms_preserve_optimistic_views() {
@@ -837,7 +834,7 @@ mod tests {
     fn random_falls_back_to_round_robin_for_view_1() {
         let mut rng = test_rng();
         let Fixture { participants, .. } =
-            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+            bls_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RandomElector<ThresholdScheme> =
@@ -866,7 +863,7 @@ mod tests {
         // 2^32 % 5 is 1, while (2^32 as u32) % 5 is 0
         let mut rng = test_rng();
         let Fixture { participants, .. } =
-            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+            bls_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let random: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
@@ -888,7 +885,7 @@ mod tests {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+        } = bls_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
@@ -948,7 +945,7 @@ mod tests {
     fn random_panics_on_none_certificate_after_view_1() {
         let mut rng = test_rng();
         let Fixture { participants, .. } =
-            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+            bls_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let elector: RandomElector<ThresholdScheme> =
             Random::new(RandomVersion::V1).build(&participants);
@@ -1015,7 +1012,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
+            } = bls_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
             let participants = Set::try_from_iter(participants).unwrap();
             let elector: RandomElector<ThresholdScheme> = version.build(&participants);
             let quorum =

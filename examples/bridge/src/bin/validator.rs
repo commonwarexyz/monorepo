@@ -7,14 +7,14 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
         self, Engine, Floor, ForwardPolicy, SkipPolicy, elector::RoundRobin,
-        scheme::bls12381_threshold::standard::Scheme,
+        scheme::bls_threshold::standard::Scheme,
     },
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
     ChaCha20Poly1305, Sha256, Signer as _,
     bls::{
-        sharing::{ModeVersion, Sharing},
+        sharing::{ModeVersion, Share, Sharing},
         variant::Variant,
     },
     bls12381::primitives::{group, variant::MinSig},
@@ -140,7 +140,7 @@ fn main() {
         .get_one::<String>("share")
         .expect("Please provide share");
     let share = from_hex(share).expect("Share not well-formed");
-    let share = group::Share::decode(share).expect("Share not well-formed");
+    let share = Share::<group::Scalar>::decode(share).expect("Share not well-formed");
 
     // Configure indexer
     let indexer = matches

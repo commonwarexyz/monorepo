@@ -362,8 +362,8 @@
 use crate::{
     BatchEntry, BatchVerifier, PublicKey, Secret, Signer,
     bls::{
-        key::{Private, Share},
-        sharing::{Mode, ModeVersion, Sharing},
+        key::Private,
+        sharing::{Mode, ModeVersion, Share, Sharing},
         variant::Variant,
     },
     curve::ScalarReadCfg,

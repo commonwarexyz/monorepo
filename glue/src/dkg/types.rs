@@ -10,8 +10,7 @@ use commonware_cryptography::{
     PublicKey,
     bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Output, PlayerAck, SignedDealerLog},
-        key::Share,
-        sharing::{ModeVersion, Sharing},
+        sharing::{ModeVersion, Share, Sharing},
         variant::Variant,
     },
 };

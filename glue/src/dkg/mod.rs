@@ -336,7 +336,7 @@ use commonware_cryptography::{
     PublicKey,
     bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
-        key::Share,
+        sharing::Share,
         variant::Variant,
     },
     transcript::Summary,

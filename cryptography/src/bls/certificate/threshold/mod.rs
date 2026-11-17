@@ -26,10 +26,9 @@ pub mod mocks;
 use crate::{
     PublicKey,
     bls::{
-        key::Share,
         ops,
         ops::{batch, threshold},
-        sharing::Sharing,
+        sharing::{Share, Sharing},
         variant::{PartialSignature, Variant},
     },
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
@@ -525,17 +524,17 @@ where
 /// # Example
 /// ```ignore
 /// // For non-generic subject types with a single namespace:
-/// impl_certificate_bls12381_threshold!(MySubject, Vec<u8>, commonware_utils::N3f1);
+/// impl_certificate_bls_threshold!(MySubject, Vec<u8>, commonware_utils::N3f1);
 ///
 /// // For protocols with generic subject types:
-/// impl_certificate_bls12381_threshold!(
+/// impl_certificate_bls_threshold!(
 ///     Subject<'a, D>,
 ///     Namespace,
 ///     commonware_utils::N3f1,
 /// );
 /// ```
 #[macro_export]
-macro_rules! impl_certificate_bls12381_threshold {
+macro_rules! impl_certificate_bls_threshold {
     ($subject:ty, $namespace:ty, $faults:ty) => {
         $crate::cfg_mocks! {
             /// Generates a test fixture with Ed25519 identities and BLS threshold schemes.
@@ -583,7 +582,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
                 polynomial: $crate::bls::sharing::Sharing<V>,
-                share: $crate::bls::key::Share<
+                share: $crate::bls::sharing::Share<
                     <V as $crate::bls::variant::Variant>::Scalar,
                 >,
             ) -> Option<Self> {
@@ -666,7 +665,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             }
 
             /// Returns the local share if this instance can generate partial signatures.
-            pub const fn share(&self) -> Option<&$crate::bls::key::Share<
+            pub const fn share(&self) -> Option<&$crate::bls::sharing::Share<
                     <V as $crate::bls::variant::Variant>::Scalar,
                 >> {
                 self.generic.share()
@@ -879,7 +878,7 @@ mod tests {
         use super::TestSubject;
         use commonware_utils::N3f1;
 
-        impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+        impl_certificate_bls_threshold!(TestSubject, Vec<u8>, N3f1);
     }
 
     #[allow(clippy::type_complexity)]

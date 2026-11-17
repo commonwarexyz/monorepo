@@ -67,10 +67,9 @@ use commonware_cryptography::bls::tle;
 use commonware_cryptography::{
     Digest, PublicKey,
     bls::{
-        key::Share,
         ops,
         ops::{batch, threshold},
-        sharing::Sharing,
+        sharing::{Share, Sharing},
         variant::{PartialSignature, Variant},
     },
     certificate,

@@ -2,11 +2,12 @@ use arbitrary::Unstructured;
 use commonware_codec::ReadExt;
 use commonware_cryptography::{
     bls::{
+        sharing::Share,
         tle::{Block, Ciphertext},
         variant::{PartialSignature, Variant},
     },
     bls12381::primitives::{
-        group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Scalar, Share},
+        group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Scalar},
         variant::{MinPk, MinSig},
     },
 };
@@ -106,7 +107,7 @@ pub fn arbitrary_bytes(
 }
 
 #[allow(unused)]
-pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share, arbitrary::Error> {
+pub fn arbitrary_share(u: &mut Unstructured) -> Result<Share<Scalar>, arbitrary::Error> {
     Ok(Share::new(
         Participant::new(u.int_in_range(1..=100)?),
         u.arbitrary()?,

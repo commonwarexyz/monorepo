@@ -434,17 +434,17 @@ where
 /// # Example
 /// ```ignore
 /// // For non-generic subject types with a single namespace:
-/// impl_certificate_bls12381_multisig!(MySubject, Vec<u8>, commonware_utils::N3f1);
+/// impl_certificate_bls_multisig!(MySubject, Vec<u8>, commonware_utils::N3f1);
 ///
 /// // For protocols with generic subject types:
-/// impl_certificate_bls12381_multisig!(
+/// impl_certificate_bls_multisig!(
 ///     Subject<'a, D>,
 ///     Namespace,
 ///     commonware_utils::N3f1,
 /// );
 /// ```
 #[macro_export]
-macro_rules! impl_certificate_bls12381_multisig {
+macro_rules! impl_certificate_bls_multisig {
     ($subject:ty, $namespace:ty, $faults:ty) => {
         $crate::cfg_mocks! {
             /// Generates a test fixture with Ed25519 identities and BLS multisig schemes.
@@ -765,7 +765,7 @@ mod tests {
         use super::TestSubject;
         use commonware_utils::N3f1;
 
-        impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>, N3f1);
+        impl_certificate_bls_multisig!(TestSubject, Vec<u8>, N3f1);
     }
 
     /// Returns `n` consensus keys and the participants they form.

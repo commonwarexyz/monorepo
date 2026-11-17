@@ -29,7 +29,7 @@ use commonware_cryptography::{
             Info, Logs, Output, Player as CryptoPlayer, PlayerAck, PlayerAckError as DkgAckError,
             SignedDealerLog,
         },
-        key,
+        sharing,
         variant::Variant,
     },
     transcript::{Summary, Transcript, Version},
@@ -243,7 +243,7 @@ where
     }
 
     /// Returns the share for `epoch`, if any.
-    pub async fn share(&mut self, epoch: Epoch) -> Option<key::Share<V::Scalar>> {
+    pub async fn share(&mut self, epoch: Epoch) -> Option<sharing::Share<V::Scalar>> {
         self.secret_store.get_share(epoch).await
     }
 
@@ -277,7 +277,7 @@ where
         &mut self,
         info: EpochInfo<V, P, D>,
         rng_seed: Summary,
-        share: Option<key::Share<V::Scalar>>,
+        share: Option<sharing::Share<V::Scalar>>,
     ) {
         let epoch = info.epoch;
         if let Some(share) = share {
@@ -432,7 +432,7 @@ where
         epoch: Epoch,
         signer: C,
         info: Info<V, P>,
-        share: Option<key::Share<V::Scalar>>,
+        share: Option<sharing::Share<V::Scalar>>,
         rng_seed: Summary,
     ) -> Option<Dealer<V, C>>
     where
@@ -692,7 +692,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
-    ) -> Result<(Output<V, C::PublicKey>, key::Share<V::Scalar>), DkgFinalizeError<C::PublicKey>>
+    ) -> Result<(Output<V, C::PublicKey>, sharing::Share<V::Scalar>), DkgFinalizeError<C::PublicKey>>
     where
         M: Faults,
         C::PublicKey: BatchVerifier,
