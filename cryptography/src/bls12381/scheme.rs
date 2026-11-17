@@ -28,12 +28,12 @@
 //! ```
 
 use super::primitives::{
-    group::{self, Private},
+    group::{self, Scalar},
     variant::MinPk,
 };
 use crate::{
     BatchEntry, BatchVerifier, Secret, Signer as _,
-    bls::{ops, variant::Variant},
+    bls::{key, ops, variant::Variant},
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -60,7 +60,7 @@ const CURVE_NAME: &str = "bls12381";
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     raw: Secret<[u8; group::PRIVATE_KEY_LENGTH]>,
-    key: Private,
+    key: key::Private<Scalar>,
 }
 
 impl PartialEq for PrivateKey {
@@ -82,7 +82,7 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key = Private::decode(Copying(raw.as_ref()))
+        let key = key::Private::<Scalar>::decode(Copying(raw.as_ref()))
             .map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
         Ok(Self {
             raw: Secret::new(*raw),
@@ -95,8 +95,8 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = group::PRIVATE_KEY_LENGTH;
 }
 
-impl From<Private> for PrivateKey {
-    fn from(key: Private) -> Self {
+impl From<key::Private<Scalar>> for PrivateKey {
+    fn from(key: key::Private<Scalar>) -> Self {
         let raw = Zeroizing::new(key.expose(|s| s.encode_fixed()));
         Self {
             raw: Secret::new(*raw),
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn test_from_private() {
         let mut rng = test_rng();
-        let private = Private::random(&mut rng);
+        let private = key::Private::<Scalar>::random(&mut rng);
         let private_key = PrivateKey::from(private);
         // Verify the key works by signing and verifying
         let msg = b"test message";

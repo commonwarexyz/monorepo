@@ -16,13 +16,10 @@ use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256,
     bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Reveal},
-        sharing::{Mode, ModeVersion},
+        sharing::{Mode, ModeVersion, Share},
         variant::Variant,
     },
-    bls12381::primitives::{
-        group::{Scalar, Share},
-        variant::MinSig,
-    },
+    bls12381::primitives::{group::Scalar, variant::MinSig},
     certificate::{Provider as CertificateProvider, Scoped},
     ed25519, sha256,
     transcript::Summary,
@@ -63,7 +60,7 @@ use std::{
 use tracing::info;
 
 /// Threshold certificate scheme used for consensus votes and certificates.
-pub type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
+pub type Scheme = simplex::scheme::bls_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>;
 /// QMDB holding the application state.
 pub type Qmdb<E> = fixed::Db<mmr::Family, E, U64, U64, Sha256, TwoCap, Sequential>;
 /// Shared handle to the application QMDB.
@@ -517,11 +514,11 @@ impl<E: StorageContext> Secrets<E> {
 }
 
 impl<E: StorageContext> dkg::SecretStore<Scalar> for Secrets<E> {
-    async fn put_share(&mut self, epoch: Epoch, share: Share) {
+    async fn put_share(&mut self, epoch: Epoch, share: Share<Scalar>) {
         self.put(key(SHARE, epoch, None), share).await;
     }
 
-    async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {
+    async fn get_share(&mut self, epoch: Epoch) -> Option<Share<Scalar>> {
         self.get(&key(SHARE, epoch, None)).await
     }
 

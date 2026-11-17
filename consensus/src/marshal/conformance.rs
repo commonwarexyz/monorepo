@@ -9,7 +9,7 @@ use super::mocks::{
 };
 use crate::{
     marshal::core::Processed,
-    simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
+    simplex::{scheme::bls_threshold::vrf as bls_threshold_vrf, types::Proposal},
     types::{Epoch, Height, Round, View},
 };
 use commonware_conformance::{Conformance, conformance_tests};
@@ -47,7 +47,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = harness::setup_network_with_participants(
             context.child("network"),
             NZUsize!(1),

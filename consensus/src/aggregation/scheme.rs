@@ -10,9 +10,9 @@
 //!   no trusted setup required.
 //! - [`secp256r1`]: Attributable signatures with individual verification. HSM-friendly,
 //!   no trusted setup required.
-//! - [`bls12381_multisig`]: Attributable signatures with aggregated verification.
+//! - [`bls_multisig`]: Attributable signatures with aggregated verification.
 //!   Compact certificates while preserving attribution.
-//! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
+//! - [`bls_threshold`]: Non-attributable threshold signatures. Constant-size
 //!   certificates regardless of committee size.
 
 use super::types::Item;
@@ -34,7 +34,7 @@ impl<D: Digest, S> Scheme<D> for S where
 {
 }
 
-pub mod bls12381_multisig {
+pub mod bls_multisig {
     //! BLS12-381 multi-signature implementation of the
     //! [`Scheme`](commonware_cryptography::certificate::Scheme) trait for `aggregation`.
     //!
@@ -42,13 +42,13 @@ pub mod bls12381_multisig {
     //! per-validator attribution.
 
     use crate::aggregation::types::{Item, Namespace};
-    use commonware_cryptography::impl_certificate_bls12381_multisig;
+    use commonware_cryptography::impl_certificate_bls_multisig;
     use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_multisig!(&'a Item<D>, Namespace, N3f1);
+    impl_certificate_bls_multisig!(&'a Item<D>, Namespace, N3f1);
 }
 
-pub mod bls12381_threshold {
+pub mod bls_threshold {
     //! BLS12-381 threshold implementation of the [`Scheme`](commonware_cryptography::certificate::Scheme)
     //! trait for `aggregation`.
     //!
@@ -56,10 +56,10 @@ pub mod bls12381_threshold {
     //! third-party evidence.
 
     use crate::aggregation::types::{Item, Namespace};
-    use commonware_cryptography::impl_certificate_bls12381_threshold;
+    use commonware_cryptography::impl_certificate_bls_threshold;
     use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, N3f1);
+    impl_certificate_bls_threshold!(&'a Item<D>, Namespace, N3f1);
 }
 
 pub mod ed25519 {

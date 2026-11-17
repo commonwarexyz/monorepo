@@ -19,12 +19,12 @@
 #![cfg_attr(
     feature = "bls12381",
     doc = "
-- [`bls12381_multisig`]: Attributable signatures with aggregated verification. Signatures
+- [`bls_multisig`]: Attributable signatures with aggregated verification. Signatures
   can be aggregated into a single multi-signature for compact certificates while preserving
   attribution (signer indices are stored alongside the aggregated signature). Callers must verify
   a proof of possession for every BLS signing key before constructing the scheme.
 
-- [`bls12381_threshold`]: Non-attributable threshold signatures. Produces succinct
+- [`bls_threshold`]: Non-attributable threshold signatures. Produces succinct
   certificates that are constant-size regardless of committee size. Requires a trusted
   setup (distributed key generation) and cannot attribute signatures to individual signers.
 "
@@ -56,12 +56,12 @@
 #![cfg_attr(
     feature = "bls12381",
     doc = "Some cryptographic schemes are only performant when used in batch verification (like
-[`bls12381_multisig`]) and/or are refreshed frequently (like [`bls12381_threshold`])."
+[`bls_multisig`]) and/or are refreshed frequently (like [`bls_threshold`])."
 )]
 //! Refer to [ed25519] for an example of a scheme that uses the same key for both purposes.
 
 #[cfg(feature = "bls12381")]
-pub use crate::bls::certificate::{multisig as bls12381_multisig, threshold as bls12381_threshold};
+pub use crate::bls::certificate::{multisig as bls_multisig, threshold as bls_threshold};
 pub use crate::ed25519::certificate as ed25519;
 #[commonware_macros::stability(ALPHA)]
 pub use crate::secp256r1::certificate as secp256r1;
@@ -1265,20 +1265,20 @@ mod tests {
     #[allow(dead_code)]
     mod threshold {
         use super::TestSubject;
-        use crate::impl_certificate_bls12381_threshold;
+        use crate::impl_certificate_bls_threshold;
         use commonware_utils::N3f1;
 
-        impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+        impl_certificate_bls_threshold!(TestSubject, Vec<u8>, N3f1);
     }
 
     #[cfg(feature = "bls12381")]
     #[allow(dead_code)]
     mod multisig {
         use super::TestSubject;
-        use crate::impl_certificate_bls12381_multisig;
+        use crate::impl_certificate_bls_multisig;
         use commonware_utils::N3f1;
 
-        impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>, N3f1);
+        impl_certificate_bls_multisig!(TestSubject, Vec<u8>, N3f1);
     }
 
     const SUBJECT: TestSubject = TestSubject {

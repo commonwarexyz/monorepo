@@ -110,7 +110,7 @@ mod tests {
             self, Plan,
             config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+            scheme::bls_threshold::vrf as bls_threshold_vrf,
             types::{
                 Activity, Certificate, Finalization, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
@@ -190,11 +190,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
@@ -388,7 +384,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let buffer = RecordingBuffer::default();
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -854,7 +850,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
@@ -954,7 +950,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
@@ -1078,7 +1074,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
@@ -1172,7 +1168,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
@@ -1272,7 +1268,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let two = make_raw_block(one.digest(), Height::new(2), 200);
@@ -1365,7 +1361,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let two = make_raw_block(one.digest(), Height::new(2), 200);
@@ -1422,7 +1418,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         let (schemes, checkpoint) = runner.start_and_recover(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
             let blocks: Vec<B> = (1..=20)
                 .map(|height| {
@@ -1544,7 +1540,7 @@ mod tests {
                 schemes,
                 participants,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let two = make_raw_block(one.digest(), Height::new(2), 200);
@@ -1656,7 +1652,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
@@ -1769,7 +1765,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
@@ -1885,7 +1881,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(3),
@@ -1963,7 +1959,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             // No network links: forces repair to rely on local cache only.
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
@@ -2095,7 +2091,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let prefix = "test-cache-far-epoch";
             let make_cfg = || cache::Config {
                 partition_prefix: prefix.to_string(),
@@ -2149,7 +2145,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Height 1290 sits in epoch 64 of the 20-block test epocher.
             let floor_round = Round::new(Epoch::new(64), View::new(1290));
@@ -2216,7 +2212,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let prefix = "test-cache-skipped-epoch";
             let make_cfg = || cache::Config {
                 partition_prefix: prefix.to_string(),
@@ -2294,11 +2290,8 @@ mod tests {
         for (survivor, emptied) in [("metadata", true), ("key", false), ("value", false)] {
             let executor = deterministic::Runner::timed(Duration::from_secs(60));
             executor.start(|mut context| async move {
-                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                let Fixture { schemes, .. } =
+                    bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let prefix = "test-cache-interrupted-destroy";
                 let make_cfg = || cache::Config {
                     partition_prefix: prefix.to_string(),
@@ -2433,11 +2426,8 @@ mod tests {
             let (completed, checkpoint) = executor.start_and_recover({
                 let faults = faults.clone();
                 |mut context| async move {
-                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
-                        &mut context,
-                        NAMESPACE,
-                        NUM_VALIDATORS,
-                    );
+                    let Fixture { schemes, .. } =
+                        bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                     let context = MutationFaultContext {
                         inner: context,
                         faults: faults.clone(),
@@ -2522,7 +2512,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let prefix = "test-cache-notarizations";
             let make_cfg = || cache::Config {
                 partition_prefix: prefix.to_string(),
@@ -2622,7 +2612,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -2713,7 +2703,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -2796,7 +2786,7 @@ mod tests {
         runner.start(|mut context| async move {
             // Start from a floor whose anchor is missing locally.
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let anchor = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(
@@ -2839,7 +2829,7 @@ mod tests {
         runner.start(|mut context| async move {
             // A floor whose anchor is missing locally.
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let anchor = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
             let commitment = anchor.digest();
             let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
@@ -2902,7 +2892,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -3035,7 +3025,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let victim = participants[0].clone();
             let server = participants[1].clone();
@@ -3141,7 +3131,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let victim = participants[0].clone();
             let server = participants[1].clone();
@@ -3412,7 +3402,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(
+            } = bls_threshold_vrf::fixture::<V, _>(
                 &mut context,
                 NAMESPACE,
                 NUM_VALIDATORS,
@@ -3542,7 +3532,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(
+            } = bls_threshold_vrf::fixture::<V, _>(
                 &mut context,
                 NAMESPACE,
                 NUM_VALIDATORS,
@@ -3804,7 +3794,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // With terms of two views, round-robin elects participant 1 for views 1 and 2, and
             // a lookahead of one view lets a validator verify view 2 on its vote for view 1.
@@ -4031,7 +4021,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -4202,7 +4192,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -4303,11 +4293,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
@@ -4385,7 +4371,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
+                } = bls_threshold_vrf::fixture::<V, _>(
                     &mut context,
                     NAMESPACE,
                     NUM_VALIDATORS,
@@ -4543,11 +4529,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
@@ -4619,11 +4601,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
@@ -4705,7 +4683,7 @@ mod tests {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+        } = bls_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
         let me = participants[0].clone();
 
         let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
@@ -4898,7 +4876,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
             let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
@@ -4977,11 +4955,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
                 let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
                     context.child("validator"),
@@ -5071,7 +5045,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let (mut marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -5201,11 +5175,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let me = participants[0].clone();
 
                 let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
@@ -5308,7 +5278,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
+                } = bls_threshold_vrf::fixture::<V, _>(
                     &mut context,
                     NAMESPACE,
                     NUM_VALIDATORS,
@@ -5482,11 +5452,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
@@ -5663,11 +5629,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
@@ -5811,11 +5773,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
@@ -5949,11 +5907,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
@@ -6095,11 +6049,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
                     NZUsize!(1),
@@ -6291,7 +6241,7 @@ mod tests {
                     schemes,
                     ..
                 } =
-                    bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                    bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let mut oracle = setup_network_with_participants(context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
@@ -6382,7 +6332,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -6439,7 +6389,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -6493,7 +6443,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -6554,7 +6504,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -6601,7 +6551,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -7188,7 +7138,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         let first_run = |mut context: deterministic::Context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
 
@@ -7300,7 +7250,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -7341,11 +7291,11 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: wrong_schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
@@ -7374,11 +7324,11 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: wrong_schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
@@ -7406,7 +7356,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
@@ -7475,7 +7425,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block =
@@ -7575,7 +7525,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let partition_prefix = "start-floor-height-one-without-metadata";
 
             let floor_round = Round::new(Epoch::zero(), View::new(1));
@@ -7631,7 +7581,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
@@ -7723,7 +7673,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -7823,7 +7773,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
             let buffer = RecordingBuffer::default();
@@ -7909,7 +7859,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
@@ -7999,7 +7949,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
@@ -8077,7 +8027,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let (application, mut started_rx) = HoldingBlockReporter::new_after(Height::zero());
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -8251,7 +8201,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
             let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
@@ -8317,7 +8267,7 @@ mod tests {
         runner.start(|mut context| async move {
             // Two floors whose anchors are missing locally.
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let old = make_raw_block(Sha256::hash(&[b"old-parent"]), Height::new(5), 500);
             let new = make_raw_block(Sha256::hash(&[b"new-parent"]), Height::new(6), 600);
             let old_proposal = Proposal::new(
@@ -8418,7 +8368,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -8521,7 +8471,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
@@ -8590,7 +8540,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
@@ -8714,7 +8664,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let application = Application::<B>::manual_ack();
             let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -8775,7 +8725,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -8856,7 +8806,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -8949,7 +8899,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
@@ -9024,7 +8974,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -9103,7 +9053,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let requested_round = Round::new(Epoch::new(1), View::new(1));
             let delivered_round = Round::new(Epoch::zero(), View::new(1));
@@ -9156,7 +9106,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -9201,7 +9151,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -9287,7 +9237,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -9389,7 +9339,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let prefix = "gated-finalized-identity";
             let strategy = GatedStrategy::new(context.child("strategy"));
             let (finalizations, blocks) = prunable_finalized_stores(&context, prefix).await;
@@ -9501,7 +9451,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // Height 1 lives in epoch 0 under `FixedEpocher`, but the finalization claims epoch 1.
             // The certificate decodes against epoch 0's config, so the epoch-equality guard must
@@ -9553,7 +9503,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -9620,7 +9570,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -9685,10 +9635,10 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: foreign, ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             // The certificate decodes under epoch 0's scope but was signed by a
             // committee marshal does not know.
@@ -9752,10 +9702,10 @@ mod tests {
             // Distinct committees per epoch, so a certificate only verifies under
             // its own epoch's scope.
             let Fixture { schemes: first, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: second, ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let early_height = Height::new(1);
             let early_block = make_raw_block(Sha256::hash(&[b""]), early_height, 100);
@@ -9855,7 +9805,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -9934,7 +9884,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -10002,7 +9952,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let partition_prefix = "restart-keeps-existing-genesis";
 
             let original_genesis =
@@ -10051,7 +10001,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let partition_prefix = format!("processed-round-restart-{me}");
 
@@ -10149,7 +10099,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let partition_prefix = "round-floor-missing-next-block";
 
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -10249,7 +10199,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let partition_prefix = "round-floor-before-anchor-ack";
 
             let floor_round = Round::new(Epoch::zero(), View::new(5));
@@ -10338,7 +10288,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -10416,7 +10366,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let partition_prefix = "round-floor-releases-pending-floor";
 
             // Models a prunable deployment after section pruning: the application
@@ -10727,7 +10677,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let partition_prefix = format!("validator-{me}");
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -11063,7 +11013,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = CountedBlock::new::<Sha256>(
                 CloneCounter::default(),
                 Sha256::hash(&[b""]),
@@ -11174,10 +11124,10 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: forged, ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, b"forged", NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, b"forged", NUM_VALIDATORS);
             let genesis =
                 CountedBlock::new::<Sha256>(DecodeCounter, Sha256::hash(&[b""]), Height::zero(), 0);
             let parent = genesis.digest();
@@ -11269,7 +11219,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let config = test_config(
                 "paced-finalized-sync",
                 ConstantProvider::new(schemes[0].clone()),
@@ -11392,7 +11342,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let config = test_config(
                 "stale-floor-anchor",
                 ConstantProvider::new(schemes[0].clone()),
@@ -11595,7 +11545,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let config = test_config(
                 "overlapping-finalized-syncs",
                 ConstantProvider::new(schemes[0].clone()),
@@ -11706,7 +11656,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations_by_height, finalized_blocks) =
                 prunable_finalized_stores(&context, PARTITION_PREFIX).await;
             let finalized_blocks =
@@ -11785,7 +11735,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             let (finalizations_by_height, mut finalized_blocks) =
@@ -11892,7 +11842,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations_by_height, finalized_blocks) =
                 prunable_finalized_stores(&context, PARTITION_PREFIX).await;
             let finalized_blocks =
@@ -12019,7 +11969,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let (finalizations_by_height, finalized_blocks) =
                 prunable_finalized_stores(&context, PARTITION_PREFIX).await;
             let (actor, mut mailbox, _) = Actor::init(
@@ -12124,7 +12074,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),
@@ -12234,7 +12184,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let unknown = Sha256::hash(&[b"unknown-block"]);
@@ -12276,7 +12226,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -12374,7 +12324,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -12442,7 +12392,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -12512,7 +12462,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -12574,7 +12524,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -12656,11 +12606,7 @@ mod tests {
                     participants,
                     schemes,
                     ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
+                } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
                 let outgoing = participants[0].clone();
                 let incoming = participants[1].clone();
                 let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
@@ -12819,7 +12765,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block_a = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -12866,7 +12812,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -12914,7 +12860,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -12966,7 +12912,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -13014,7 +12960,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
@@ -13057,7 +13003,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let me = participants[0].clone();
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -13186,7 +13132,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let victim = participants[3].clone();
             let peer = participants[2].clone();
             let mut oracle = setup_network_with_participants(
@@ -13561,7 +13507,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
             let blocks: Vec<B> = (1..=30)
                 .map(|height| {
@@ -13777,7 +13723,7 @@ mod tests {
     impl BoundaryBlock {
         fn new(context: &mut deterministic::Context) -> Self {
             let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+                bls_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
             let block = make_raw_block(Sha256::hash(&[b"parent"]), Height::new(10), 1_000);
             Self { schemes, block }
         }
@@ -13813,7 +13759,7 @@ mod tests {
     ) -> ReproposalRun {
         // Chain blocks 1 through 30 from genesis.
         let Fixture { schemes, .. } =
-            bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+            bls_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
         let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
         let blocks: Vec<B> = (1..=30)
             .map(|height| {
@@ -14833,7 +14779,7 @@ mod tests {
         // Start a marshal that keeps `view_retention` views under `epocher`. Its application
         // acknowledges each block only when the test asks, starting with genesis.
         let Fixture { schemes, .. } =
-            bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+            bls_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
         let (certificates, finalized) =
             prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
         let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(

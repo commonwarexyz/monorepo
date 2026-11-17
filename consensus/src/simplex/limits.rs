@@ -25,7 +25,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+            scheme::{bls_multisig, bls_threshold, ed25519, secp256r1},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
@@ -152,14 +152,14 @@ mod tests {
     }
 
     #[test]
-    fn widest_encodings_bls12381_multisig() {
+    fn widest_encodings_bls_multisig() {
         for participants in PARTICIPANTS {
-            check(bls12381_multisig::fixture::<MinPk, _>(
+            check(bls_multisig::fixture::<MinPk, _>(
                 &mut test_rng(),
                 NAMESPACE,
                 participants,
             ));
-            check(bls12381_multisig::fixture::<MinSig, _>(
+            check(bls_multisig::fixture::<MinSig, _>(
                 &mut test_rng(),
                 NAMESPACE,
                 participants,
@@ -168,25 +168,25 @@ mod tests {
     }
 
     #[test]
-    fn widest_encodings_bls12381_threshold() {
+    fn widest_encodings_bls_threshold() {
         // A threshold certificate has one size for every committee.
         for participants in [4, 33] {
-            check(bls12381_threshold::standard::fixture::<MinPk, _>(
+            check(bls_threshold::standard::fixture::<MinPk, _>(
                 &mut test_rng(),
                 NAMESPACE,
                 participants,
             ));
-            check(bls12381_threshold::standard::fixture::<MinSig, _>(
+            check(bls_threshold::standard::fixture::<MinSig, _>(
                 &mut test_rng(),
                 NAMESPACE,
                 participants,
             ));
-            check(bls12381_threshold::vrf::fixture::<MinPk, _>(
+            check(bls_threshold::vrf::fixture::<MinPk, _>(
                 &mut test_rng(),
                 NAMESPACE,
                 participants,
             ));
-            check(bls12381_threshold::vrf::fixture::<MinSig, _>(
+            check(bls_threshold::vrf::fixture::<MinSig, _>(
                 &mut test_rng(),
                 NAMESPACE,
                 participants,

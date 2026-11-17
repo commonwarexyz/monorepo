@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_consensus::simplex::{
-    scheme::{
-        Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-    },
+    scheme::{Scheme, bls_multisig, bls_threshold::vrf as bls_threshold_vrf, ed25519},
     types::{Certificate, Vote},
 };
 use commonware_cryptography::{
@@ -16,10 +14,10 @@ use commonware_cryptography::{
 use libfuzzer_sys::fuzz_target;
 
 type Ed25519Scheme = ed25519::Scheme;
-type Bls12381MultisigMinPk = bls12381_multisig::Scheme<PublicKey, MinPk>;
-type Bls12381MultisigMinSig = bls12381_multisig::Scheme<PublicKey, MinSig>;
-type ThresholdSchemeMinPk = bls12381_threshold_vrf::Scheme<PublicKey, MinPk>;
-type ThresholdSchemeMinSig = bls12381_threshold_vrf::Scheme<PublicKey, MinSig>;
+type Bls12381MultisigMinPk = bls_multisig::Scheme<PublicKey, MinPk>;
+type Bls12381MultisigMinSig = bls_multisig::Scheme<PublicKey, MinSig>;
+type ThresholdSchemeMinPk = bls_threshold_vrf::Scheme<PublicKey, MinPk>;
+type ThresholdSchemeMinSig = bls_threshold_vrf::Scheme<PublicKey, MinSig>;
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {

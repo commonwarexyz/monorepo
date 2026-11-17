@@ -23,7 +23,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{
             DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
         },
-        key::Share,
+        sharing::Share,
         variant::Variant as BlsVariant,
     },
 };

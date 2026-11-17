@@ -14,7 +14,7 @@ mod tests {
     use super::*;
     use crate::{
         aggregation::{
-            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+            scheme::{bls_multisig, bls_threshold, ed25519, secp256r1},
             types::{Ack, Item, TipAck},
         },
         types::{Epoch, Height, Participant},
@@ -58,22 +58,22 @@ mod tests {
     fn widest_encodings() {
         check(ed25519::fixture(&mut test_rng(), NAMESPACE, 4));
         check(secp256r1::fixture(&mut test_rng(), NAMESPACE, 4));
-        check(bls12381_multisig::fixture::<MinPk, _>(
+        check(bls_multisig::fixture::<MinPk, _>(
             &mut test_rng(),
             NAMESPACE,
             4,
         ));
-        check(bls12381_multisig::fixture::<MinSig, _>(
+        check(bls_multisig::fixture::<MinSig, _>(
             &mut test_rng(),
             NAMESPACE,
             4,
         ));
-        check(bls12381_threshold::fixture::<MinPk, _>(
+        check(bls_threshold::fixture::<MinPk, _>(
             &mut test_rng(),
             NAMESPACE,
             4,
         ));
-        check(bls12381_threshold::fixture::<MinSig, _>(
+        check(bls_threshold::fixture::<MinSig, _>(
             &mut test_rng(),
             NAMESPACE,
             4,

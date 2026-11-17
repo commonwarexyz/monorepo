@@ -19,10 +19,10 @@
 //! - [`secp256r1`][scheme::secp256r1]: Attributable signatures with individual verification.
 //!   HSM-friendly, no trusted setup required. Certificates contain individual signatures.
 //!
-//! - [`bls12381_multisig`][scheme::bls12381_multisig]: Attributable signatures with aggregated
+//! - [`bls_multisig`][scheme::bls_multisig]: Attributable signatures with aggregated
 //!   verification. Produces compact certificates while preserving signer attribution.
 //!
-//! - [`bls12381_threshold`][scheme::bls12381_threshold]: Non-attributable threshold signatures.
+//! - [`bls_threshold`][scheme::bls_threshold]: Non-attributable threshold signatures.
 //!   Produces succinct constant-size certificates. Requires trusted setup (DKG).
 //!
 //! # Architecture
@@ -118,7 +118,7 @@ cfg_if::cfg_if! {
 mod tests {
     use super::{Config, Engine, max_payload_size, mocks};
     use crate::{
-        aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
+        aggregation::scheme::{Scheme, bls_multisig, bls_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
     };
     use commonware_cryptography::{
@@ -155,10 +155,10 @@ mod tests {
     // Invoke `$cb!($($args)*, $suffix, $fixture)` once per canonical scheme fixture.
     macro_rules! for_each_fixture {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, bls12381_threshold_min_pk, bls12381_threshold::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_threshold_min_sig, bls12381_threshold::fixture::<MinSig, _>);
-            $cb!($($args)*, bls12381_multisig_min_pk, bls12381_multisig::fixture::<MinPk, _>);
-            $cb!($($args)*, bls12381_multisig_min_sig, bls12381_multisig::fixture::<MinSig, _>);
+            $cb!($($args)*, bls_threshold_min_pk, bls_threshold::fixture::<MinPk, _>);
+            $cb!($($args)*, bls_threshold_min_sig, bls_threshold::fixture::<MinSig, _>);
+            $cb!($($args)*, bls_multisig_min_pk, bls_multisig::fixture::<MinPk, _>);
+            $cb!($($args)*, bls_multisig_min_sig, bls_multisig::fixture::<MinSig, _>);
             $cb!($($args)*, ed25519, ed25519::fixture);
             $cb!($($args)*, secp256r1, secp256r1::fixture);
         };

@@ -23,7 +23,7 @@ use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
     bls::{
         dkg::feldman_desmedt::{Info, Output},
-        key::Share,
+        sharing::Share,
         variant::Variant as BlsVariant,
     },
     transcript::Summary,

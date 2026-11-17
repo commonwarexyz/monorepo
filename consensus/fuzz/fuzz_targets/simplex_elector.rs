@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
         elector::{self, Elector, Mode as _, Random, RandomVersion, RoundRobin},
-        scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
+        scheme::{bls_threshold::vrf as bls_threshold_vrf, ed25519},
     },
     types::{Round, TermLength, View, ViewDelta},
 };
@@ -24,8 +24,8 @@ use std::time::Duration;
 enum FuzzElector {
     RoundRobin(TermLength),
     RoundRobinShuffled([u8; 32], TermLength),
-    RandomMinPk(bls12381_threshold_vrf::Certificate<MinPk>),
-    RandomMinSig(bls12381_threshold_vrf::Certificate<MinSig>),
+    RandomMinPk(bls_threshold_vrf::Certificate<MinPk>),
+    RandomMinSig(bls_threshold_vrf::Certificate<MinSig>),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -96,12 +96,12 @@ fuzz_target!(|input: FuzzInput| {
         }
         FuzzElector::RandomMinPk(certificate) => {
             #[allow(deprecated)]
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(
+            fuzz::<bls_threshold_vrf::Scheme<_, MinPk>, _>(
                 &input,
                 Random::<Sha256>::new(RandomVersion::V0),
                 Some(certificate),
             );
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinPk>, _>(
+            fuzz::<bls_threshold_vrf::Scheme<_, MinPk>, _>(
                 &input,
                 Random::<Sha256>::new(RandomVersion::V1),
                 Some(certificate),
@@ -109,12 +109,12 @@ fuzz_target!(|input: FuzzInput| {
         }
         FuzzElector::RandomMinSig(certificate) => {
             #[allow(deprecated)]
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinSig>, _>(
+            fuzz::<bls_threshold_vrf::Scheme<_, MinSig>, _>(
                 &input,
                 Random::<Sha256>::new(RandomVersion::V0),
                 Some(certificate),
             );
-            fuzz::<bls12381_threshold_vrf::Scheme<_, MinSig>, _>(
+            fuzz::<bls_threshold_vrf::Scheme<_, MinSig>, _>(
                 &input,
                 Random::<Sha256>::new(RandomVersion::V1),
                 Some(certificate),

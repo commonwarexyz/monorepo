@@ -8,7 +8,7 @@ use commonware_cryptography::{
     },
     bls12381::primitives::variant::{MinPk, MinSig},
     certificate::{Attestation, Scheme as _},
-    ed25519, impl_certificate_bls12381_multisig,
+    ed25519, impl_certificate_bls_multisig,
     sha256::Digest as Sha256Digest,
 };
 use commonware_math::algebra::Random;
@@ -18,7 +18,7 @@ use criterion::{Criterion, criterion_group};
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_MULTISIG_OPTIMISTIC_ASSEMBLE";
 const POP_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_MULTISIG_OPTIMISTIC_ASSEMBLE_POP";
 
-impl_certificate_bls12381_multisig!(BenchSubject, Vec<u8>, N3f1);
+impl_certificate_bls_multisig!(BenchSubject, Vec<u8>, N3f1);
 
 type Multisig<V> = Scheme<ed25519::PublicKey, V>;
 

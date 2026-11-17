@@ -11,8 +11,7 @@
 use super::{
     super::{
         Error,
-        key::Share,
-        sharing::Sharing,
+        sharing::{Share, Sharing},
         variant::{PartialSignature, Variant},
     },
     batch,

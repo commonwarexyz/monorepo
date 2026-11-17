@@ -2,17 +2,17 @@ use super::utils::optimistic_assemble::BenchSubject;
 use bytes::Bytes;
 use commonware_codec::{Encode as _, types::lazy::Lazy};
 use commonware_cryptography::{
-    bls::ops::sign_message,
-    bls12381::primitives::{group::Private, variant::MinPk},
+    bls::{key::Private, ops::sign_message},
+    bls12381::primitives::variant::MinPk,
     certificate::Attestation,
-    ed25519, impl_certificate_bls12381_multisig,
+    ed25519, impl_certificate_bls_multisig,
 };
 use commonware_math::algebra::Random;
 use commonware_utils::{N3f1, Participant, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
-impl_certificate_bls12381_multisig!(BenchSubject, Vec<u8>, N3f1);
+impl_certificate_bls_multisig!(BenchSubject, Vec<u8>, N3f1);
 
 type Multisig = Scheme<ed25519::PublicKey, MinPk>;
 

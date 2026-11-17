@@ -14,7 +14,7 @@
 //! * Lazy Message Verification
 //! * Application-Defined Block Format
 //! * Pluggable Hashing and Cryptography
-//! * Embedded VRF (via [scheme::bls12381_threshold::vrf])
+//! * Embedded VRF (via [scheme::bls_threshold::vrf])
 //!
 //! # Design
 //!
@@ -418,7 +418,7 @@
 //!
 //! Unlike other consensus constructions that verify all incoming messages received from peers, for schemes
 //! where [`Verifier::is_batchable()`](commonware_cryptography::certificate::Verifier::is_batchable) returns `true`
-//! (such as [scheme::ed25519], [scheme::bls12381_multisig] and [scheme::bls12381_threshold]), `simplex` lazily
+//! (such as [scheme::ed25519], [scheme::bls_multisig] and [scheme::bls_threshold]), `simplex` lazily
 //! verifies messages (only when a quorum is met), enabling efficient batch verification. For schemes where
 //! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
 //! arrive since there is no batching benefit.
@@ -533,7 +533,7 @@
 //! with 32 byte public keys and 64 byte signatures. While they are well-supported by commercial HSMs and offer efficient batch
 //! verification, the signatures are not aggregatable (and certificates grow linearly with the quorum size).
 //!
-//! ### [scheme::bls12381_multisig]
+//! ### [scheme::bls_multisig]
 //!
 //! [commonware_cryptography::bls12381] is a ["digital signature scheme with aggregation properties"](https://www.ietf.org/archive/id/draft-irtf-cfrg-bls-signature-05.txt).
 //! Unlike [commonware_cryptography::ed25519], signatures from multiple participants (say the signers in a certificate) can be aggregated
@@ -547,21 +547,21 @@
 //! benefit from batch verification, so signatures are verified individually. Certificates grow linearly with quorum size
 //! (similar to ed25519).
 //!
-//! ### [scheme::bls12381_threshold]
+//! ### [scheme::bls_threshold]
 //!
-//! [scheme::bls12381_threshold] employs threshold cryptography (BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum)
+//! [scheme::bls_threshold] employs threshold cryptography (BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum)
 //! to generate succinct consensus certificates (verifiable with just the static public key). This scheme requires instantiating
 //! the shared secret via [commonware_cryptography::bls12381::dkg] and resharing whenever participants change.
 //!
 //! Two (non-attributable) variants are provided:
 //!
-//! - [scheme::bls12381_threshold::standard]: Certificates contain only a vote signature.
+//! - [scheme::bls_threshold::standard]: Certificates contain only a vote signature.
 //!
-//! - [scheme::bls12381_threshold::vrf]: Certificates contain a vote signature and a view signature (i.e. a seed that can be used
+//! - [scheme::bls_threshold::vrf]: Certificates contain a vote signature and a view signature (i.e. a seed that can be used
 //!   as a VRF). This variant can be configured for random leader election (via [elector::Random]) and/or incorporate this randomness
 //!   into execution.
 //!
-//! #### Embedded VRF ([scheme::bls12381_threshold::vrf])
+//! #### Embedded VRF ([scheme::bls_threshold::vrf])
 //!
 //! Every `notarize(c,v)`, `nullify(v)`, or `finalize(c,v)` message includes an `attestation(v)` (a partial signature over the view `v`).
 //! After `2f+1` attestations are collected from unique participants, `seed(v)` can be recovered. Because `attestation(v)` is only over the
@@ -573,7 +573,7 @@
 //! manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), so it is a sound beacon for leader election
 //! (where `seed(v)` determines the leader for `v+1`). It is **not** safe as a source of randomness for execution within view `v` itself: a
 //! coalition of `f` Byzantine participants recovers `seed(v)` after only `f+1` honest attestations, before the round resolves, letting a
-//! malicious leader front-run the outcome. Consume `seed(v)` only in a later view or epoch (see [scheme::bls12381_threshold::vrf] for
+//! malicious leader front-run the outcome. Consume `seed(v)` only in a later view or epoch (see [scheme::bls_threshold::vrf] for
 //! extended discussion of the attack and the commit-then-reveal mitigation).
 //!
 //! #### Succinct Certificates
@@ -940,10 +940,10 @@ mod tests {
                 wrapped,
             },
             scheme::{
-                Scheme, bls12381_multisig,
-                bls12381_threshold::{
-                    standard as bls12381_threshold_std,
-                    vrf::{self as bls12381_threshold_vrf, Seedable},
+                Scheme, bls_multisig,
+                bls_threshold::{
+                    standard as bls_threshold_std,
+                    vrf::{self as bls_threshold_vrf, Seedable},
                 },
                 ed25519, secp256r1,
             },
@@ -1004,12 +1004,12 @@ mod tests {
     // once per canonical (elector, scheme) fixture.
     macro_rules! for_each_fixture {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, bls12381_threshold_vrf_min_pk, Random, bls12381_threshold_vrf::fixture::<MinPk, _>, Random::new(RandomVersion::V1));
-            $cb!($($args)*, bls12381_threshold_vrf_min_sig, Random, bls12381_threshold_vrf::fixture::<MinSig, _>, Random::new(RandomVersion::V1));
-            $cb!($($args)*, bls12381_threshold_std_min_pk, RoundRobin, bls12381_threshold_std::fixture::<MinPk, _>, RoundRobin::default());
-            $cb!($($args)*, bls12381_threshold_std_min_sig, RoundRobin, bls12381_threshold_std::fixture::<MinSig, _>, RoundRobin::default());
-            $cb!($($args)*, bls12381_multisig_min_pk, RoundRobin, bls12381_multisig::fixture::<MinPk, _>, RoundRobin::default());
-            $cb!($($args)*, bls12381_multisig_min_sig, RoundRobin, bls12381_multisig::fixture::<MinSig, _>, RoundRobin::default());
+            $cb!($($args)*, bls_threshold_vrf_min_pk, Random, bls_threshold_vrf::fixture::<MinPk, _>, Random::new(RandomVersion::V1));
+            $cb!($($args)*, bls_threshold_vrf_min_sig, Random, bls_threshold_vrf::fixture::<MinSig, _>, Random::new(RandomVersion::V1));
+            $cb!($($args)*, bls_threshold_std_min_pk, RoundRobin, bls_threshold_std::fixture::<MinPk, _>, RoundRobin::default());
+            $cb!($($args)*, bls_threshold_std_min_sig, RoundRobin, bls_threshold_std::fixture::<MinSig, _>, RoundRobin::default());
+            $cb!($($args)*, bls_multisig_min_pk, RoundRobin, bls_multisig::fixture::<MinPk, _>, RoundRobin::default());
+            $cb!($($args)*, bls_multisig_min_sig, RoundRobin, bls_multisig::fixture::<MinSig, _>, RoundRobin::default());
             $cb!($($args)*, ed25519, RoundRobin, ed25519::fixture, RoundRobin::default());
             $cb!($($args)*, secp256r1, RoundRobin, secp256r1::fixture, RoundRobin::default());
         };
@@ -1578,9 +1578,9 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
+    fn test_all_online_rayon_bls_threshold_vrf_min_pk() {
         all_online::<_, _, Random, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
             |context| context.strategy(NZUsize!(2)),
         );
@@ -2007,20 +2007,12 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_dishonest_leader_certification_rejected() {
-        dishonest_leader_certification_rejected::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-        dishonest_leader_certification_rejected::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        dishonest_leader_certification_rejected::<_, _>(
-            bls12381_threshold_std::fixture::<MinPk, _>,
-        );
-        dishonest_leader_certification_rejected::<_, _>(
-            bls12381_threshold_std::fixture::<MinSig, _>,
-        );
-        dishonest_leader_certification_rejected::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
-        dishonest_leader_certification_rejected::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls_threshold_vrf::fixture::<MinPk, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls_threshold_vrf::fixture::<MinSig, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls_threshold_std::fixture::<MinPk, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls_threshold_std::fixture::<MinSig, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls_multisig::fixture::<MinPk, _>);
+        dishonest_leader_certification_rejected::<_, _>(bls_multisig::fixture::<MinSig, _>);
         dishonest_leader_certification_rejected::<_, _>(ed25519::fixture);
         dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
     }
@@ -8102,7 +8094,7 @@ mod tests {
     fn tle<V, L>(elector: L)
     where
         V: Variant,
-        L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
+        L: elector::Config<bls_threshold_vrf::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
@@ -8116,9 +8108,9 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
+            } = bls_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
             let mut oracle = start_test_network_with_peers::<
-                bls12381_threshold_vrf::Scheme<PublicKey, V>,
+                bls_threshold_vrf::Scheme<PublicKey, V>,
                 _,
             >(context.child("network"), participants.clone(), true)
             .await;

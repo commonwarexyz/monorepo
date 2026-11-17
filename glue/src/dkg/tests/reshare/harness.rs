@@ -55,9 +55,9 @@ use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     bls::{
         dkg::feldman_desmedt::{Reveal, deal},
-        sharing::Mode,
+        sharing::{Mode, Share},
     },
-    bls12381::primitives::{group::Share, variant::MinPk},
+    bls12381::primitives::{group::Scalar, variant::MinPk},
     certificate::{
         ConstantProvider, Membership, Provider as CertificateProvider, Scheme as _, Scoped,
     },
@@ -102,7 +102,7 @@ use std::{
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 type Database<E> = Shared<Qmdb<E>>;
-type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
+type Scheme = simplex::scheme::bls_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
 type PublicKey = ed25519::PublicKey;
@@ -682,7 +682,7 @@ pub(super) struct ValidatorEngine {
 #[derive(Clone)]
 struct InitialState {
     info: EpochInfo<MinPk, ed25519::PublicKey, TestDirectory>,
-    shares: Map<ed25519::PublicKey, Share>,
+    shares: Map<ed25519::PublicKey, Share<Scalar>>,
 }
 
 impl InitialState {

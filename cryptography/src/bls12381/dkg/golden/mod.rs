@@ -128,9 +128,12 @@ mod evrf;
 
 use crate::{
     Signer as _, Verifier as _,
-    bls::sharing::{Mode, ModeVersion, Sharing},
+    bls::{
+        key::Private,
+        sharing::{Mode, ModeVersion, Share, Sharing},
+    },
     bls12381::primitives::{
-        group::{G1, Private, Scalar, Share, SmallScalar},
+        group::{G1, Scalar, SmallScalar},
         variant::MinPk,
     },
     curve::ScalarReadCfg,
@@ -469,7 +472,7 @@ pub fn deal(
     setup: &Setup,
     info: &Info,
     me: &PrivateKey,
-    share: Option<Share>,
+    share: Option<Share<Scalar>>,
     strategy: &impl Strategy,
 ) -> Result<SignedDealerLog, Error> {
     check_setup(setup, info)?;
@@ -647,7 +650,7 @@ pub fn play(
     logs: BTreeMap<PublicKey, DealerLog>,
     me: &PrivateKey,
     strategy: &impl Strategy,
-) -> Result<(Output<PublicKey>, Share), Error> {
+) -> Result<(Output<PublicKey>, Share<Scalar>), Error> {
     check_setup(setup, info)?;
     let me_pub = me.public();
     let my_index = info.player_index(&me_pub)?;
@@ -1223,7 +1226,7 @@ mod test_plan {
             dealer_keys: &[PrivateKey],
             player_keys: &[PrivateKey],
             strategy: &impl Strategy,
-        ) -> anyhow::Result<(Output<PublicKey>, Vec<Share>)> {
+        ) -> anyhow::Result<(Output<PublicKey>, Vec<Share<Scalar>>)> {
             let info = Self::make_info(0, None, dealer_keys, player_keys);
 
             let mut logs = BTreeMap::new();

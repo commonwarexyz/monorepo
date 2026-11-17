@@ -3,8 +3,7 @@
 use crate::{
     bls::{
         dkg::feldman_desmedt::deal,
-        key::Share,
-        sharing::{Mode, Sharing},
+        sharing::{Mode, Share, Sharing},
         variant::Variant,
     },
     certificate::{Scheme, mocks::Fixture},

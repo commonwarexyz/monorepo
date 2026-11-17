@@ -13,10 +13,7 @@
 //! group operations can still be the identity, so an API that treats it as invalid must reject it
 //! at its own boundary.
 
-use crate::{
-    bls::key,
-    curve::{DST, ScalarReadCfg},
-};
+use crate::curve::{DST, ScalarReadCfg};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
@@ -535,9 +532,6 @@ impl arbitrary::Arbitrary<'_> for GT {
     }
 }
 
-/// A BLS12-381 private key.
-pub type Private = key::Private<Scalar>;
-
 /// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
@@ -954,9 +948,6 @@ impl FieldNTT for Scalar {
         Self(ret)
     }
 }
-
-/// A share of a BLS12-381 threshold signing key.
-pub type Share = key::Share<Scalar>;
 
 impl G1 {
     /// Encodes the G1 element into a slice.
@@ -1887,7 +1878,11 @@ impl HashToGroup for G2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Secret, bls12381::primitives::group::Scalar};
+    use crate::{
+        Secret,
+        bls::{key::Private, sharing::Share},
+        bls12381::primitives::group::Scalar,
+    };
     use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
@@ -2034,7 +2029,7 @@ mod tests {
     #[test]
     fn test_private_decode_rejects_zero_scalar() {
         let encoded = Scalar::zero().encode();
-        assert!(Private::decode(encoded).is_err());
+        assert!(Private::<Scalar>::decode(encoded).is_err());
     }
 
     #[test]
@@ -2449,7 +2444,7 @@ mod tests {
     #[test]
     fn test_share_redacted() {
         let mut rng = test_rng();
-        let share = Share::new(Participant::new(1), Private::random(&mut rng));
+        let share = Share::<Scalar>::new(Participant::new(1), Private::random(&mut rng));
         let debug = format!("{:?}", share);
         let display = format!("{}", share);
         assert!(debug.contains("REDACTED"));
@@ -2740,9 +2735,9 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<G1>,
             CodecConformance<G2>,
-            CodecConformance<Private>,
+            CodecConformance<Private<Scalar>>,
             CodecConformance<Scalar>,
-            CodecConformance<Share>
+            CodecConformance<Share<Scalar>>
         }
     }
 

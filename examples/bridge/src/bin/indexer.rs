@@ -10,7 +10,7 @@ use commonware_bridge::{
 use commonware_codec::{DecodeExt, Encode};
 use commonware_consensus::{
     Viewable,
-    simplex::{scheme::bls12381_threshold::standard as bls12381_threshold, types::Finalization},
+    simplex::{scheme::bls_threshold::standard as bls_threshold, types::Finalization},
     types::View,
 };
 use commonware_cryptography::{
@@ -40,7 +40,7 @@ use std::{
 };
 use tracing::{debug, info};
 
-type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+type Scheme = bls_threshold::Scheme<PublicKey, MinSig>;
 
 enum Message<D: Digest> {
     PutBlock {
@@ -151,7 +151,7 @@ fn main() {
             let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
             verifiers.insert(
                 public,
-                bls12381_threshold::Scheme::certificate_verifier(&namespace, public),
+                bls_threshold::Scheme::certificate_verifier(&namespace, public),
             );
             blocks.insert(public, HashMap::new());
             finalizations.insert(public, BTreeMap::new());
