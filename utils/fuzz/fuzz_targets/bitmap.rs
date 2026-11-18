@@ -5,10 +5,12 @@ use commonware_codec::{
     Error,
     codec::{EncodeSize, Read, Write},
 };
-use commonware_utils::bitmap::Readable;
+use commonware_utils::bitmap::{Atomic, Readable};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 100_000;
+/// Maximum number of threads setting bits of an [Atomic] bitmap.
+const MAX_ATOMIC_THREADS: u8 = 4;
 
 // Alias to avoid having to specify the chunk size in every test case.
 type BitMap = commonware_utils::bitmap::BitMap;
@@ -62,6 +64,9 @@ enum FuzzInput {
     Readable(Vec<bool>, u64),
     /// Exercise `BitMap`'s own `arbitrary` impl and basic invariants on it.
     ArbitraryBitMap(BitMap),
+    /// Set bits (taken modulo the length) of an `Atomic` bitmap of the given length from up to
+    /// `MAX_ATOMIC_THREADS` threads, and check the converted bitmap against a `Vec<bool>` model.
+    Atomic(u16, u8, Vec<u64>),
 }
 
 #[derive(Debug)]
@@ -630,8 +635,45 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert_eq!(BitMap::from(&model), v);
                 assert_eq!(v.count_ones() + v.count_zeros(), v.len());
             }
+
+            FuzzInput::Atomic(len, threads, bits) => check_atomic(len.into(), threads, bits),
         }
     }
+}
+
+fn check_atomic(len: u64, threads: u8, bits: Vec<u64>) {
+    let bits: Vec<u64> = if len == 0 {
+        Vec::new()
+    } else {
+        bits.into_iter().map(|bit| bit % len).collect()
+    };
+    let mut model = vec![false; len as usize];
+    for &bit in &bits {
+        model[bit as usize] = true;
+    }
+
+    // Threads take interleaved bits, so they race on the same words.
+    let atomic = Atomic::zeroes(len);
+    let threads = usize::from(threads % MAX_ATOMIC_THREADS) + 1;
+    if threads == 1 {
+        bits.iter().for_each(|&bit| atomic.set(bit));
+    } else {
+        std::thread::scope(|scope| {
+            for stripe in 0..threads {
+                let (atomic, bits) = (&atomic, &bits);
+                scope.spawn(move || {
+                    for &bit in bits.iter().skip(stripe).step_by(threads) {
+                        atomic.set(bit);
+                    }
+                });
+            }
+        });
+    }
+
+    let bitmap = atomic.into_bitmap();
+    assert_eq!(bitmap, BitMap::from(&model));
+    let ones = model.iter().filter(|&&bit| bit).count() as u64;
+    assert_eq!(bitmap.count_ones(), ones);
 }
 
 #[derive(Arbitrary, Debug)]

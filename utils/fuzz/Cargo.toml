@@ -189,3 +189,17 @@ path = "fuzz_targets/probability.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shared"
+path = "fuzz_targets/shared.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iter"
+path = "fuzz_targets/iter.rs"
+test = false
+doc = false
+bench = false
