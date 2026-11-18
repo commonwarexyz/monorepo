@@ -451,6 +451,7 @@ where
         &self,
         candidates: usize,
     ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        let candidates = candidates.min(self.active_keys);
         let mut locations = Vec::with_capacity(candidates);
         (&*self.bitmap).fill(
             self.inactivity_floor_loc,
