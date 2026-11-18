@@ -1,10 +1,10 @@
 //! A durable, at-least-once delivery queue backed by a [`variable::Journal`](crate::journal::contiguous::variable).
 //!
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
-//! Items are durably stored in a journal and will survive crashes. [Queue::init] returns the
-//! queue, which writes items, and its [Reader], which delivers committed items. The reader must
-//! explicitly acknowledge each item after processing. On restart, all non-pruned items are
-//! re-delivered (acknowledged or not).
+//! [Queue::init] returns the queue and its [Reader]. During normal operation, a commit or sync
+//! publishes new items to the reader. On restart, the reader delivers all items that the journal
+//! recovers, including any uncommitted items. The reader must acknowledge each item after
+//! processing. Items acknowledged before restart can be delivered again unless pruned.
 //!
 //! # Ownership
 //!
