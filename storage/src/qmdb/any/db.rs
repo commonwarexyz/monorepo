@@ -11,7 +11,7 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics},
+    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics, operation::same_key},
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -198,7 +198,7 @@ where
             // Translated keys can collide, so read candidates until the full key matches.
             for loc in self.snapshot.get(key).copied() {
                 let update = self.read_update(loc).await?;
-                if update.key() == key {
+                if same_key(update.key(), key) {
                     return Ok(Some((update, loc)));
                 }
             }
@@ -372,7 +372,7 @@ where
             let loc = Location::new(pos);
             let mut pending = None;
             for &(key_idx, _) in group {
-                if results[key_idx].is_some() || data.key() != keys[key_idx].borrow() {
+                if results[key_idx].is_some() || !same_key(data.key(), keys[key_idx].borrow()) {
                     continue;
                 }
                 if let Some(prev) = pending.replace(key_idx) {

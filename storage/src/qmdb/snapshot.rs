@@ -116,12 +116,20 @@ const LOAD_KEYS: usize = 1 << 16;
 #[cfg(test)]
 const LOAD_KEYS: usize = 8;
 
+/// Bytes of keys a merged bucket holds before it loads them, however few keys that is. A key
+/// larger than this is loaded on its own. Small in tests so long keys are loaded a few at a time.
+#[cfg(not(test))]
+const LOAD_BYTES: usize = 4 << 20;
+#[cfg(test)]
+const LOAD_BYTES: usize = 512;
+
 /// How a build assigns operations to buckets and encodes their records.
 ///
-/// A record is the key's length, the operation's tagged location, then the key. A length below
-/// 255 takes one byte, and a longer key writes 255 followed by its length in four little-endian
-/// bytes. The tagged location is the operation's offset from `floor` shifted left by one, with
-/// the low bit set for a delete, in `loc_bytes` little-endian bytes.
+/// A record is the key's length, the operation's tagged location, then the key's bytes, which
+/// identify it (see [Key](crate::qmdb::operation::Key)). A length below 255 takes one byte, and
+/// a longer key writes 255 followed by its length in four little-endian bytes. The tagged
+/// location is the operation's offset from `floor` shifted left by one, with the low bit set
+/// for a delete, in `loc_bytes` little-endian bytes.
 #[derive(Clone, Copy)]
 struct Layout {
     /// Maps a key to its index partition.
@@ -670,7 +678,11 @@ impl<B: Blob, R> Buckets<B, R> {
                 continue;
             }
             let of = (layout.partition_of)(&merge.key);
-            if !entries.is_empty() && (of != partition || entries.len() >= LOAD_KEYS) {
+            if !entries.is_empty()
+                && (of != partition
+                    || entries.len() >= LOAD_KEYS
+                    || keys.len() + merge.key.len() > LOAD_BYTES)
+            {
                 load(&mut keys, &mut entries);
             }
             partition = of;
@@ -762,13 +774,16 @@ where
             return Ok((filled, active_keys));
         }
         let (mut range, buf, runs) = buckets.take(bucket);
-        let stored: usize = runs.iter().map(|(_, len)| len).sum();
+
+        // A bucket's records can exceed what a narrow address space counts, and such a bucket
+        // is merged, so they are counted in 64 bits.
+        let stored: u64 = runs.iter().map(|&(_, len)| len as u64).sum();
         let activate = |offset| active.set(offset);
         active_keys += if runs.is_empty() {
             load_bucket::<F, _>(&mut range, &buf, buckets.layout, activate)
-        } else if stored + buf.len() <= MERGE_BYTES {
+        } else if stored + buf.len() as u64 <= MERGE_BYTES as u64 {
             let mut data = buf;
-            data.reserve_exact(stored);
+            data.reserve_exact(stored as usize);
             buckets.read(&runs, &mut data).await?;
             load_bucket::<F, _>(&mut range, &data, buckets.layout, activate)
         } else {

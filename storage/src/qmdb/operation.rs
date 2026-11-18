@@ -10,6 +10,10 @@ use core::{fmt::Debug, hash::Hash, ops::Deref};
 
 /// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys
 /// (`Array` types) and variable-length keys (`Vec<u8>`).
+///
+/// A key's bytes identify it: two keys must be equal exactly when their bytes are equal. A
+/// database indexes keys by their bytes and rebuilds its index from them, so two unequal keys
+/// with the same bytes would be taken for one key.
 pub trait Key:
     CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
 {
@@ -18,6 +22,22 @@ pub trait Key:
 impl<T> Key for T where
     T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
 {
+}
+
+/// Whether `found`, the key of an operation the index holds for the bytes of `key`, is `key`.
+///
+/// # Panics
+///
+/// Panics if the keys differ while their bytes are equal, which [Key] forbids.
+pub(crate) fn same_key<K: Key>(found: &K, key: &K) -> bool {
+    if found == key {
+        return true;
+    }
+    assert!(
+        found.as_ref() != key.as_ref(),
+        "keys with equal bytes must be equal"
+    );
+    false
 }
 
 /// An operation from which an inactivity floor can be read.
