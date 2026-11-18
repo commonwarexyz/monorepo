@@ -241,6 +241,8 @@ pub trait Contiguous: Send + Sync {
     /// Return a future that reads the storage backing `positions` (strictly increasing) into
     /// the page cache, so later reads of them can avoid storage I/O.
     ///
+    /// The default implementation does nothing.
+    ///
     /// The future does not borrow the journal, so it can run alongside any journal operation, and
     /// it can be dropped at any point. Prefetching is best effort. Positions outside `bounds()`
     /// are skipped, and failures are logged.
@@ -248,7 +250,12 @@ pub trait Contiguous: Send + Sync {
     /// One prefetch warms at most half as many pages as the page cache's Main section holds,
     /// mostly starting from the lowest positions. The rest are skipped and a warning is logged.
     #[commonware_macros::stability(ALPHA)]
-    fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<Self>;
+    fn prefetch(
+        &self,
+        _positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<Self> {
+        std::future::ready(())
+    }
 
     /// Return a stream of the items in `range` as [`Batch`]es of consecutive items, in position
     /// order. `range` must fall within `bounds()`. An empty range within `bounds()` yields an
