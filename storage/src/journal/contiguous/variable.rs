@@ -27,10 +27,7 @@ use crate::{
     journal::{
         Error,
         durability::Barrier,
-        frame::{
-            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
-        },
+        frame::{Limited, decode_item, decode_length_prefix, encode_frame_into, read_frame_at},
     },
 };
 use bytes::{Bytes, BytesMut};
@@ -94,6 +91,46 @@ fn read_buffer_len(lengths: impl IntoIterator<Item = usize>) -> Option<usize> {
         .into_iter()
         .try_fold(0usize, |total, len| total.checked_add(len))?;
     (total <= MAX_ALLOCATION_BYTES).then_some(total)
+}
+
+/// Read a cached frame prefix and return the frame's exclusive end and prefix length.
+fn cached_frame_header<B: RBlob>(
+    blob: &Blob<'_, B>,
+    offset: u64,
+    header: &mut [u8; MAX_U32_VARINT_SIZE],
+) -> Option<(u64, usize)> {
+    let remaining = blob.size().checked_sub(offset)?;
+    let header_len = remaining.min(MAX_U32_VARINT_SIZE as u64) as usize;
+    if header_len == 0 || !blob.try_read_sync_into(&mut header[..header_len], offset) {
+        return None;
+    }
+    let (size, prefix_len) = decode_length_prefix(&mut Copying(&header[..header_len])).ok()?;
+    let len = size.checked_add(prefix_len)? as u64;
+    (len <= remaining).then(|| (offset + len, prefix_len))
+}
+
+/// Resolve all requested ranges in one blob before serving any of them. A frame end
+/// obtained from its prefix imposes the same lower bound on the next start as an indexed end.
+fn cached_frame_ranges(
+    offsets: impl ExactSizeIterator<Item = (Option<u64>, Option<u64>)>,
+    size: u64,
+    mut prefix_end: impl FnMut(u64) -> Option<u64>,
+) -> Option<Vec<(u64, usize)>> {
+    let mut ranges = Vec::with_capacity(offsets.len());
+    let mut previous_end = 0;
+    for (start, end) in offsets {
+        let start = start?;
+        if start < previous_end {
+            return None;
+        }
+        let end = end.or_else(|| prefix_end(start))?;
+        if end <= start || end > size {
+            return None;
+        }
+        ranges.push((start, usize::try_from(end - start).ok()?));
+        previous_end = end;
+    }
+    Some(ranges)
 }
 
 /// Decode an item from a `span` that holds exactly its frame, length prefix included. Returns
@@ -515,39 +552,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
-        let remaining = blob.size().checked_sub(offset)?;
-        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
-        if header_len == 0 {
-            return None;
-        }
-
-        // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_sync_into(&mut header[..header_len], offset) {
-            return None;
-        }
-        let (_, item_info) = find_frame(&header[..header_len], offset).ok()?;
-
-        let (varint_len, data_len) = match item_info {
-            FrameInfo::Complete {
-                varint_len,
-                data_len,
-            } => (varint_len, data_len),
-            FrameInfo::Incomplete {
-                varint_len,
-                total_len,
-                ..
-            } => (varint_len, total_len),
-        };
-        let item_len = varint_len.checked_add(data_len)?;
-        if item_len > usize::try_from(remaining).ok()? {
-            return None;
-        }
+        let (end, varint_len) = cached_frame_header(&blob, offset, &mut header)?;
+        let item_len = usize::try_from(end - offset).ok()?;
 
         // If the full item fits in the header read, decode directly.
-        if item_len <= header_len {
+        if item_len <= header.len() {
             return decode_item::<V>(
-                Copying(&header[varint_len..varint_len + data_len]),
+                Copying(&header[varint_len..item_len]),
                 &self.codec_config,
                 self.compressed,
             )
@@ -674,84 +686,41 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         let offsets = self.offsets.probe_items(&lookups);
 
-        // Resolve each queried frame's extent for the batched cache read below. Frames with a
-        // cached start but no cached successor can use their length prefix instead. If any
-        // resolved extent is empty, unsorted, overlapping, or out of bounds, serve nothing
-        // from the batch so completion can validate all requested extents together.
-        let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
-        let mut singles = Vec::new();
-        let mut lookup_idx = 0;
-        let mut next_blob_start = 0;
-        let mut size = None;
-        let mut previous_end = 0;
-        for (idx, &position) in positions.iter().enumerate() {
-            while lookups[lookup_idx] != position {
-                lookup_idx += 1;
-            }
-            if self.validate_readable(position).is_err() {
-                continue;
-            }
-            let Some(offset) = offsets[lookup_idx] else {
-                continue;
-            };
-
-            // On entering a new blob, look up its size and restart the overlap check. Positions
-            // in a blob missing from the reader stay unserved.
-            if position >= next_blob_start {
-                let blob_num = position_to_blob(position, items_per_blob);
-                next_blob_start = (blob_num + 1).saturating_mul(items_per_blob);
-                size = self.data.get(blob_num).map(|blob| blob.size());
-                previous_end = 0;
-            }
-            let Some(size) = size else {
-                continue;
-            };
-
-            // A same-blob successor is adjacent in `lookups`.
-            let end = match self.next_in_blob(position) {
-                Some(_) => offsets[lookup_idx + 1],
-                None => Some(size),
-            };
-            // Checking the start needs no successor, so it covers frames served by prefix too.
-            if offset < previous_end || end.is_some_and(|end| end <= offset || end > size) {
-                extents.clear();
-                singles.clear();
-                break;
-            }
-            let Some(end) = end else {
-                singles.push((idx, offset));
-                continue;
-            };
-            let Ok(len) = usize::try_from(end - offset) else {
-                continue;
-            };
-            previous_end = end;
-            extents.push((idx, offset, len));
-        }
-
         let mut buf = BytesMut::new();
         let mut hits = 0u64;
-
-        // Serve the resolved extents with one batched cache read per data blob.
-        let mut group_start = 0;
-        while group_start < extents.len() {
-            let blob_num = position_to_blob(positions[extents[group_start].0], items_per_blob);
-            let mut group_end = group_start + 1;
-            while group_end < extents.len()
-                && position_to_blob(positions[extents[group_end].0], items_per_blob) == blob_num
-            {
+        let mut lookup_idx = 0;
+        let readable_end = positions.partition_point(|&p| p < self.bounds.end);
+        let mut group_end = positions.partition_point(|&p| p < self.bounds.start);
+        while group_end < readable_end {
+            let group_start = group_end;
+            let blob_num = position_to_blob(positions[group_start], items_per_blob);
+            let end = super::blob_end_position(blob_num, items_per_blob, self.bounds.end);
+            group_end += 1;
+            while group_end < readable_end && positions[group_end] < end {
                 group_end += 1;
             }
-            let group = &extents[group_start..group_end];
-            group_start = group_end;
-
             let Some(blob) = self.data.get(blob_num) else {
                 continue;
             };
-            let ranges: Vec<(u64, usize)> = group
-                .iter()
-                .map(|&(_, offset, len)| (offset, len))
-                .collect();
+
+            let size = blob.size();
+            let group_offsets = positions[group_start..group_end].iter().map(|&position| {
+                while lookups[lookup_idx] != position {
+                    lookup_idx += 1;
+                }
+                let end = match self.next_in_blob(position) {
+                    Some(_) => offsets[lookup_idx + 1],
+                    None => Some(size),
+                };
+                (offsets[lookup_idx], end)
+            });
+            let Some(ranges) = cached_frame_ranges(group_offsets, size, |offset| {
+                cached_frame_header(&blob, offset, &mut [0; MAX_U32_VARINT_SIZE])
+                    .map(|(end, _)| end)
+            }) else {
+                // Completion checks misses together, so defer every requested frame in this blob.
+                continue;
+            };
             let Some(total) = read_buffer_len(ranges.iter().map(|&(_, len)| len)) else {
                 continue;
             };
@@ -760,7 +729,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             with_bytes(&mut buf, |bytes| {
                 let mut missed = missed.into_iter().peekable();
                 let mut frames = Viewing::new(bytes);
-                for (range_idx, &(idx, offset, len)) in group.iter().enumerate() {
+                for (range_idx, &(offset, len)) in ranges.iter().enumerate() {
                     let span = frames.split_to(len);
                     if missed.peek() == Some(&range_idx) {
                         missed.next();
@@ -776,17 +745,11 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                         &self.codec_config,
                         self.compressed,
                     ) {
-                        out[idx] = Some(item);
+                        out[group_start + range_idx] = Some(item);
                         hits += 1;
                     }
                 }
             });
-        }
-        for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut buf) {
-                out[idx] = Some(item);
-                hits += 1;
-            }
         }
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
@@ -5202,6 +5165,22 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_variable_read_many_prefix_end_bounds_next_range() {
+        // The second range may begin at the first range's exclusive end or after it.
+        let ranges = |next| {
+            cached_frame_ranges(
+                [(Some(0), None), (Some(next), Some(12))].into_iter(),
+                12,
+                |_| Some(8),
+            )
+        };
+        assert!(ranges(0).is_none());
+        assert!(ranges(7).is_none());
+        assert_eq!(ranges(8), Some(vec![(0, 8), (8, 4)]));
+        assert_eq!(ranges(9), Some(vec![(0, 8), (9, 3)]));
+    }
+
     #[test_traced]
     fn test_variable_read_many_cached_frame_with_cold_successor() {
         let executor = deterministic::Runner::default();
@@ -5253,6 +5232,11 @@ mod tests {
             assert!(recorded.reads.is_empty());
             assert!(recorded.batches.is_empty());
             assert!(reader.offsets.try_read_sync(64).is_none());
+
+            // Frame 63 is readable from its prefix. With frame 64's start still cold,
+            // the two extents must stay together for completion to check their boundary.
+            assert_eq!(reader.try_read_many_sync(&[63, 64]), vec![None, None]);
+            assert_eq!(reader.read_many(&[63, 64]).await.unwrap(), appended[63..65]);
             drop(reader);
 
             journal.destroy().await.unwrap();
