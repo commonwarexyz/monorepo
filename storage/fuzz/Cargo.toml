@@ -3,16 +3,20 @@ name = "commonware-storage-fuzz"
 version.workspace = true
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
 
+[lints.cargo]
+unused_dependencies = "allow"
+
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
-commonware-parallel.workspace = true
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { workspace = true, features = ["std", "fuzzing", "test-traits", "arbitrary"] }
 commonware-utils = { workspace = true, features = ["arbitrary"] }
@@ -97,6 +101,13 @@ bench = false
 [[bin]]
 name = "rmap_operations"
 path = "fuzz_targets/rmap_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merkle_batch_operations"
+path = "fuzz_targets/merkle_batch_operations.rs"
 test = false
 doc = false
 bench = false

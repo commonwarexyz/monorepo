@@ -1,6 +1,6 @@
 use super::{
     job::{HeapJob, JobRef},
-    registry::Registry,
+    registry::{Placement, Registry},
     unwind,
 };
 use std::{mem, sync::Arc};
@@ -8,10 +8,12 @@ use std::{mem, sync::Arc};
 #[cfg(test)]
 mod test;
 
-/// Spawns an asynchronous job in `registry.`
+/// Spawns `func` in `registry` under `placement`.
 ///
-/// Unsafe because `registry` must not yet have terminated.
-pub(super) unsafe fn spawn_in<F>(func: F, registry: &Arc<Registry>)
+/// # Safety
+///
+/// `registry` must not have terminated.
+pub(super) unsafe fn spawn_in<F>(func: F, registry: &Arc<Registry>, placement: Placement)
 where
     F: FnOnce() + Send + 'static,
 {
@@ -23,7 +25,7 @@ where
     let abort_guard = unwind::AbortIfPanic; // just in case we are wrong, and code CAN panic
     // SAFETY: the caller guarantees `registry` has not terminated.
     let job_ref = unsafe { spawn_job(func, registry) };
-    registry.inject_or_push(job_ref);
+    registry.place(placement, job_ref);
     mem::forget(abort_guard);
 }
 

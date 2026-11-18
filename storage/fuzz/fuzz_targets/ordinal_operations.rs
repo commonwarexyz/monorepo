@@ -105,7 +105,7 @@ fn fuzz(input: FuzzInput) {
                                 .await
                                 .expect("failed to put value into store"),
                         );
-                        expected_data.insert(*index, value);
+                        expected_data.entry(*index).or_insert(value);
                     }
                 }
 
@@ -184,11 +184,11 @@ fn fuzz(input: FuzzInput) {
 
                 OrdinalOperation::Prune { min } => {
                     if let Some(ordinal) = store.take() {
-                        let min_blob = *min / items_per_blob.get();
+                        let min_blob = *min / items_per_blob;
                         store = Some(ordinal.prune(*min).await.expect("failed to prune store"));
                         // Remove all data in pruned blobs from expected state
-                        expected_data.retain(|&index, _| index / items_per_blob.get() >= min_blob);
-                        synced_data.retain(|&index, _| index / items_per_blob.get() >= min_blob);
+                        expected_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                        synced_data.retain(|&index, _| index / items_per_blob >= min_blob);
                     }
                 }
 
@@ -212,7 +212,7 @@ fn fuzz(input: FuzzInput) {
                                 .put(index, value.clone())
                                 .await
                                 .expect("failed to put value into store");
-                            expected_data.insert(index, value);
+                            expected_data.entry(index).or_insert(value);
                         }
 
                         // Sync after batch operation to test persistence
@@ -240,7 +240,7 @@ fn fuzz(input: FuzzInput) {
                                 .put(index, value.clone())
                                 .await
                                 .expect("failed to put value into store");
-                            expected_data.insert(index, value);
+                            expected_data.entry(index).or_insert(value);
                         }
 
                         // Sync after large batch to test buffer flushing

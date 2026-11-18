@@ -5,7 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Cutoff, Floor, Processed, State as FloorState, closed_epoch},
+    floor::{Cutoff, Floor, Processed, State as FloorState, closed_epoch, retained_from},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -23,7 +23,7 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization, Subject, verify_certificates},
     },
-    types::{Epoch, EpochDelta, Epocher, Height, Round, ViewDelta},
+    types::{Epoch, Epocher, Height, Round, ViewDelta},
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
@@ -1180,8 +1180,10 @@ where
         // registered for later local availability.
         //
         // Round-based fetching is for notarized proposal lookups whose height is
-        // not known before the request. Height-based fetching is only for callers
-        // that have a validated block height for resolver retention.
+        // not known before the request. Commitment-based fetching is for callers
+        // that read the block's height from the block above it. That height bounds
+        // the request only once the block above has been checked against its own
+        // parent. A round the caller supplies bounds it regardless.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
                 // Fetch the notarized proposal for this round. The response
@@ -1194,7 +1196,7 @@ where
                     .ignore();
                 debug!(?round, ?digest, "notarized block unavailable");
             }
-            CommitmentFallback::FetchByCommitment { height } => {
+            CommitmentFallback::FetchByCommitment { height, round } => {
                 let commitment = match key {
                     SubscriptionKey::Commitment(commitment) => commitment,
                     SubscriptionKey::Digest(_) => {
@@ -1203,14 +1205,21 @@ where
                 };
 
                 // Ancestry may be only notarized, so skipping commitment recomputation
-                // requires certification evidence
+                // requires certification evidence. That evidence also fixes the block's
+                // height, so only a request without it needs the round as a bound.
                 let request = if self.certified.contains(height, &commitment) {
                     Request::certified(commitment, height)
                 } else {
-                    Request::untrusted(commitment, height)
+                    Request::untrusted(commitment, height, round)
                 };
                 self.floor.fetch_if_permitted(resolver, request).ignore();
-                debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
+                debug!(
+                    %height,
+                    ?round,
+                    ?commitment,
+                    ?digest,
+                    "certified ancestry block unavailable"
+                );
             }
             CommitmentFallback::Wait => {}
         }
@@ -1562,7 +1571,7 @@ where
                     matches!(
                         annotation,
                         Annotation::Certified { height: bound }
-                        | Annotation::Untrusted { height: bound } if height <= *bound
+                        | Annotation::Untrusted { height: bound, .. } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
@@ -2448,12 +2457,9 @@ where
         let missing_items = self
             .finalized_blocks
             .missing_items(start, self.max_repair.get());
-        let requests: Vec<_> = missing_items.into_iter().map(Request::finalized).collect();
-        if !requests.is_empty() {
-            self.floor
-                .fetch_all_if_permitted(resolver, requests)
-                .ignore();
-        }
+        self.floor
+            .fetch_finalizations_if_permitted(resolver, missing_items)
+            .ignore();
         (self, wrote)
     }
 
@@ -2635,27 +2641,12 @@ where
             return self;
         }
 
-        // Retain view-indexed cache data for `view_retention` views behind the previously
-        // witnessed finalization round.
+        // Keep cached data from the last `view_retention` views before the previously witnessed
+        // finalization round. Since views restart each epoch, any views we still need from earlier
+        // epochs are counted as one per block height.
         if let Some(previous) = self.floor.witness(round) {
-            // Views restart with each epoch and the number of views earlier epochs spanned is
-            // unknown here, so the window is measured within the previous round's epoch and
-            // stops at its first view. The views it could not cover there are owed by whole
-            // earlier epochs, one per view, because every epoch spans at least one view; this
-            // keeps at least the window and usually more. With a window of ten views, (3, 15)
-            // prunes behind (3, 5), while (8, 3) takes three views from epoch 8, owes seven to
-            // epochs 7 through 1, and prunes behind (1, 0).
-            let view = previous.view().saturating_sub(self.view_retention);
-            let owed = self
-                .view_retention
-                .get()
-                .saturating_sub(previous.view().get());
-            let epoch = previous.epoch().saturating_sub(EpochDelta::new(owed));
-
-            // Destroy the caches of every epoch below `epoch` and prune the view-indexed archives
-            // of `epoch` below `view`. Pruning removes whole sections, so entries below `view` in
-            // the section that contains it can remain.
-            self.cache = self.cache.prune_by_view(Round::new(epoch, view)).await;
+            let retained = retained_from(&self.epocher, previous, self.view_retention);
+            self.cache = self.cache.prune_by_view(retained).await;
         }
 
         // The round floor covers the witnessed round, which retires round-bound requests at or

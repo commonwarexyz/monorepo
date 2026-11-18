@@ -620,7 +620,6 @@ mod test {
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::iobuf::EncodeExt;
-    use futures::executor::block_on;
 
     const MAX_BLOCK_SIZE: usize = 1024 * 1024;
 
@@ -635,7 +634,7 @@ mod test {
         expected: ExpectedCommitment<Commitment<TestBlock, RS, H>>,
     ) -> Result<CodedBlock<TestBlock, RS, H>, Error> {
         let (inner, config) = <(TestBlock, CodingConfig)>::decode_cfg(encoded, &((), ()))?;
-        block_on(CodedBlock::from_decoded(
+        Sequential.block_on(CodedBlock::from_decoded(
             inner,
             config,
             expected,

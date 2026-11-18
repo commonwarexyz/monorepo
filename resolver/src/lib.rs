@@ -190,6 +190,10 @@ commonware_macros::stability_scope!(BETA {
         /// subscribers, without crediting or penalizing the source. Any remaining
         /// subscribers receive the same response.
         ///
+        /// A verdict, or a dropped sender, does not retire a fetch issued after it. A
+        /// fetch issued before it for a delivered subscriber may be retired with that
+        /// subscriber.
+        ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).
         ///
@@ -228,7 +232,7 @@ commonware_macros::stability_scope!(BETA {
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
         /// Initiate fetches for a batch of keys.
-        fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
+        fn fetch_all<F>(&mut self, keys: impl IntoIterator<Item = F>) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
@@ -265,7 +269,7 @@ commonware_macros::stability_scope!(BETA {
         /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
         fn fetch_all_targeted<F>(
             &mut self,
-            keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+            keys: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;

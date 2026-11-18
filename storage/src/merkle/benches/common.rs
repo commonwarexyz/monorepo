@@ -1,12 +1,12 @@
 //! Shared setup for the proof generation and verification benchmarks.
 
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{
     self, Bagging::ForwardFold, Family, Location, LocationRangeExt as _, mem::Mem,
 };
 use commonware_utils::test_rng;
-use futures::executor::block_on;
 use rand::{RngExt as _, seq::IndexedRandom};
 use std::ops::Range;
 
@@ -15,16 +15,18 @@ pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 /// Number of leaves or ranges sampled from each tree.
 pub const SAMPLE_SIZE: usize = 100;
 
-#[cfg(not(full_bench))]
-pub const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(full_bench)]
-pub const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
-
 /// A proven leaf and its location.
 pub type SingleSample<F> = (Location<F>, sha256::Digest);
 
 /// A proven range of leaves and their elements.
 pub type RangeSample<F> = (Range<Location<F>>, Vec<sha256::Digest>);
+
+pub fn n_leaves() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[10_000, 100_000],
+    }
+}
 
 /// Builds an in-memory tree of `n` random elements and returns it with its root
 /// and the elements in location order.
@@ -33,18 +35,16 @@ fn build<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<sh
     let mut mem = Mem::<F, _>::new();
     let mut elements = Vec::with_capacity(n);
     let mut sampler = test_rng();
-    block_on(async {
-        let batch = {
-            let mut batch = mem.new_batch();
-            for _ in 0..n {
-                let element = sha256::Digest::random(&mut sampler);
-                batch = batch.add(&hasher, &element);
-                elements.push(element);
-            }
-            batch.merkleize(&mem, &hasher)
-        };
-        mem.apply_batch(&batch).unwrap();
-    });
+    let batch = {
+        let mut batch = mem.new_batch();
+        for _ in 0..n {
+            let element = sha256::Digest::random(&mut sampler);
+            batch = batch.add(&hasher, &element);
+            elements.push(element);
+        }
+        batch.merkleize(&mem, &hasher)
+    };
+    mem.apply_batch(&batch).unwrap();
     let root = mem.root(&hasher, 0).unwrap();
     (mem, root, elements)
 }

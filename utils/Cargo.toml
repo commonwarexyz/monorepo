@@ -1,6 +1,7 @@
 [package]
 name = "commonware-utils"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -55,6 +56,7 @@ features = ["wasm_js"]
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-allocator = { workspace = true, features = ["mimalloc"] }
+commonware-bench.workspace = true
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-macros.workspace = true

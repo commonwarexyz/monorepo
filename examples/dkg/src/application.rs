@@ -78,10 +78,10 @@ where
             context.1,
             parent.digest(),
             height,
-            Target::new(
-                merkleized.root(),
-                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            ),
+            Target {
+                root: merkleized.root(),
+                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            },
             payload,
         );
         Some(Proposed { block, merkleized })
@@ -123,6 +123,9 @@ where
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }

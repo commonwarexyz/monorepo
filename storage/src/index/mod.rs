@@ -545,7 +545,9 @@ mod tests {
         // keys produce no visits, and duplicate input keys are visited once per slot.
         let keys: Vec<&[u8]> = vec![b"zz", b"missing", b"ab", b"zz"];
         let mut visits: Vec<Vec<u64>> = vec![Vec::new(); keys.len()];
-        index.get_many(&keys, |key_idx, value| visits[key_idx].push(*value));
+        index.get_many(keys.iter().copied(), |key_idx, value| {
+            visits[key_idx].push(*value)
+        });
         visits[2].sort_unstable();
         assert_eq!(visits[0], vec![4]);
         assert!(visits[1].is_empty());

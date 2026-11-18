@@ -247,7 +247,7 @@ mod tests {
         let (network, mut oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>()]),
+                max_size: max_message_size([max_payload_size::<S, Sha256Digest>()]),
                 max_peers_per_set: NZUsize!(fixture.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),

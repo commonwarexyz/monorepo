@@ -3,6 +3,7 @@ use criterion::criterion_main;
 
 mod aggregate_verify_same_message;
 mod aggregate_verify_same_signer;
+mod attestation_eq;
 mod batch_to_affine;
 mod batch_verify_same_signer;
 mod combine_public_keys;
@@ -33,6 +34,7 @@ criterion_main!(
     dkg::golden::benches,
     dkg::feldman_desmedt::benches,
     hash_to_curve::benches,
+    attestation_eq::benches,
     threshold_recover::benches,
     threshold_optimistic_assemble::benches,
     combine_public_keys::benches,

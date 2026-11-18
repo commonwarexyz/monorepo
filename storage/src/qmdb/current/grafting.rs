@@ -104,10 +104,23 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
-/// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:
-/// each leaf is `hash(chunk || chunk_ops_digest)`, except all-zero chunks preserve
-/// `chunk_ops_digest` directly (zero-chunk identity).
-pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
+/// Returns the grafted leaf digest for a bitmap `chunk` and the root of the ops subtree it covers.
+fn grafted_leaf_digest<H: Hasher>(
+    hasher: &merkle::hasher::Standard<H>,
+    chunk: &[u8],
+    ops_subtree_root: H::Digest,
+) -> H::Digest {
+    // An all-zero chunk grafts to the ops subtree root itself (the zero-chunk identity). Any other
+    // chunk grafts to `hash(chunk || ops_subtree_root)`.
+    if chunk.iter().all(|&b| b == 0) {
+        ops_subtree_root
+    } else {
+        hasher.hash(&[chunk, ops_subtree_root.as_ref()])
+    }
+}
+
+/// Compute the grafted leaf digest of each resolved `(chunk_idx, chunk_ops_digest, chunk)` triple.
+pub(super) fn grafted_leaf_digests<H: Hasher, S: Strategy, const N: usize>(
     strategy: &S,
     inputs: Vec<(usize, H::Digest, [u8; N])>,
 ) -> Vec<(usize, H::Digest)> {
@@ -115,14 +128,7 @@ pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
         inputs,
         || qmdb::hasher::<H>(),
         |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            if chunk == BitMap::<N>::EMPTY_CHUNK {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash(&[chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
+            (chunk_idx, grafted_leaf_digest(h, &chunk, chunk_ops_digest))
         },
     )
 }
@@ -167,9 +173,8 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 // 2. **Ops position**: Position in the full operations tree.
 // 3. **Grafted position**: Position in the grafted tree, whose leaves correspond 1:1 with chunks.
 //
-// All conversions rely on a single family identity: given the leftmost leaf at position P of a
-// perfect subtree, the subtree root at height h is at `P + 2^(h+1) - 2`, and conversely the
-// leftmost leaf under a subtree root at position P and height h is at `P + 2 - 2^(h+1)`.
+// All conversions go through the family's `subtree_root_position` and `leftmost_leaf`, which map
+// between the leftmost leaf of a perfect subtree and that subtree's root at a given height.
 
 /// Convert an ops-family position (at or above the grafting height) to a grafted-tree position.
 ///
@@ -182,17 +187,22 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 ///
 /// Panics if `ops_pos` is below the grafting height.
 pub fn ops_to_grafted_pos<F: Graftable>(ops_pos: Position<F>, grafting_height: u32) -> Position<F> {
+    try_ops_to_grafted_pos(ops_pos, grafting_height)
+        .expect("ops node must be at or above the grafting height")
+}
+
+/// Map an ops position into the grafted tree if it reaches the grafting height.
+fn try_ops_to_grafted_pos<F: Graftable>(
+    ops_pos: Position<F>,
+    grafting_height: u32,
+) -> Option<Position<F>> {
     let ops_height = F::pos_to_height(ops_pos);
-    assert!(
-        ops_height >= grafting_height,
-        "position height {ops_height} < grafting height {grafting_height}"
-    );
-    let grafted_height = ops_height - grafting_height;
+    let grafted_height = ops_height.checked_sub(grafting_height)?;
 
     let ops_leaf_loc = F::leftmost_leaf(ops_pos, ops_height);
     let chunk_idx = *ops_leaf_loc >> grafting_height;
     let grafted_leaf_loc = Location::<F>::new(chunk_idx);
-    F::subtree_root_position(grafted_leaf_loc, grafted_height)
+    Some(F::subtree_root_position(grafted_leaf_loc, grafted_height))
 }
 
 /// Convert a grafted position to the ops-family position whose subtree covers the same ops-leaf
@@ -388,14 +398,7 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                     return ops_subtree_root;
                 };
 
-                // For all-zero chunks, the grafted leaf is the ops subtree root (identity).
-                // For non-zero chunks: grafted_leaf = hash(chunk || ops_subtree_root).
-                let chunk = self.chunks[local];
-                if chunk.iter().all(|&b| b == 0) {
-                    ops_subtree_root
-                } else {
-                    self.hash(&[chunk, ops_subtree_root.as_ref()])
-                }
+                grafted_leaf_digest(&self.hasher, self.chunks[local], ops_subtree_root)
             }
         }
     }
@@ -423,13 +426,13 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
 /// standard proof generation to work transparently over the combined structure.
 ///
 /// Both the ops structure and the grafted structure use the same [Family] `F`. The combined storage
-/// presents as `StorageTrait<F>` so that callers generic over `F` can use it transparently.
+/// supports asynchronous storage reads and synchronous reads from memory when the ops tree does.
 pub(super) struct Storage<
     'a,
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest>,
-    S: StorageTrait<F, Digest = H::Digest>,
+    S,
 > {
     grafted_tree: &'a G,
     grafting_height: u32,
@@ -437,13 +440,8 @@ pub(super) struct Storage<
     grafted_hasher: GraftedHasher<F, merkle::hasher::Standard<H>>,
 }
 
-impl<
-    'a,
-    F: Graftable,
-    H: Hasher,
-    G: Readable<Family = F, Digest = H::Digest>,
-    S: StorageTrait<F, Digest = H::Digest>,
-> Storage<'a, F, H, G, S>
+impl<'a, F: Graftable, H: Hasher, G: Readable<Family = F, Digest = H::Digest>, S>
+    Storage<'a, F, H, G, S>
 {
     /// Creates a new [Storage] instance.
     pub(super) const fn new(grafted_tree: &'a G, grafting_height: u32, ops_tree: &'a S) -> Self {
@@ -470,7 +468,7 @@ impl<
     ///
     /// Returns `None` at height 0 (a grafted leaf), since leaves encode bitmap data and
     /// cannot be recomputed from the tree structure alone. The settlement guard in
-    /// [`super::db::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
+    /// [`super::Db::sync_boundary`] ensures this case is unreachable for pruned chunks.
     fn reconstruct_grafted_node(&self, pos: Position<F>) -> Option<H::Digest> {
         if let Some(node) = self.grafted_tree.get_node(pos) {
             return Some(node);
@@ -494,6 +492,28 @@ impl<
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest>,
+    S: Readable<Family = F, Digest = H::Digest>,
+> Readable for Storage<'_, F, H, G, S>
+{
+    type Family = F;
+    type Digest = H::Digest;
+
+    fn size(&self) -> Position<F> {
+        self.ops_tree.size()
+    }
+
+    fn get_node(&self, pos: Position<F>) -> Option<H::Digest> {
+        let Some(grafted_pos) = try_ops_to_grafted_pos(pos, self.grafting_height) else {
+            return self.ops_tree.get_node(pos);
+        };
+        self.reconstruct_grafted_node(grafted_pos)
+    }
+}
+
+impl<
+    F: Graftable,
+    H: Hasher,
+    G: Readable<Family = F, Digest = H::Digest>,
     S: StorageTrait<F, Digest = H::Digest>,
 > StorageTrait<F> for Storage<'_, F, H, G, S>
 {
@@ -504,11 +524,9 @@ impl<
     }
 
     async fn get_node(&self, pos: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
-        let ops_height = F::pos_to_height(pos);
-        if ops_height < self.grafting_height {
+        let Some(grafted_pos) = try_ops_to_grafted_pos(pos, self.grafting_height) else {
             return self.ops_tree.get_node(pos).await;
-        }
-        let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
+        };
         Ok(self.reconstruct_grafted_node(grafted_pos))
     }
 
@@ -520,11 +538,10 @@ impl<
         let mut ops_positions = Vec::with_capacity(positions.len());
         let mut missing = None;
         for (slot, &pos) in nodes.iter_mut().zip(positions) {
-            if F::pos_to_height(pos) < self.grafting_height {
+            let Some(grafted_pos) = try_ops_to_grafted_pos(pos, self.grafting_height) else {
                 ops_positions.push(pos);
                 continue;
-            }
-            let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
+            };
             match self.reconstruct_grafted_node(grafted_pos) {
                 Some(node) => *slot = Some(node),
                 None => {
@@ -997,7 +1014,7 @@ mod tests {
             {
                 let combined =
                     Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-                assert_eq!(combined.size(), ops_mmr.size());
+                assert_eq!(Readable::size(&combined), ops_mmr.size());
 
                 // Compute the grafted root by iterating ops peaks.
                 let grafted_root = {
@@ -1009,7 +1026,7 @@ mod tests {
                             let gp = ops_to_grafted_pos(peak_pos, GRAFTING_HEIGHT);
                             peaks.push(grafted.get_node(gp).unwrap());
                         } else {
-                            peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
+                            peaks.push(Readable::get_node(&combined, peak_pos).unwrap());
                         }
                     }
                     hasher
@@ -1031,13 +1048,13 @@ mod tests {
                         vec![&c1],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b1, &grafted_root));
 
                     let loc = Location::new(1);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b2, &grafted_root));
 
                     let loc = Location::new(2);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
@@ -1049,13 +1066,13 @@ mod tests {
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b3, &grafted_root));
 
                     let loc = Location::new(3);
                     let proof = verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
                 }
 
                 // Verify that manipulated inputs cause proof verification to fail.
@@ -1070,19 +1087,19 @@ mod tests {
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b3, &grafted_root));
 
                     // Wrong root.
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &ops_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b4, &ops_root));
 
                     // Wrong position.
                     assert!(!proof.verify_element_inclusion(
                         &verifier,
-                        &b4,
                         loc + 1,
+                        &b4,
                         &grafted_root,
                     ));
 
@@ -1093,7 +1110,7 @@ mod tests {
                         vec![&c1],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
 
                     // Wrong chunk index in the verifier.
                     let verifier = Verifier::<mmr::Family, Sha256>::new(
@@ -1102,7 +1119,7 @@ mod tests {
                         vec![&c2],
                         ALL_CHUNKS_GRAFTABLE,
                     );
-                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, loc, &b4, &grafted_root));
                 }
 
                 // Verify range proofs.
@@ -1124,8 +1141,8 @@ mod tests {
                     );
                     assert!(proof.verify_range_inclusion(
                         &verifier,
-                        &range,
                         Location::new(0),
+                        &range,
                         &grafted_root,
                     ));
 
@@ -1138,8 +1155,8 @@ mod tests {
                     );
                     assert!(!proof.verify_range_inclusion(
                         &verifier,
-                        &range,
                         Location::new(0),
+                        &range,
                         &grafted_root,
                     ));
                 }
@@ -1158,7 +1175,7 @@ mod tests {
 
             let combined =
                 Storage::<mmr::Family, Sha256, _, _>::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
-            assert_eq!(combined.size(), ops_mmr.size());
+            assert_eq!(Readable::size(&combined), ops_mmr.size());
 
             // Compute the grafted root.
             let grafted_root = {
@@ -1170,7 +1187,7 @@ mod tests {
                         let gp = ops_to_grafted_pos(peak_pos, GRAFTING_HEIGHT);
                         peaks.push(grafted.get_node(gp).unwrap());
                     } else {
-                        peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
+                        peaks.push(Readable::get_node(&combined, peak_pos).unwrap());
                     }
                 }
                 hasher
@@ -1190,7 +1207,7 @@ mod tests {
                 vec![&c1],
                 ALL_CHUNKS_GRAFTABLE,
             );
-            assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
+            assert!(proof.verify_element_inclusion(&verifier, loc, &b1, &grafted_root));
 
             let verifier = Verifier::<mmr::Family, Sha256>::new(
                 GRAFTING_HEIGHT,
@@ -1202,20 +1219,27 @@ mod tests {
             let proof = merkle::verification::range_proof(&hasher, &combined, loc..loc + 1, 0)
                 .await
                 .unwrap();
-            assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));
+            assert!(proof.verify_element_inclusion(&verifier, loc, &b5, &grafted_root));
         });
     }
 
     /// The combined storage's `get_nodes` must agree with `get_node` on every available
-    /// position and name the lowest position `get_node` reports as absent.
-    async fn assert_get_nodes_matches_get_node(
-        combined: &impl StorageTrait<mmr::Family, Digest = sha256::Digest>,
-    ) {
-        let all: Vec<Position> = (0..*combined.size()).map(Position::new).collect();
+    /// position and name the lowest position `get_node` reports as absent. With memory-backed
+    /// inputs, synchronous reads must agree with asynchronous reads too.
+    async fn assert_get_nodes_matches_get_node<S>(combined: &S)
+    where
+        S: StorageTrait<mmr::Family, Digest = sha256::Digest>
+            + Readable<Family = mmr::Family, Digest = sha256::Digest>,
+    {
+        let size = StorageTrait::size(combined);
+        assert_eq!(Readable::size(combined), size);
+        let all: Vec<Position> = (0..*size).map(Position::new).collect();
         let mut available = Vec::new();
         let mut first_absent = None;
         for &pos in &all {
-            match combined.get_node(pos).await.unwrap() {
+            let node = StorageTrait::get_node(combined, pos).await.unwrap();
+            assert_eq!(Readable::get_node(combined, pos), node, "position {pos}");
+            match node {
                 Some(node) => available.push((pos, node)),
                 None => {
                     if first_absent.is_none() {
@@ -1241,7 +1265,10 @@ mod tests {
         let sparse: Vec<_> = positions.iter().copied().step_by(3).collect();
         let batched = combined.get_nodes(&sparse).await.unwrap();
         for (slot, &pos) in sparse.iter().enumerate() {
-            let single = combined.get_node(pos).await.unwrap().unwrap();
+            let single = StorageTrait::get_node(combined, pos)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(batched[slot], single, "position {pos}");
         }
         assert!(combined.get_nodes(&[]).await.unwrap().is_empty());

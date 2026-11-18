@@ -36,6 +36,10 @@ Before making a PR, to run all lints and tests, run:
 $ just pre-pr
 ```
 
+Lint recipes use the pinned rustup toolchains. Clippy, rustfmt, required nightly tools, and Dylint read their pins from [`.github/toolchains.toml`](.github/toolchains.toml). The Dylint `rust-toolchain` file is a symlink to this shared configuration so rustup discovers its compiler automatically. Set `NIGHTLY_VERSION` to override the tooling nightly, or to an empty value to use `cargo` from `PATH`.
+
+Without rustup (for example, Nix), set `COMMONWARE_NO_RUSTUP=1` to use tools from `PATH` without toolchain selectors or installs. `RUSTFMT` can select a standalone formatter. Match the documented pins when running checks for CI, including Dylint's compiler.
+
 Use `just test -p <crate>` for routine development and reserve workspace-wide tests for changes that need them. The root [agent guidance](AGENTS.md) records the always-applicable repository constraints.
 
 When creating a new crate, follow the `lib.rs` header conventions used across the workspace: crates that support `no_std` gate `std` behind a feature flag or `cfg(test)` (e.g. `#![cfg_attr(not(any(feature = "std", test)), no_std)]`), and every crate sets the Commonware logos:
@@ -122,6 +126,22 @@ mod operation_name;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(operation_name::benches);
+```
+
+### Inputs
+
+A benchmark picks its inputs by matching on `commonware_bench::Inputs::current()`, which needs `commonware-bench.workspace = true` in the crate's dev-dependencies. `cargo bench` measures the `Standard` inputs, and `just bench-full` (`COMMONWARE_BENCH_FULL=1 cargo bench`) measures the `Full` ones. CI runs `cargo test --benches` instead, which selects `Smoke`: Criterion runs each benchmark once without measuring it, but the benchmark's setup still builds its inputs, so a benchmark with slow setup uses smaller inputs there. Put every input that varies in the benchmark name.
+
+```rust
+use commonware_bench::Inputs;
+
+fn sizes() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Smoke => &[1_000],
+        Inputs::Standard => &[1_000, 100_000],
+        Inputs::Full => &[1_000, 100_000, 10_000_000],
+    }
+}
 ```
 
 ### Naming

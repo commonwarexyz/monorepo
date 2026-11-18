@@ -182,7 +182,7 @@ fn main() {
         let region_index = index % regions.len();
         let region = regions[region_index].clone();
         let instance = aws::InstanceConfig {
-            name: name.clone(),
+            name,
             region,
             availability_zone_group: None,
             instance_type: instance_type.clone(),
@@ -190,6 +190,7 @@ fn main() {
             storage_class: storage_class.clone(),
             storage_iops,
             storage_throughput,
+            bandwidth_weighting: Default::default(),
             binary: BINARY_NAME.to_string(),
             config: peer_config_file,
             profiling: instrument,
@@ -207,6 +208,7 @@ fn main() {
             storage_class: storage_class.clone(),
             storage_iops,
             storage_throughput,
+            bandwidth_weighting: Default::default(),
             dashboard: "dashboard.json".to_string(),
         },
         ports: vec![aws::PortConfig {

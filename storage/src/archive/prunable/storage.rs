@@ -381,7 +381,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let mut replay = Oversized::<E, Record<K>, V>::init_with_metadata(
+        let mut replay = Oversized::<E, Record<K>, V>::init_with_markers(
             context.child("oversized"),
             oversized_cfg,
             cfg.metadata_partition,
@@ -415,7 +415,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             intervals.insert(entry.index);
             records += 1;
         }
-        let oversized = replay.finish_tracked().await?;
+        let oversized = replay.finish().await?;
 
         // Index every record by key in a table sized once for all of them.
         let mut keys = Table::with_capacity(records);

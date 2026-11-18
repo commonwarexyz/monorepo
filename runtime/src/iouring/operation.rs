@@ -840,6 +840,42 @@ pub mod tests {
     }
 
     #[test]
+    fn test_queued_forward_wake_panic_fails_the_runner() {
+        // Cleanup drops a forwarding message still queued on its worker, which
+        // wakes the foreign observer. That waker's panic must fail the runner
+        // like any other deferred callback's.
+        let callbacks = Arc::new(Reentrant::default());
+
+        // Keep the operation and its peer past cleanup, so the receiver is
+        // still registered when the queued sender drops.
+        let mut kept = None;
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            runner().start(|_| async {
+                // A foreign poll queues the forwarding message on this worker.
+                let (fd, peer) = socket();
+                let operation = recv(fd, None);
+                let operation = poll_on_foreign_thread(operation, callbacks.waker());
+
+                // The root completes in this poll, so the message is still
+                // queued when cleanup starts.
+                callbacks
+                    .panic_callback
+                    .store(Reentrant::WAKE, Ordering::Relaxed);
+                kept = Some((operation, peer));
+            });
+        }))
+        .expect_err("a queued forwarding message's waker panic must fail the runner");
+
+        // The panic surfaced after the receiver was woken once.
+        assert_eq!(
+            extract_panic_message(&*panic),
+            format!("waker callback panic {}", Reentrant::WAKE)
+        );
+        assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 1);
+        drop(kept);
+    }
+
+    #[test]
     fn test_forwarded_observer_callbacks_and_shutdown() {
         for (promoted, completed) in [(false, false), (true, false), (true, true)] {
             let callbacks = Arc::new(Reentrant::default());

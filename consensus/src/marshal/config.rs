@@ -74,21 +74,23 @@ where
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///
     /// Useful for keeping around information that peers may desire to have. Data is kept for at
-    /// least this many views behind the previously witnessed finalization round, which advances
-    /// with the finalizations of processed blocks and installed floor anchors. Views restart with
-    /// each epoch, so the part of the window that reaches below an epoch's first view is counted
-    /// in whole earlier epochs instead: the previous epoch stays until that round is this many
-    /// views into its epoch, and at most this many earlier epochs stay.
+    /// least this many views behind the previously witnessed finalization round. That round
+    /// advances with the finalizations of processed blocks and installed floor anchors.
+    ///
+    /// Views restart with each epoch, so the views the window lacks in that round's epoch are
+    /// counted one per height below the epoch, and the epoch containing the lowest such height is
+    /// kept whole. Where the [epocher](Self::epocher) cannot place those heights, each earlier
+    /// epoch counts for one view, so at most this many earlier epochs stay.
     ///
     /// ```text
-    /// window of 10 views behind the previously witnessed round P
+    /// window of 10 views behind the previously witnessed round P, epochs of 4 heights
     /// (`=` kept, `.` eligible for pruning)
     ///
     ///   P = (8, 15)   ep 7 ........ | ep 8  . . . . . = = = = = = = = = = P
-    ///                 the window fits in epoch 8: prune below (8, 5) and all earlier epochs
+    ///                 the window fits in epoch 8, so prune below (8, 5) and all earlier epochs
     ///
-    ///   P = (8, 3)    ep 0 ........ | ep 1 == | ep 2 == | ... | ep 7 == | ep 8  = = = P
-    ///                 epoch 8 has 3 of the 10 views; epochs 7 to 1 stand in for the other 7
+    ///   P = (8, 3)    ep 5 ........ | ep 6 = = = = | ep 7 = = = = | ep 8  = = = P
+    ///                 epoch 8 has 3 of the 10 views, and the 7 heights below it reach into epoch 6
     /// ```
     pub view_retention: ViewDelta,
 

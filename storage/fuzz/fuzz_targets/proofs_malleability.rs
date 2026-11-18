@@ -158,18 +158,18 @@ fn fuzz_element_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         for (leaf, element) in digests.iter().enumerate() {
             let loc = Location::<F>::new(leaf as u64);
             let original_proof = merkle.proof(&hasher, loc, inactive_peaks).unwrap();
-            assert!(original_proof.verify_element_inclusion(&hasher, element, loc, &root));
+            assert!(original_proof.verify_element_inclusion(&hasher, loc, element, &root));
 
             let mut mutated_proof = original_proof.clone();
             mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
             assert_ne!(mutated_proof, original_proof);
-            assert!(!mutated_proof.verify_element_inclusion(&hasher, element, loc, &root));
+            assert!(!mutated_proof.verify_element_inclusion(&hasher, loc, element, &root));
 
             for mutation in &input.mutations {
                 let mut mutated_proof = original_proof.clone();
                 mutate_proof_bytes(&mut mutated_proof, mutation, &256);
                 if mutated_proof != original_proof {
-                    assert!(!mutated_proof.verify_element_inclusion(&hasher, element, loc, &root));
+                    assert!(!mutated_proof.verify_element_inclusion(&hasher, loc, element, &root));
                 }
             }
         }
@@ -206,12 +206,12 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         return;
     };
     let range_elements: Vec<Digest> = digests[start_idx..start_idx + range_len].to_vec();
-    assert!(original_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
+    assert!(original_proof.verify_range_inclusion(&hasher, start_loc, &range_elements, &root));
 
     let mut mutated_proof = original_proof.clone();
     mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
     assert_ne!(mutated_proof, original_proof);
-    assert!(!mutated_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
+    assert!(!mutated_proof.verify_range_inclusion(&hasher, start_loc, &range_elements, &root));
 
     for mutation in &input.mutations {
         let mut mutated_proof = original_proof.clone();
@@ -219,8 +219,8 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         if mutated_proof != original_proof {
             assert!(!mutated_proof.verify_range_inclusion(
                 &hasher,
-                &range_elements,
                 start_loc,
+                &range_elements,
                 &root
             ));
         }
@@ -238,12 +238,12 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
         )) else {
             continue;
         };
-        assert!(original_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
+        assert!(original_proof.verify_range_inclusion(&hasher, start_loc, &range_elements, &root));
 
         let mut mutated_proof = original_proof.clone();
         mutated_proof.inactive_peaks ^= input.inactive_peaks_mask.get();
         assert_ne!(mutated_proof, original_proof);
-        assert!(!mutated_proof.verify_range_inclusion(&hasher, &range_elements, start_loc, &root));
+        assert!(!mutated_proof.verify_range_inclusion(&hasher, start_loc, &range_elements, &root));
 
         for mutation in &input.mutations {
             let mut mutated_proof = original_proof.clone();
@@ -251,8 +251,8 @@ fn fuzz_range_proof<F: MerkleFamily>(input: &FuzzInput, digests: &[Digest]) {
             if mutated_proof != original_proof {
                 assert!(!mutated_proof.verify_range_inclusion(
                     &hasher,
-                    &range_elements,
                     start_loc,
+                    &range_elements,
                     &root
                 ));
             }
@@ -288,7 +288,7 @@ fn fuzz(input: FuzzInput) {
                 let original_proof = tree.proof(idx as u32).unwrap();
                 assert!(
                     original_proof
-                        .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
+                        .verify_element_inclusion::<Sha256>(idx as u32, digest, &root)
                         .is_ok()
                 );
 
@@ -298,7 +298,7 @@ fn fuzz(input: FuzzInput) {
                     if mutated_proof != original_proof {
                         assert!(
                             mutated_proof
-                                .verify_element_inclusion::<Sha256>(digest, idx as u32, &root)
+                                .verify_element_inclusion::<Sha256>(idx as u32, digest, &root)
                                 .is_err()
                         );
                     }
@@ -326,9 +326,9 @@ fn fuzz(input: FuzzInput) {
             let Ok(original_proof) = tree.multi_proof(&positions) else {
                 return;
             };
-            let elements: Vec<(Digest, u32)> = positions
+            let elements: Vec<(u32, Digest)> = positions
                 .iter()
-                .map(|&p| (digests[p as usize], p))
+                .map(|&p| (p, digests[p as usize]))
                 .collect();
 
             assert!(

@@ -22,13 +22,11 @@ use commonware_storage::{
         verification,
     },
     qmdb::{
-        self,
-        any::{
-            ordered, unordered,
-            value::{FixedEncoding, VariableEncoding},
-        },
+        self, ProofExt as _,
+        any::{ordered, unordered},
         current::proof::RangeProof,
         immutable, keyless,
+        value::{FixedEncoding, VariableEncoding},
     },
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
@@ -446,7 +444,7 @@ fn prove_operations<F: Graftable, H: Hasher, O: Codec + Clone>(
                 )
                 .map_err(|error| error.to_string())?;
             let operations: Vec<_> = (*start..start + count).map(&operation).collect();
-            if !qmdb::verify_proof::<H, F, _>(&proof, Location::new(*start), &operations, &root) {
+            if !proof.verify::<H, _>(Location::new(*start), &operations, &root) {
                 return Err("Commonware rejected its operations range proof".into());
             }
             Ok(RangeOutput {
@@ -485,7 +483,7 @@ fn multi<F: Graftable, H: Hasher, O: Codec + Clone>(
         .iter()
         .map(|&loc| (Location::new(loc), operation(loc)))
         .collect();
-    if !qmdb::verify_multi_proof::<H, F, _>(&proof, &operations, &root) {
+    if !proof.verify_multi::<H, _>(&operations, &root) {
         return Err("Commonware rejected its operations multiproof".into());
     }
     let positions = qmdb_positions::<F>(tree.leaves, &locs, inactive)?;

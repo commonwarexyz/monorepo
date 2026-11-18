@@ -738,6 +738,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 monitoring_storage_class,
                 config.monitoring.storage_iops,
                 config.monitoring.storage_throughput,
+                config.monitoring.bandwidth_weighting,
                 &key_name,
                 &monitoring_subnets,
                 &monitoring_az_support,
@@ -782,6 +783,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     storage_class,
                     instance.storage_iops,
                     instance.storage_throughput,
+                    instance.bandwidth_weighting,
                     &key_name,
                     &subnets,
                     &az_support,
@@ -1533,7 +1535,7 @@ mod tests {
         RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
         select_group_availability_zone, validate_names, validate_storage_config,
     };
-    use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
+    use crate::aws::{BandwidthWeighting, Config, Error, InstanceConfig, MonitoringConfig};
     use std::{
         collections::{BTreeSet, HashMap},
         sync::{
@@ -1559,6 +1561,7 @@ mod tests {
             storage_class: "gp3".to_string(),
             storage_iops: None,
             storage_throughput: None,
+            bandwidth_weighting: BandwidthWeighting::Default,
             binary: "binary".to_string(),
             config: "config.yaml".to_string(),
             profiling: false,
@@ -1581,6 +1584,7 @@ mod tests {
             storage_class: storage_class.to_string(),
             storage_iops,
             storage_throughput: None,
+            bandwidth_weighting: BandwidthWeighting::Default,
             dashboard: "dashboard.json".to_string(),
         }
     }

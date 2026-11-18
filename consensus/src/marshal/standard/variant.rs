@@ -156,12 +156,16 @@ where
     fn subscribe_parent(
         &self,
         block: &Digested<Self::Block>,
+        bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+        // A standard block isn't required to carry a consensus context, so the provider reads no
+        // parent round from it. The caller's bound is the only round that can retire the request.
         let receiver = block.height().previous().map(|parent_height| {
             self.subscribe_by_commitment(
                 block.parent(),
                 CommitmentFallback::FetchByCommitment {
                     height: parent_height,
+                    round: bound,
                 },
             )
         });
@@ -179,7 +183,6 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_parallel::Sequential;
-    use futures::executor::block_on;
 
     type TestBlock = MockBlock<Sha256Digest, u64>;
     type TestVariant = Standard<TestBlock>;
@@ -193,13 +196,14 @@ mod tests {
             ExpectedCommitment::Trusted(block.digest()),
             ExpectedCommitment::Untrusted(block.digest()),
         ] {
-            let decoded = block_on(TestVariant::decode_block(
-                encoded.clone(),
-                &(),
-                expected,
-                &Sequential,
-            ))
-            .unwrap();
+            let decoded = Sequential
+                .block_on(TestVariant::decode_block(
+                    encoded.clone(),
+                    &(),
+                    expected,
+                    &Sequential,
+                ))
+                .unwrap();
             assert_eq!(decoded.inner(), &block);
             assert_eq!(decoded.digest(), block.digest());
         }
@@ -211,13 +215,14 @@ mod tests {
             ExpectedCommitment::Untrusted(other),
         ] {
             assert!(
-                block_on(TestVariant::decode_block(
-                    encoded.clone(),
-                    &(),
-                    expected,
-                    &Sequential
-                ))
-                .is_err()
+                Sequential
+                    .block_on(TestVariant::decode_block(
+                        encoded.clone(),
+                        &(),
+                        expected,
+                        &Sequential
+                    ))
+                    .is_err()
             );
         }
     }

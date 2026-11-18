@@ -1671,7 +1671,7 @@ where
 mod tests {
     use super::{heapsort, par_mergesort, par_quicksort, split_for_merge};
     use crate::rayon::ThreadPoolBuilder;
-    use commonware_utils::{sync::Mutex, test_rng};
+    use commonware_utils::{NZUsize, sync::Mutex, test_rng};
     use rand::RngExt as _;
     use std::{
         cell::RefCell,
@@ -1685,8 +1685,7 @@ mod tests {
 
     /// Runs `f` on a worker of a new pool, as the strategy runs its sorts.
     fn in_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
-        ThreadPoolBuilder::new()
-            .num_threads(4)
+        ThreadPoolBuilder::new(NZUsize!(4))
             .build()
             .unwrap()
             .install(f)
@@ -1798,7 +1797,7 @@ mod tests {
                     assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
 
                     // Test heapsort using `>` operator.
-                    let mut tmp = v.clone();
+                    let mut tmp = v;
                     heapsort(&mut tmp, |a, b| a > b);
                     assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
                 }

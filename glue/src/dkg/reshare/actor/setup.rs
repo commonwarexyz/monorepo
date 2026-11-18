@@ -362,6 +362,8 @@ where
             seed,
         } = preparation;
 
+        self.metrics
+            .reconcile(&participants.dealers, &participants.players);
         let round = Info::new::<N3f1>(
             self.namespace,
             epoch.get(),

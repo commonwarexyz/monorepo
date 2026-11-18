@@ -1,6 +1,6 @@
 use crate::{BALANCE, Balance, CONCURRENCY, Nonced, for_each_batch};
 use commonware_glue::transfers::{Selection, Transfer};
-use commonware_parallel::{Rayon, Sequential, Strategy};
+use commonware_parallel::{Rayon, Sequential, Strategy, rayon::ThreadPoolBuilder};
 use commonware_storage::qmdb::any::batch::Slot;
 use commonware_utils::NZUsize;
 use criterion::{Criterion, criterion_group};
@@ -37,7 +37,7 @@ fn bench_batch<T: Transfer>(
 }
 
 fn bench_select(c: &mut Criterion) {
-    let pool = Rayon::new(NZUsize!(CONCURRENCY)).unwrap();
+    let pool = Rayon::new(ThreadPoolBuilder::new(NZUsize!(CONCURRENCY))).unwrap();
     for_each_batch(|params, payments, signed| {
         bench_batch(
             c,

@@ -1,6 +1,6 @@
 use crate::{CONCURRENCY, for_each_batch};
 use commonware_glue::transfers::{Plan, Transfer};
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::NZUsize;
 use criterion::{Criterion, criterion_group};
 
@@ -16,7 +16,7 @@ fn bench_batch<T: Transfer + Sync>(c: &mut Criterion, pool: &Rayon, params: &str
 }
 
 fn bench_plan(c: &mut Criterion) {
-    let pool = Rayon::new(NZUsize!(CONCURRENCY)).unwrap();
+    let pool = Rayon::new(ThreadPoolBuilder::new(NZUsize!(CONCURRENCY))).unwrap();
     for_each_batch(|params, payments, signed| {
         bench_batch(c, &pool, &format!("{params} effects=none"), payments);
         bench_batch(c, &pool, &format!("{params} effects=nonce"), signed);

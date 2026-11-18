@@ -1,10 +1,21 @@
 //! A work-stealing pool of worker threads.
 //!
-//! A [`ThreadPool`] owns a fixed set of worker threads. Each worker keeps a deque of jobs that it
-//! pushes and pops at one end while idle workers steal from the other, and a pool-wide injector
-//! takes jobs submitted from threads outside the pool. A worker with nothing to run searches for
-//! work for a while and then sleeps. Publishing a job or setting a latch wakes sleeping workers
-//! as needed. A worker waiting for a job's latch keeps running its pool's jobs until it is set.
+//! A [`ThreadPool`] owns a fixed set of worker threads arranged in groups. Each worker has Local
+//! and Wide deques. Local jobs stay within their group, and any worker may steal a Wide job. Each
+//! group has a Local injector, and all groups share a Wide injector:
+//!
+//! ```text
+//! queue                  filled by                         taken by
+//! -------------------    ------------------------------    -------------------------
+//! w's Local deque        w, under a Local placement        w and its group-mates
+//! w's Wide deque         w, under a Wide placement         any worker
+//! G's Local injector     threads that are not G's workers  G's workers
+//! Wide injector          threads outside the pool          any worker
+//! ```
+//!
+//! A worker with nothing to run searches for work and then sleeps. Publishing a job or setting a
+//! latch wakes sleeping workers as needed. A worker waiting for a job's latch keeps running jobs
+//! its group may take until the latch is set.
 //!
 //! Internal `join` calls run two closures potentially in parallel. [`ThreadPool::spawn`] runs a
 //! detached task, and [`ThreadPool::broadcast`] and [`ThreadPool::spawn_broadcast`] run a task on
@@ -22,8 +33,7 @@
 //! - Exports `ThreadPool`, `ThreadPoolBuilder`, `ThreadPoolBuildError`, and `Yield` through
 //!   `commonware_parallel::rayon`. Retained free functions are crate-private or test-only.
 //! - Removed the global pool, `build_global`, `initialize`, `Registry::current`, the `primed`
-//!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` and `current_num_threads` require a
-//!   calling worker.
+//!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` requires a calling worker.
 //! - Removed free `spawn`, `broadcast`, and `spawn_broadcast`.
 //! - Removed scopes and their `CountLatch` operations, FIFO scheduling, `yield_local`,
 //!   `current_thread_has_pending_tasks`, `max_num_threads`, and `ThreadPool::join`.
@@ -31,6 +41,8 @@
 //! - Removed builder options `spawn_handler`, `build_scoped`, `exit_handler`, `panic_handler`, and
 //!   `breadth_first`. The registry starts threads directly. Uncaught detached-job and start-handler
 //!   panics abort.
+//! - `ThreadPoolBuilder::new` takes the worker count. Removed `num_threads`, `RAYON_NUM_THREADS`,
+//!   `RAYON_RS_NUM_CPUS`, and the logical CPU count default.
 //! - Removed the fallback for targets without threads, `ThreadPoolBuildError::is_unsupported`,
 //!   `web_spin_lock`, `wasm_sync`, the build script, and the `links` key.
 //! - `bridge.rs` directly composes the producer and consumers. Removed iterator traits and
@@ -52,17 +64,34 @@
 //!   `Vec::with_capacity` in place of `new` followed by `reserve`.
 //! - Adapted docs to the retained API, clarified queued join execution, removed inaccessible
 //!   doctests and section banners, and named the scheduler in its abort message.
+//! - Workers form fixed groups with separate Local and Wide deques. Local jobs stay within one
+//!   group. Wide jobs can run on any worker. Jobs carry their placement through stealing,
+//!   nested helping, and unwinding. The bridge's splitter sizes its split budget by the width
+//!   of the calling worker's placement. Removed `current_num_threads`.
+//! - Each group owns its Local injector and sleep states. All groups share a Wide injector.
+//!   Workers search eligible deques before taking the oldest incoming job across their group's
+//!   Local injector and the Wide injector.
+//! - Wide publication and idle exits propagate wakeups between groups. Native worker waits wake
+//!   the owning worker through its group and offset.
+//! - Internal placement methods run and spawn work within groups. Public pool operations remain
+//!   available.
+//! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom
+//!   models of the wake protocol.
+//! - Added a busy-time meter for measured runs. Stack jobs run in their creator's context, and
+//!   hand-offs, scheduler waits, yields, and detached jobs run in none. Busy-time tests read a
+//!   virtual clock.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
 
-use std::{env, error::Error, fmt, io, str::FromStr, thread};
+use std::{error::Error, fmt, io, num::NonZeroUsize, sync, thread};
 
 mod bridge;
 mod broadcast;
 mod job;
 mod join;
 mod latch;
+mod meter;
 mod registry;
 mod sleep;
 mod sort;
@@ -71,23 +100,45 @@ mod spawn;
 mod test;
 mod thread_pool;
 mod unwind;
+#[cfg(all(test, feature = "loom"))]
+mod wake_loom_tests;
 
-pub use self::thread_pool::{ThreadPool, Yield};
 #[cfg(test)]
-pub(crate) use self::thread_pool::{current_thread_index, yield_now};
+pub(crate) use self::meter::TestClock;
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
+pub(crate) use self::thread_pool::current_thread_index;
+#[cfg(test)]
+pub(crate) use self::thread_pool::yield_now;
+pub use self::thread_pool::{ThreadPool, Yield};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
+    meter::{Clock, Parked, Waiting, charge, is_waiting, measure_with, unparked},
+    registry::Placement,
     sort::{par_mergesort, par_quicksort},
 };
+pub(crate) use sleep::THREADS_MAX;
 
-/// Returns the number of threads in the pool of the calling worker.
+/// Busy-waits for `duration`, so a job holds its thread without sleeping.
+#[cfg(test)]
+pub(crate) fn spin(duration: std::time::Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < duration {
+        std::hint::spin_loop();
+    }
+}
+
+/// Returns the number of workers eligible to run the calling worker's current job.
 ///
 /// # Panics
 ///
 /// Panics if the calling thread is not a worker of a thread pool.
-pub(crate) fn current_num_threads() -> usize {
-    registry::Registry::current_num_threads()
+fn placement_width() -> usize {
+    // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
+    let worker = unsafe { registry::WorkerThread::current().as_ref() };
+    worker
+        .expect("the calling thread must be a worker of a thread pool")
+        .width()
 }
 
 /// We need to transmit raw pointers across threads. It is possible to do this
@@ -143,21 +194,24 @@ enum ErrorKind {
 ///
 /// ```
 /// use commonware_parallel::rayon::ThreadPoolBuilder;
+/// use std::num::NonZeroUsize;
 ///
-/// let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+/// let pool = ThreadPoolBuilder::new(NonZeroUsize::new(4).unwrap()).build().unwrap();
 /// assert_eq!(pool.current_num_threads(), 4);
 /// assert_eq!(pool.install(|| 1 + 1), 2);
 /// ```
 pub struct ThreadPoolBuilder {
     /// The number of threads in the thread pool.
-    /// If zero, use the environment or the number of logical CPUs.
-    num_threads: usize,
+    num_threads: NonZeroUsize,
+
+    /// The width of each worker group, or zero for one group.
+    group_width: usize,
 
     /// The thread we're building *from* will also be part of the pool.
     use_current_thread: bool,
 
     /// Closure to compute the name of a thread.
-    get_thread_name: Option<Box<dyn FnMut(usize) -> String>>,
+    get_thread_name: Option<Box<dyn FnMut(WorkerPosition) -> String>>,
 
     /// The stack size for the created worker threads
     stack_size: Option<usize>,
@@ -172,12 +226,30 @@ pub struct ThreadPoolBuilder {
 /// The type for a closure that gets invoked when a thread starts. The
 /// closure is passed the index of the thread on which it is invoked.
 /// Note that this same closure may be invoked multiple times in parallel.
-type StartHandler = dyn Fn(usize) + Send + Sync;
+type StartHandler = dyn Fn(WorkerPosition) + Send + Sync;
 
-impl Default for ThreadPoolBuilder {
-    fn default() -> Self {
+/// A worker's position in its pool, passed to the closures set with
+/// [`ThreadPoolBuilder::thread_name`] and [`ThreadPoolBuilder::start_handler`].
+///
+/// A pool's workers form consecutive groups, each of the same width except possibly the last.
+/// A pool built directly from a [`ThreadPoolBuilder`] has one group holding every worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerPosition {
+    /// The worker's index in the pool, from zero.
+    pub index: usize,
+    /// The worker's group, from zero.
+    pub group: usize,
+    /// The worker's offset in its group, from zero.
+    pub offset: usize,
+}
+
+impl ThreadPoolBuilder {
+    /// Creates a builder for a pool of `num_threads` workers. The pool spawns one thread per
+    /// worker, or one fewer with [`Self::use_current_thread`].
+    pub const fn new(num_threads: NonZeroUsize) -> Self {
         Self {
-            num_threads: 0,
+            num_threads,
+            group_width: 0,
             use_current_thread: false,
             get_thread_name: None,
             stack_size: None,
@@ -185,86 +257,63 @@ impl Default for ThreadPoolBuilder {
             start_threads: true,
         }
     }
-}
-
-impl ThreadPoolBuilder {
-    /// Creates and returns a valid thread pool builder, but does not initialize it.
-    pub fn new() -> Self {
-        Self::default()
-    }
 
     /// Creates a new `ThreadPool` initialized using this configuration.
     pub fn build(self) -> Result<ThreadPool, ThreadPoolBuildError> {
         ThreadPool::build(self)
     }
 
-    /// Get the number of threads that will be used for the thread
-    /// pool. See `num_threads()` for more information.
-    fn get_num_threads(&self) -> usize {
-        if self.num_threads > 0 {
-            self.num_threads
+    /// The number of threads the pool will have.
+    pub(crate) const fn get_num_threads(&self) -> usize {
+        self.num_threads.get()
+    }
+
+    /// Get the width of the groups a pool of `n_threads` threads is split into.
+    /// See `group_width()` for more information.
+    const fn get_group_width(&self, n_threads: usize) -> usize {
+        if self.group_width == 0 || self.group_width > n_threads {
+            n_threads
         } else {
-            let default = || {
-                thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(1)
-            };
-
-            match env::var("RAYON_NUM_THREADS")
-                .ok()
-                .and_then(|s| usize::from_str(&s).ok())
-            {
-                Some(x @ 1..) => return x,
-                Some(0) => return default(),
-                _ => {}
-            }
-
-            // Support for deprecated `RAYON_RS_NUM_CPUS`.
-            match env::var("RAYON_RS_NUM_CPUS")
-                .ok()
-                .and_then(|s| usize::from_str(&s).ok())
-            {
-                Some(x @ 1..) => x,
-                _ => default(),
-            }
+            self.group_width
         }
     }
 
-    /// Get the thread name for the thread with the given index.
-    fn get_thread_name(&mut self, index: usize) -> Option<String> {
-        let f = self.get_thread_name.as_mut()?;
-        Some(f(index))
+    /// Splits the workers into consecutive groups of `width` workers, the last one narrower when
+    /// `width` does not divide the thread count. Worker `i` is in group `i / width`.
+    ///
+    /// A job placed [`Placement::Local`] on a group runs only on that group's workers, and a job
+    /// placed [`Placement::Wide`] runs on any worker. If `width` is 0 or at least the thread
+    /// count, or you do not call this function, all workers form one group.
+    pub(crate) const fn group_width(mut self, width: usize) -> Self {
+        self.group_width = width;
+        self
     }
 
-    /// Sets a closure which takes a thread index and returns
-    /// the thread's name.
+    /// Get the thread name for the worker at `position`.
+    fn get_thread_name(&mut self, position: WorkerPosition) -> Option<String> {
+        let f = self.get_thread_name.as_mut()?;
+        Some(f(position))
+    }
+
+    /// Whether a thread name closure has been set.
+    pub(crate) const fn has_thread_name(&self) -> bool {
+        self.get_thread_name.is_some()
+    }
+
+    /// Sets a closure which takes a worker's position in the pool and returns the thread's name.
     pub fn thread_name<F>(mut self, closure: F) -> Self
     where
-        F: FnMut(usize) -> String + 'static,
+        F: FnMut(WorkerPosition) -> String + 'static,
     {
         self.get_thread_name = Some(Box::new(closure));
         self
     }
 
-    /// Sets the number of threads to be used in the thread pool.
-    ///
-    /// If you specify a non-zero number of threads using this
-    /// function, then the resulting thread pools are guaranteed to
-    /// start at most this number of threads.
-    ///
-    /// If `num_threads` is 0, or you do not call this function, then
-    /// the pool uses `RAYON_NUM_THREADS`, then the deprecated `RAYON_RS_NUM_CPUS`, and
-    /// otherwise the number of logical CPUs reported by [`std::thread::available_parallelism`].
-    /// A zero `RAYON_NUM_THREADS` selects the logical CPU count.
-    pub const fn num_threads(mut self, num_threads: usize) -> Self {
-        self.num_threads = num_threads;
-        self
-    }
-
     /// Use the current thread as one of the threads in the pool.
     ///
-    /// The current thread is guaranteed to be at index 0, and since the thread is not managed by
-    /// the pool, the start handler does not run for that thread.
+    /// The current thread is worker 0 and counts toward the pool's worker count, so a pool of one
+    /// worker spawns no thread at all. Since the thread is not managed by the pool, the start
+    /// handler does not run for it.
     ///
     /// Note that the current thread won't run the main work-stealing loop, so jobs spawned into
     /// the thread pool will generally not be picked up automatically by this thread unless you
@@ -291,18 +340,17 @@ impl ThreadPoolBuilder {
     }
 
     /// Takes the current thread start callback, leaving `None`.
-    const fn take_start_handler(&mut self) -> Option<Box<StartHandler>> {
+    pub(crate) const fn take_start_handler(&mut self) -> Option<Box<StartHandler>> {
         self.start_handler.take()
     }
 
     /// Sets a callback to be invoked on thread start.
     ///
-    /// The closure is passed the index of the thread on which it is invoked.
-    /// Note that this same closure may be invoked multiple times in parallel.
-    /// If this closure panics, the process aborts.
+    /// The closure is passed the position of the worker on which it is invoked, and it may run
+    /// on several workers at once. If this closure panics, the process aborts.
     pub fn start_handler<H>(mut self, start_handler: H) -> Self
     where
-        H: Fn(usize) + Send + Sync + 'static,
+        H: Fn(WorkerPosition) + Send + Sync + 'static,
     {
         self.start_handler = Some(Box::new(start_handler));
         self
@@ -348,6 +396,7 @@ impl fmt::Debug for ThreadPoolBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             ref num_threads,
+            ref group_width,
             ref use_current_thread,
             ref get_thread_name,
             ref stack_size,
@@ -368,6 +417,7 @@ impl fmt::Debug for ThreadPoolBuilder {
 
         f.debug_struct("ThreadPoolBuilder")
             .field("num_threads", num_threads)
+            .field("group_width", group_width)
             .field("use_current_thread", use_current_thread)
             .field("get_thread_name", &get_thread_name)
             .field("stack_size", &stack_size)

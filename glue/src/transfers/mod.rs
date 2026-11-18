@@ -1,10 +1,11 @@
-//! Settle batches of `u64` balance transfers against a [QMDB](commonware_storage::qmdb) database.
+//! Settle batches of balance transfers against a [QMDB](commonware_storage::qmdb) database.
 //!
-//! Each key holds an [`Account`]: a `u64` balance and any state the application keeps beside it,
-//! such as a nonce. A [`Transfer`] lists the accounts it changes, each with a [`Change`] holding
-//! how much it debits and credits the account and any effect on the account's own state, such as
-//! consuming a nonce. A batch of transfers settles against its starting accounts, read for its keys
-//! before any of its transfers apply.
+//! Each key holds an [`Account`]: a balance and any state the application keeps beside it, such as
+//! a nonce. A [`Transfer`] lists the accounts it changes, each with a [`Change`] holding how much
+//! it debits and credits the account and any effect on the account's own state, such as consuming
+//! a nonce. Balances, debits, and credits are unsigned integers of an [`Amount`] type the
+//! application chooses. A batch of transfers settles against its starting accounts, read for its
+//! keys before any of its transfers apply.
 //!
 //! Each key's final balance is its starting balance less the batch's debits plus the batch's
 //! credits. Credits never fund debits in the same batch, even within one transfer. Every key's
@@ -19,7 +20,7 @@
 //! one that reuses a consumed nonce.
 //!
 //! A batch settles all or nothing. If any account refuses an effect, any key cannot afford its
-//! debits, or any final balance would exceed `u64::MAX`, the whole batch is rejected with a
+//! debits, or any final balance would exceed the largest amount, the whole batch is rejected with a
 //! [`Rejection`].
 //!
 //! A key the database does not hold reads as the default account, and settling an account to the
@@ -89,6 +90,10 @@
 //! struct Balance(u64);
 //!
 //! impl Account for Balance {
+//!     // The balance and the amounts a transfer debits and credits.
+//!     type Amount = u64;
+//!
+//!     // No effect exists, since the account keeps no state other than its balance.
 //!     type Effect = Infallible;
 //!
 //!     fn balance(&self) -> u64 {
@@ -114,7 +119,7 @@
 //!     type Key = Address;
 //!     type Account = Balance;
 //!
-//!     fn changes(&self) -> impl Iterator<Item = (&Address, Change)> {
+//!     fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
 //!         [
 //!             (&self.from, Change::debit(self.amount)),
 //!             (&self.to, Change::credit(self.amount)),
@@ -178,6 +183,7 @@
 //! # #[derive(Clone, Debug, Default, PartialEq, Eq)]
 //! # struct Balance(u64);
 //! # impl Account for Balance {
+//! #     type Amount = u64;
 //! #     type Effect = Infallible;
 //! #     fn balance(&self) -> u64 { self.0 }
 //! #     fn set_balance(&mut self, balance: u64) { self.0 = balance; }
@@ -187,7 +193,7 @@
 //! # impl Transfer for Payment {
 //! #     type Key = Address;
 //! #     type Account = Balance;
-//! #     fn changes(&self) -> impl Iterator<Item = (&Address, Change)> {
+//! #     fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
 //! #         [(&self.from, Change::debit(self.amount)), (&self.to, Change::credit(self.amount))]
 //! #             .into_iter()
 //! #     }
@@ -223,19 +229,17 @@ use ahash::RandomState;
 use commonware_parallel::Strategy;
 use commonware_storage::qmdb::any::batch::Slot;
 use commonware_utils::{
-    Array, Widen,
+    Amount, Array, Widen,
     handles::{self, Table},
     prefetch::{self, Lookahead},
 };
-use std::{
-    convert::Infallible, fmt::Debug, hash::BuildHasher, iter, num::NonZeroUsize, ops::Range,
-};
+use std::{fmt::Debug, hash::BuildHasher, iter, num::NonZeroUsize, ops::Range};
 use thiserror::Error;
 
 mod select;
 pub use select::Selection;
 
-/// A movement of `u64` value between accounts, with any effects on their own state.
+/// A movement of value between accounts, with any effects on their own state.
 ///
 /// Implement this for a transaction type to settle batches of it with [`Plan`] and to choose a
 /// block's transfers with [`Selection`].
@@ -250,13 +254,10 @@ pub trait Transfer {
     ///
     /// A key listed more than once settles as one change whose debits and credits are summed and
     /// whose effects apply in the order listed.
-    #[allow(clippy::type_complexity)]
-    fn changes(
-        &self,
-    ) -> impl Iterator<Item = (&Self::Key, Change<<Self::Account as Account>::Effect>)>;
+    fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)>;
 }
 
-/// The value a key holds: a `u64` balance and any state the application keeps beside it.
+/// The value a key holds: a balance and any state the application keeps beside it.
 ///
 /// A key the database does not hold reads as the default account, and settling a key to the
 /// default deletes it. The default should therefore be the state of a fresh account, such as its
@@ -284,6 +285,9 @@ pub trait Transfer {
 /// }
 ///
 /// impl Account for Sequenced {
+///     // The balance and the amounts a transfer debits and credits.
+///     type Amount = u64;
+///
 ///     // The nonce a transfer consumes.
 ///     type Effect = u64;
 ///
@@ -315,7 +319,7 @@ pub trait Transfer {
 ///     type Key = Address;
 ///     type Account = Sequenced;
 ///
-///     fn changes(&self) -> impl Iterator<Item = (&Address, Change<u64>)> {
+///     fn changes(&self) -> impl Iterator<Item = (&Self::Key, Change<Self::Account>)> {
 ///         // The sender's change consumes the nonce and debits the amount.
 ///         let sender = Change::debit(self.amount).with_effect(self.nonce);
 ///         [(&self.from, sender), (&self.to, Change::credit(self.amount))].into_iter()
@@ -346,15 +350,19 @@ pub trait Transfer {
 /// assert_eq!(settle(&[pay(0), pay(0)]), Err(Rejection::Refused(alice)));
 /// ```
 pub trait Account: Clone + Debug + Default + Eq + Send + Sync {
+    /// The unsigned integer type of the balance and of the amounts debited from and credited to
+    /// it.
+    type Amount: Amount;
+
     /// A change to the account's own state that a transfer can make, such as consuming a nonce.
-    /// An account with no such state uses [`Infallible`].
+    /// An account with no such state uses [`Infallible`](std::convert::Infallible).
     type Effect: Clone + Debug + Send + Sync;
 
     /// Returns the account's balance.
-    fn balance(&self) -> u64;
+    fn balance(&self) -> Self::Amount;
 
     /// Sets the account's balance.
-    fn set_balance(&mut self, balance: u64);
+    fn set_balance(&mut self, balance: Self::Amount);
 
     /// Applies `effect`, returning whether the account accepts it.
     ///
@@ -367,51 +375,55 @@ pub trait Account: Clone + Debug + Default + Eq + Send + Sync {
     fn apply(&mut self, effect: Self::Effect) -> bool;
 }
 
-/// The change one transfer makes to one account.
+/// The change one transfer makes to one account of type `A`.
 ///
 /// The debit comes off the account's starting balance and the credit is added after every debit of
 /// the batch, so a credit never funds a debit, even within one change. A change with no debit,
 /// credit, or effect is empty and is left out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Change<E = Infallible> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change<A: Account> {
     /// Value removed from the balance.
-    pub debit: u64,
+    pub debit: A::Amount,
     /// Value added to the balance.
-    pub credit: u64,
+    pub credit: A::Amount,
     /// A change to the account's own state, such as consuming a nonce.
-    pub effect: Option<E>,
+    pub effect: Option<A::Effect>,
 }
 
-impl<E> Change<E> {
+// A change holds only its account's amounts and effect, so it is `Copy` whenever the effect is,
+// whether or not the account is.
+impl<A: Account<Effect: Copy>> Copy for Change<A> {}
+
+impl<A: Account> Change<A> {
     /// A change that only removes `amount` from the balance.
-    pub const fn debit(amount: u64) -> Self {
+    pub const fn debit(amount: A::Amount) -> Self {
         Self {
             debit: amount,
-            credit: 0,
+            credit: A::Amount::ZERO,
             effect: None,
         }
     }
 
     /// A change that only adds `amount` to the balance.
-    pub const fn credit(amount: u64) -> Self {
+    pub const fn credit(amount: A::Amount) -> Self {
         Self {
-            debit: 0,
+            debit: A::Amount::ZERO,
             credit: amount,
             effect: None,
         }
     }
 
     /// A change that only applies `effect`.
-    pub const fn effect(effect: E) -> Self {
+    pub const fn effect(effect: A::Effect) -> Self {
         Self {
-            debit: 0,
-            credit: 0,
+            debit: A::Amount::ZERO,
+            credit: A::Amount::ZERO,
             effect: Some(effect),
         }
     }
 
     /// This change with `effect` in place of any effect it has.
-    pub fn with_effect(self, effect: E) -> Self {
+    pub fn with_effect(self, effect: A::Effect) -> Self {
         Self {
             effect: Some(effect),
             ..self
@@ -419,16 +431,16 @@ impl<E> Change<E> {
     }
 
     /// Whether the change moves no value and has no effect, so it is left out.
-    const fn is_empty(&self) -> bool {
-        self.debit == 0 && self.credit == 0 && self.effect.is_none()
+    fn is_empty(&self) -> bool {
+        self.debit == A::Amount::ZERO && self.credit == A::Amount::ZERO && self.effect.is_none()
     }
 }
 
-impl<E> Default for Change<E> {
+impl<A: Account> Default for Change<A> {
     fn default() -> Self {
         Self {
-            debit: 0,
-            credit: 0,
+            debit: A::Amount::ZERO,
+            credit: A::Amount::ZERO,
             effect: None,
         }
     }
@@ -447,7 +459,7 @@ pub enum Rejection<K: Debug> {
     /// The key's debits exceed its starting balance.
     #[error("account {0:?} cannot afford its debits")]
     Insufficient(K),
-    /// The key's final balance exceeds `u64::MAX`.
+    /// The key's final balance exceeds the largest amount.
     #[error("the balance of account {0:?} overflows")]
     Overflow(K),
 }
@@ -463,9 +475,9 @@ pub struct Plan<K, A: Account> {
     /// Every key the batch changes, each once.
     keys: Vec<K>,
     /// The sum of each key's debits, in `keys` order.
-    debits: Vec<u64>,
+    debits: Vec<A::Amount>,
     /// The sum of each key's credits, in `keys` order.
-    credits: Vec<u64>,
+    credits: Vec<A::Amount>,
     /// Where each key's effects start in `effects`, then where the last key's end, or empty when no
     /// key has one.
     effect_offsets: Vec<usize>,
@@ -533,14 +545,14 @@ const MIN_SETTLE_BATCH: NonZeroUsize = NonZeroUsize::new(1 << 14).expect("minimu
 const PREFETCH_DISTANCE: usize = 16;
 
 /// One change of a batch that moves value or has an effect, with its key's hash.
-struct Touch<'a, K, E> {
+struct Touch<'a, K, A: Account> {
     hash: u64,
     key: &'a K,
-    change: Change<E>,
+    change: Change<A>,
 }
 
 /// The touches of one range of transfers, bucketed by partition.
-type Buckets<'a, K, E> = Vec<Vec<Touch<'a, K, E>>>;
+type Buckets<'a, K, A> = Vec<Vec<Touch<'a, K, A>>>;
 
 impl<K: Array, A: Account> Plan<K, A> {
     /// Plans `transfers`, gathering their changes for each key.
@@ -555,9 +567,9 @@ impl<K: Array, A: Account> Plan<K, A> {
     ///
     /// # Errors
     ///
-    /// Returns [`Rejection::Insufficient`] if a key's debits sum to more than `u64::MAX` and
-    /// [`Rejection::Overflow`] if its credits do. No balance can afford such debits or hold such
-    /// credits.
+    /// Returns [`Rejection::Insufficient`] if a key's debits sum to more than the largest amount
+    /// and [`Rejection::Overflow`] if its credits do. No balance can afford such debits or hold
+    /// such credits.
     ///
     /// # Panics
     ///
@@ -634,7 +646,7 @@ impl<K: Array, A: Account> Plan<K, A> {
 
         // Hash the key of each change in parallel over the transfers and bucket the touches by
         // partition, so each partition's worker reads only its own buckets.
-        let buckets: Vec<Buckets<'_, K, A::Effect>> =
+        let buckets: Vec<Buckets<'_, K, A>> =
             strategy.run_batches(transfers.len(), MIN_HASH_BATCH, 1, |batches| {
                 batches.map_collect_vec(
                     |ranges| ranges.into_iter().map(|range| &transfers[range]),
@@ -674,7 +686,7 @@ impl<K: Array, A: Account> Plan<K, A> {
     }
 
     /// Concatenates `shards`, shifting effect offsets past the preceding shards.
-    fn from_shards(shards: Vec<Shard<K, A::Effect>>) -> Self {
+    fn from_shards(shards: Vec<Shard<K, A>>) -> Self {
         let len = shards.iter().map(|shard| shard.keys.len()).sum();
         let effects: usize = shards.iter().map(|shard| shard.effects.len()).sum();
         let mut plan = Self {
@@ -737,7 +749,7 @@ impl<K: Array, A: Account> Plan<K, A> {
     ///
     /// Returns [`Rejection::Refused`] if an account refuses one of its effects,
     /// [`Rejection::Insufficient`] if a key's debits exceed its starting balance, and
-    /// [`Rejection::Overflow`] if its final balance exceeds `u64::MAX`.
+    /// [`Rejection::Overflow`] if its final balance exceeds the largest amount.
     ///
     /// # Panics
     ///
@@ -789,8 +801,8 @@ impl<K: Array, A: Account> Plan<K, A> {
     }
 }
 
-impl<K, A: Account> From<Shard<K, A::Effect>> for Plan<K, A> {
-    fn from(shard: Shard<K, A::Effect>) -> Self {
+impl<K, A: Account> From<Shard<K, A>> for Plan<K, A> {
+    fn from(shard: Shard<K, A>) -> Self {
         Self {
             keys: shard.keys,
             debits: shard.debits,
@@ -802,37 +814,37 @@ impl<K, A: Account> From<Shard<K, A::Effect>> for Plan<K, A> {
 }
 
 /// The keys of one range of partitions, each once, with their debit and credit sums and effects.
-struct Shard<K, E> {
+struct Shard<K, A: Account> {
     /// Each key changed in the partitions, once.
     keys: Vec<K>,
     /// The sum of each key's debits, in `keys` order.
-    debits: Vec<u64>,
+    debits: Vec<A::Amount>,
     /// The sum of each key's credits, in `keys` order.
-    credits: Vec<u64>,
+    credits: Vec<A::Amount>,
     /// Where each key's effects start in `effects`, then where the last key's end, or empty when no
     /// key has one.
     effect_offsets: Vec<usize>,
     /// Each key's effects in transfer order, grouped in `keys` order.
-    effects: Vec<E>,
+    effects: Vec<A::Effect>,
 }
 
-impl<K: Array, E: Clone> Shard<K, E> {
+impl<K: Array, A: Account> Shard<K, A> {
     /// Deduplicates `touches`, sums their debits and credits, and groups their effects by key.
     ///
     /// The index is sized for every touch, so it never grows and never rehashes a key through
     /// `hasher`.
     fn build<'a>(
-        touches: impl Iterator<Item = &'a [Touch<'a, K, E>]> + Clone,
+        touches: impl Iterator<Item = &'a [Touch<'a, K, A>]> + Clone,
         hasher: &impl BuildHasher,
     ) -> Result<Self, Rejection<K>>
     where
         K: 'a,
-        E: 'a,
+        A: 'a,
     {
         let expected = touches.clone().map(<[_]>::len).sum();
         let mut index = KeyIndex::with_capacity(expected);
-        let mut debits: Vec<u64> = Vec::with_capacity(expected);
-        let mut credits: Vec<u64> = Vec::with_capacity(expected);
+        let mut debits: Vec<A::Amount> = Vec::with_capacity(expected);
+        let mut credits: Vec<A::Amount> = Vec::with_capacity(expected);
         let mut effects = Vec::new();
         for run in touches {
             // Prefetch the home slot of each touch a fixed distance ahead of its lookup, so the
@@ -848,25 +860,25 @@ impl<K: Array, E: Clone> Shard<K, E> {
                 let Some(touch) = scan.next() else { break };
                 let (position, inserted) = index.find_or_insert(touch.key, touch.hash, hasher);
                 if inserted {
-                    debits.push(0);
-                    credits.push(0);
+                    debits.push(A::Amount::ZERO);
+                    credits.push(A::Amount::ZERO);
                 }
 
-                // No balance can afford debits that sum past `u64::MAX`, and credits that sum past
-                // it overflow every balance. A sum is updated only for a nonzero amount, so a
-                // change that only debits or only credits writes one sum. An effect is set aside
-                // with its key's position and grouped once every touch is placed.
+                // No balance can afford debits that sum past the largest amount, and credits that
+                // sum past it overflow every balance. A sum is updated only for a nonzero amount,
+                // so a change that only debits or only credits writes one sum. An effect is set
+                // aside with its key's position and grouped once every touch is placed.
                 let Change {
                     debit,
                     credit,
                     effect,
                 } = &touch.change;
-                if *debit != 0 {
+                if *debit != A::Amount::ZERO {
                     debits[position] = debits[position]
                         .checked_add(*debit)
                         .ok_or_else(|| Rejection::Insufficient(touch.key.clone()))?;
                 }
-                if *credit != 0 {
+                if *credit != A::Amount::ZERO {
                     credits[position] = credits[position]
                         .checked_add(*credit)
                         .ok_or_else(|| Rejection::Overflow(touch.key.clone()))?;
@@ -925,7 +937,7 @@ fn group_effects<E: Clone>(keys: usize, effects: Vec<(usize, E)>) -> (Vec<usize>
 fn for_each_touch<'a, T: Transfer>(
     transfers: &'a [T],
     hasher: &impl BuildHasher,
-    mut touch: impl FnMut(Touch<'a, T::Key, <T::Account as Account>::Effect>),
+    mut touch: impl FnMut(Touch<'a, T::Key, T::Account>),
 ) {
     // A plain loop over the changes compiles to a much faster scan than chained iterator adapters.
     for transfer in transfers {
@@ -955,7 +967,7 @@ fn estimated_changes<T: Transfer>(transfers: &[T]) -> usize {
 ///
 /// Each bucket reserves an even share plus a margin for uneven hashing, so most buckets never
 /// grow.
-fn empty_buckets<'a, K, E>(expected: usize) -> Buckets<'a, K, E> {
+fn empty_buckets<'a, K, A: Account>(expected: usize) -> Buckets<'a, K, A> {
     let share = expected.div_ceil(PARTITIONS);
     let capacity = share + share / BUCKET_MARGIN_DIVISOR + BUCKET_SPARE;
     (0..PARTITIONS)
@@ -1048,7 +1060,7 @@ impl<K: Array> KeyIndex<K> {
 /// The default account is stored as an absent key, and an account left as it started is not
 /// written. An absent key starts as the default, so an account that changes and settles to the
 /// default belongs to a held key, and the key is deleted.
-fn settled_slot<A: Account>(mut account: A, balance: u64, start: &A, default: &A) -> Slot<A> {
+fn settled_slot<A: Account>(mut account: A, balance: A::Amount, start: &A, default: &A) -> Slot<A> {
     account.set_balance(balance);
     if account == *start {
         Slot::Keep

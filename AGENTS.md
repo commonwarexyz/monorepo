@@ -28,6 +28,16 @@ Document public APIs clearly. Use `//!` for module docs, `///` for items, and in
 
 ## Tests and validation
 
+### Toolchain policy
+
+- Floating `stable`: builds and tests must pass before merging.
+- Pinned MSRV: must pass before merging; the version lives in `Cargo.toml`.
+- Floating `nightly` builds: informational; report and investigate failures.
+- Required nightly tooling (Miri, dependency checks, API checks, coverage, and fuzzing) uses a pinned nightly; Dylint uses its own pinned compiler.
+- Clippy/rustfmt: pin when needed to avoid lint and formatting churn. Keep all tooling pins in `.github/toolchains.toml` for local checks and CI.
+
+Compiler upgrades are inputs CI should test immediately so we catch compatibility regressions when Rust releases ship.
+
 Use `just` commands, which run tests through `nextest`. Start with the narrowest useful check:
 
 ```bash
@@ -47,6 +57,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 - Keep `mod.rs` minimal, use `cfg_if!` for platform-specific implementations, and put imports at module scope.
 - Use `thiserror` for error types.
 - Label runtime actors with `context.child(...)`; use `context.shared(true).spawn()` for CPU-intensive work in async code.
+- Per-peer gauges report current state, so remove a peer's entry when that state ends, such as when it leaves the tracked set, disconnects, or is unblocked. Per-peer counters record history and keep their entries.
 - Benchmark names use `module_path!()` and the format `module::operation/key=value key=value`.
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.
 - Storage handles and runtime writers take `self` on asynchronous methods that mutate storage and return it on success, so an error or a dropped future destroys it. A method may borrow instead when a failure leaves its receiver unchanged or permanently failed. Synchronous methods that perform no I/O borrow.

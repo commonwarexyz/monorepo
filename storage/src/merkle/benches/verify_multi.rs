@@ -1,4 +1,4 @@
-use crate::common::{N_LEAVES, SAMPLE_SIZE, StandardHasher, multi_samples};
+use crate::common::{SAMPLE_SIZE, StandardHasher, multi_samples, n_leaves};
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{Bagging::ForwardFold, Family, verification};
 use criterion::{Criterion, criterion_group};
@@ -7,14 +7,10 @@ use std::hint::black_box;
 
 /// Times multi-proof verification, with the proof generated before timing starts.
 fn bench_verify_multi_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         let (mem, root, samples) = multi_samples::<F>(n);
         let locations: Vec<_> = samples.iter().map(|(loc, _)| *loc).collect();
         let proof = block_on(verification::multi_proof(&mem, 0, &locations)).unwrap();
-        let elements: Vec<_> = samples
-            .into_iter()
-            .map(|(loc, element)| (element, loc))
-            .collect();
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         c.bench_function(
             &format!(
@@ -25,7 +21,7 @@ fn bench_verify_multi_family<F: Family>(c: &mut Criterion, family: &str) {
                 b.iter(|| {
                     assert!(black_box(&proof).verify_multi_inclusion(
                         &hasher,
-                        black_box(&elements),
+                        black_box(&samples),
                         &root
                     ))
                 })

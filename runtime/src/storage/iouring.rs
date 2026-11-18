@@ -362,17 +362,15 @@ impl Shared {
         if let Some(error) = self.tracker.failure() {
             return Err(error);
         }
-        if !self.tracker.is_dirty() {
-            #[cfg(test)]
-            self.tracker.skip_sync();
-            return Ok(false);
-        }
+        let dirty = self.tracker.is_dirty();
         #[cfg(test)]
-        if let Some(error) = self.pending.take_flush_failure() {
+        if !dirty {
+            self.tracker.skip_sync();
+        } else if let Some(error) = self.pending.take_flush_failure() {
             self.tracker.poison(&error);
             return Err(error);
         }
-        Ok(true)
+        Ok(dirty)
     }
 
     /// Settle a write's mutation debt from the outcome the ring observed.
@@ -2352,6 +2350,16 @@ mod tests {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
             shared::check_failed_creation(&storage, &storage.pending).await;
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    #[test]
+    fn test_failed_creation_over_torn_header_recreates() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            shared::check_failed_creation_over_torn_header(&storage, &storage.pending).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });

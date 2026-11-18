@@ -20,8 +20,9 @@ use commonware_storage::{
     merkle::{self, full, mmb::Family as Mmb},
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-        current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
-        floor::Proportional,
+        current::{
+            Config as CurrentConfig, ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed,
+        },
     },
     translator::EightCap,
 };
@@ -77,13 +78,11 @@ fn pc() -> CacheRef {
     CacheRef::new(PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
 }
 
-fn cur_fix_cfg(
-    ctx: &impl Strategizer,
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
+fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentConfig<EightCap, FConfig, Rayon> {
     let pc = pc();
-    commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+    CurrentConfig {
+        merkle: merkle_cfg(ctx, pc.clone()),
+        log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
@@ -159,7 +158,7 @@ macro_rules! with_current_db {
 /// batch.
 async fn run_chained_growth<
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
     Fork: Fn(&C::Merkleized) -> C::Batch,
 >(
     db: C,
@@ -172,17 +171,11 @@ async fn run_chained_growth<
 
     // Pre-build a deep chain (untimed).
     let initial = write_random_updates(db.new_batch(), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-    let mut parent = initial
-        .merkleize(&db, None, &mut Proportional)
-        .await
-        .unwrap();
+    let mut parent = initial.merkleize(&db).await.unwrap();
     for _ in 0..PREBUILT_CHAIN {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let child = child_batch.merkleize(&db).await.unwrap();
         db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
@@ -196,10 +189,7 @@ async fn run_chained_growth<
     for _ in 0..grow {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let child = child_batch.merkleize(&db).await.unwrap();
         black_box(child.root());
         db = db.apply_batch(parent).await.unwrap();
         parent = child;

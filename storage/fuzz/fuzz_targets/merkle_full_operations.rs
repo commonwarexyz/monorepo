@@ -187,7 +187,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 if let Ok(proof) = merkle.proof(&hasher, location, 0).await {
                                     let root = merkle.root(&hasher, 0).unwrap();
                                     assert!(proof.verify_element_inclusion(
-                                        &hasher, element, location, &root
+                                        &hasher, location, element, &root
                                     ));
                                 }
                             }
@@ -211,8 +211,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 let root = merkle.root(&hasher, 0).unwrap();
                                 assert!(proof.verify_range_inclusion(
                                     &hasher,
-                                    &leaves[range.to_usize_range()],
                                     Location::<F>::new(start_loc),
+                                    &leaves[range.to_usize_range()],
                                     &root
                                 ));
                             }
@@ -240,8 +240,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 let verify_hasher = Standard::<Sha256>::new(ForwardFold);
                                 assert!(historical_proof.verify_range_inclusion(
                                     &verify_hasher,
-                                    &leaves[range.to_usize_range()],
                                     range.start,
+                                    &leaves[range.to_usize_range()],
                                     &expected_root
                                 ));
                             }

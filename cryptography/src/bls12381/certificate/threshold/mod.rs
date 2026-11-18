@@ -504,7 +504,8 @@ where
 /// Generates a BLS12-381 threshold signing scheme wrapper for a specific protocol.
 ///
 /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-/// implementation, and a `fixture` function for testing.
+/// implementation, and a `fixture` function for testing when this crate's `mocks` feature is
+/// enabled.
 ///
 /// # Parameters
 ///
@@ -535,28 +536,28 @@ where
 #[macro_export]
 macro_rules! impl_certificate_bls12381_threshold {
     ($subject:ty, $namespace:ty, $faults:ty) => {
-        /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
-        ///
-        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-        /// scheme instances share a consistent ordering.
-        #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
-        pub fn fixture<V, R>(
-            rng: &mut R,
-            namespace: &[u8],
-            n: u32,
-        ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
-        where
-            V: $crate::bls12381::primitives::variant::Variant,
-            R: rand_core::CryptoRng,
-        {
-            $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
-                rng,
-                namespace,
-                n,
-                Scheme::signer,
-                Scheme::verifier,
-            )
+        $crate::cfg_mocks! {
+            /// Generates a test fixture with Ed25519 identities and BLS12-381 threshold schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            pub fn fixture<V, R>(
+                rng: &mut R,
+                namespace: &[u8],
+                n: u32,
+            ) -> $crate::certificate::mocks::Fixture<Scheme<$crate::ed25519::PublicKey, V>>
+            where
+                V: $crate::bls12381::primitives::variant::Variant,
+                R: rand_core::CryptoRng,
+            {
+                $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
+                    rng,
+                    namespace,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
+            }
         }
 
         /// BLS12-381 threshold signature scheme wrapper.
@@ -845,6 +846,7 @@ mod tests {
     use commonware_utils::{
         Faults, N3f1, N5f1, NZU32, Participant, TryCollect, Widen, ordered::Set, test_rng,
     };
+    use scheme::Scheme;
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
     const MESSAGE: &[u8] = b"test message";
@@ -867,8 +869,15 @@ mod tests {
         }
     }
 
-    // Use the macro to generate the test scheme
-    impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+    // Use the macro to generate the test scheme. The tests build schemes from keys of their own, so
+    // its fixture goes unused.
+    #[allow(dead_code)]
+    mod scheme {
+        use super::TestSubject;
+        use commonware_utils::N3f1;
+
+        impl_certificate_bls12381_threshold!(TestSubject, Vec<u8>, N3f1);
+    }
 
     #[allow(clippy::type_complexity)]
     fn setup_signers<V: Variant>(
