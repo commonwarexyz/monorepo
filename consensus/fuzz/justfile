@@ -6,8 +6,9 @@ set fallback := true
 set positional-arguments := true
 
 # Same toolchain selection as the root justfile: `NIGHTLY_VERSION` in the environment
-# wins; otherwise the pin CI uses (`.github/workflows/slow.yml`) applies, then `nightly`.
-ci_nightly_version := `sed -n 's/^ *NIGHTLY_VERSION: *//p' ../../.github/workflows/slow.yml | head -1`
+# wins; otherwise the nightly tooling pin CI uses (`.github/toolchains.toml`) applies, then
+# `nightly`.
+ci_nightly_version := `sed -n 's/^nightly = "\(.*\)"/\1/p' ../../.github/toolchains.toml`
 default_nightly_version := if ci_nightly_version != "" { ci_nightly_version } else { "nightly" }
 env_nightly_version := env("NIGHTLY_VERSION", default_nightly_version)
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }

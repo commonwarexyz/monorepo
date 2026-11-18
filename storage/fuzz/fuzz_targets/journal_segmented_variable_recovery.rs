@@ -116,8 +116,8 @@ fn read_varint(bytes: &[u8]) -> Option<(usize, usize)> {
 /// the item payloads decoded from it in append order.
 ///
 /// Also returns the smallest section whose blob holds no valid page. Init derives a section's
-/// logical size from its last valid page, so such a section recovers to size zero and must
-/// accept appends without a prior replay.
+/// logical size from its last valid page, so such a section recovers to size zero and its next
+/// append lands at offset zero.
 async fn recover_expected(
     context: &deterministic::Context,
     partition: &str,

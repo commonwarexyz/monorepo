@@ -172,15 +172,6 @@ where
         }
     }
 
-    /// Return the inactive_peaks count for the given leaf count and inactivity floor.
-    pub(crate) fn inactive_peaks(
-        &self,
-        leaves: Location<F>,
-        inactivity_floor: Location<F>,
-    ) -> usize {
-        F::inactive_peaks(leaves, inactivity_floor)
-    }
-
     /// Return a reference to the merkleization strategy.
     pub const fn strategy(&self) -> &S {
         self.log.strategy()
@@ -527,7 +518,7 @@ where
 
         let inactivity_floor =
             crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
-        let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
+        let inactive_peaks = F::inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await

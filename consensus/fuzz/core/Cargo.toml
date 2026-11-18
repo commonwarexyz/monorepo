@@ -3,6 +3,7 @@ name = "commonware-consensus-fuzz-core"
 version.workspace = true
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [features]
@@ -13,6 +14,9 @@ mocks = [
 	"commonware-p2p/mocks",
 	"commonware-resolver/mocks",
 ]
+
+[lints.cargo]
+unused_dependencies = "allow"
 
 # `cargo fuzz` sets `--cfg fuzzing`; declare it so non-fuzz builds don't warn.
 [lints.rust]

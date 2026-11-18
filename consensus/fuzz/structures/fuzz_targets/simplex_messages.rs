@@ -795,7 +795,7 @@ fn arbitrary_case(kind: ArbitraryKind, participants: u8, data: Vec<u8>) {
 fn assert_epoch_info(info: &EpochInfo, height: Height, epoch_length: NonZeroU64) {
     assert_eq!(info.height(), height);
 
-    let expected_epoch = height.get() / epoch_length.get();
+    let expected_epoch = height.get() / epoch_length;
     assert_eq!(info.epoch().get(), expected_epoch);
 
     let expected_first = expected_epoch
@@ -855,7 +855,7 @@ fn consensus_types(
     }
 
     let epoch_offsets = [
-        u64::from(range_span) % epoch_length.get(),
+        u64::from(range_span) % epoch_length,
         epoch_length.get() / 2,
         epoch_length.get() - 1,
     ];

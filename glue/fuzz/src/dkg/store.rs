@@ -16,10 +16,15 @@
 
 use super::pacing::{EnginePacing, Operation, Secret};
 use crate::stateful::runner::unattributed;
+use bytes::Bytes;
+use commonware_codec::Encode as _;
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     PublicKey,
-    bls12381::{dkg::feldman_desmedt::DealerPrivMsg, primitives::group::Share},
+    bls12381::{
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
+        primitives::{group::Share, variant::Variant},
+    },
     transcript::Summary,
 };
 use commonware_glue::dkg::SecretStore;
@@ -30,7 +35,10 @@ use std::{collections::BTreeMap, sync::Arc};
 struct Inner {
     shares: BTreeMap<Epoch, Share>,
     seeds: BTreeMap<Epoch, Summary>,
-    dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
+    /// Private dealings keyed by epoch, encoded dealer key, and the encoded
+    /// public message each came with, since a dealer can deal more than once
+    /// in an epoch.
+    dealings: BTreeMap<(Epoch, Vec<u8>, Bytes), DealerPrivMsg>,
 
     /// Every distinct share ever stored, in the order stored. Pruning does
     /// not shorten it.
@@ -128,9 +136,25 @@ impl Secrets {
             inner
                 .dealings
                 .keys()
-                .filter(|(dealt, _)| *dealt == epoch)
+                .filter(|(dealt, _, _)| *dealt == epoch)
                 .count()
         })
+    }
+
+    /// Give `copy` at once the private dealings held for `epoch` from
+    /// `dealer`, each under the public message it came with.
+    #[cfg(test)]
+    pub(super) fn copy_dealings<P: PublicKey>(&self, copy: &Self, epoch: Epoch, dealer: &P) {
+        let dealer = dealer.encode().to_vec();
+        let held: Vec<_> = self.read(|inner| {
+            inner
+                .dealings
+                .iter()
+                .filter(|((dealt, from, _), _)| *dealt == epoch && *from == dealer)
+                .map(|(key, private)| (key.clone(), private.clone()))
+                .collect()
+        });
+        copy.inner.lock().dealings.extend(held);
     }
 
     /// Every distinct share the engine ever stored, with the epoch it was
@@ -175,28 +199,41 @@ impl SecretStore for Secrets {
         self.read(|inner| inner.seeds.get(&epoch).cloned())
     }
 
-    async fn put_dealing<P: PublicKey>(&mut self, epoch: Epoch, dealer: P, private: DealerPrivMsg) {
-        let dealer = dealer.encode().to_vec();
+    async fn put_dealing<V: Variant, P: PublicKey>(
+        &mut self,
+        epoch: Epoch,
+        dealer: P,
+        public: &DealerPubMsg<V>,
+        private: DealerPrivMsg,
+    ) {
+        let key = (epoch, dealer.encode().to_vec(), public.encode());
         self.write(Secret::Dealing, |inner| {
-            inner.dealings.insert((epoch, dealer), private);
+            // A player stores only a dealing it verified, and one public
+            // message fixes the private dealing each player can verify.
+            let replaced = inner.dealings.insert(key, private.clone());
+            assert!(
+                replaced.is_none_or(|replaced| replaced == private),
+                "stored private dealing must not change"
+            );
         })
         .await;
     }
 
-    async fn get_dealing<P: PublicKey>(
+    async fn get_dealing<V: Variant, P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
+        public: &DealerPubMsg<V>,
     ) -> Option<DealerPrivMsg> {
-        let dealer = dealer.encode().to_vec();
-        self.read(|inner| inner.dealings.get(&(epoch, dealer)).cloned())
+        let key = (epoch, dealer.encode().to_vec(), public.encode());
+        self.read(|inner| inner.dealings.get(&key).cloned())
     }
 
     async fn prune(&mut self, min: Epoch) {
         self.write(Secret::Prune, |inner| {
             inner.shares.retain(|epoch, _| *epoch >= min);
             inner.seeds.retain(|epoch, _| *epoch >= min);
-            inner.dealings.retain(|(epoch, _), _| *epoch >= min);
+            inner.dealings.retain(|(epoch, _, _), _| *epoch >= min);
         })
         .await;
     }
@@ -207,17 +244,26 @@ mod tests {
     use super::*;
     use crate::{
         dkg::{
+            MockGroup, RESHARE_NAMESPACE,
             context::EngineContext,
             fixtures::{committee, described},
+            identities,
             pacing::{PacedCounts, Pacing, Stage},
         },
         stateful::runner::tolerating,
+    };
+    use commonware_cryptography::{
+        bls12381::{
+            dkg::feldman_desmedt::{Dealer, Info as Round, Reveal},
+            primitives::sharing::Mode,
+        },
+        ed25519,
     };
     use commonware_math::algebra::Random as _;
     use commonware_runtime::{
         Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use commonware_utils::TestRng;
+    use commonware_utils::{N3f1, TestRng};
     use std::time::Duration;
 
     /// When the one crash of every schedule here is due, how far back its
@@ -235,6 +281,30 @@ mod tests {
     /// The share a trusted deal gives the first identity.
     fn share() -> Share {
         described(1, EPOCH).1.remove(0)
+    }
+
+    /// The public message of the first identity's dealing when it reshares
+    /// the output of the trusted deal.
+    fn public() -> DealerPubMsg<MockGroup> {
+        let (info, _) = described(1, EPOCH);
+        let round = Round::new::<N3f1>(
+            RESHARE_NAMESPACE,
+            EPOCH.get(),
+            Some(info.output.clone()),
+            Mode::NonZeroCounter,
+            Reveal::V1,
+            info.output.players().clone(),
+            info.players,
+        )
+        .expect("a reshare among the dealt committee is valid");
+        let (_, public, _) = Dealer::<MockGroup, ed25519::PrivateKey>::start::<N3f1>(
+            TestRng::new(7),
+            round,
+            identities().remove(0),
+            Some(share()),
+        )
+        .expect("the first identity deals");
+        public
     }
 
     /// What a store holds for [`EPOCH`] after a crash, how the held writes
@@ -365,7 +435,7 @@ mod tests {
             unpaced.put_seed(EPOCH, seed()).await;
             assert_eq!(unpaced.get_seed(EPOCH).await, Some(seed()));
             assert_eq!(secrets.get_seed(EPOCH).await, None);
-            assert_eq!(secrets.get_dealing(EPOCH, &dealer).await, None);
+            assert_eq!(secrets.get_dealing(EPOCH, &dealer, &public()).await, None);
             assert_eq!(context.current(), started);
 
             secrets.put_seed(EPOCH, seed()).await;

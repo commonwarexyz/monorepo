@@ -607,7 +607,7 @@ section 9.
 ## 10. Delivery and end-to-end verification
 
 For each target, the following steps prove it works. `cargo fuzz` requires a nightly toolchain;
-use the nightly pinned by CI (`NIGHTLY_VERSION` in `.github/workflows/slow.yml`).
+use the nightly pinned by CI (`nightly` under `[tools]` in `.github/toolchains.toml`).
 
 1. **Production source tree is untouched.**
    `git status --porcelain glue/src cryptography/src consensus/src` prints nothing (I11, R3).

@@ -84,6 +84,7 @@ enum Effect {
 }
 
 impl Account for Nonced {
+    type Amount = u64;
     type Effect = Effect;
 
     fn balance(&self) -> u64 {
@@ -117,13 +118,13 @@ impl Account for Nonced {
 }
 
 #[derive(Clone, Debug)]
-struct Multi(Vec<(Key, Change<Effect>)>);
+struct Multi(Vec<(Key, Change<Nonced>)>);
 
 impl Transfer for Multi {
     type Key = Key;
     type Account = Nonced;
 
-    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Effect>)> {
+    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Nonced>)> {
         self.0.iter().map(|(key, change)| (key, *change))
     }
 }
@@ -143,7 +144,7 @@ enum ChangeInput {
     },
 }
 
-impl From<&ChangeInput> for Change<Effect> {
+impl From<&ChangeInput> for Change<Nonced> {
     fn from(input: &ChangeInput) -> Self {
         match *input {
             ChangeInput::Empty => Change::default(),

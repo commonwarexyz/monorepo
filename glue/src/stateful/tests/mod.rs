@@ -1,7 +1,9 @@
 //! E2E tests for `stateful`
 
 use self::{
-    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    common::{
+        EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config, stable_leaders,
+    },
     mocks::digested,
     multi_db_app::{
         App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,
@@ -34,6 +36,7 @@ use commonware_consensus::{
         standard::{Deferred, Standard},
     },
     simplex::{
+        elector::RoundRobin,
         mocks::scheme as scheme_mocks,
         types::{Activity, Context},
     },
@@ -72,6 +75,7 @@ use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
+use rstest::rstest;
 use std::{
     collections::VecDeque,
     convert::Infallible,
@@ -100,124 +104,236 @@ fn delay_first<P: PublicKey>(participants: &[P], view: u64) -> Crash<P> {
     }
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn all_validators_finalize_and_commit() {
-    run_finalize(SingleDbEngine::new(NUM_VALIDATORS));
-    run_finalize(MultiDbEngine::new(NUM_VALIDATORS));
+fn all_validators_finalize_and_commit(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_finalize(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_finalize(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn all_validators_finalize_and_commit_with_storage_faults() {
-    run_finalize_with_storage_faults(SingleDbEngine::new(NUM_VALIDATORS));
-    run_finalize_with_storage_faults(MultiDbEngine::new(NUM_VALIDATORS));
+fn all_validators_finalize_and_commit_with_storage_faults(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_finalize_with_storage_faults(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_restart_retention(),
+    );
+    run_finalize_with_storage_faults(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_restart_retention(),
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn deterministic_across_seeds() {
-    run_determinism(SingleDbEngine::new(NUM_VALIDATORS));
-    run_determinism(MultiDbEngine::new(NUM_VALIDATORS));
+fn deterministic_across_seeds(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_determinism(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_determinism(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn crash_and_restart_one_validator() {
-    run_crash_restart(SingleDbEngine::new(NUM_VALIDATORS));
-    run_crash_restart(MultiDbEngine::new(NUM_VALIDATORS));
+fn crash_and_restart_one_validator(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_crash_restart(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_restart_retention(),
+    );
+    run_crash_restart(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_restart_retention(),
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn pruning_bounds_finalized_history() {
-    run_pruning(SingleDbEngine::new(NUM_VALIDATORS));
-    run_pruning(MultiDbEngine::new(NUM_VALIDATORS));
+fn pruning_bounds_finalized_history(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_pruning(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_pruning(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn delayed_start_one_validator() {
-    run_delayed_start(SingleDbEngine::new(NUM_VALIDATORS));
-    run_delayed_start(MultiDbEngine::new(NUM_VALIDATORS));
+fn delayed_start_one_validator(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_delayed_start(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_delayed_start(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn state_sync_hands_off_to_marshal() {
-    run_state_sync(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
-    run_state_sync(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
+fn state_sync_hands_off_to_marshal(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_state_sync(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_state_sync(),
+    );
+    run_state_sync(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_state_sync(),
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn state_sync_hands_off_to_marshal_with_storage_faults() {
-    run_state_sync_with_storage_faults(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
-    run_state_sync_with_storage_faults(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
+fn state_sync_hands_off_to_marshal_with_storage_faults(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_state_sync_with_storage_faults(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_state_sync(),
+    );
+    run_state_sync_with_storage_faults(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_state_sync(),
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn state_sync_deterministic() {
-    run_state_sync_deterministic(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
-    run_state_sync_deterministic(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
+fn state_sync_deterministic(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_state_sync_deterministic(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_state_sync(),
+    );
+    run_state_sync_deterministic(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_state_sync(),
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn state_sync_random_crashes() {
-    run_state_sync_random_crashes(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
-    run_state_sync_random_crashes(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
+fn state_sync_random_crashes(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_state_sync_random_crashes(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_state_sync()
+            .with_restart_retention(),
+    );
+    run_state_sync_random_crashes(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_state_sync()
+            .with_restart_retention(),
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn state_sync_lossy_network() {
+fn state_sync_lossy_network(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
         success_rate: probability!(0.7),
     };
     run_state_sync_lossy(
-        SingleDbEngine::new(NUM_VALIDATORS).with_state_sync(),
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_state_sync(),
         link.clone(),
     );
-    run_state_sync_lossy(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync(), link);
+    run_state_sync_lossy(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_state_sync(),
+        link,
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn lossy_network() {
+fn lossy_network(#[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin) {
     let link = Link {
         latency: Duration::from_millis(200),
         jitter: Duration::from_millis(150),
         success_rate: probability!(0.7),
     };
-    run_lossy(SingleDbEngine::new(NUM_VALIDATORS), link.clone());
-    run_lossy(MultiDbEngine::new(NUM_VALIDATORS), link);
+    run_lossy(
+        SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()),
+        link.clone(),
+    );
+    run_lossy(
+        MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector),
+        link,
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn random_crashes() {
-    run_random_crashes(SingleDbEngine::new(NUM_VALIDATORS));
-    run_random_crashes(MultiDbEngine::new(NUM_VALIDATORS));
+fn random_crashes(#[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin) {
+    run_random_crashes(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector.clone())
+            .with_restart_retention(),
+    );
+    run_random_crashes(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
+            .with_restart_retention(),
+    );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn many_concurrent_crashes() {
-    run_many_crashes(SingleDbEngine::new(NUM_VALIDATORS));
-    run_many_crashes(MultiDbEngine::new(NUM_VALIDATORS));
+fn many_concurrent_crashes(#[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin) {
+    run_many_crashes(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_many_crashes(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn full_cluster_outage_and_recovery() {
-    run_total_shutdown(SingleDbEngine::new(NUM_VALIDATORS));
-    run_total_shutdown(MultiDbEngine::new(NUM_VALIDATORS));
+fn full_cluster_outage_and_recovery(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_total_shutdown(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_total_shutdown(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
+/// Runs with rotating leaders only. Its crash at 6.25s is timed to land while the late joiner
+/// syncs, and stable leaders reach the exit height before then.
 #[test_group("slow")]
 #[test_traced("DEBUG")]
 fn state_sync_crash_during_sync() {
@@ -233,40 +349,52 @@ fn state_sync_crash_during_sync() {
     );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
 #[should_panic(expected = "runtime timeout")]
-fn state_sync_partitioned_restart_stays_stuck_until_network_heals_single_db() {
+fn state_sync_partitioned_restart_stays_stuck_until_network_heals_single_db(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
     run_state_sync_partitioned_restart_stays_stuck_until_network_heals(
         SingleDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
             .with_state_sync()
             .with_slow_state_sync(),
     );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
 #[should_panic(expected = "runtime timeout")]
-fn state_sync_partitioned_restart_stays_stuck_until_network_heals_multi_db() {
+fn state_sync_partitioned_restart_stays_stuck_until_network_heals_multi_db(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
     run_state_sync_partitioned_restart_stays_stuck_until_network_heals(
         MultiDbEngine::new(NUM_VALIDATORS)
+            .with_elector(elector)
             .with_state_sync()
             .with_slow_state_sync(),
     );
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn rapid_crashes() {
-    run_rapid_crashes(SingleDbEngine::new(NUM_VALIDATORS));
-    run_rapid_crashes(MultiDbEngine::new(NUM_VALIDATORS));
+fn rapid_crashes(#[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin) {
+    run_rapid_crashes(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_rapid_crashes(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
+#[rstest]
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn network_partition_and_rejoin() {
-    run_network_partition(SingleDbEngine::new(NUM_VALIDATORS));
-    run_network_partition(MultiDbEngine::new(NUM_VALIDATORS));
+fn network_partition_and_rejoin(
+    #[values(RoundRobin::default(), stable_leaders())] elector: RoundRobin,
+) {
+    run_network_partition(SingleDbEngine::new(NUM_VALIDATORS).with_elector(elector.clone()));
+    run_network_partition(MultiDbEngine::new(NUM_VALIDATORS).with_elector(elector));
 }
 
 fn run_finalize<D>(engine: D)
@@ -395,8 +523,11 @@ where
         ))
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
+        .timeout(Duration::from_secs(60))
         .run()
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .for_each(|result| assert_eq!(result.crashes, 1));
 }
 
 /// Run long enough to cross the prune maintenance interval many times and
@@ -461,11 +592,11 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
-    let participants = engine.participants();
+    // The late joiner is not running during the fault window, and a restart would start it
+    // before its delay round.
+    let active = engine.participants().into_iter().skip(1);
     state_sync_plan(engine)
-        .crash(Crash::Schedule(default_storage_fault_schedule(
-            state_sync_restart_order(&participants),
-        )))
+        .crash(Crash::Schedule(default_storage_fault_schedule(active)))
         .timeout(Duration::from_secs(90))
         .run()
         .unwrap();
@@ -485,16 +616,6 @@ where
         .exit_condition(ProcessedHeightAtLeast::new(150))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(150))
-}
-
-fn state_sync_restart_order<P: PublicKey>(participants: &[P]) -> Vec<P> {
-    let Some((late_joiner, active)) = participants.split_first() else {
-        return Vec::new();
-    };
-
-    let mut restart_order = active.to_vec();
-    restart_order.push(late_joiner.clone());
-    restart_order
 }
 
 fn state_sync_partitioned_restart_schedule<P>(participants: &[P], late_joiner: P) -> Schedule<P>
@@ -567,6 +688,7 @@ where
         })
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
+        .timeout(Duration::from_secs(60))
         .run()
         .unwrap();
 }
@@ -678,6 +800,7 @@ where
         .exit_condition(ProcessedHeightAtLeast::new(150))
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(150))
+        .timeout(Duration::from_secs(60))
         .run()
         .unwrap();
 }

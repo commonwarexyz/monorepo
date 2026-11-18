@@ -4,7 +4,7 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
-use commonware_parallel::Strategy as ParStrategy;
+use commonware_parallel::Strategy;
 use core::{
     fmt::Debug,
     iter,
@@ -238,7 +238,7 @@ pub trait Space<R>:
     /// that they have the same length.
     ///
     /// For empty slices, the result should be [`Additive::zero`];
-    fn msm(points: &[Self], scalars: &[R], _strategy: &impl ParStrategy) -> Self {
+    fn msm(points: &[Self], scalars: &[R], _strategy: &impl Strategy) -> Self {
         msm_naive(points, scalars)
     }
 }

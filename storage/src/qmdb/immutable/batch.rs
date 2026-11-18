@@ -28,7 +28,7 @@ use std::{
 
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 
-/// What happened to a key in this batch.
+/// The value a batch set for a key and the location of that set operation.
 #[derive(Clone)]
 pub(crate) struct DiffEntry<F: Family, V> {
     pub(crate) value: V,

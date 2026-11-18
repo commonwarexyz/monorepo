@@ -324,18 +324,16 @@ impl<E: Context> Joiner<E> {
     /// Whether the caller records the completion of its sync.
     fn remembers(&self) -> bool {
         #[cfg(test)]
-        if self.lapse == Some(Lapse::Forget) {
-            return false;
-        }
+        return self.lapse != Some(Lapse::Forget);
+        #[cfg(not(test))]
         true
     }
 
     /// Whether the caller completes the sync this start runs at all.
     fn completes(&self) -> bool {
         #[cfg(test)]
-        if self.lapse == Some(Lapse::Stall) {
-            return false;
-        }
+        return self.lapse != Some(Lapse::Stall);
+        #[cfg(not(test))]
         true
     }
 

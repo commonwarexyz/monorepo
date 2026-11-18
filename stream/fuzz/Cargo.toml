@@ -3,10 +3,14 @@ name = "commonware-stream-fuzz"
 version.workspace = true
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
+
+[lints.cargo]
+unused_dependencies = "allow"
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }

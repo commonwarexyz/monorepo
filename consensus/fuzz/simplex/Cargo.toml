@@ -3,6 +3,7 @@ name = "commonware-consensus-fuzz-simplex"
 version.workspace = true
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [features]
@@ -22,6 +23,9 @@ twins = [ "mocks" ]
 
 [package.metadata]
 cargo-fuzz = true
+
+[lints.cargo]
+unused_dependencies = "allow"
 
 # `cargo fuzz` sets `--cfg fuzzing`; declare it so non-fuzz builds don't warn.
 [lints.rust]

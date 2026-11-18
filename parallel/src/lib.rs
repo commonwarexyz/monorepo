@@ -2114,7 +2114,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
             F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
         {
-            let count = self.parallelism.min(len / minimum_batch_len.get());
+            let count = self.parallelism.min(len / minimum_batch_len);
             if count < 2 {
                 return run(Batches::whole(self, len));
             }
@@ -2128,7 +2128,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         // Plan the batches with the parallelism of the placement, so a group of a
                         // grouped strategy gets no more batches than it has workers.
                         let placed = self.placed(placement);
-                        let count = placed.parallelism.min(len / minimum_batch_len.get());
+                        let count = placed.parallelism.min(len / minimum_batch_len);
                         run(Batches::balanced(&placed, len, count))
                     }
                 },

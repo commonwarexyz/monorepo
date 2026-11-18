@@ -34,12 +34,12 @@ cargo +nightly fuzz list --fuzz-dir consensus/fuzz/marshal
 ```
 
 The sanitizer build needs nightly, and the repository root is pinned to stable. Prefer the
-nightly CI pins in `NIGHTLY_VERSION` ([`.github/workflows/slow.yml`](../../.github/workflows/slow.yml)):
+nightly CI pins as `nightly` under `[tools]` in [`.github/toolchains.toml`](../../.github/toolchains.toml):
 a newer nightly can fail to build the workspace on a lint that does not fire on the pinned
 version.
 
 Or use `just`, which builds every target in the package once and then runs each for
-`max_time` seconds. It takes its toolchain from the same `NIGHTLY_VERSION` variable,
+`max_time` seconds. It takes its toolchain from the `NIGHTLY_VERSION` variable,
 defaulting to the CI pin:
 
 ```bash

@@ -393,4 +393,4 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
   - Set `CONSENSUS_FUZZ_LOG` to print the input and the ByzzFuzz, Mallory or Chaos decision log on panic.
   - `coverage.sh` builds per-target HTML coverage for the simplex targets.
 - **Example:** `cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock`
-- **Gotchas:** `consensus/fuzz` has no manifest, so a bare `cargo fuzz` fails; always pass `--fuzz-dir`. Use the nightly pinned as `NIGHTLY_VERSION` in `.github/workflows/slow.yml`.
+- **Gotchas:** `consensus/fuzz` has no manifest, so a bare `cargo fuzz` fails; always pass `--fuzz-dir`. Use the nightly pinned as `nightly` under `[tools]` in `.github/toolchains.toml`.

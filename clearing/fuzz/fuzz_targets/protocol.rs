@@ -4203,8 +4203,7 @@ impl Harness {
         // without a row or an entry.
         for sender in 0..self.users() {
             let account = &self.accounts[sender];
-            for receiver in 0..self.users() {
-                let paid = &self.accounts[receiver];
+            for (receiver, paid) in self.accounts.iter().enumerate() {
                 let opening = matrix.open(account, paid);
                 roundtrip(&opening, &());
                 let row = opening

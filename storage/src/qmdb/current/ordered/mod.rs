@@ -438,7 +438,7 @@ pub mod tests {
                 let wrong_root = Sha256::hash(&[&[0xDD]]);
                 assert!(!proof.verify::<Sha256, V>(key, value, &wrong_root));
                 // Proof should fail with the wrong next-key.
-                let mut bad_proof = proof.clone();
+                let mut bad_proof = proof;
                 bad_proof.next_key = wrong_key;
                 assert!(!bad_proof.verify::<Sha256, V>(key, value, &root));
             }

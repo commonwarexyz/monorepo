@@ -374,6 +374,10 @@ ordinary Rust values or buffer output.
 Reuse the backend token for child operations. Call `dispatch` once for the
 whole computation, rather than inside a loop, to avoid repeated CPU detection.
 
+Tokens and vector values are `Send` and `Sync`, so a computation can share its
+token with worker threads. Target features do not follow a token to another
+thread: each worker enters its part of the computation through `simd.execute`.
+
 ## Status
 
 Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

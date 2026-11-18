@@ -559,11 +559,11 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
         except: Node,
         finalization: Finalization<SchemeOf<P>, Sha256Digest>,
     ) {
-        for idx in 0..self.nodes.len() {
+        for (idx, node) in self.nodes.iter().enumerate() {
             if idx == except.idx() {
                 continue;
             }
-            if let Some(node) = self.nodes[idx].as_ref() {
+            if let Some(node) = node.as_ref() {
                 node.mailbox.set_floor(finalization.clone());
             }
         }

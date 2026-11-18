@@ -12,7 +12,7 @@ pub(crate) mod variable;
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        operation::{Committable, Floored, Key, Operation as OperationTrait},
+        operation::{Committable, Floored, Key},
         value::ValueEncoding,
     },
 };
@@ -59,30 +59,6 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
             Self::Commit(_, loc) => Some(*loc),
             Self::Set(_, _) => None,
         }
-    }
-}
-
-impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<F, K, V> {
-    type Key = K;
-
-    fn key(&self) -> Option<&Self::Key> {
-        self.key()
-    }
-
-    fn into_key(self) -> Option<Self::Key> {
-        match self {
-            Self::Set(key, _) => Some(key),
-            Self::Commit(_, _) => None,
-        }
-    }
-
-    fn is_delete(&self) -> bool {
-        // Immutable databases don't support deletion
-        false
-    }
-
-    fn is_update(&self) -> bool {
-        matches!(self, Self::Set(_, _))
     }
 }
 

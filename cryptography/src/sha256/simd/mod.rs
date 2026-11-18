@@ -16,6 +16,11 @@
 //! shape, or the same shape split into a different part decomposition, falls
 //! back to serial hashing.
 //!
+//! On x86_64, single-message kernels also load one message from its exact
+//! parts. They take both node shapes and the two leaf shapes,
+//! `position || digest` with an 8-byte MMR or 4-byte BMT position (40 and 36
+//! bytes, one block each).
+//!
 //! AVX-512 hashes batches of 16 equal-length contiguous messages in independent
 //! SIMD lanes, producing the ordinary SHA-256 digest of each message.
 
@@ -53,6 +58,22 @@ const _: () = assert!(MMR_NODE_LEN == 72);
 const BMT_NODE_LEN: usize = 2 * DIGEST_LENGTH;
 const _: () = assert!(BMT_NODE_LEN == 64);
 
+/// The MMR leaf message length: an 8-byte position and one 32-byte digest.
+#[cfg(target_arch = "x86_64")]
+const MMR_LEAF_LEN: usize = POSITION_LEN + DIGEST_LENGTH;
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!(MMR_LEAF_LEN == 40);
+
+/// The BMT leaf's position prefix length.
+#[cfg(target_arch = "x86_64")]
+const BMT_POSITION_LEN: usize = 4;
+
+/// The BMT leaf message length: a 4-byte position and one 32-byte digest.
+#[cfg(target_arch = "x86_64")]
+const BMT_LEAF_LEN: usize = BMT_POSITION_LEN + DIGEST_LENGTH;
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!(BMT_LEAF_LEN == 36);
+
 /// Independent 32-bit message lanes in a 512-bit vector.
 #[cfg(target_arch = "x86_64")]
 pub(super) const X16_LANES: usize = 16;
@@ -87,6 +108,39 @@ pub(super) fn supports_sha_ni() -> bool {
             std::arch::is_x86_feature_detected!("sha")
         } else {
             cfg!(target_feature = "sha")
+        }
+    }
+}
+
+/// Return whether every target feature the SHA-NI kernels require is
+/// available.
+#[cfg(all(
+    target_arch = "x86_64",
+    any(
+        feature = "std",
+        all(
+            target_feature = "sha",
+            target_feature = "avx2",
+            target_feature = "ssse3",
+            target_feature = "sse4.1",
+        ),
+    ),
+))]
+#[inline(always)]
+fn supports_sha_ni_kernels() -> bool {
+    cfg_if::cfg_if! {
+        if #[cfg(all(
+            target_feature = "sha",
+            target_feature = "avx2",
+            target_feature = "ssse3",
+            target_feature = "sse4.1",
+        ))] {
+            true
+        } else {
+            std::arch::is_x86_feature_detected!("sha")
+                && std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("ssse3")
+                && std::arch::is_x86_feature_detected!("sse4.1")
         }
     }
 }
@@ -188,20 +242,19 @@ macro_rules! define_dispatch {
                     None
                 } else if #[cfg(all(
                     target_arch = "x86_64",
-                    target_feature = "sha",
-                    target_feature = "avx2",
-                    target_feature = "ssse3",
-                    target_feature = "sse4.1",
+                    any(
+                        feature = "std",
+                        all(
+                            target_feature = "sha",
+                            target_feature = "avx2",
+                            target_feature = "ssse3",
+                            target_feature = "sse4.1",
+                        ),
+                    ),
                 ))] {
-                    // SAFETY: The required target features are statically enabled.
-                    Some(unsafe { x86_64::$x86_64_kernel($($arg),+) })
-                } else if #[cfg(all(target_arch = "x86_64", feature = "std"))] {
-                    if std::arch::is_x86_feature_detected!("sha")
-                        && std::arch::is_x86_feature_detected!("avx2")
-                        && std::arch::is_x86_feature_detected!("ssse3")
-                        && std::arch::is_x86_feature_detected!("sse4.1")
-                    {
-                        // SAFETY: The required target features were just detected.
+                    if supports_sha_ni_kernels() {
+                        // SAFETY: `supports_sha_ni_kernels` established every
+                        // required target feature.
                         return Some(unsafe { x86_64::$x86_64_kernel($($arg),+) });
                     }
                     None
@@ -237,4 +290,99 @@ define_dispatch!(
         right_a: &[u8; DIGEST_LENGTH],
         right_b: &[u8; DIGEST_LENGTH],
     )
+);
+
+/// Hash one merkle-shaped message, given as parts, with the single-message
+/// kernel for the current CPU.
+///
+/// Returns `None` when the required CPU features are unavailable or `parts`
+/// is not exactly a position and two digests, two digests, or a position and
+/// one digest.
+///
+/// Inlined so the shape match constant-folds at call sites with fixed-shape
+/// inputs.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub(super) fn hash_single(parts: &[&[u8]]) -> Option<Digest> {
+    match parts {
+        [pos, left, right] => dispatch_mmr_node(
+            (*pos).try_into().ok()?,
+            (*left).try_into().ok()?,
+            (*right).try_into().ok()?,
+        ),
+        [first, digest] => {
+            let digest = (*digest).try_into().ok()?;
+            match first.len() {
+                DIGEST_LENGTH => dispatch_bmt_node((*first).try_into().ok()?, digest),
+                POSITION_LEN => dispatch_mmr_leaf((*first).try_into().ok()?, digest),
+                BMT_POSITION_LEN => dispatch_bmt_leaf((*first).try_into().ok()?, digest),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Dispatch one merkle-shaped message, given as its constituent parts, to
+/// its single-message kernel.
+///
+/// `kernel` names the x86_64 kernel function to invoke once the required
+/// CPU features are confirmed. `args` lists the parts the kernel takes.
+#[cfg(target_arch = "x86_64")]
+macro_rules! define_single_dispatch {
+    ($name:ident, $kernel:ident, ($($arg:ident: $ty:ty),+ $(,)?)) => {
+        #[inline(always)]
+        fn $name($($arg: $ty),+) -> Option<Digest> {
+            cfg_if::cfg_if! {
+                if #[cfg(any(
+                    feature = "std",
+                    all(
+                        target_feature = "sha",
+                        target_feature = "avx2",
+                        target_feature = "ssse3",
+                        target_feature = "sse4.1",
+                    ),
+                ))] {
+                    if supports_sha_ni_kernels() {
+                        // SAFETY: `supports_sha_ni_kernels` established every
+                        // required target feature.
+                        return Some(unsafe { x86_64::$kernel($($arg),+) });
+                    }
+                    None
+                } else {
+                    let _ = ($($arg),+);
+                    None
+                }
+            }
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+define_single_dispatch!(
+    dispatch_mmr_node,
+    hash_72,
+    (
+        pos: &[u8; POSITION_LEN],
+        left: &[u8; DIGEST_LENGTH],
+        right: &[u8; DIGEST_LENGTH],
+    )
+);
+#[cfg(target_arch = "x86_64")]
+define_single_dispatch!(
+    dispatch_bmt_node,
+    hash_64,
+    (left: &[u8; DIGEST_LENGTH], right: &[u8; DIGEST_LENGTH])
+);
+#[cfg(target_arch = "x86_64")]
+define_single_dispatch!(
+    dispatch_mmr_leaf,
+    hash_40,
+    (pos: &[u8; POSITION_LEN], digest: &[u8; DIGEST_LENGTH])
+);
+#[cfg(target_arch = "x86_64")]
+define_single_dispatch!(
+    dispatch_bmt_leaf,
+    hash_36,
+    (pos: &[u8; BMT_POSITION_LEN], digest: &[u8; DIGEST_LENGTH])
 );

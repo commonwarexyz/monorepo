@@ -5066,11 +5066,8 @@ mod state_sync_tests {
 
     /// The round the block at `height` is finalized in: one view a block.
     fn round(height: u64) -> Round {
-        let epoch = height / EPOCH_LENGTH.get();
-        Round::new(
-            Epoch::new(epoch),
-            View::new(height % EPOCH_LENGTH.get() + 1),
-        )
+        let epoch = height / EPOCH_LENGTH;
+        Round::new(Epoch::new(epoch), View::new(height % EPOCH_LENGTH + 1))
     }
 
     /// The material of a floor at `height`, paired with the description of
@@ -5109,7 +5106,7 @@ mod state_sync_tests {
             endorsed: (1..=tip)
                 .map(|height| (Height::new(height), block(height)))
                 .collect(),
-            delivered: (1..=(tip + 1) / EPOCH_LENGTH.get())
+            delivered: (1..=(tip + 1) / EPOCH_LENGTH)
                 .map(|epoch| (Epoch::new(epoch), info(epoch)))
                 .collect(),
             steps: Vec::new(),

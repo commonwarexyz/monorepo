@@ -214,7 +214,7 @@ mod test {
         Recipients, Sender as _,
         simulated::{Config as SimConfig, Link, Network, Oracle, Sender},
     };
-    use commonware_parallel::{Sequential, Strategy as ParallelStrategy};
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
         Clock, Handle, Metrics, Quota, Runner as _, Supervisor, buffer::paged::CacheRef,
         deterministic, telemetry::traces::collector::TraceStorage,
@@ -407,7 +407,7 @@ mod test {
             rng: &mut R,
             subject: Self::Subject<'_, D>,
             certificate: &Self::Certificate,
-            strategy: &impl ParallelStrategy,
+            strategy: &impl Strategy,
         ) -> bool
         where
             R: rand_core::CryptoRng,
@@ -421,7 +421,7 @@ mod test {
             &self,
             rng: &mut R,
             certificates: NonEmpty<I>,
-            strategy: &impl ParallelStrategy,
+            strategy: &impl Strategy,
         ) -> bool
         where
             R: rand_core::CryptoRng,
@@ -476,7 +476,7 @@ mod test {
             rng: &mut R,
             subject: Self::Subject<'_, D>,
             attestation: &Attestation<Self>,
-            strategy: &impl ParallelStrategy,
+            strategy: &impl Strategy,
         ) -> bool
         where
             R: rand_core::CryptoRng,
@@ -495,7 +495,7 @@ mod test {
             rng: &mut R,
             subject: Self::Subject<'_, D>,
             attestations: I,
-            strategy: &impl ParallelStrategy,
+            strategy: &impl Strategy,
         ) -> Verification<Self>
         where
             R: rand_core::CryptoRng,
@@ -525,7 +525,7 @@ mod test {
             subject: Self::Subject<'_, D>,
             pending: I,
             verified: J,
-            strategy: &impl ParallelStrategy,
+            strategy: &impl Strategy,
         ) -> Result<Self::Certificate, Verification<Self>>
         where
             R: rand_core::CryptoRng,
@@ -543,7 +543,7 @@ mod test {
         fn assemble<I>(
             &self,
             attestations: NonEmpty<I>,
-            strategy: &impl ParallelStrategy,
+            strategy: &impl Strategy,
         ) -> Result<Self::Certificate, certificate::AssemblyError>
         where
             I: Iterator<Item = Attestation<Self>> + Send,

@@ -58,13 +58,13 @@ test = false
 doc = false
 ```
 
-Build and run (toolchain pin read from `NIGHTLY_VERSION` in `.github/workflows/slow.yml`,
-currently `nightly-2026-08-20`):
+Build and run (toolchain pin read from `nightly` under `[tools]` in `.github/toolchains.toml`,
+currently `nightly-2026-11-12`):
 
 ```bash
-cargo +nightly-2026-08-20 fuzz build --fuzz-dir runtime/fuzz --features runtime-all
-cargo +nightly-2026-08-20 fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_differential
-cargo +nightly-2026-08-20 fuzz run --fuzz-dir runtime/fuzz --features runtime-all iobuf
+cargo +nightly-2026-11-12 fuzz build --fuzz-dir runtime/fuzz --features runtime-all
+cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_differential
+cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all iobuf
 ```
 
 A build without features must keep producing only the three existing targets.

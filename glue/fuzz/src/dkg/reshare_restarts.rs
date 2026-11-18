@@ -1634,9 +1634,7 @@ mod tests {
                 copy.put_seed(epoch, seed).await;
             }
             for dealer in participants {
-                if let Some(dealing) = held.get_dealing(epoch, dealer).await {
-                    copy.put_dealing(epoch, dealer.clone(), dealing).await;
-                }
+                held.copy_dealings(&copy, epoch, dealer);
             }
         }
         match secrets.pacing() {

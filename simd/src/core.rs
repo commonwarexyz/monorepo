@@ -37,6 +37,10 @@
 /// Methods take an execution token by value so generic algorithms can use static
 /// dispatch with a backend-specific vector representation.
 ///
+/// Tokens and vectors are `Send` and `Sync`: the CPU features that a token proves
+/// present hold on every thread. A thread that receives a token enters its own kernel
+/// through [`Self::execute`].
+///
 /// # Examples
 ///
 /// ```
@@ -48,9 +52,9 @@
 ///     simd.u64_store(sum, output);
 /// }
 /// ```
-pub trait Simd: Copy {
+pub trait Simd: Copy + Send + Sync + 'static {
     /// Four unsigned 32-bit lanes, independent of [`Self::U32_LANES`].
-    type U32x4: Copy;
+    type U32x4: Copy + Send + Sync;
 
     /// `r[i] = input[i]`.
     ///
@@ -121,19 +125,19 @@ pub trait Simd: Copy {
     fn u32x4_blend<const MASK: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
 
     /// Vector of [`Self::U8_LANES`] unsigned 8-bit lanes.
-    type U8: Copy;
+    type U8: Copy + Send + Sync;
 
     /// Number of lanes in [`Self::U8`]. Must be positive and equal `4 * Self::U32_LANES`.
     const U8_LANES: usize;
 
     /// Vector of [`Self::U32_LANES`] unsigned 32-bit lanes.
-    type U32: Copy;
+    type U32: Copy + Send + Sync;
 
     /// Number of lanes in [`Self::U32`]. Must be positive and equal `2 * Self::U64_LANES`.
     const U32_LANES: usize;
 
     /// Vector of [`Self::U64_LANES`] unsigned 64-bit lanes.
-    type U64: Copy;
+    type U64: Copy + Send + Sync;
 
     /// Number of lanes in [`Self::U64`]. Must be positive.
     const U64_LANES: usize;
@@ -192,7 +196,7 @@ pub trait Simd: Copy {
     ///
     /// Build one with [`Self::u8_table_load`] and use it with [`Self::u8_table_lookup`].
     /// Load tables once, outside loops, so backends can keep them in registers.
-    type U8Table: Copy;
+    type U8Table: Copy + Send + Sync;
 
     /// `r[j] = table[j]` for `0 <= j < 16`.
     fn u8_table_load(self, table: &[u8; 16]) -> Self::U8Table;
@@ -671,7 +675,7 @@ pub trait Neon: Simd {
     fn sha256_su1(self, a: Self::U32x4, b: Self::U32x4, c: Self::U32x4) -> Self::U32x4;
 
     /// Eight unsigned 16-bit lanes corresponding to one half of a byte vector.
-    type U16: Copy;
+    type U16: Copy + Send + Sync;
 
     /// `r[j] = table[j]` for `0 <= j < 16`.
     ///
@@ -711,7 +715,7 @@ pub trait Neon: Simd {
     /// Vector of two unsigned 32-bit lanes, matching this profile's two
     /// [`Simd::U64`] lanes in order. This is half the width of the common
     /// [`Simd::U32`] vector.
-    type U32Half: Copy;
+    type U32Half: Copy + Send + Sync;
 
     /// `r[i] = value[i] mod 2^32` for `0 <= i < 2`.
     fn u64_narrow(self, value: Self::U64) -> Self::U32Half;

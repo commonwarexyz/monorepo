@@ -444,7 +444,7 @@ mod coding {
         const NAME: &'static str = "coding";
         type Payload = Payload;
         type Variant = CodingVariant<Block<Self>, Erasure, Sha256, PublicKey>;
-        type Buffer = shards::Mailbox<Block<Self>, Erasure, Sha256, PublicKey>;
+        type Buffer = shards::Mailbox<Block<Self>, Erasure, Sha256>;
         type Automaton = Marshaled<
             deterministic::Context,
             ErasedApplication<Self>,

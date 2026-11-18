@@ -242,7 +242,7 @@ pub(crate) fn effective_boundary<F: Family, D: Digest>(
 /// A batch is applicable if the database has not advanced since the batch was created, if all
 /// ancestors are already applied, or if the database has advanced to one of the batch's ancestor
 /// [`Commitment`]s, given by `ancestors`.
-pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
+fn validate_batch_applicable<F: Family, D: Digest>(
     current: Commitment<F, D>,
     batch_db: Commitment<F, D>,
     ancestors: impl IntoIterator<Item = Commitment<F, D>>,

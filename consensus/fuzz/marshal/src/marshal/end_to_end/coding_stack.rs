@@ -186,8 +186,7 @@ pub(crate) type CodingVariant<P> = Coding<CodingB<P>, ReedSolomon<Sha256>, Sha25
 pub(crate) type CodingCoded<P> = CodedBlock<CodingB<P>, ReedSolomon<Sha256>, Sha256>;
 
 /// Shard dissemination mailbox handed to the marshal actor and the engine.
-pub(crate) type ShardsMailbox<P> =
-    shards::Mailbox<CodingB<P>, ReedSolomon<Sha256>, Sha256, PublicKeyOf<P>>;
+pub(crate) type ShardsMailbox<P> = shards::Mailbox<CodingB<P>, ReedSolomon<Sha256>, Sha256>;
 
 pub(crate) type CodingMarshaled<P, A> = Marshaled<
     deterministic::Context,

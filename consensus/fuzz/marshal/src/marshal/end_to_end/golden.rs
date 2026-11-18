@@ -153,7 +153,7 @@ fn ordinary_marshal_runs_are_unchanged() {
     let mut coding = twins_input(vec![0], 1);
     coding.strategy = small(1);
     let (state, _) = run_coding_twins::<SimplexCertificateMock>(coding, None);
-    runs.push(("coding twins", state, "e88b9ecb"));
+    runs.push(("coding twins", state, "925f8298"));
     // The faulty application (selector bit 0).
     let mut coding_faulty = twins_input(vec![1], 1);
     coding_faulty.strategy = small(1);

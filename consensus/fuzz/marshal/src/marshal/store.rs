@@ -326,7 +326,10 @@ impl DeliverAnnotation {
     /// The annotation the actor itself attaches to a fetch of `height`.
     fn annotation(self, height: Height) -> Annotation {
         match self {
-            Self::Untrusted => Annotation::Untrusted { height },
+            Self::Untrusted => Annotation::Untrusted {
+                height,
+                round: None,
+            },
             Self::Certified => Annotation::Certified { height },
             Self::Finalized => Annotation::Finalized(Finalized::ByHeight { height }),
         }
@@ -751,6 +754,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                             block.digest(),
                             CommitmentFallback::FetchByCommitment {
                                 height: block.height(),
+                                round: None,
                             },
                         )
                     };
