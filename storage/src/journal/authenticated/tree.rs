@@ -1523,7 +1523,8 @@ mod tests {
     /// in batches, including subtrees whose roots are born only past that size.
     async fn subtrees_near_maximum<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
-        for height in 4..=7 {
+        // Height 17 exercises the chunk width used by production initialization.
+        for height in [4, 5, 6, 7, 17] {
             let width = 1u64 << height;
             let boundary = Location::<F>::new(*F::MAX_LEAVES / width * width - 2 * width);
             let ops = Arc::new(Operations::range(*boundary..*F::MAX_LEAVES));
