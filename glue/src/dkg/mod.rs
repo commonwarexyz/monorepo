@@ -232,7 +232,8 @@
 //! Marshal can archive that finalization later, but it does not update the checkpoint. In either
 //! case the peer cannot serve the epoch. Since recording a checkpoint drops older ones, a peer
 //! serves only its recent epochs. Discovery asks every peer for the boundary, so one peer that
-//! can serve it suffices.
+//! can serve it suffices. After trying every verified responder, discovery samples latest
+//! finalizations again to find a newer boundary while keeping the previous fetch as a fallback.
 //!
 //! Under stateful pruning, [`PruneConfig::retained_marshal_blocks`] sets marshal's retention.
 //! Retain at least one epoch's worth of blocks (`blocks_per_epoch`) as a starting point for
