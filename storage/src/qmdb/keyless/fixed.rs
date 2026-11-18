@@ -34,13 +34,14 @@ mod tests {
             keyless::tests::{self, keyless_tests},
             sync,
         },
+        utils::task_metrics::{SPAWNED, tasks},
     };
     use commonware_codec::FixedSize;
     use commonware_cryptography::Sha256;
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        Clock as _, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{
             self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
@@ -1353,19 +1354,12 @@ mod tests {
         });
     }
 
-    /// Initialization replays the log on `init_concurrency` tasks, and with 1 it spawns none.
+    /// Initialization replays the log on tasks of its own above an `init_concurrency` of 1, and
+    /// with 1 it spawns none.
     #[test_traced]
-    fn test_init_concurrency_counts_replay_tasks() {
-        /// The sum of the runtime's `metric` samples for tasks whose labels contain `label`.
-        fn tasks(metrics: &str, metric: &str, label: &str) -> u64 {
-            metrics
-                .lines()
-                .filter(|line| line.starts_with(metric) && line.contains(label))
-                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
-                .sum()
-        }
-
+    fn test_init_concurrency_spawns_replay_tasks() {
         deterministic::Runner::default().start(|context| async move {
+            // Commit operations for a reopen to replay, then close the database.
             let cfg = |concurrency| Config {
                 init_concurrency: NonZeroUsize::new(concurrency).unwrap(),
                 ..db_config("replay-tasks", Sequential)
@@ -1381,31 +1375,20 @@ mod tests {
             let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
             drop(db);
 
-            // Two tasks replay.
-            let init = TestDb::<mmr::Family>::init(context.child("two"), cfg(2), None);
-            futures::pin_mut!(init);
-            let mut replaying = 0;
-            let db = loop {
-                if let core::task::Poll::Ready(db) = futures::poll!(&mut init) {
-                    break db.unwrap();
-                }
-                let metrics = context.encode();
-                let running = tasks(&metrics, "runtime_tasks_running{", "replay_chunk");
-                replaying = replaying.max(running);
-                context.sleep(core::time::Duration::from_millis(1)).await;
-            };
-            assert_eq!(replaying, 2);
+            // With an `init_concurrency` of 2, initialization replays the log on tasks of its own.
+            let chunks = tasks(&context.encode(), SPAWNED, "replay_chunk");
+            let db = TestDb::<mmr::Family>::init(context.child("two"), cfg(2), None)
+                .await
+                .unwrap();
+            assert!(tasks(&context.encode(), SPAWNED, "replay_chunk") > chunks);
             drop(db);
 
             // One task: nothing is spawned.
-            let spawned = tasks(&context.encode(), "runtime_tasks_spawned_total{", "");
+            let spawned = tasks(&context.encode(), SPAWNED, "");
             let db = TestDb::<mmr::Family>::init(context.child("one"), cfg(1), None)
                 .await
                 .unwrap();
-            assert_eq!(
-                tasks(&context.encode(), "runtime_tasks_spawned_total{", ""),
-                spawned
-            );
+            assert_eq!(tasks(&context.encode(), SPAWNED, ""), spawned);
             db.destroy().await.unwrap();
         });
     }

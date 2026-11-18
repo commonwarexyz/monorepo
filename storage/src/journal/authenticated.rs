@@ -1650,14 +1650,18 @@ mod tests {
             operation::Committable,
             value::FixedEncoding,
         },
-        utils::detached::{DropMonitor, block_strategy},
+        utils::{
+            detached::{DropMonitor, block_strategy},
+            task_metrics::{self, RUNNING},
+        },
     };
     use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_parallel::{Rayon, Sequential, mocks::Explorer, rayon::ThreadPoolBuilder};
     use commonware_runtime::{
-        Error as RuntimeError, Runner as _, Storage as _, Strategizer as _, Supervisor as _,
+        Error as RuntimeError, Metrics as _, Runner as _, Storage as _, Strategizer as _,
+        Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
@@ -3105,6 +3109,7 @@ mod tests {
                 // Fail once every subtree task is parked in a read, holding the journal.
                 let tasks = NZUsize!(2);
                 let subtrees = tasks.get();
+                let observer = context.child("observer");
                 let result: Result<(_, ()), Error<mmr::Family>> = recovery
                     .finish_with(tasks, |journal| async move {
                         drop(journal);
@@ -3113,6 +3118,11 @@ mod tests {
                         for parked in parked {
                             parked.await.unwrap();
                         }
+                        assert_eq!(
+                            task_metrics::tasks(&observer.encode(), RUNNING, "replay_chunk"),
+                            subtrees as u64,
+                            "the replay must run exactly {subtrees} tasks at once"
+                        );
                         Err(Error::Merkle(merkle::Error::DataCorrupted("read")))
                     })
                     .await;

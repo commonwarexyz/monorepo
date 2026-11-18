@@ -2023,14 +2023,17 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    use crate::qmdb::{
-        any::{
-            batch::Slot,
-            ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
-            traits::MerkleizedBatch as MerkleizedTrait,
-            unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
+    use crate::{
+        qmdb::{
+            any::{
+                batch::Slot,
+                ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
+                traits::MerkleizedBatch as MerkleizedTrait,
+                unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
+            },
+            floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
         },
-        floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
+        utils::task_metrics::{RUNNING, SPAWNED, tasks},
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_parallel::Sequential;
@@ -6068,21 +6071,6 @@ pub(crate) mod test {
         db.commit().await.unwrap()
     }
 
-    /// The runtime's gauge of running tasks.
-    const RUNNING: &str = "runtime_tasks_running{";
-
-    /// The runtime's counter of spawned tasks.
-    const SPAWNED: &str = "runtime_tasks_spawned_total{";
-
-    /// The sum of the runtime's `metric` samples for tasks whose labels contain `label`.
-    fn tasks(metrics: &str, metric: &str, label: &str) -> u64 {
-        metrics
-            .lines()
-            .filter(|line| line.starts_with(metric) && line.contains(label))
-            .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
-            .sum()
-    }
-
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
     /// its snapshot workers and decoders rather than leaving them running until they happen
     /// to observe a closed channel.
@@ -6138,14 +6126,15 @@ pub(crate) mod test {
         });
     }
 
-    /// A snapshot build that hashes the journal's operations decodes on all `init_concurrency`
-    /// tasks, beside fewer insert workers.
+    /// With a partitioned index, initialization spawns snapshot decode tasks and none of the
+    /// journal's own replay tasks.
     #[test_traced("INFO")]
-    fn test_hashing_build_decodes_on_init_concurrency() {
+    fn test_hashing_build_spawns_no_journal_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Commit and sync operations for a reopen to scan, then close the database.
             let ctx = context.child("db");
-            let cfg = || fixed_db_config_full::<OneCap, _>("decoders", Sequential, NZUsize!(6));
+            let cfg = || fixed_db_config_full::<OneCap, _>("decoders", Sequential, NZUsize!(3));
             let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
                 .await
                 .unwrap();
@@ -6159,30 +6148,27 @@ pub(crate) mod test {
             let db = db.sync().await.unwrap();
             drop(db);
 
-            let init = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None);
-            pin_mut!(init);
-            let (mut decoders, mut workers) = (0, 0);
-            let db = loop {
-                if let std::task::Poll::Ready(db) = poll!(&mut init) {
-                    break db.unwrap();
-                }
-                let metrics = context.encode();
-                decoders = decoders.max(tasks(&metrics, RUNNING, "snapshot_decoder"));
-                workers = workers.max(tasks(&metrics, RUNNING, "snapshot_worker"));
-                context.sleep(Duration::from_millis(1)).await;
-            };
-            assert_eq!(decoders, 6);
-            assert!((1..6).contains(&workers), "{workers} workers");
+            // The reopen spawns decode tasks and none of the journal's own replay tasks.
+            let metrics = context.encode();
+            let chunks = tasks(&metrics, SPAWNED, "replay_chunk");
+            let decoders = tasks(&metrics, SPAWNED, "snapshot_decoder");
+            let db = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
+                .await
+                .unwrap();
+            let metrics = context.encode();
+            assert_eq!(tasks(&metrics, SPAWNED, "replay_chunk"), chunks);
+            assert!(tasks(&metrics, SPAWNED, "snapshot_decoder") > decoders);
             db.destroy().await.unwrap();
         });
     }
 
-    /// With an unpartitioned index, initialization replays the log on `init_concurrency` tasks
-    /// while this task scans it for the index, and with an `init_concurrency` of 1 it spawns none.
+    /// With an unpartitioned index, initialization replays the log on tasks of its own while this
+    /// task scans it for the index, and with an `init_concurrency` of 1 it spawns none.
     #[test_traced("INFO")]
-    fn test_init_concurrency_sizes_the_replay_beside_the_index() {
+    fn test_init_concurrency_replays_beside_the_index() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Commit and sync operations for a reopen to scan, then close the database.
             let ctx = context.child("db");
             let cfg = |concurrency| {
                 fixed_db_config_full::<OneCap, _>(
@@ -6204,19 +6190,22 @@ pub(crate) mod test {
             let db = db.sync().await.unwrap();
             drop(db);
 
-            // Three tasks replay while this one scans for the index.
-            let init = UnorderedFixedDb::init(ctx.child("storage"), cfg(3), None);
-            pin_mut!(init);
-            let mut replaying = 0;
-            let db: UnorderedFixed = loop {
-                if let std::task::Poll::Ready(db) = poll!(&mut init) {
-                    break db.unwrap();
-                }
-                let metrics = context.encode();
-                replaying = replaying.max(tasks(&metrics, RUNNING, "replay_chunk"));
-                context.sleep(Duration::from_millis(1)).await;
-            };
-            assert_eq!(replaying, 3);
+            // With an `init_concurrency` of 3, initialization replays the log on tasks of its own
+            // while this task builds the index.
+            let metrics = context.encode();
+            let chunks = tasks(&metrics, SPAWNED, "replay_chunk");
+            let builders = tasks(&metrics, SPAWNED, "snapshot_decoder")
+                + tasks(&metrics, SPAWNED, "snapshot_worker");
+            let db: UnorderedFixed = UnorderedFixedDb::init(ctx.child("storage"), cfg(3), None)
+                .await
+                .unwrap();
+            let metrics = context.encode();
+            assert!(tasks(&metrics, SPAWNED, "replay_chunk") > chunks);
+            assert_eq!(
+                tasks(&metrics, SPAWNED, "snapshot_decoder")
+                    + tasks(&metrics, SPAWNED, "snapshot_worker"),
+                builders
+            );
             drop(db);
 
             // One task: nothing is spawned.

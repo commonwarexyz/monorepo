@@ -619,13 +619,26 @@ mod tests {
         });
     }
 
+    /// The error an open reports for a reset journal whose boundary was not recorded.
+    #[derive(Clone, Copy, Debug)]
+    enum Unrecorded {
+        /// The journal holds no commit, and its start is nonzero.
+        ItemPruned,
+        /// The journal holds a commit, and the frontier's boundary lies before the journal's start.
+        FrontierOutside,
+    }
+
     /// Interrupt sync after a reset, before or after a commit arrives. Retrying supplies the
     /// missing boundary pins even when the target changed during sync.
     #[rstest]
-    #[case::before_first_commit(false, 8)]
-    #[case::after_target_update_before_fetch(true, 4)]
-    #[case::after_target_update(true, 12)]
-    fn interrupted_pruned_sync_is_retried(#[case] update_target: bool, #[case] stop_at: u64) {
+    #[case::before_first_commit(false, 7, Unrecorded::ItemPruned)]
+    #[case::after_target_update_before_fetch(true, 4, Unrecorded::ItemPruned)]
+    #[case::after_target_update(true, 12, Unrecorded::FrontierOutside)]
+    fn interrupted_pruned_sync_is_retried(
+        #[case] update_target: bool,
+        #[case] stop_at: u64,
+        #[case] expected: Unrecorded,
+    ) {
         deterministic::Runner::default().start(|context| async move {
             // Commits at 0, 8 and 15. The target starts at 4, inside the first batch.
             let source = Arc::new(
@@ -680,12 +693,18 @@ mod tests {
             let error = KeylessDb::init(context.child("reopen"), local.clone(), None)
                 .await
                 .expect_err("reset journal reopened without a boundary");
-            match error {
-                qmdb::Error::Journal(crate::journal::Error::ItemPruned(n)) => assert_eq!(n, *start),
-                qmdb::Error::Merkle(crate::merkle::Error::DataCorrupted(
-                    "frontier outside operation journal",
-                )) => {}
-                other => panic!("unexpected reopen error: {other}"),
+            match (expected, error) {
+                (
+                    Unrecorded::ItemPruned,
+                    qmdb::Error::Journal(crate::journal::Error::ItemPruned(n)),
+                ) => assert_eq!(n, *start),
+                (
+                    Unrecorded::FrontierOutside,
+                    qmdb::Error::Merkle(crate::merkle::Error::DataCorrupted(
+                        "frontier outside operation journal",
+                    )),
+                ) => {}
+                (expected, other) => panic!("reopen must fail with {expected:?}, got {other}"),
             }
             assert!(matches!(
                 KeylessDb::init(context.child("capped"), local.clone(), Some(start)).await,
