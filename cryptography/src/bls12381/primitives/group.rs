@@ -1572,7 +1572,9 @@ const MILLER_LOOP_CHUNK: usize = 8;
 /// Returns the product of the Miller loops of the pairs `(ps[i], qs[i])`, computed with one shared
 /// accumulator.
 ///
-/// Every point must be finite: blst only special-cases the identity when there is a single pair.
+/// Every point must be finite: blst's multi-Miller loop does not handle the identity, even for a
+/// single pair. `G1::multi_pairing` drops pairs with an identity beforehand, since they pair to the
+/// identity of the target group.
 fn miller_loop_n(qs: &[blst_p2_affine], ps: &[blst_p1_affine]) -> blst_fp12 {
     assert_eq!(qs.len(), ps.len(), "qs and ps must have the same length");
     assert!(!qs.is_empty(), "the Miller loop needs at least one pair");
