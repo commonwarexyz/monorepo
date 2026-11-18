@@ -150,8 +150,14 @@ impl arbitrary::Arbitrary<'_> for F {
 /// This is constructed as a subgroup of the units in `F_q`.
 ///
 /// `q = 2p + 1`, so the group of units has a subgroup of order `p`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct G(u64);
+
+impl core::fmt::Display for G {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl FixedSize for G {
     const SIZE: usize = 8;
@@ -491,8 +497,13 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod test {
     use super::*;
-    use commonware_codec::Encode;
+    use crate::algebra::Twin;
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::test_rng;
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
 
     #[test]
     fn test_field_and_group_guards() {
@@ -503,6 +514,33 @@ mod test {
         assert!(F::read(&mut P.encode()).is_err());
         assert!(G::read(&mut Q.encode()).is_err());
         assert!(G::read(&mut 0u64.encode()).is_err());
+    }
+
+    fn hash_of<T: Hash>(value: &T) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    // `G` has an encoding, a hash, and a `Display` impl, and `G2` does not, so
+    // these checks wrap `G` as `Twin<Twin<G>>`.
+    #[test]
+    fn test_twin_encodes_hashes_and_formats_like_inner() {
+        let x = G::generator() * &F::from(5u8);
+        let twin = Twin::<Twin<G>>::new(x);
+        let copy = twin;
+        assert_eq!(copy, twin);
+
+        assert_eq!(Twin::<Twin<G>>::SIZE, G::SIZE);
+        assert_eq!(twin.encode(), x.encode());
+        assert_eq!(Twin::<Twin<G>>::decode(x.encode()).unwrap(), twin);
+        assert!(Twin::<Twin<G>>::decode(Q.encode()).is_err());
+        assert!(Twin::<Twin<G>>::decode(0u64.encode()).is_err());
+
+        assert_eq!(hash_of(&twin), hash_of(&x));
+
+        assert_eq!(format!("{twin:?}"), format!("{x:?}"));
+        assert_eq!(format!("{twin}"), format!("{x}"));
     }
 
     #[cfg(feature = "arbitrary")]
@@ -553,11 +591,8 @@ mod twin {
         // direct `mul_each` call runs the mutable cast.
         let mut products = lefts.clone();
         Twin::<G>::mul_each(&mut products, &scalars, &Sequential);
-        let expected_products: Vec<Twin<G>> = lefts
-            .iter()
-            .zip(&scalars)
-            .map(|(x, s)| x.clone() * s)
-            .collect();
+        let expected_products: Vec<Twin<G>> =
+            lefts.iter().zip(&scalars).map(|(x, s)| *x * s).collect();
         assert_eq!(products, expected_products);
 
         assert_eq!(
