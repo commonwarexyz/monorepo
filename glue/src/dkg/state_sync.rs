@@ -676,6 +676,11 @@ where
         }
     }
 
+    /// Returns whether the plan can store checkpoints.
+    pub(crate) const fn is_enabled(&self) -> bool {
+        self.storage.is_some()
+    }
+
     /// Returns the persisted material if `recovered_epoch` is `None` or not past
     /// the floor's epoch, and `None` if there is no material. Otherwise deletes
     /// the material and returns `None`.

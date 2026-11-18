@@ -83,7 +83,43 @@ where
     /// If subscribers are pending, the actor starts serving once they are
     /// resolved or dropped. A source node can attach without ever subscribing,
     /// so it serves without sending discovery requests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the plan was created with [`Plan::disabled`].
     pub fn attach(&self, marshal: MarshalMailbox<S, V>, plan: Plan<S, V>) {
+        assert!(
+            plan.is_enabled(),
+            "probe requires an enabled state sync plan"
+        );
         let _ = self.sender.enqueue(Message::Attach { marshal, plan });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dkg::tests::mocks;
+    use commonware_cryptography::Signer as _;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{NZU64, NZUsize};
+
+    #[test]
+    #[should_panic(expected = "probe requires an enabled state sync plan")]
+    fn attach_rejects_disabled_plan() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = mocks::scheme_fixture(&mut context);
+            let marshal = mocks::closed_marshal_mailbox(
+                context.child("marshal"),
+                &mocks::TestSigner::from_seed(0),
+                fixture.schemes[0].clone(),
+                "disabled-plan",
+                NZU64!(2),
+            )
+            .await;
+            let (sender, _receiver) =
+                commonware_actor::mailbox::new(context.child("probe"), NZUsize!(1));
+            Mailbox::new(sender).attach(marshal, Plan::disabled());
+        });
     }
 }
