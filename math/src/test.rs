@@ -389,30 +389,6 @@ impl Additive for GT {
     }
 }
 
-impl<'a> Mul<&'a F> for GT {
-    type Output = Self;
-
-    fn mul(self, rhs: &'a F) -> Self::Output {
-        Self(self.0 * rhs)
-    }
-}
-
-impl<'a> MulAssign<&'a F> for GT {
-    fn mul_assign(&mut self, rhs: &'a F) {
-        self.0 *= rhs;
-    }
-}
-
-impl Space<F> for GT {}
-
-impl CryptoGroup for GT {
-    type Scalar = F;
-
-    fn generator() -> Self {
-        Self(G::generator())
-    }
-}
-
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for GT {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
