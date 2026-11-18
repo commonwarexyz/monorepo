@@ -72,9 +72,7 @@ where
     M: Monitor<Response = Rs, PublicKey = P>,
     H: Handler<Request = Rq, Response = Rs, PublicKey = P>,
 {
-    /// Creates a new engine with the given configuration.
-    ///
-    /// Returns the engine and the [Mailbox] that enqueues requests and cancellations to it.
+    /// Creates a new engine and the [Mailbox] that enqueues requests and cancellations to it.
     pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
         // Create mailbox
         let (tx, rx) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -111,15 +109,9 @@ where
         )
     }
 
-    /// Starts the engine with the network channels that carry requests and responses.
-    ///
-    /// `requests` and `responses` must be two different channels, and every peer must assign
-    /// them the same way.
-    ///
-    /// Returns a handle that resolves when the engine stops. The engine stops when its context
-    /// is stopped, when either receiver closes, or once every [Mailbox] has been dropped and the
-    /// commands already enqueued have been handled. A peer that only serves requests must
-    /// therefore keep its [Mailbox].
+    /// Starts the engine and returns a handle that resolves once its context is stopped, either
+    /// receiver closes, or every [Mailbox] has been dropped and the commands already enqueued have
+    /// been handled. A peer that only serves requests must therefore keep its [Mailbox].
     pub fn start(
         mut self,
         requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),

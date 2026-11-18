@@ -92,6 +92,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_p2p::Recipients;
+    use rstest::rstest;
     use std::collections::VecDeque;
 
     fn peer(seed: u64) -> PublicKey {
@@ -189,10 +190,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn send_same_request_keeps_recipients_separate() {
-        // One request for two peers.
-        let request = Request { id: 1, data: 10 };
+    /// Sends that share a commitment stay separate and in order.
+    #[rstest]
+    // The second send carries the same request.
+    #[case::same_request(Request { id: 1, data: 10 })]
+    // The second send carries a different payload with the same commitment.
+    #[case::different_payload(Request { id: 1, data: 20 })]
+    fn send_same_commitment_keeps_sends_separate(#[case] second: Request) {
+        // One request for the first peer.
+        let first = Request { id: 1, data: 10 };
         let peer1 = peer(1);
         let peer2 = peer(2);
         let mut overflow = VecDeque::new();
@@ -200,57 +206,24 @@ mod tests {
         // Queue a send to each peer.
         handle(
             &mut overflow,
-            send(request.clone(), Recipients::One(peer1.clone())),
+            send(first.clone(), Recipients::One(peer1.clone())),
         );
         handle(
             &mut overflow,
-            send(request.clone(), Recipients::One(peer2.clone())),
+            send(second.clone(), Recipients::One(peer2.clone())),
         );
 
-        // Both sends remain in order.
-        assert_eq!(overflow.len(), 2);
-        assert!(matches!(
-            &overflow[0],
-            Message::Send { request: queued, recipients: Recipients::One(peer), .. }
-                if queued == &request && peer == &peer1
-        ));
-        assert!(matches!(
-            &overflow[1],
-            Message::Send { request: queued, recipients: Recipients::One(peer), .. }
-                if queued == &request && peer == &peer2
-        ));
-    }
-
-    #[test]
-    fn send_same_commitment_different_payload_keeps_payloads_separate() {
-        // Two payloads with one commitment, each for a different peer.
-        let request1 = Request { id: 1, data: 10 };
-        let request2 = Request { id: 1, data: 20 };
-        let peer1 = peer(1);
-        let peer2 = peer(2);
-        let mut overflow = VecDeque::new();
-
-        // Queue a send for each.
-        handle(
-            &mut overflow,
-            send(request1.clone(), Recipients::One(peer1.clone())),
-        );
-        handle(
-            &mut overflow,
-            send(request2.clone(), Recipients::One(peer2.clone())),
-        );
-
-        // Both sends remain, each with its own payload and peer.
+        // Both sends remain in order, each with its own payload and peer.
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
             Message::Send { request, recipients: Recipients::One(peer), .. }
-                if request == &request1 && peer == &peer1
+                if request == &first && peer == &peer1
         ));
         assert!(matches!(
             &overflow[1],
             Message::Send { request, recipients: Recipients::One(peer), .. }
-                if request == &request2 && peer == &peer2
+                if request == &second && peer == &peer2
         ));
     }
 

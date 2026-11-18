@@ -14,9 +14,7 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     /// Processes each request the engine receives.
     pub handler: H,
 
-    /// Capacity of the engine's inbox.
-    ///
-    /// The Backpressure section of the [module](super) docs describes what waits behind it.
+    /// Capacity of the engine's [inbox](super#backpressure).
     pub mailbox_size: NonZeroUsize,
 
     /// Whether requests are sent with priority over other network messages.

@@ -30,10 +30,8 @@ commonware_macros::stability_scope!(ALPHA {
         type Request: Committable + Codec;
 
         /// Enqueues `request` for a set of [Recipients]. Each recipient the request is sent to
-        /// joins the collection for its commitment.
-        ///
-        /// [Feedback] indicates whether the request was accepted for processing. It does not
-        /// indicate whether any recipient received it.
+        /// joins the collection for its commitment. [Feedback] indicates whether the request was
+        /// accepted for processing, not whether any recipient received it.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
@@ -79,11 +77,9 @@ commonware_macros::stability_scope!(ALPHA {
         /// The type of response collected.
         type Response: Committable + Codec;
 
-        /// Receives a `response` collected from `handler`.
-        ///
-        /// A collection yields at most one response per `handler`. `count` is the number of
-        /// handlers that have responded in the collection, whether or not their responses are
-        /// valid. `collected` must return promptly.
+        /// Receives a `response` collected from `handler`. A collection yields at most one response
+        /// per `handler`, and `count` is the number of handlers that have responded in the
+        /// collection, whether or not their responses are valid. `collected` must return promptly.
         fn collected(&mut self, handler: Self::PublicKey, response: Self::Response, count: usize);
     }
 });

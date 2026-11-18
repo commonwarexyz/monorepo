@@ -4,14 +4,17 @@
 //!
 //! Every honest peer runs an engine whose handler and monitor record what they observe. One more
 //! peer, the Byzantine peer, runs no engine. It injects well-formed, malformed, unsolicited, and
-//! duplicate traffic on both channels and answers the requests it receives.
+//! duplicate traffic on both channels and answers the requests it receives. The input may also
+//! leave one engine unable to send responses.
 //!
 //! After every operation the harness checks what the monitors collected and what the handlers
 //! processed against a model of what the originators asked for. Every mailbox call must be
-//! accepted, so an engine that stops early fails the run. A final settle phase checks response
-//! routing, blocking and the engines' metrics. On reliable links it also checks that every request
-//! a handler answered immediately with its own commitment was collected unless that commitment was
-//! ever cancelled.
+//! accepted, so an engine that stops early fails the run.
+//!
+//! A final settle phase checks response routing, blocking, and the engines' metrics. On reliable
+//! links it also checks that an originator collected every honest peer that answered one of its
+//! requests immediately, unless the request's commitment was ever cancelled or the peer cannot send
+//! responses.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_actor::Feedback;
@@ -171,36 +174,27 @@ impl Committable for FuzzResponse {
 /// How a handler treats a request, chosen by the first byte of its data.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Behavior {
-    /// Answer with the request's commitment.
+    /// Answer immediately.
     Respond,
     /// Drop the responder.
     Drop,
-    /// Answer with the next id's commitment.
-    Redirect,
-    /// Keep the responder until a [Operation::Release].
+    /// Keep the responder until an [Operation::Release].
     Hold,
 }
 
 /// Returns how every handler treats `request`.
 fn behavior(request: &FuzzRequest) -> Behavior {
-    match request.data.first().copied().unwrap_or(0) % 4 {
+    match request.data.first().copied().unwrap_or(0) % 3 {
         0 => Behavior::Respond,
         1 => Behavior::Drop,
-        2 => Behavior::Redirect,
         _ => Behavior::Hold,
     }
 }
 
-/// Returns the response to `request`. The response has the next id's commitment when
-/// `redirect` is set.
-fn answer(request: &FuzzRequest, redirect: bool) -> FuzzResponse {
-    let id = if redirect {
-        request.id.wrapping_add(1) % ID_SPACE
-    } else {
-        request.id
-    };
+/// Returns the response to `request`.
+fn answer(request: &FuzzRequest) -> FuzzResponse {
     FuzzResponse {
-        id,
+        id: request.id,
         result: request.data.iter().rev().copied().collect(),
     }
 }
@@ -208,7 +202,8 @@ fn answer(request: &FuzzRequest, redirect: bool) -> FuzzResponse {
 /// The engine that served a request, the request's authenticated origin, and the request.
 type Processed = (usize, PublicKey, FuzzRequest);
 
-/// The engine that collected a response, its responder, the response, and the reported count.
+/// The engine that collected a response, the handler that sent it, the response, and the reported
+/// count.
 type Collected = (usize, PublicKey, FuzzResponse, usize);
 
 /// The engine whose handler holds a responder, the request, and the responder.
@@ -246,10 +241,7 @@ impl Handler for RecordingHandler {
         let (responder, receiver) = oneshot::channel();
         match behavior(&request) {
             Behavior::Respond => {
-                responder.send_lossy(answer(&request, false));
-            }
-            Behavior::Redirect => {
-                responder.send_lossy(answer(&request, true));
+                responder.send_lossy(answer(&request));
             }
             Behavior::Drop => drop(responder),
             Behavior::Hold => self.log.held.lock().push((self.index, request, responder)),
@@ -336,6 +328,7 @@ struct FuzzInput {
     mailbox_size: NonZeroUsize,
     reliable: bool,
     disconnect_on_block: bool,
+    muted: Option<u8>,
     latency_ms: u64,
     priority_requests: bool,
     priority_responses: bool,
@@ -349,6 +342,11 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let mailbox_size = NonZeroUsize::new(u.int_in_range(1..=4)?).unwrap();
         let reliable = u.arbitrary()?;
         let disconnect_on_block = u.arbitrary()?;
+        let muted = if u.ratio(1u8, 4u8)? {
+            Some(u.arbitrary()?)
+        } else {
+            None
+        };
         let latency_ms = u.int_in_range(1..=100)?;
         let priority_requests = u.arbitrary()?;
         let priority_responses = u.arbitrary()?;
@@ -362,6 +360,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             mailbox_size,
             reliable,
             disconnect_on_block,
+            muted,
             latency_ms,
             priority_requests,
             priority_responses,
@@ -375,14 +374,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 struct Sent {
     /// Every peer each commitment was ever addressed to.
     addressed: HashMap<Digest, HashSet<PublicKey>>,
-    /// Every request payload sent under each commitment.
-    payloads: HashMap<Digest, HashSet<FuzzRequest>>,
+    /// Every request enqueued, paired with each peer it was addressed to.
+    sent: HashSet<(PublicKey, FuzzRequest)>,
     /// Number of cancels enqueued for each commitment.
     cancels: HashMap<Digest, usize>,
-    /// Collections started so far for each commitment, and the responders of the latest one.
+    /// Collections started for each commitment, and the handlers collected in the latest one.
     collections: HashMap<Digest, (usize, HashSet<PublicKey>)>,
-    /// Each request sent and the honest peers it was addressed to, for the completeness check.
-    requests: Vec<(FuzzRequest, Vec<usize>)>,
     /// Commitments the engine must be collecting once it has handled every enqueued command.
     live: HashSet<Digest>,
     /// Number of sends enqueued.
@@ -397,52 +394,40 @@ struct Model {
     byzantine_requests: Vec<Vec<FuzzRequest>>,
     /// Engines the Byzantine peer sent undecodable bytes to.
     expect_block: Vec<bool>,
-    /// Every (collector, responder, commitment) observed.
-    seen: HashSet<(usize, PublicKey, Digest)>,
+    /// The engine that cannot send responses, if any.
+    muted: Option<PublicKey>,
     /// Number of responses each engine's monitor collected.
     collected: Vec<usize>,
     /// Number of requests each engine's handler processed.
     processed: Vec<usize>,
+    /// Number of requests each engine's handler declined.
+    declined: Vec<usize>,
 }
 
 impl Model {
     /// Records that originator `from` enqueues `request` for the peers in `addressed`.
-    fn record_send(
-        &mut self,
-        peers: &[PublicKey],
-        from: usize,
-        request: &FuzzRequest,
-        addressed: Vec<PublicKey>,
-    ) {
+    fn record_send(&mut self, from: usize, request: &FuzzRequest, addressed: Vec<PublicKey>) {
         let commitment = request.commitment();
         let originator = &mut self.originators[from];
         originator.sends += 1;
         if !addressed.is_empty() {
             originator.live.insert(commitment);
-            let targets = peers
-                .iter()
-                .enumerate()
-                .filter(|(index, peer)| *index != from && addressed.contains(peer))
-                .map(|(index, _)| index)
-                .collect();
-            originator.requests.push((request.clone(), targets));
+        }
+        for peer in &addressed {
+            originator.sent.insert((peer.clone(), request.clone()));
         }
         originator
             .addressed
             .entry(commitment)
             .or_default()
             .extend(addressed);
-        originator
-            .payloads
-            .entry(commitment)
-            .or_default()
-            .insert(request.clone());
     }
 
     /// Checks every observation recorded since the previous call.
     fn check(&mut self, log: &Log, peers: &[PublicKey], byzantine: &PublicKey) {
-        // Each collected response comes from a peer its commitment was sent to, once per
-        // collection, with a count that grows by one per responder.
+        // A collected response comes from a peer its commitment was sent to, and never from the
+        // engine that cannot send responses. A collection collects each handler at most once with a
+        // count that grows by one per handler, and a new collection starts only after a cancel.
         for (index, handler, response, count) in log.collected.lock().drain(..) {
             self.collected[index] += 1;
             let originator = &mut self.originators[index];
@@ -454,6 +439,11 @@ impl Model {
             assert!(
                 addressed.contains(&handler),
                 "a response must be collected from a peer its commitment was sent to"
+            );
+            assert_ne!(
+                self.muted.as_ref(),
+                Some(&handler),
+                "an engine that cannot send responses must not be collected"
             );
             let cancels = originator.cancels.get(&commitment).copied().unwrap_or(0);
             let (started, responders) = originator.collections.entry(commitment).or_default();
@@ -468,18 +458,20 @@ impl Model {
             assert_eq!(
                 responders.len() + 1,
                 count,
-                "count must grow by one per responder"
+                "count must grow by one with each handler collected"
             );
             assert!(
-                responders.insert(handler.clone()),
-                "a responder must be collected once per collection"
+                responders.insert(handler),
+                "a handler must be collected at most once per collection"
             );
-            self.seen.insert((index, handler, commitment));
         }
 
         // Each processed request is one its origin sent to this handler.
         for (index, origin, request) in log.processed.lock().drain(..) {
             self.processed[index] += 1;
+            if behavior(&request) == Behavior::Drop {
+                self.declined[index] += 1;
+            }
             if &origin == byzantine {
                 assert!(
                     self.byzantine_requests[index].contains(&request),
@@ -491,18 +483,11 @@ impl Model {
                 .iter()
                 .position(|peer| peer == &origin)
                 .expect("a request must come from a known peer");
-            let commitment = request.commitment();
-            let originator = &self.originators[from];
             assert!(
-                originator
-                    .payloads
-                    .get(&commitment)
-                    .is_some_and(|payloads| payloads.contains(&request)),
-                "a handler must only see payloads its origin sent"
-            );
-            assert!(
-                originator.addressed[&commitment].contains(&peers[index]),
-                "a handler must only see requests addressed to it"
+                self.originators[from]
+                    .sent
+                    .contains(&(peers[index].clone(), request)),
+                "a handler must only see requests its origin addressed to it"
             );
         }
     }
@@ -517,26 +502,24 @@ fn expect_running(feedback: Feedback) {
     );
 }
 
-/// Reads gauge `name` of the engine at `index`.
-fn gauge(context: &deterministic::Context, name: &str, index: usize) -> usize {
+/// Reads gauge `name` of the engine at `index` from the encoded `metrics`.
+fn gauge(metrics: &str, name: &str, index: usize) -> usize {
     let prefix = format!("engine_{name}{{");
     let label = format!("index=\"{index}\"");
-    context
-        .encode()
+    metrics
         .lines()
         .find(|line| line.starts_with(&prefix) && line.contains(&label))
         .and_then(|line| line.rsplit(' ').next()?.parse().ok())
         .expect("every engine must export its gauges")
 }
 
-/// Reads how often the engine at `index` counted `status` in `family`. A status that was never
-/// counted reads as zero.
-fn count(context: &deterministic::Context, family: &str, status: Status, index: usize) -> usize {
+/// Reads from the encoded `metrics` how often the engine at `index` counted `status` in `family`. A
+/// status that was never counted reads as zero.
+fn count(metrics: &str, family: &str, status: Status, index: usize) -> usize {
     let prefix = format!("engine_{family}_total{{");
     let engine = format!("index=\"{index}\"");
     let status = format!("status=\"{status:?}\"");
-    context
-        .encode()
+    metrics
         .lines()
         .find(|line| line.starts_with(&prefix) && line.contains(&engine) && line.contains(&status))
         .map_or(0, |line| {
@@ -610,12 +593,20 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Start one engine per honest peer, and register the Byzantine peer's channels.
+        let muted = input
+            .muted
+            .map(|index| peers[usize::from(index) % honest].clone());
         let log = Log::default();
         let mut mailboxes: Vec<Mailbox<PublicKey, FuzzRequest>> = Vec::new();
         for (index, peer) in peers.iter().enumerate() {
             let control = oracle.control(peer.clone());
             let requests = control.register(REQUESTS, QUOTA).await.unwrap();
-            let responses = control.register(RESPONSES, QUOTA).await.unwrap();
+            let mut responses = control.register(RESPONSES, QUOTA).await.unwrap();
+            if muted.as_ref() == Some(peer) {
+                // Registering the channel again closes the sender registered first, so this engine
+                // receives responses and cannot send them.
+                responses.1 = control.register(RESPONSES, QUOTA).await.unwrap().1;
+            }
             let (engine, mailbox) = Engine::new(
                 context.child("engine").with_attribute("index", index),
                 Config {
@@ -649,9 +640,10 @@ fn fuzz(input: FuzzInput) {
             originators: (0..honest).map(|_| Sent::default()).collect(),
             byzantine_requests: vec![Vec::new(); honest],
             expect_block: vec![false; honest],
-            seen: HashSet::new(),
+            muted,
             collected: vec![0; honest],
             processed: vec![0; honest],
+            declined: vec![0; honest],
         };
 
         // Apply each operation, then check what the engines observed against the model.
@@ -692,7 +684,7 @@ fn fuzz(input: FuzzInput) {
                             (Recipients::Some(chosen.clone()), chosen)
                         }
                     };
-                    model.record_send(&peers, from, &request, addressed);
+                    model.record_send(from, &request, addressed);
                     expect_running(mailboxes[from].send(recipients, request));
                 }
                 Operation::Burst {
@@ -708,7 +700,7 @@ fn fuzz(input: FuzzInput) {
                         data,
                     };
                     for peer in targets.into_iter().take(everyone.len() + 1).map(pick) {
-                        model.record_send(&peers, from, &request, vec![peer.clone()]);
+                        model.record_send(from, &request, vec![peer.clone()]);
                         expect_running(
                             mailboxes[from].send(Recipients::One(peer), request.clone()),
                         );
@@ -724,7 +716,7 @@ fn fuzz(input: FuzzInput) {
                 }
                 Operation::Release => {
                     for (_, request, responder) in log.held.lock().drain(..) {
-                        responder.send_lossy(answer(&request, false));
+                        responder.send_lossy(answer(&request));
                     }
                 }
                 Operation::ByzantineRequest { to, payload } => {
@@ -780,7 +772,7 @@ fn fuzz(input: FuzzInput) {
                         for _ in 0..=copies % 3 {
                             byzantine_responses.send(
                                 Recipients::One(origin.clone()),
-                                answer(&request, false).encode(),
+                                answer(&request).encode(),
                                 false,
                             );
                         }
@@ -794,14 +786,13 @@ fn fuzz(input: FuzzInput) {
             model.check(&log, &peers, &byzantine);
         }
 
-        // Let every message in flight arrive, then confirm each engine is still running.
+        // Let every message in flight arrive and check what the engines observed, then confirm each
+        // engine is still running.
         context.sleep(SETTLE).await;
         model.check(&log, &peers, &byzantine);
         for mailbox in &mut mailboxes {
             expect_running(mailbox.cancel(commitment(ID_SPACE)));
         }
-        context.sleep(Duration::from_millis(10)).await;
-        model.check(&log, &peers, &byzantine);
 
         // Engines answer only the requester, so the Byzantine peer receives at most one response
         // per decodable request it sent.
@@ -840,10 +831,13 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
+        // Every engine has settled, so one encoding of the metrics serves every check below.
+        let metrics = context.encode();
+
         // Each engine is collecting exactly the commitments sent and not cancelled since.
         for (index, originator) in model.originators.iter().enumerate() {
             assert_eq!(
-                gauge(&context, "outstanding", index),
+                gauge(&metrics, "outstanding", index),
                 originator.live.len(),
                 "outstanding commitments must match the model"
             );
@@ -859,39 +853,58 @@ fn fuzz(input: FuzzInput) {
                 .filter(|(holder, ..)| *holder == index)
                 .count();
             assert_eq!(
-                gauge(&context, "serve_processing", index),
+                gauge(&metrics, "serve_processing", index),
                 held,
                 "pending requests must match the responders a handler holds"
             );
 
             // Every request the handler processed is either still held or counted as served.
-            let served = count(&context, "serve", Status::Success, index)
-                + count(&context, "serve", Status::Failure, index)
-                + count(&context, "serve", Status::Dropped, index);
+            let success = count(&metrics, "serve", Status::Success, index);
+            let failure = count(&metrics, "serve", Status::Failure, index);
+            let dropped = count(&metrics, "serve", Status::Dropped, index);
             assert_eq!(
-                served + held,
+                success + failure + dropped + held,
                 model.processed[index],
                 "served and pending requests must add up to the requests processed"
             );
 
+            // A declined request is counted as a failure, and a response is counted as dropped
+            // exactly when its engine cannot send it.
+            assert_eq!(
+                failure, model.declined[index],
+                "declined requests must be counted as failures"
+            );
+            if model.muted.as_ref() == Some(&peers[index]) {
+                assert_eq!(
+                    success, 0,
+                    "an engine that cannot send responses must count none as sent"
+                );
+            } else {
+                assert_eq!(
+                    dropped, 0,
+                    "an engine that can send responses must count none as dropped"
+                );
+            }
+
             // Every response the monitor collected is a success.
             assert_eq!(
-                count(&context, "collect", Status::Success, index),
+                count(&metrics, "collect", Status::Success, index),
                 model.collected[index],
                 "collected responses must be counted as successes"
             );
 
-            // A send that a cancel discarded is not counted.
-            let sent = count(&context, "send", Status::Success, index)
-                + count(&context, "send", Status::Dropped, index);
+            // A cancel can discard sends that wait behind the inbox, so the engine counts at most
+            // the sends enqueued.
+            let sent = count(&metrics, "send", Status::Success, index)
+                + count(&metrics, "send", Status::Dropped, index);
             assert!(
                 sent <= model.originators[index].sends,
                 "an engine must not count more sends than were enqueued"
             );
 
             // Undecodable bytes are counted as invalid, and nothing else is.
-            let invalid = count(&context, "serve", Status::Invalid, index)
-                + count(&context, "collect", Status::Invalid, index);
+            let invalid = count(&metrics, "serve", Status::Invalid, index)
+                + count(&metrics, "collect", Status::Invalid, index);
             assert_eq!(
                 invalid > 0,
                 model.expect_block[index],
@@ -899,25 +912,28 @@ fn fuzz(input: FuzzInput) {
             );
         }
 
-        // On reliable links, every request a handler answered immediately with its own commitment
-        // is collected unless that commitment was ever cancelled.
+        // On reliable links, an originator collects every honest peer that answered one of its
+        // requests immediately, unless the request's commitment was ever cancelled or the peer
+        // cannot send responses.
         if input.reliable {
             for (index, originator) in model.originators.iter().enumerate() {
-                for (request, targets) in &originator.requests {
+                for (peer, request) in &originator.sent {
                     let commitment = request.commitment();
-                    if behavior(request) != Behavior::Respond
+                    if peer == &peers[index]
+                        || peer == &byzantine
+                        || Some(peer) == model.muted.as_ref()
+                        || behavior(request) != Behavior::Respond
                         || originator.cancels.contains_key(&commitment)
                     {
                         continue;
                     }
-                    for target in targets {
-                        assert!(
-                            model
-                                .seen
-                                .contains(&(index, peers[*target].clone(), commitment)),
-                            "an answered request must be collected"
-                        );
-                    }
+                    assert!(
+                        originator
+                            .collections
+                            .get(&commitment)
+                            .is_some_and(|(_, responders)| responders.contains(peer)),
+                        "a peer that answers immediately must be collected"
+                    );
                 }
             }
         }

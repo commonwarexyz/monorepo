@@ -25,6 +25,7 @@ commonware-utils.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-p2p = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 rstest.workspace = true
 tracing-subscriber.workspace = true
