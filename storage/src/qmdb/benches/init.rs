@@ -205,7 +205,7 @@ fn bench_store_init(c: &mut Criterion) {
                 // Measure init time.
                 b.to_async(&runner).iter_custom(move |iters| async move {
                     let ctx = context::get::<Context>();
-                    let cfg = store_cfg();
+                    let cfg = store_cfg(&ctx);
                     let start = std::time::Instant::now();
                     for _ in 0..iters {
                         let db = StoreDb::init(ctx.child("storage"), cfg.clone(), None)
