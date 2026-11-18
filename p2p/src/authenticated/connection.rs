@@ -262,8 +262,10 @@ impl<E: Clock + Supervisor, P: PublicKey> Inbox<E, P> {
 ///
 /// Returns `Ok(Ok(()))` if `context` stops first, otherwise the kill outcome or the result of the
 /// first handler to finish. When several are ready, shutdown wins over a kill and a kill over
-/// either handler. `wait` does not abort the handlers, so run it in the task whose context spawned
-/// them and they stop when that task returns.
+/// either handler.
+///
+/// Run `wait` in the task that spawned the handlers. `wait` does not abort them. When that task
+/// exits, runtime supervision signals both handlers to stop.
 pub(crate) async fn wait<E: From<Error> + Send + 'static>(
     context: &impl Spawner,
     mut kill: ring::Receiver<()>,
@@ -423,5 +425,22 @@ pub(crate) mod tests {
                 }
             });
         }
+    }
+
+    /// A kill decides the outcome when a handler has already finished.
+    #[test]
+    fn test_wait_prefers_kill_over_finished_handler() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mailbox, receiver) = ring::channel(NZUsize!(1));
+            mailbox.send_lossy(());
+
+            let pending = context
+                .child("receiver")
+                .spawn(|_| future::pending::<Result<(), Error>>());
+            let result = wait(&context, receiver, Handle::ready(Ok(Ok(()))), pending)
+                .await
+                .expect("handler tasks must not fail");
+            assert!(matches!(result, Err(Error::Killed)), "{result:?}");
+        });
     }
 }

@@ -12,7 +12,7 @@ impl Mailbox {
         (Self(sender), receiver)
     }
 
-    /// Ends the connection without blocking.
+    /// Signals the peer task to end the connection.
     pub fn kill(&self) {
         let _ = self.0.send_lossy(());
     }

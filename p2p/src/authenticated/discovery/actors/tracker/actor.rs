@@ -188,7 +188,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                     return;
                 }
 
-                let Some(peer) = self.mailboxes.get(&public_key).cloned() else {
+                let Some(peer) = self.mailboxes.get(&public_key) else {
                     return;
                 };
                 if let Some(bit_vec) = self.directory.get_random_bit_vec() {
@@ -206,7 +206,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                     return;
                 }
 
-                let Some(peer) = self.mailboxes.get(&public_key).cloned() else {
+                let Some(peer) = self.mailboxes.get(&public_key) else {
                     return;
                 };
                 let Some(mut infos) = self.directory.infos(&bit_vec) else {
@@ -672,12 +672,10 @@ mod tests {
                     .is_none(),
                 "reserved peer should be rejected if it connects after losing tracked-set membership"
             );
-            assert!(
-                !matches!(
-                    killed.recv().now_or_never(),
-                    Some(Some(()))
-                ),
-                "discovery connect rejection is signaled by a missing greeting"
+            assert_eq!(
+                killed.recv().now_or_never(),
+                Some(None),
+                "rejected connect must drop the peer's mailbox without killing it"
             );
 
             drop(reservation);

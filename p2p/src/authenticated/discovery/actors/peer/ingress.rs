@@ -54,7 +54,7 @@ impl<C: PublicKey> Mailbox<C> {
         let _ = self.gossip.enqueue(Message::Peers(peers));
     }
 
-    /// Ends the connection without blocking.
+    /// Signals the peer task to end the connection.
     pub fn kill(&self) {
         let _ = self.kill.send_lossy(());
     }
@@ -79,6 +79,7 @@ impl<C: PublicKey> fmt::Debug for Mailbox<C> {
 mod tests {
     use super::*;
     use commonware_cryptography::ed25519;
+    use commonware_utils::bitmap::BitMap;
 
     /// A full gossip queue drops a new message and keeps the queued one.
     #[test]
@@ -86,7 +87,10 @@ mod tests {
         let (mailbox, mut gossip, _kill) =
             Mailbox::<ed25519::PublicKey>::new(crate::utils::mocks::Metrics, NZUsize!(1));
         mailbox.peers(Vec::new());
-        mailbox.peers(Vec::new());
+        mailbox.bit_vec(types::BitVec {
+            index: 0,
+            bits: BitMap::zeroes(0),
+        });
 
         assert!(matches!(gossip.try_recv(), Ok(Message::Peers(_))));
         assert!(gossip.try_recv().is_err());

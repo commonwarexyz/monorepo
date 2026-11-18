@@ -91,14 +91,14 @@ where
     /// Capacity for internal actor mailboxes and for each connection's outbound queues.
     ///
     /// Each connection holds outbound application messages in two queues of this capacity, one
-    /// per priority, and peer discovery messages in a third. While a queue is full, new messages
-    /// for that peer are dropped.
+    /// per priority, and peer discovery messages in a third. A full queue drops new messages
+    /// bound for it.
     ///
     /// The capacity counts messages, so one peer that reads slowly can keep up to
     /// `2 * mailbox_size` application messages of up to [`Config::max_message_size`] bytes each
-    /// queued, plus one batch of up to [`Config::send_batch_size`] messages being written. The
-    /// runtime's write timeout, if it has one, bounds each batch write, not the time a message
-    /// waits in a queue.
+    /// queued, plus one batch of up to [`Config::send_batch_size`] messages being written. A
+    /// runtime write timeout applies to each write on the connection. It does not limit how long a
+    /// message waits in a queue.
     ///
     /// This does not affect inbound application message capacity, which is derived from channel
     /// rate limits and [`Config::max_peers_per_set`].
