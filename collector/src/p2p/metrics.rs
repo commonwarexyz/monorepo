@@ -7,7 +7,7 @@ use commonware_runtime::{
 pub struct Metrics {
     /// Number of commitments being collected.
     pub outstanding: Gauge,
-    /// Number of received requests the engine has not finished serving.
+    /// Number of received requests being served.
     pub serve_processing: Gauge,
     /// Number of sent requests by status. A request sent to at least one peer is a success and a
     /// request sent to none is dropped.
@@ -28,7 +28,7 @@ impl Metrics {
             outstanding: context.gauge("outstanding", "Number of commitments being collected"),
             serve_processing: context.gauge(
                 "serve_processing",
-                "Number of received requests being processed",
+                "Number of received requests being served",
             ),
             send: context.family("send", "Number of sent requests by status"),
             collect: context.family("collect", "Number of received responses by status"),

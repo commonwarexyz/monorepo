@@ -33,8 +33,8 @@ impl<P: PublicKey, R: Committable + Codec> Policy for Message<P, R> {
             }
             Self::Cancel { commitment } => {
                 // Drop queued sends that this cancel supersedes, and queue this cancel unless one
-                // for the same commitment already waits. A cancel must stay queued because the
-                // engine may already track a collection for the commitment.
+                // for the same commitment is already queued. A cancel must stay queued because the
+                // engine may already have a collection for the commitment.
                 let mut canceled = false;
                 overflow.retain(|message| match message {
                     Self::Send {
@@ -116,11 +116,13 @@ mod tests {
 
     #[test]
     fn cancel_prunes_queued_sends_and_is_retained() {
+        // Two requests with distinct commitments.
         let request1 = Request { id: 1, data: 10 };
         let request2 = Request { id: 2, data: 20 };
         let commitment1 = request1.commitment();
         let mut overflow = VecDeque::new();
 
+        // Queue a send for each, then cancel the first.
         handle(&mut overflow, send(request1, Recipients::One(peer(1))));
         handle(
             &mut overflow,
@@ -133,6 +135,7 @@ mod tests {
             },
         );
 
+        // The other send remains, followed by the cancel.
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
@@ -146,12 +149,14 @@ mod tests {
 
     #[test]
     fn cancel_coalesces_duplicate_cancels_in_place() {
+        // Two requests with distinct commitments.
         let request1 = Request { id: 1, data: 10 };
         let request2 = Request { id: 2, data: 20 };
         let commitment1 = request1.commitment();
         let commitment2 = request2.commitment();
         let mut overflow = VecDeque::new();
 
+        // Queue a cancel for each, a send for the first, and a second cancel for the first.
         handle(
             &mut overflow,
             Message::Cancel {
@@ -172,6 +177,7 @@ mod tests {
             },
         );
 
+        // The send is dropped, and the first cancel keeps its place.
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
@@ -185,11 +191,13 @@ mod tests {
 
     #[test]
     fn send_same_request_keeps_recipients_separate() {
+        // One request for two peers.
         let request = Request { id: 1, data: 10 };
         let peer1 = peer(1);
         let peer2 = peer(2);
         let mut overflow = VecDeque::new();
 
+        // Queue a send to each peer.
         handle(
             &mut overflow,
             send(request.clone(), Recipients::One(peer1.clone())),
@@ -199,6 +207,7 @@ mod tests {
             send(request.clone(), Recipients::One(peer2.clone())),
         );
 
+        // Both sends remain in order.
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
@@ -214,12 +223,14 @@ mod tests {
 
     #[test]
     fn send_same_commitment_different_payload_keeps_payloads_separate() {
+        // Two payloads with one commitment, each for a different peer.
         let request1 = Request { id: 1, data: 10 };
         let request2 = Request { id: 1, data: 20 };
         let peer1 = peer(1);
         let peer2 = peer(2);
         let mut overflow = VecDeque::new();
 
+        // Queue a send for each.
         handle(
             &mut overflow,
             send(request1.clone(), Recipients::One(peer1.clone())),
@@ -229,6 +240,7 @@ mod tests {
             send(request2.clone(), Recipients::One(peer2.clone())),
         );
 
+        // Both sends remain, each with its own payload and peer.
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
@@ -244,15 +256,18 @@ mod tests {
 
     #[test]
     fn send_with_all_recipients_keeps_payloads_separate() {
+        // One request for two sends.
         let request = Request { id: 1, data: 10 };
         let mut overflow = VecDeque::new();
 
+        // Queue a send to one peer, then the same request to all peers.
         handle(
             &mut overflow,
             send(request.clone(), Recipients::One(peer(1))),
         );
         handle(&mut overflow, send(request, Recipients::All));
 
+        // Both sends remain.
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],

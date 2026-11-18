@@ -47,7 +47,7 @@ commonware_macros::stability_scope!(ALPHA {
         fn cancel(&mut self, commitment: <Self::Request as Committable>::Commitment) -> Feedback;
     }
 
-    /// A [Handler] receives requests and (optionally) sends responses.
+    /// A [Handler] receives requests and may send responses.
     pub trait Handler: Clone + Send + 'static {
         /// The [PublicKey] of the [Originator].
         type PublicKey: PublicKey;
@@ -60,8 +60,7 @@ commonware_macros::stability_scope!(ALPHA {
         /// A response must have the commitment of the request it answers.
         type Response: Committable<Commitment = <Self::Request as Committable>::Commitment> + Codec;
 
-        /// Processes a `request` from an [Originator] and (optionally) sends a response on
-        /// `responder`.
+        /// Processes a `request` from an [Originator] and may send a response on `responder`.
         ///
         /// `process` must return promptly. A handler that cannot answer yet keeps `responder` and
         /// sends on it later, and a handler that declines the request drops it.

@@ -9,8 +9,9 @@
 //! After every operation the harness checks what the monitors collected and what the handlers
 //! processed against a model of what the originators asked for. Every mailbox call must be
 //! accepted, so an engine that stops early fails the run. A final settle phase checks response
-//! routing, blocking, the engines' metrics, and, on reliable links, that every request a handler
-//! answered was collected.
+//! routing, blocking and the engines' metrics. On reliable links it also checks that every request
+//! a handler answered immediately with its own commitment was collected unless that commitment was
+//! ever cancelled.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_actor::Feedback;
@@ -204,14 +205,13 @@ fn answer(request: &FuzzRequest, redirect: bool) -> FuzzResponse {
     }
 }
 
-/// A request a handler processed: the serving engine, the authenticated origin, and the request.
+/// The engine that served a request, the request's authenticated origin, and the request.
 type Processed = (usize, PublicKey, FuzzRequest);
 
-/// A response a monitor collected: the collecting engine, the responder, the response, and the
-/// count.
+/// The engine that collected a response, its responder, the response, and the reported count.
 type Collected = (usize, PublicKey, FuzzResponse, usize);
 
-/// A responder a handler holds: the serving engine, the request, and the responder.
+/// The engine whose handler holds a responder, the request, and the responder.
 type Held = (usize, FuzzRequest, oneshot::Sender<FuzzResponse>);
 
 /// Observations shared by every handler and monitor.
@@ -316,9 +316,9 @@ enum Operation {
     Cancel { from: u8, id: u8 },
     /// Every held responder answers.
     Release,
-    /// The Byzantine peer sends bytes on the request channel.
+    /// The Byzantine peer sends bytes on the requests channel.
     ByzantineRequest { to: u8, payload: Payload },
-    /// The Byzantine peer sends bytes on the response channel.
+    /// The Byzantine peer sends bytes on the responses channel.
     ByzantineResponse { to: u8, payload: Payload },
     /// The Byzantine peer answers each decodable request it has received since its last answer,
     /// sending one to three copies.
@@ -382,7 +382,7 @@ struct Sent {
     collections: HashMap<Digest, (usize, HashSet<PublicKey>)>,
     /// Each request sent and the honest peers it was addressed to, for the completeness check.
     requests: Vec<(FuzzRequest, Vec<usize>)>,
-    /// Commitments the engine must track once its mailbox drains.
+    /// Commitments the engine must be collecting once it has handled every enqueued command.
     live: HashSet<Digest>,
     /// Number of sends enqueued.
     sends: usize,
@@ -839,7 +839,7 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        // Each engine tracks exactly the commitments sent and not cancelled since.
+        // Each engine is collecting exactly the commitments sent and not cancelled since.
         for (index, originator) in model.originators.iter().enumerate() {
             assert_eq!(
                 gauge(&context, "outstanding", index),
@@ -848,8 +848,9 @@ fn fuzz(input: FuzzInput) {
             );
         }
 
-        // Each engine still waits on exactly the responders its handler holds.
+        // Each engine's metrics agree with the model.
         for index in 0..honest {
+            // The engine still waits on exactly the responders its handler holds.
             let held = log
                 .held
                 .lock()
@@ -862,8 +863,7 @@ fn fuzz(input: FuzzInput) {
                 "pending requests must match the responders a handler holds"
             );
 
-            // Every request a handler processed is either still held or counted as served, every
-            // collected response is a success, and a send that a cancel discarded is not counted.
+            // Every request the handler processed is either still held or counted as served.
             let served = count(&context, "serve", Status::Success, index)
                 + count(&context, "serve", Status::Failure, index)
                 + count(&context, "serve", Status::Dropped, index);
@@ -872,21 +872,34 @@ fn fuzz(input: FuzzInput) {
                 model.processed[index],
                 "served and pending requests must add up to the requests processed"
             );
+
+            // Every response the monitor collected is a success.
             assert_eq!(
                 count(&context, "collect", Status::Success, index),
                 model.collected[index],
                 "collected responses must be counted as successes"
             );
+
+            // A send that a cancel discarded is not counted.
             let sent = count(&context, "send", Status::Success, index)
                 + count(&context, "send", Status::Dropped, index);
             assert!(
                 sent <= model.originators[index].sends,
                 "an engine must not count more sends than were enqueued"
             );
+
+            // Undecodable bytes are counted as invalid, and nothing else is.
+            let invalid = count(&context, "serve", Status::Invalid, index)
+                + count(&context, "collect", Status::Invalid, index);
+            assert_eq!(
+                invalid > 0,
+                model.expect_block[index],
+                "undecodable bytes, and only they, must be counted as invalid"
+            );
         }
 
-        // On reliable links, every request an honest peer answered is collected unless its
-        // commitment was cancelled.
+        // On reliable links, every request a handler answered immediately with its own commitment
+        // is collected unless that commitment was ever cancelled.
         if input.reliable {
             for (index, originator) in model.originators.iter().enumerate() {
                 for (request, targets) in &originator.requests {

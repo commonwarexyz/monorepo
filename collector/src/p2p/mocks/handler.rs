@@ -14,7 +14,7 @@ pub struct Processed {
 /// A mock [crate::Handler].
 #[derive(Clone)]
 pub struct Handler {
-    /// Reports each request the handler processes.
+    /// Reports each request the handler processes
     sender: mpsc::UnboundedSender<Processed>,
 
     /// Configured responses for specific request IDs

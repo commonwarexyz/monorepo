@@ -41,8 +41,7 @@ where
     handler: H,
     mailbox: mailbox::Receiver<Message<P, Rq>>,
 
-    // Collections by commitment, each with the peers the commitment was sent to and the peers
-    // that have responded
+    // Collections by commitment, each with its recipients and the recipients that have responded
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
 
     // Metrics
@@ -152,6 +151,7 @@ where
 
             // Response from the local handler
             (peer, response) = processed.next_completed() => {
+                // A dropped responder means the handler declined the request
                 let Ok(response) = response else {
                     self.metrics.serve.inc(Status::Failure);
                     continue;

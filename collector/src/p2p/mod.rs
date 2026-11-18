@@ -5,9 +5,9 @@
 //! An [Engine] runs on every peer and plays both roles. As an originator it sends the requests
 //! enqueued through its [Mailbox] and passes the responses it collects to its
 //! [Monitor](crate::Monitor). As a handler it passes each request it receives to its
-//! [Handler](crate::Handler) and returns the response, if there is one, to the peer that sent the
-//! request. Requests travel on one p2p channel and responses on another, and both are passed to
-//! [Engine::start].
+//! [Handler](crate::Handler) and returns any response to the peer that sent the request. Requests
+//! and responses travel on two p2p channels, the requests channel and the responses channel, and
+//! both are passed to [Engine::start].
 //!
 //! ```text
 //!                  peer A                                              peer B
@@ -51,7 +51,19 @@
 //!
 //! A response is matched by its commitment and its sender, not by the request it answers. A
 //! recipient's first response to a collection is collected even when it answers a request sent
-//! before the last cancel. Requests that need distinct responses must have distinct commitments.
+//! before the last cancel:
+//!
+//! ```text
+//! commands        send(c: X)              cancel(c)   send(c: X)
+//!                 |                       |           |
+//! collection      +=======================+           +==================================
+//! answer to 1st         X ------------------------------------> 1
+//! answer to 2nd                                             X ------------> .
+//! ignored as                                                            duplicate
+//! ```
+//!
+//! Each arrow runs from the time X answers a send to the time its response arrives. Requests that
+//! need distinct responses must have distinct commitments.
 //!
 //! # Delivery
 //!
@@ -69,8 +81,8 @@
 //! # Invalid Messages
 //!
 //! A peer that sends a request or response the engine cannot decode is blocked through
-//! [Config::blocker]. All peers must therefore use the same request and response types on these
-//! channels, with codec configurations that accept each other's messages.
+//! [Config::blocker]. All peers must therefore use the same request and response types, with
+//! codec configurations that accept each other's messages.
 //!
 //! # Serving Requests
 //!
@@ -260,7 +272,7 @@ mod tests {
     }
 
     /// Reads how often the engine labelled with `public_key` counted `status` in `family`. A
-    /// status that was never counted has no line and reads as zero.
+    /// status that was never counted reads as zero.
     fn engine_count(
         context: &deterministic::Context,
         family: &str,
@@ -802,7 +814,7 @@ mod tests {
                 MockHandler::dummy(),
             );
 
-            // A request that reaches no peer leaves nothing to track.
+            // A request that reaches no peer starts no collection.
             for recipients in [Recipients::All, Recipients::Some(Vec::new())] {
                 let request = Request { id: 1, data: 1 };
                 assert_eq!(mailbox.send(recipients, request), Feedback::Ok);
@@ -849,7 +861,7 @@ mod tests {
             );
             engine.start((Failing::<PublicKey>::new(), request_receiver), responses);
 
-            // A request that never left is not tracked.
+            // A request that reaches no peer starts no collection.
             let request = Request { id: 1, data: 1 };
             assert_eq!(
                 mailbox.send(Recipients::One(peers[1].clone()), request),
@@ -1011,8 +1023,7 @@ mod tests {
                 },
             }
 
-            // An honest peer can answer a request whose collection was cancelled and restarted
-            // without it, so an unsolicited response is ignored and its sender is not blocked.
+            // Unsolicited responses can be honest, so they do not block their sender.
             assert!(oracle.blocked().await.unwrap().is_empty());
 
             // The recipient's response is collected and the other peer's response is dropped.
@@ -1340,8 +1351,8 @@ mod tests {
                 handler,
             );
 
-            // Peer 1 declines request 1 and observes the dropped responder before request 2
-            // arrives.
+            // Peer 1 declines request 1, and its engine handles the dropped responder before
+            // request 2 arrives.
             assert_eq!(
                 mailbox0.send(
                     Recipients::One(peers[1].clone()),
@@ -1403,7 +1414,7 @@ mod tests {
                 })
                 .collect();
 
-            // Both sends are queued before either response can arrive.
+            // Both sends are enqueued before either response can arrive.
             let request = Request { id: 4, data: 4 };
             for peer in &peers[1..] {
                 assert_eq!(
@@ -1412,7 +1423,7 @@ mod tests {
                 );
             }
 
-            // Responders from both sends are collected under one commitment.
+            // The responders to both sends are collected in one collection.
             let first = monitor_out.recv().await.unwrap();
             let second = monitor_out.recv().await.unwrap();
             assert_eq!((first.count, second.count), (1, 2));
@@ -1428,12 +1439,14 @@ mod tests {
     fn test_resend_after_cancel_restarts_collection() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            // Peer 0 originates, and peer 1 serves.
+            // Link peers 0 and 1.
             let (mut oracle, schemes, peers, connections) =
                 setup_network_and_peers(&context, &[0, 1]).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
+
+            // Peer 0 originates, and peer 1 serves.
             let scheme = schemes.next().unwrap();
             let (monitor, mut monitor_out) = MockMonitor::new();
             let mut mailbox0 = setup_and_spawn_engine(
@@ -1503,7 +1516,7 @@ mod tests {
             );
             let (_raw_requests, (mut raw, _raw_response_receiver)) = connections.next().unwrap();
 
-            // Unsolicited responses neither create tracked state nor block their sender.
+            // Unsolicited responses neither start a collection nor block their sender.
             for id in [7, 8, 9] {
                 raw.send(
                     Recipients::One(peers[0].clone()),
@@ -1532,8 +1545,8 @@ mod tests {
             }
             assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 2);
 
-            // Cancelling an unknown commitment changes nothing, and cancelling a tracked one
-            // releases it.
+            // Cancelling an unknown commitment changes nothing, and cancelling a sent one ends its
+            // collection.
             let unknown = Request { id: 3, data: 0 }.commitment();
             assert_eq!(mailbox0.cancel(unknown), Feedback::Ok);
             assert_eq!(
@@ -1561,7 +1574,7 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             let mut connections = connections.into_iter();
 
-            // Peer 0 runs the engine, and peer 1 speaks the wire format directly.
+            // Peer 0 runs the engine, and peer 1 is a raw peer.
             let scheme = schemes.into_iter().next().unwrap();
             let (monitor, mut monitor_out) = MockMonitor::new();
             let mut mailbox0 = setup_and_spawn_engine(
@@ -1615,7 +1628,7 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             let mut connections = connections.into_iter();
 
-            // Peer 0 sends through recording senders, and peer 1 is a raw client.
+            // Peer 0 sends through recording senders, and peer 1 is a raw peer.
             let ((_request_sender, requests_in), (_response_sender, responses_in)) =
                 connections.next().unwrap();
             let ((mut raw_requests, _raw_request_receiver), _raw_responses) =
@@ -1685,7 +1698,7 @@ mod tests {
             let ((_raw_request_sender, mut raw_requests), _raw_responses) =
                 connections.next().unwrap();
 
-            // Give peer 0 a one-slot inbox and fill it before its engine starts.
+            // Give peer 0 a one-slot inbox.
             let (engine, mut mailbox) = Engine::new(
                 context
                     .child("engine")
@@ -1701,6 +1714,8 @@ mod tests {
                     response_codec_config: (),
                 },
             );
+
+            // Before the engine starts, fill the inbox and cancel a request that waits behind it.
             let kept = Request { id: 1, data: 1 };
             let cancelled = Request { id: 2, data: 2 };
             assert_eq!(
@@ -1714,12 +1729,12 @@ mod tests {
             assert_eq!(mailbox.cancel(cancelled.commitment()), Feedback::Backoff);
             engine.start(connection.0, connection.1);
 
-            // Only the request that was not cancelled reaches the wire, and only it is tracked.
+            // Only the request that was not cancelled reaches the wire and starts a collection.
             let (_, bytes) = raw_requests.recv().await.unwrap();
             assert_eq!(bytes, kept.encode().as_ref());
             select! {
                 _ = raw_requests.recv() => {
-                    panic!("a cancelled queued request must not be sent");
+                    panic!("a request cancelled while it waits behind the inbox must not be sent");
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {},
             }
@@ -1746,6 +1761,8 @@ mod tests {
                 .register(channel, TEST_QUOTA)
                 .await
                 .unwrap();
+
+            // The engine stops as soon as it starts, and its mailbox then reports it closed.
             let (engine, mut mailbox) = Engine::new(
                 context
                     .child("engine")
@@ -1765,7 +1782,7 @@ mod tests {
             engine
                 .start(connection.0, connection.1)
                 .await
-                .expect("engine must stop once a network receiver closes");
+                .expect("an engine must stop once a network receiver closes");
             assert_eq!(
                 mailbox.cancel(Request { id: 1, data: 1 }.commitment()),
                 Feedback::Closed
@@ -2135,6 +2152,7 @@ mod tests {
 
     #[test_traced]
     fn test_resend_over_lossy_links_collects_every_peer() {
+        // Every seed collects every peer, and a replay of the seed ends in the same state.
         for seed in 0..5 {
             assert_eq!(
                 collect_over_lossy_links(seed),
@@ -2156,7 +2174,6 @@ mod tests {
     /// A handler and monitor that log their calls in the order the engine makes them.
     #[derive(Clone)]
     struct Ordered {
-        /// Receives each call in the order the engine makes it.
         calls: mpsc::UnboundedSender<Call>,
     }
 
@@ -2183,7 +2200,7 @@ mod tests {
     fn test_waiting_response_is_handled_before_waiting_request() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            // Peer 0 runs the engine, and peer 1 speaks the wire format directly.
+            // Peer 0 runs the engine, and peer 1 is a raw peer.
             let (mut oracle, _, peers, connections) =
                 setup_network_and_peers(&context, &[0, 1]).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2192,8 +2209,7 @@ mod tests {
             let ((mut raw_requests, _raw_request_receiver), (mut raw_responses, _raw_receiver)) =
                 connections.next().unwrap();
 
-            // Peer 0 enqueues a request to peer 1, and a request and a response from peer 1 both
-            // wait for peer 0's engine to start.
+            // Peer 0's handler and monitor log each call its engine makes.
             let (calls, mut observed) = mpsc::unbounded_channel();
             let ordered = Ordered { calls };
             let (engine, mut mailbox) = Engine::new(
@@ -2211,6 +2227,9 @@ mod tests {
                     response_codec_config: (),
                 },
             );
+
+            // Peer 0 enqueues a request to peer 1, and a request and a response from peer 1 both
+            // wait for peer 0's engine to start.
             assert_eq!(
                 mailbox.send(
                     Recipients::One(peers[1].clone()),
@@ -2319,7 +2338,7 @@ mod tests {
             let (_raw_requests2, (mut raw_responses2, _raw_receiver2)) =
                 connections.next().unwrap();
 
-            // Peer 0 may send each peer one request per second.
+            // Peer 0's engine may send each peer one request per second.
             let requests = oracle
                 .control(peers[0].clone())
                 .register(0, Quota::per_second(NZU32!(1)))
@@ -2405,11 +2424,12 @@ mod tests {
             let connection = connections.into_iter().next().unwrap();
             let handle = engine.start(connection.0, connection.1);
 
-            // The engine stops with its mailbox still held and its receivers still open.
+            // The engine stops while its mailbox is held and its receivers are open, and its
+            // mailbox then reports it closed.
             context.child("stopper").stop(0, None).await.unwrap();
             handle
                 .await
-                .expect("engine must stop once its context is stopped");
+                .expect("an engine must stop once its context is stopped");
             assert_eq!(
                 mailbox.cancel(Request { id: 1, data: 1 }.commitment()),
                 Feedback::Closed
