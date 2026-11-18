@@ -7,9 +7,8 @@
 //! [Monitor](crate::Monitor). As a handler it passes each request it receives to its
 //! [Handler](crate::Handler) and returns any response to the peer that sent the request.
 //!
-//! Requests and responses travel on two different p2p channels, the requests channel and the
-//! responses channel. Every peer must assign them the same way, and both are passed to
-//! [Engine::start].
+//! Requests and responses share the p2p channel passed to [Engine::start], and the engine handles
+//! them in the order they arrive.
 //!
 //! ```text
 //!                  peer A                                              peer B
@@ -18,11 +17,9 @@
 //!          |                     |                            |                      |
 //!          |--- send ----------->|                            |                      |
 //!          |                     |--- request --------------->|                      |
-//!          |                     |    (requests channel)      |                      |
 //!          |                     |                            |--- process --------->|
 //!          |                     |                            |<-- response ---------|
 //!          |                     |<-- response ---------------|                      |
-//!          |                     |    (responses channel)     |                      |
 //!          |<-- collected -------|                            |                      |
 //! ```
 //!
@@ -73,18 +70,19 @@
 //! skipped and is not added to the collection, and a request sent to no recipient starts no
 //! collection. The application is not told which recipients were skipped.
 //!
-//! A response is lost when the network drops it, for example when the peer that requested it is
-//! over its rate limit on the responses channel. The responses channel's quota should therefore
-//! allow the rate and the bursts at which a handler answers one peer.
+//! The channel's quota applies separately to what the engine sends a peer and to what it receives
+//! from that peer, and requests and responses count against it together. A response to a peer over
+//! the send limit is dropped. The quota should therefore allow the combined rate and bursts of the
+//! requests and the responses that one peer sends another.
 //!
 //! The engine has no timeouts and no retries. The application retries a request by sending it
 //! again, and it must cancel the commitment once it needs no more responses.
 //!
 //! # Invalid Messages
 //!
-//! A peer that sends a request or response the engine cannot decode is blocked through
-//! [Config::blocker]. All peers must therefore use the same request and response types, with
-//! codec configurations that accept each other's messages.
+//! A peer that sends a message the engine cannot decode is blocked through [Config::blocker]. All
+//! peers must therefore use the same request and response types, with codec configurations that
+//! accept each other's messages.
 //!
 //! # Serving Requests
 //!
@@ -117,21 +115,20 @@
 //! # Message Sizes
 //!
 //! ```text
-//! Request, sent on the requests channel:
-//! +------------------------+
-//! | request (encoded size) |
-//! +------------------------+
+//! Request (tag 0):
+//! +---------+------------------------+
+//! | tag (1) | request (encoded size) |
+//! +---------+------------------------+
 //!
-//! Response, sent on the responses channel:
-//! +-------------------------+
-//! | response (encoded size) |
-//! +-------------------------+
+//! Response (tag 1):
+//! +---------+-------------------------+
+//! | tag (1) | response (encoded size) |
+//! +---------+-------------------------+
 //! ```
 //!
-//! Each payload the engine sends is the encoding of one request from its [Mailbox] or one response
-//! from its [Handler](crate::Handler). The engine adds no framing, so each request and each
-//! response must fit the configured `max_message_size` of the network that carries its channel,
-//! less the subchannel prefix on a [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
+//! The tag adds one byte to the encoding of each request and response. Every message must fit the
+//! configured `max_message_size` of the network that carries the channel, less the subchannel
+//! prefix on a [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
 
 mod config;
 pub use config::Config;
@@ -139,6 +136,7 @@ mod engine;
 pub use engine::Engine;
 mod ingress;
 pub use ingress::Mailbox;
+mod wire;
 
 #[cfg(test)]
 mod mocks;
@@ -153,10 +151,11 @@ mod tests {
             sender::{Failing, Recording},
             types::{Request, Response},
         },
+        wire,
     };
     use crate::{Handler, Monitor, Originator};
     use commonware_actor::Feedback;
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, FixedSize as _};
     use commonware_cryptography::{
         Committable, Signer,
         ed25519::{PrivateKey, PublicKey},
@@ -172,10 +171,7 @@ mod tests {
         telemetry::metrics::{count_running_tasks, status::Status},
     };
     use commonware_utils::{
-        NZU32, NZUsize,
-        channel::{fallible::OneshotExt as _, mpsc, oneshot},
-        ordered::Set,
-        probability,
+        NZU32, NZUsize, channel::fallible::OneshotExt as _, ordered::Set, probability,
     };
     use rstest::rstest;
     use std::{collections::HashSet, num::NonZeroUsize, time::Duration};
@@ -195,6 +191,15 @@ mod tests {
         success_rate: probability!(1.0),
     };
 
+    /// The sender and receiver of a peer's channel.
+    type Channel = (
+        Sender<PublicKey, deterministic::Context>,
+        Receiver<PublicKey>,
+    );
+
+    /// A message on the channel between test peers.
+    type Message = wire::Message<Request, Response>;
+
     async fn setup_network_and_peers(
         context: &deterministic::Context,
         peer_seeds: &[u64],
@@ -202,16 +207,7 @@ mod tests {
         Oracle<PublicKey, deterministic::Context>,
         Vec<PrivateKey>,
         Vec<PublicKey>,
-        Vec<(
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-        )>,
+        Vec<Channel>,
     ) {
         let (network, oracle) = Network::new(
             context.child("network"),
@@ -232,10 +228,12 @@ mod tests {
 
         let mut connections = Vec::new();
         for peer in &peers {
-            let control = oracle.control(peer.clone());
-            let (sender1, receiver1) = control.register(0, TEST_QUOTA).await.unwrap();
-            let (sender2, receiver2) = control.register(1, TEST_QUOTA).await.unwrap();
-            connections.push(((sender1, receiver1), (sender2, receiver2)));
+            let channel = oracle
+                .control(peer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            connections.push(channel);
         }
         oracle
             .manager()
@@ -261,15 +259,15 @@ mod tests {
             .unwrap();
     }
 
-    /// Reads gauge `name` exported by the engine labelled with `public_key`.
-    fn engine_gauge(context: &deterministic::Context, name: &str, public_key: &PublicKey) -> i64 {
+    /// Reads the metric exported as `name` by the engine labelled with `public_key`.
+    fn engine_metric(context: &deterministic::Context, name: &str, public_key: &PublicKey) -> i64 {
         let prefix = format!("engine_{name}{{");
         let label = format!("public_key=\"{public_key}\"");
         let encoded = context.encode();
         let line = encoded
             .lines()
             .find(|line| line.starts_with(&prefix) && line.contains(&label))
-            .unwrap_or_else(|| panic!("gauge {name} must be exported for {public_key}"));
+            .unwrap_or_else(|| panic!("metric {name} must be exported for {public_key}"));
         line.rsplit(' ').next().unwrap().parse().unwrap()
     }
 
@@ -330,21 +328,11 @@ mod tests {
     }
 
     /// Starts an engine for `signer` on `connection` and returns its mailbox.
-    #[allow(clippy::type_complexity)]
     fn setup_and_spawn_engine(
         context: &deterministic::Context,
         blocker: impl Blocker<PublicKey = PublicKey>,
         signer: impl Signer<PublicKey = PublicKey>,
-        connection: (
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-        ),
+        connection: Channel,
         monitor: impl Monitor<PublicKey = PublicKey, Response = Response>,
         handler: impl Handler<PublicKey = PublicKey, Request = Request, Response = Response>,
     ) -> Mailbox<PublicKey, Request> {
@@ -355,7 +343,7 @@ mod tests {
                 .with_attribute("public_key", &public_key),
             config(blocker, monitor, handler),
         );
-        engine.start(connection.0, connection.1);
+        engine.start(connection);
 
         mailbox
     }
@@ -374,30 +362,24 @@ mod tests {
 
             // Setup peer 1
             let scheme = schemes.next().unwrap();
-            let conn = connections.next().unwrap();
-            let req_conn = conn.0;
-            let res_conn = conn.1;
             let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
-                (req_conn, res_conn),
+                connections.next().unwrap(),
                 mon,
                 MockHandler::dummy(),
             );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
-            let conn = connections.next().unwrap();
-            let req_conn = conn.0;
-            let res_conn = conn.1;
             let (handler, mut handler_out) = MockHandler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
-                (req_conn, res_conn),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler,
             );
@@ -438,30 +420,24 @@ mod tests {
 
             // Setup peer 1
             let scheme = schemes.next().unwrap();
-            let conn = connections.next().unwrap();
-            let req_conn = conn.0;
-            let res_conn = conn.1;
             let (mon, mut mon_out) = MockMonitor::new();
             let mut mailbox = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
-                (req_conn, res_conn),
+                connections.next().unwrap(),
                 mon,
                 MockHandler::dummy(),
             );
 
             // Setup peer 2
             let scheme = schemes.next().unwrap();
-            let conn = connections.next().unwrap();
-            let req_conn = conn.0;
-            let res_conn = conn.1;
             let (handler, _) = MockHandler::new(true);
             let _mailbox = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
-                (req_conn, res_conn),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler,
             );
@@ -504,45 +480,36 @@ mod tests {
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
-            let conn1 = connections.next().unwrap();
-            let req_conn1 = conn1.0;
-            let res_conn1 = conn1.1;
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
-                (req_conn1, res_conn1),
+                connections.next().unwrap(),
                 mon1,
                 MockHandler::dummy(),
             );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
-            let conn2 = connections.next().unwrap();
-            let req_conn2 = conn2.0;
-            let res_conn2 = conn2.1;
             let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
-                (req_conn2, res_conn2),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler2,
             );
 
             // Setup peer 3
             let scheme3 = schemes.next().unwrap();
-            let conn3 = connections.next().unwrap();
-            let req_conn3 = conn3.0;
-            let res_conn3 = conn3.1;
             let (handler3, _) = MockHandler::new(true);
             let _mailbox3 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme3.public_key()),
                 scheme3,
-                (req_conn3, res_conn3),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler3,
             );
@@ -592,30 +559,24 @@ mod tests {
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
-            let conn1 = connections.next().unwrap();
-            let req_conn1 = conn1.0;
-            let res_conn1 = conn1.1;
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
-                (req_conn1, res_conn1),
+                connections.next().unwrap(),
                 mon1,
                 MockHandler::dummy(),
             );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
-            let conn2 = connections.next().unwrap();
-            let req_conn2 = conn2.0;
-            let res_conn2 = conn2.1;
             let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
-                (req_conn2, res_conn2),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler2,
             );
@@ -674,24 +635,18 @@ mod tests {
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
-            let conn1 = connections.next().unwrap();
-            let req_conn1 = conn1.0;
-            let res_conn1 = conn1.1;
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
-                (req_conn1, res_conn1),
+                connections.next().unwrap(),
                 mon1,
                 MockHandler::dummy(),
             );
 
             // Setup peer 2
             let scheme2 = schemes.next().unwrap();
-            let conn2 = connections.next().unwrap();
-            let req_conn2 = conn2.0;
-            let res_conn2 = conn2.1;
             let (mut handler2, _) = MockHandler::new(false);
             handler2.set_response(10, Response { id: 10, result: 20 });
             handler2.set_response(20, Response { id: 20, result: 40 });
@@ -699,7 +654,7 @@ mod tests {
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
-                (req_conn2, res_conn2),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler2,
             );
@@ -755,30 +710,24 @@ mod tests {
 
             // Setup peer 1
             let scheme1 = schemes.next().unwrap();
-            let conn1 = connections.next().unwrap();
-            let req_conn1 = conn1.0;
-            let res_conn1 = conn1.1;
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
-                (req_conn1, res_conn1),
+                connections.next().unwrap(),
                 mon1,
                 MockHandler::dummy(),
             );
 
             // Setup peer 2 with handler that doesn't respond
             let scheme2 = schemes.next().unwrap();
-            let conn2 = connections.next().unwrap();
-            let req_conn2 = conn2.0;
-            let res_conn2 = conn2.1;
             let (handler2, mut handler_out2) = MockHandler::new(false);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
-                (req_conn2, res_conn2),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler2,
             );
@@ -839,7 +788,7 @@ mod tests {
                 engine_count(&context, "send", Status::Dropped, &peers[0]),
                 1
             );
-            assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 0);
+            assert_eq!(engine_metric(&context, "outstanding", &peers[0]), 0);
         });
     }
 
@@ -853,10 +802,9 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             let mut connections = connections.into_iter();
 
-            // Peer 0's request sender is closed, and peer 1 is a raw peer.
-            let ((_request_sender, request_receiver), responses) = connections.next().unwrap();
-            let (_raw_requests, (mut raw_responses, _raw_response_receiver)) =
-                connections.next().unwrap();
+            // Peer 0's sender is closed, and peer 1 is a raw peer.
+            let (_sender, receiver) = connections.next().unwrap();
+            let (mut raw, _raw_receiver) = connections.next().unwrap();
             let public_key = schemes[0].public_key();
             let (monitor, mut monitor_out) = MockMonitor::new();
             let (engine, mut mailbox) = Engine::new(
@@ -865,7 +813,7 @@ mod tests {
                     .with_attribute("public_key", &public_key),
                 config(oracle.control(public_key), monitor, MockHandler::dummy()),
             );
-            engine.start((Failing::<PublicKey>::new(), request_receiver), responses);
+            engine.start((Failing::<PublicKey>::new(), receiver));
 
             // A request sent to no peer starts no collection.
             let request = Request { id: 1, data: 1 };
@@ -878,12 +826,12 @@ mod tests {
                 engine_count(&context, "send", Status::Dropped, &peers[0]),
                 1
             );
-            assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 0);
+            assert_eq!(engine_metric(&context, "outstanding", &peers[0]), 0);
 
             // A response from the intended recipient is not collected.
-            raw_responses.send(
+            raw.send(
                 Recipients::One(peers[0].clone()),
-                Response { id: 1, result: 2 }.encode(),
+                Message::Response(Response { id: 1, result: 2 }).encode(),
                 false,
             );
             select! {
@@ -910,9 +858,7 @@ mod tests {
 
             // Setup peer 1
             let scheme = schemes.next().unwrap();
-            let conn = connections.next().unwrap();
-            let (sender1, receiver1) = conn.0; // Request channel
-            let (sender2, receiver2) = conn.1; // Response channel
+            let connection = connections.next().unwrap();
             let public_key = scheme.public_key();
             let (engine, mut mailbox) = Engine::new(
                 context
@@ -926,7 +872,7 @@ mod tests {
             );
 
             // Start engine
-            let handle = engine.start((sender1, receiver1), (sender2, receiver2));
+            let handle = engine.start(connection);
 
             // Stop the engine
             handle.abort();
@@ -957,37 +903,30 @@ mod tests {
 
             // Setup peer 1 (originator)
             let scheme1 = schemes.next().unwrap();
-            let conn1 = connections.next().unwrap();
-            let req_conn1 = conn1.0;
-            let res_conn1 = conn1.1;
             let (mon1, mut mon_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme1.public_key()),
                 scheme1,
-                (req_conn1, res_conn1),
+                connections.next().unwrap(),
                 mon1,
                 MockHandler::dummy(),
             );
 
             // Setup peer 2 (legitimate responder)
             let scheme2 = schemes.next().unwrap();
-            let conn2 = connections.next().unwrap();
-            let req_conn2 = conn2.0;
-            let res_conn2 = conn2.1;
             let (handler2, _) = MockHandler::new(true);
             let _mailbox2 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme2.public_key()),
                 scheme2,
-                (req_conn2, res_conn2),
+                connections.next().unwrap(),
                 MockMonitor::dummy(),
                 handler2,
             );
 
             // Setup peer 3 (will respond with same commitment as peer 2's request)
-            let conn3 = connections.next().unwrap();
-            let mut res_conn3 = conn3.1;
+            let (mut sender3, _receiver3) = connections.next().unwrap();
 
             // Send request from peer 1 to peer 2 (collector records the in-flight request)
             let request_to_peer2 = Request { id: 42, data: 42 };
@@ -998,9 +937,9 @@ mod tests {
 
             // Send a response from peer 3 to peer 1
             let response_to_peer1 = Response { id: 42, result: 72 };
-            res_conn3.0.send(
+            sender3.send(
                 Recipients::One(peers[0].clone()),
-                response_to_peer1.encode(),
+                Message::Response(response_to_peer1).encode(),
                 true,
             );
 
@@ -1041,21 +980,11 @@ mod tests {
 
     /// Starts an engine with a responding mock handler for each scheme and returns their mailboxes
     /// and handles.
-    #[allow(clippy::type_complexity)]
     fn spawn_engines_with_handles(
         engine_context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         schemes: Vec<PrivateKey>,
-        connections: Vec<(
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-            (
-                Sender<PublicKey, deterministic::Context>,
-                Receiver<PublicKey>,
-            ),
-        )>,
+        connections: Vec<Channel>,
     ) -> (
         Vec<Mailbox<PublicKey, Request>>,
         Vec<commonware_runtime::Handle<()>>,
@@ -1071,7 +1000,7 @@ mod tests {
                 ctx,
                 config(oracle.control(scheme.public_key()), mon, handler),
             );
-            handles.push(engine.start(conn.0, conn.1));
+            handles.push(engine.start(conn));
             mailboxes.push(mailbox);
         }
 
@@ -1185,7 +1114,7 @@ mod tests {
                     MockHandler::dummy(),
                 ),
             );
-            let handle = engine.start(conn.0, conn.1);
+            let handle = engine.start(conn);
 
             drop(mailbox);
             handle
@@ -1194,8 +1123,27 @@ mod tests {
         });
     }
 
+    /// The engine blocks a peer that sends a message it cannot decode, counts the message as
+    /// invalid, and keeps serving other peers and collecting from them.
+    #[rstest]
+    // The payload is empty.
+    #[case::empty(Vec::new())]
+    // The tag marks neither a request nor a response.
+    #[case::unknown_tag([&[2][..], &Request { id: 1, data: 1 }.encode()[..]].concat())]
+    // A request tag is followed by a body one byte short of a request.
+    #[case::malformed_request(
+        Message::Request(Request { id: 1, data: 1 }).encode()[..Request::SIZE].to_vec()
+    )]
+    // A response tag is followed by a body one byte short of a response.
+    #[case::malformed_response(
+        Message::Response(Response { id: 1, result: 2 }).encode()[..Response::SIZE].to_vec()
+    )]
+    // A valid request is followed by one extra byte.
+    #[case::trailing_byte(
+        [&Message::Request(Request { id: 1, data: 1 }).encode()[..], &[0][..]].concat()
+    )]
     #[test_traced]
-    fn test_invalid_request_blocks_sender_and_engine_keeps_serving() {
+    fn test_invalid_message_blocks_sender_and_engine_keeps_working(#[case] payload: Vec<u8>) {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             // Link peer 0 to peers 1 and 2.
@@ -1206,19 +1154,20 @@ mod tests {
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
-            // Peer 0 serves, peer 1 originates, and peer 2 is a raw attacker.
+            // Peers 0 and 1 both serve and originate, and peer 2 is a raw peer.
             let scheme = schemes.next().unwrap();
             let (handler, mut handler_out) = MockHandler::new(true);
-            let _mailbox0 = setup_and_spawn_engine(
+            let (monitor, mut monitor_out) = MockMonitor::new();
+            let mut mailbox0 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.next().unwrap(),
-                MockMonitor::dummy(),
+                monitor,
                 handler,
             );
             let scheme = schemes.next().unwrap();
-            let (monitor, mut monitor_out) = MockMonitor::new();
+            let (monitor, mut monitor_out1) = MockMonitor::new();
             let mut mailbox1 = setup_and_spawn_engine(
                 &context,
                 oracle.control(scheme.public_key()),
@@ -1227,16 +1176,15 @@ mod tests {
                 monitor,
                 MockHandler::dummy(),
             );
-            let ((mut attacker, _attacker_requests), _attacker_responses) =
-                connections.next().unwrap();
+            let (mut attacker, _attacker_receiver) = connections.next().unwrap();
 
-            // Bytes that do not decode as a request block the attacker.
-            attacker.send(Recipients::One(peers[0].clone()), vec![0xFF], false);
+            // The message blocks peer 2 and is counted as invalid.
+            attacker.send(Recipients::One(peers[0].clone()), payload, false);
             wait_for_block(&context, &oracle, &peers[0], &peers[2]).await;
             assert_eq!(oracle.blocked().await.unwrap().len(), 1);
+            assert_eq!(engine_metric(&context, "invalid_total", &peers[0]), 1);
 
-            // The engine keeps serving honest peers, and the invalid request never reached the
-            // handler.
+            // Peer 0 keeps serving peer 1, and its handler's first request is peer 1's.
             let request = Request { id: 1, data: 1 };
             assert_eq!(
                 mailbox1.send(Recipients::One(peers[0].clone()), request.clone()),
@@ -1245,62 +1193,26 @@ mod tests {
             let processed = handler_out.recv().await.unwrap();
             assert_eq!(processed.origin, peers[1]);
             assert_eq!(processed.request, request);
-            let collected = monitor_out.recv().await.unwrap();
+            let collected = monitor_out1.recv().await.unwrap();
             assert_eq!(collected.handler, peers[0]);
             assert_eq!(collected.count, 1);
-        });
-    }
 
-    #[test_traced]
-    fn test_invalid_response_blocks_sender_and_engine_keeps_collecting() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|context| async move {
-            // Link peer 0 to peers 1 and 2.
-            let (mut oracle, schemes, peers, connections) =
-                setup_network_and_peers(&context, &[0, 1, 2]).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            let mut schemes = schemes.into_iter();
-            let mut connections = connections.into_iter();
-
-            // Peer 0 originates, peer 1 serves, and peer 2 is a raw attacker.
-            let scheme = schemes.next().unwrap();
-            let (monitor, mut monitor_out) = MockMonitor::new();
-            let mut mailbox0 = setup_and_spawn_engine(
-                &context,
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.next().unwrap(),
-                monitor,
-                MockHandler::dummy(),
-            );
-            let scheme = schemes.next().unwrap();
-            let _mailbox1 = setup_and_spawn_engine(
-                &context,
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.next().unwrap(),
-                MockMonitor::dummy(),
-                MockHandler::dummy(),
-            );
-            let (_attacker_requests, (mut attacker, _attacker_responses)) =
-                connections.next().unwrap();
-
-            // Bytes that do not decode as a response block the attacker.
-            attacker.send(Recipients::One(peers[0].clone()), vec![0xFF], false);
-            wait_for_block(&context, &oracle, &peers[0], &peers[2]).await;
-            assert_eq!(oracle.blocked().await.unwrap().len(), 1);
-
-            // The engine keeps collecting from honest peers.
-            let request = Request { id: 1, data: 1 };
+            // Peer 0 keeps collecting from peer 1, and its monitor's first response is peer 1's.
             assert_eq!(
-                mailbox0.send(Recipients::One(peers[1].clone()), request),
+                mailbox0.send(
+                    Recipients::One(peers[1].clone()),
+                    Request { id: 2, data: 2 }
+                ),
                 Feedback::Ok
             );
             let collected = monitor_out.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]);
-            assert_eq!(collected.response, Response { id: 1, result: 2 });
+            assert_eq!(collected.response, Response { id: 2, result: 4 });
             assert_eq!(collected.count, 1);
+
+            // Peer 0's handler and monitor saw nothing else.
+            assert!(handler_out.try_recv().is_err());
+            assert!(monitor_out.try_recv().is_err());
         });
     }
 
@@ -1516,13 +1428,13 @@ mod tests {
                 MockMonitor::dummy(),
                 MockHandler::dummy(),
             );
-            let (_raw_requests, (mut raw, _raw_response_receiver)) = connections.next().unwrap();
+            let (mut raw, _raw_receiver) = connections.next().unwrap();
 
             // Unsolicited responses neither start a collection nor block their sender.
             for id in [7, 8, 9] {
                 raw.send(
                     Recipients::One(peers[0].clone()),
-                    Response { id, result: 0 }.encode(),
+                    Message::Response(Response { id, result: 0 }).encode(),
                     false,
                 );
             }
@@ -1531,7 +1443,7 @@ mod tests {
                 engine_count(&context, "collect", Status::Dropped, &peers[0]),
                 3
             );
-            assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 0);
+            assert_eq!(engine_metric(&context, "outstanding", &peers[0]), 0);
             assert!(oracle.blocked().await.unwrap().is_empty());
 
             // Sent commitments are outstanding until cancelled, including one that a peer
@@ -1545,7 +1457,7 @@ mod tests {
             for _ in 0..2 {
                 assert_eq!(monitor_out.recv().await.unwrap().handler, peers[1]);
             }
-            assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 2);
+            assert_eq!(engine_metric(&context, "outstanding", &peers[0]), 2);
 
             // Cancelling an unknown commitment changes nothing, and cancelling a sent one ends its
             // collection.
@@ -1556,18 +1468,18 @@ mod tests {
                 Feedback::Ok
             );
             context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 1);
+            assert_eq!(engine_metric(&context, "outstanding", &peers[0]), 1);
             assert_eq!(
                 mailbox0.cancel(Request { id: 2, data: 0 }.commitment()),
                 Feedback::Ok
             );
             context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 0);
+            assert_eq!(engine_metric(&context, "outstanding", &peers[0]), 0);
         });
     }
 
     #[test_traced]
-    fn test_wire_payloads_are_bare_encodings() {
+    fn test_wire_payloads_are_tagged_encodings() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             // Link peers 0 and 1.
@@ -1587,35 +1499,45 @@ mod tests {
                 monitor,
                 MockHandler::dummy(),
             );
-            let (
-                (mut raw_request_sender, mut raw_requests),
-                (mut raw_responses, mut raw_response_receiver),
-            ) = connections.next().unwrap();
+            let (mut raw, mut raw_receiver) = connections.next().unwrap();
 
-            // A request travels as its bare encoding.
+            // A request travels as the byte 0 followed by its encoding.
             let request = Request { id: 9, data: 3 };
             assert_eq!(
                 mailbox0.send(Recipients::One(peers[1].clone()), request.clone()),
                 Feedback::Ok
             );
-            let (origin, bytes) = raw_requests.recv().await.unwrap();
+            let (origin, bytes) = raw_receiver.recv().await.unwrap();
             assert_eq!(origin, peers[0]);
-            assert_eq!(bytes, request.encode().as_ref());
+            assert_eq!(bytes, [&[0][..], &request.encode()[..]].concat().as_slice());
 
-            // A bare response encoding is collected.
+            // The byte 1 followed by a response's encoding is collected.
             let response = Response { id: 9, result: 6 };
-            raw_responses.send(Recipients::One(peers[0].clone()), response.encode(), false);
+            raw.send(
+                Recipients::One(peers[0].clone()),
+                [&[1][..], &response.encode()[..]].concat(),
+                false,
+            );
             let collected = monitor_out.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]);
             assert_eq!(collected.response, response);
             assert_eq!(collected.count, 1);
 
-            // A bare request encoding is served, and the response travels as its bare encoding.
+            // The byte 0 followed by a request's encoding is served, and the response travels as
+            // the byte 1 followed by its encoding.
             let request = Request { id: 4, data: 5 };
-            raw_request_sender.send(Recipients::One(peers[0].clone()), request.encode(), false);
-            let (origin, bytes) = raw_response_receiver.recv().await.unwrap();
+            raw.send(
+                Recipients::One(peers[0].clone()),
+                [&[0][..], &request.encode()[..]].concat(),
+                false,
+            );
+            let (origin, bytes) = raw_receiver.recv().await.unwrap();
             assert_eq!(origin, peers[0]);
-            assert_eq!(bytes, Response { id: 4, result: 10 }.encode().as_ref());
+            let response = Response { id: 4, result: 10 };
+            assert_eq!(
+                bytes,
+                [&[1][..], &response.encode()[..]].concat().as_slice()
+            );
         });
     }
 
@@ -1639,13 +1561,10 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             let mut connections = connections.into_iter();
 
-            // Peer 0 sends through recording senders, and peer 1 is a raw peer.
-            let ((_request_sender, requests_in), (_response_sender, responses_in)) =
-                connections.next().unwrap();
-            let ((mut raw_requests, _raw_request_receiver), _raw_responses) =
-                connections.next().unwrap();
-            let (request_sender, sent_requests) = Recording::<PublicKey>::new();
-            let (response_sender, sent_responses) = Recording::<PublicKey>::new();
+            // Peer 0 sends through a recording sender, and peer 1 is a raw peer.
+            let (_sender, receiver) = connections.next().unwrap();
+            let (mut raw, _raw_receiver) = connections.next().unwrap();
+            let (sender, sent) = Recording::<PublicKey>::new();
             let (engine, mut mailbox) = Engine::new(
                 context
                     .child("engine")
@@ -1660,10 +1579,7 @@ mod tests {
                     )
                 },
             );
-            engine.start(
-                (request_sender, requests_in),
-                (response_sender, responses_in),
-            );
+            engine.start((sender, receiver));
 
             // A request carries the request priority.
             assert_eq!(
@@ -1675,21 +1591,21 @@ mod tests {
             );
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(
-                sent_requests.lock().as_slice(),
-                [(Recipients::One(peer), priority)]
+                sent.lock().as_slice(),
+                [(Recipients::One(peer), 0, priority)]
                     if peer == &peers[1] && *priority == priority_requests
             ));
 
             // A response carries the response priority and goes only to the requester.
-            raw_requests.send(
+            raw.send(
                 Recipients::One(peers[0].clone()),
-                Request { id: 2, data: 2 }.encode(),
+                Message::Request(Request { id: 2, data: 2 }).encode(),
                 true,
             );
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(
-                sent_responses.lock().as_slice(),
-                [(Recipients::One(peer), priority)]
+                sent.lock().as_slice(),
+                [_, (Recipients::One(peer), 1, priority)]
                     if peer == &peers[1] && *priority == priority_responses
             ));
         });
@@ -1705,8 +1621,7 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             let mut connections = connections.into_iter();
             let connection = connections.next().unwrap();
-            let ((_raw_request_sender, mut raw_requests), _raw_responses) =
-                connections.next().unwrap();
+            let (_raw_sender, mut raw_receiver) = connections.next().unwrap();
 
             // Give peer 0 a one-slot inbox.
             let (engine, mut mailbox) = Engine::new(
@@ -1735,18 +1650,18 @@ mod tests {
                 Feedback::Backoff
             );
             assert_eq!(mailbox.cancel(cancelled.commitment()), Feedback::Backoff);
-            engine.start(connection.0, connection.1);
+            engine.start(connection);
 
             // Only the request that was not cancelled is sent, and it starts a collection.
-            let (_, bytes) = raw_requests.recv().await.unwrap();
-            assert_eq!(bytes, kept.encode().as_ref());
+            let (_, bytes) = raw_receiver.recv().await.unwrap();
+            assert_eq!(bytes, Message::Request(kept).encode().as_ref());
             select! {
-                _ = raw_requests.recv() => {
+                _ = raw_receiver.recv() => {
                     panic!("a request cancelled while it waits behind the inbox must not be sent");
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {},
             }
-            assert_eq!(engine_gauge(&context, "outstanding", &peers[0]), 1);
+            assert_eq!(engine_metric(&context, "outstanding", &peers[0]), 1);
         });
     }
 
@@ -1754,7 +1669,7 @@ mod tests {
     fn test_dropped_mailbox_stops_engine_after_enqueued_commands() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            // Peer 0's engine has a one-slot inbox and a requests channel that records each send.
+            // Peer 0's engine has a one-slot inbox and a sender that records each send.
             let (oracle, _, peers, _) = setup_network_and_peers(&context, &[0, 1, 2]).await;
             let (engine, mut mailbox) = Engine::new(
                 context
@@ -1769,8 +1684,8 @@ mod tests {
                     )
                 },
             );
-            let (request_sender, sent_requests) = Recording::<PublicKey>::new();
-            let (_, requests_in) = inert_channel(&peers);
+            let (sender, sent) = Recording::<PublicKey>::new();
+            let (_, receiver) = inert_channel(&peers);
 
             // Before the engine starts, enqueue a request for peer 1 into the inbox and a request
             // for peer 2 behind it, then drop the only mailbox.
@@ -1787,34 +1702,29 @@ mod tests {
 
             // The engine sends both requests in order and then stops.
             engine
-                .start((request_sender, requests_in), inert_channel(&peers))
+                .start((sender, receiver))
                 .await
                 .expect("an engine must stop once every mailbox is dropped");
             assert!(matches!(
-                sent_requests.lock().as_slice(),
-                [(Recipients::One(first), _), (Recipients::One(second), _)]
+                sent.lock().as_slice(),
+                [(Recipients::One(first), 0, _), (Recipients::One(second), 0, _)]
                     if first == &peers[1] && second == &peers[2]
             ));
         });
     }
 
-    /// An engine whose receiver on `channel` is already closed stops as soon as it starts.
-    #[rstest]
-    // The requests channel is closed.
-    #[case::requests(0)]
-    // The responses channel is closed.
-    #[case::responses(1)]
+    /// An engine whose receiver is already closed stops as soon as it starts.
     #[test_traced]
-    fn test_closed_network_receiver_stops_engine(#[case] channel: u64) {
+    fn test_closed_network_receiver_stops_engine() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             // A single peer with no links.
             let (oracle, _, peers, connections) = setup_network_and_peers(&context, &[0]).await;
 
-            // Registering a channel again closes the receiver the engine starts with.
+            // Registering the channel again closes the receiver the engine starts with.
             let _replacement = oracle
                 .control(peers[0].clone())
-                .register(channel, TEST_QUOTA)
+                .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
 
@@ -1831,9 +1741,9 @@ mod tests {
             );
             let connection = connections.into_iter().next().unwrap();
             engine
-                .start(connection.0, connection.1)
+                .start(connection)
                 .await
-                .expect("an engine must stop once a network receiver closes");
+                .expect("an engine must stop once its network receiver closes");
             assert_eq!(
                 mailbox.cancel(Request { id: 1, data: 1 }.commitment()),
                 Feedback::Closed
@@ -1916,13 +1826,12 @@ mod tests {
     fn test_metrics_count_each_outcome() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            // Link peer 0 to every other peer, and peer 1 to peer 3.
+            // Link peer 0 to every other peer.
             let (mut oracle, schemes, peers, connections) =
                 setup_network_and_peers(&context, &[0, 1, 2, 3]).await;
             for peer in 1..peers.len() {
                 add_link(&mut oracle, LINK.clone(), &peers, 0, peer).await;
             }
-            add_link(&mut oracle, LINK.clone(), &peers, 1, 3).await;
             let mut schemes = schemes.into_iter();
             let mut connections = connections.into_iter();
 
@@ -1950,7 +1859,7 @@ mod tests {
                 handler,
             );
             let public_key = schemes.next().unwrap().public_key();
-            let (requests, (_response_sender, response_receiver)) = connections.next().unwrap();
+            let (_sender, receiver) = connections.next().unwrap();
             let (handler, mut silenced_out) = MockHandler::new(true);
             let (engine, _mailbox2) = Engine::new(
                 context
@@ -1958,8 +1867,8 @@ mod tests {
                     .with_attribute("public_key", &public_key),
                 config(oracle.control(public_key), MockMonitor::dummy(), handler),
             );
-            engine.start(requests, (Failing::<PublicKey>::new(), response_receiver));
-            let ((mut raw_requests, _), (mut raw_responses, _)) = connections.next().unwrap();
+            engine.start((Failing::<PublicKey>::new(), receiver));
+            let (mut raw, _raw_receiver) = connections.next().unwrap();
 
             // A request sent to no peer is dropped, and a request that is sent, served, and
             // collected is a success in each of those counts.
@@ -2028,9 +1937,9 @@ mod tests {
             );
 
             // A response that matches no collection is dropped.
-            raw_responses.send(
+            raw.send(
                 Recipients::One(peers[0].clone()),
-                Response { id: 8, result: 0 }.encode(),
+                Message::Response(Response { id: 8, result: 0 }).encode(),
                 false,
             );
             context.sleep(Duration::from_millis(100)).await;
@@ -2039,19 +1948,10 @@ mod tests {
                 1
             );
 
-            // Bytes that do not decode are invalid on either channel.
-            raw_requests.send(Recipients::One(peers[1].clone()), vec![0xFF], false);
-            wait_for_block(&context, &oracle, &peers[1], &peers[3]).await;
-            assert_eq!(
-                engine_count(&context, "serve", Status::Invalid, &peers[1]),
-                1
-            );
-            raw_responses.send(Recipients::One(peers[0].clone()), vec![0xFF], false);
+            // Bytes that do not decode are invalid.
+            raw.send(Recipients::One(peers[0].clone()), vec![0xFF], false);
             wait_for_block(&context, &oracle, &peers[0], &peers[3]).await;
-            assert_eq!(
-                engine_count(&context, "collect", Status::Invalid, &peers[0]),
-                1
-            );
+            assert_eq!(engine_metric(&context, "invalid_total", &peers[0]), 1);
         });
     }
 
@@ -2099,7 +1999,7 @@ mod tests {
             let (second, second_responder) = deferred.recv().await.unwrap();
             assert_eq!((first.id, second.id), (1, 2));
             context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(engine_gauge(&context, "serve_processing", &peers[1]), 2);
+            assert_eq!(engine_metric(&context, "serve_processing", &peers[1]), 2);
 
             // A response sent later is collected.
             let response = Response { id: 2, result: 7 };
@@ -2107,12 +2007,12 @@ mod tests {
             let collected = monitor_out.recv().await.unwrap();
             assert_eq!(collected.handler, peers[1]);
             assert_eq!(collected.response, response);
-            assert_eq!(engine_gauge(&context, "serve_processing", &peers[1]), 1);
+            assert_eq!(engine_metric(&context, "serve_processing", &peers[1]), 1);
 
             // A dropped responder releases its request without a response.
             drop(first_responder);
             context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(engine_gauge(&context, "serve_processing", &peers[1]), 0);
+            assert_eq!(engine_metric(&context, "serve_processing", &peers[1]), 0);
             assert_eq!(
                 engine_count(&context, "serve", Status::Failure, &peers[1]),
                 1
@@ -2207,92 +2107,6 @@ mod tests {
         );
     }
 
-    /// A call the engine made on an [Ordered] mock.
-    #[derive(Debug, PartialEq, Eq)]
-    enum Call {
-        /// The engine called [Handler::process].
-        Process,
-        /// The engine called [Monitor::collected].
-        Collected,
-    }
-
-    /// A handler and monitor that log their calls in the order the engine makes them.
-    #[derive(Clone)]
-    struct Ordered {
-        calls: mpsc::UnboundedSender<Call>,
-    }
-
-    impl Handler for Ordered {
-        type PublicKey = PublicKey;
-        type Request = Request;
-        type Response = Response;
-
-        fn process(&mut self, _: PublicKey, _: Request) -> oneshot::Receiver<Response> {
-            let _ = self.calls.send(Call::Process);
-            oneshot::channel().1
-        }
-    }
-
-    impl Monitor for Ordered {
-        type PublicKey = PublicKey;
-        type Response = Response;
-
-        fn collected(&mut self, _: PublicKey, _: Response, _: usize) {
-            let _ = self.calls.send(Call::Collected);
-        }
-    }
-
-    #[test_traced]
-    fn test_waiting_response_is_handled_before_waiting_request() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|context| async move {
-            // Peer 0 runs the engine, and peer 1 is a raw peer.
-            let (mut oracle, _, peers, connections) =
-                setup_network_and_peers(&context, &[0, 1]).await;
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-            let mut connections = connections.into_iter();
-            let connection = connections.next().unwrap();
-            let ((mut raw_requests, _raw_request_receiver), (mut raw_responses, _raw_receiver)) =
-                connections.next().unwrap();
-
-            // Peer 0's handler and monitor log each call its engine makes.
-            let (calls, mut observed) = mpsc::unbounded_channel();
-            let ordered = Ordered { calls };
-            let (engine, mut mailbox) = Engine::new(
-                context
-                    .child("engine")
-                    .with_attribute("public_key", &peers[0]),
-                config(oracle.control(peers[0].clone()), ordered.clone(), ordered),
-            );
-
-            // Peer 0 enqueues a request to peer 1, and a request and a response from peer 1 both
-            // wait for peer 0's engine to start.
-            assert_eq!(
-                mailbox.send(
-                    Recipients::One(peers[1].clone()),
-                    Request { id: 1, data: 1 }
-                ),
-                Feedback::Ok
-            );
-            raw_requests.send(
-                Recipients::One(peers[0].clone()),
-                Request { id: 2, data: 2 }.encode(),
-                false,
-            );
-            raw_responses.send(
-                Recipients::One(peers[0].clone()),
-                Response { id: 1, result: 2 }.encode(),
-                false,
-            );
-            context.sleep(Duration::from_millis(100)).await;
-            engine.start(connection.0, connection.1);
-
-            // The engine collects the response before it serves the request.
-            assert_eq!(observed.recv().await.unwrap(), Call::Collected);
-            assert_eq!(observed.recv().await.unwrap(), Call::Process);
-        });
-    }
-
     #[test_traced]
     fn test_response_to_request_sent_before_cancel_is_collected_after_resend() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -2368,15 +2182,13 @@ mod tests {
                 setup_network_and_peers(&context, &[0, 1, 2]).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            let mut connections = connections.into_iter();
-            let (_, responses) = connections.next().unwrap();
-            let (_raw_requests1, (mut raw_responses1, _raw_receiver1)) =
-                connections.next().unwrap();
-            let (_raw_requests2, (mut raw_responses2, _raw_receiver2)) =
-                connections.next().unwrap();
+            let mut connections = connections.into_iter().skip(1);
+            let (mut raw1, _raw_receiver1) = connections.next().unwrap();
+            let (mut raw2, _raw_receiver2) = connections.next().unwrap();
 
-            // Peer 0's engine may send each peer one request per second.
-            let requests = oracle
+            // Peer 0 registers the channel again so that its engine may send each peer one
+            // message per second.
+            let channel = oracle
                 .control(peers[0].clone())
                 .register(0, Quota::per_second(NZU32!(1)))
                 .await
@@ -2392,7 +2204,7 @@ mod tests {
                     MockHandler::dummy(),
                 ),
             );
-            engine.start(requests, responses);
+            engine.start(channel);
 
             // The first request spends peer 1's quota, so the second is sent to peer 2 alone.
             assert_eq!(
@@ -2417,14 +2229,14 @@ mod tests {
 
             // The skipped recipient's response is ignored, and the other recipient's response
             // is collected.
-            let response = Response { id: 2, result: 0 };
-            raw_responses1.send(Recipients::One(peers[0].clone()), response.encode(), false);
+            let response = Message::Response(Response { id: 2, result: 0 }).encode();
+            raw1.send(Recipients::One(peers[0].clone()), response.clone(), false);
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
                 engine_count(&context, "collect", Status::Dropped, &peers[0]),
                 1
             );
-            raw_responses2.send(Recipients::One(peers[0].clone()), response.encode(), false);
+            raw2.send(Recipients::One(peers[0].clone()), response, false);
             let collected = monitor_out.recv().await.unwrap();
             assert_eq!(collected.handler, peers[2]);
             assert_eq!(collected.count, 1);
@@ -2432,11 +2244,109 @@ mod tests {
         });
     }
 
+    /// The requests and responses an engine sends to one peer count against the same send limit.
+    #[rstest]
+    // A request spends the limit, so the response to that peer's request is dropped.
+    #[case::request_first(true)]
+    // A response spends the limit, so a request to that peer is skipped and starts no collection.
+    #[case::response_first(false)]
+    #[test_traced]
+    fn test_requests_and_responses_share_send_limit(#[case] request_first: bool) {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // Peer 0 runs the engine, and peer 1 is a raw peer.
+            let (mut oracle, _, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            let (mut raw, mut raw_receiver) = connections.into_iter().nth(1).unwrap();
+
+            // Peer 0 registers the channel again so that its engine may send each peer one
+            // message per second.
+            let channel = oracle
+                .control(peers[0].clone())
+                .register(0, Quota::per_second(NZU32!(1)))
+                .await
+                .unwrap();
+            let (handler, mut handler_out) = MockHandler::new(true);
+            let (engine, mut mailbox) = Engine::new(
+                context
+                    .child("engine")
+                    .with_attribute("public_key", &peers[0]),
+                config(
+                    oracle.control(peers[0].clone()),
+                    MockMonitor::dummy(),
+                    handler,
+                ),
+            );
+            engine.start(channel);
+
+            // Within one second, peer 0 enqueues a request to peer 1 and its handler answers a
+            // request from peer 1, in the order of the case.
+            let request = Request { id: 1, data: 1 };
+            let asked = Request { id: 2, data: 2 };
+            for originate in [request_first, !request_first] {
+                if originate {
+                    assert_eq!(
+                        mailbox.send(Recipients::One(peers[1].clone()), request.clone()),
+                        Feedback::Ok
+                    );
+                } else {
+                    raw.send(
+                        Recipients::One(peers[0].clone()),
+                        Message::Request(asked.clone()).encode(),
+                        false,
+                    );
+                    assert!(handler_out.recv().await.unwrap().responded);
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+
+            // Only the first message reaches peer 1, even once the limit allows another.
+            let first = if request_first {
+                Message::Request(request)
+            } else {
+                Message::Response(Response { id: 2, result: 4 })
+            };
+            let (_, bytes) = raw_receiver.recv().await.unwrap();
+            assert_eq!(bytes, first.encode().as_ref());
+            select! {
+                _ = raw_receiver.recv() => {
+                    panic!("a message over the send limit must not be sent");
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {},
+            }
+
+            // The second message is counted as dropped, and a skipped request starts no
+            // collection.
+            let (sent, answered) = if request_first { (1, 0) } else { (0, 1) };
+            assert_eq!(
+                engine_count(&context, "send", Status::Success, &peers[0]),
+                sent
+            );
+            assert_eq!(
+                engine_count(&context, "send", Status::Dropped, &peers[0]),
+                1 - sent
+            );
+            assert_eq!(
+                engine_count(&context, "serve", Status::Success, &peers[0]),
+                answered
+            );
+            assert_eq!(
+                engine_count(&context, "serve", Status::Dropped, &peers[0]),
+                1 - answered
+            );
+            assert_eq!(
+                engine_metric(&context, "outstanding", &peers[0]),
+                i64::from(request_first)
+            );
+        });
+    }
+
     #[test_traced]
     fn test_stopped_context_stops_engine() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
-            // A single peer starts an engine on channels that never close.
+            // A single peer starts an engine on a channel that never closes.
             let (oracle, _, peers, _) = setup_network_and_peers(&context, &[0]).await;
             let (engine, mut mailbox) = Engine::new(
                 context
@@ -2448,9 +2358,9 @@ mod tests {
                     MockHandler::dummy(),
                 ),
             );
-            let handle = engine.start(inert_channel(&peers), inert_channel(&peers));
+            let handle = engine.start(inert_channel(&peers));
 
-            // The engine stops while it waits for work with its mailbox held and its receivers
+            // The engine stops while it waits for work with its mailbox held and its receiver
             // open, and its mailbox then reports it closed.
             context.sleep(Duration::from_millis(100)).await;
             context.child("stopper").stop(0, None).await.unwrap();

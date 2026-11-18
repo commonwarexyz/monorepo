@@ -1885,8 +1885,10 @@ dependencies = [
 name = "commonware-collector"
 version = "2026.10.0"
 dependencies = [
+ "arbitrary",
  "commonware-actor",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",

@@ -4,8 +4,12 @@
 //!
 //! Every honest peer runs an engine whose handler and monitor record what they observe. One more
 //! peer, the Byzantine peer, runs no engine. It injects well-formed, malformed, unsolicited, and
-//! duplicate traffic on both channels and answers the requests it receives. The input may also
+//! duplicate traffic on the channel and answers the requests it receives. The input may also
 //! leave one engine unable to send responses.
+//!
+//! The harness builds and parses messages itself from the layout the crate documents, where a tag
+//! byte of 0 opens a request and 1 opens a response. Every message an engine sends the Byzantine
+//! peer must parse, so the harness also checks that layout.
 //!
 //! After every operation the harness checks what the monitors collected and what the handlers
 //! processed against a model of what the originators asked for. Every mailbox call must be
@@ -17,10 +21,10 @@
 //! responses.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_actor::Feedback;
+use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
-    Buf, Decode, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt,
-    ReadRangeExt, Write,
+    Buf, Copying, Decode, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read,
+    ReadExt, ReadRangeExt, Write,
 };
 use commonware_collector::{
     Handler, Monitor, Originator,
@@ -32,11 +36,11 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_p2p::{
-    Receiver as _, Recipients, Sender as _,
+    CheckedSender, LimitedSender, Receiver, Recipients, Sender,
     simulated::{Config as NetworkConfig, Link, Network},
 };
 use commonware_runtime::{
-    BufMut, Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
+    BufMut, Clock, IoBufs, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
     telemetry::metrics::status::Status,
 };
 use commonware_utils::{
@@ -51,14 +55,17 @@ use std::{
     collections::{HashMap, HashSet},
     num::NonZeroUsize,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
-/// Channel carrying requests.
-const REQUESTS: u64 = 0;
+/// Channel carrying requests and responses.
+const CHANNEL: u64 = 0;
 
-/// Channel carrying responses.
-const RESPONSES: u64 = 1;
+/// Tag that opens a request on the channel.
+const REQUEST: u8 = 0;
+
+/// Tag that opens a response on the channel.
+const RESPONSE: u8 = 1;
 
 /// Rate limit high enough that honest traffic is never limited.
 const QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
@@ -66,8 +73,7 @@ const QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 /// Longest payload either codec accepts.
 const MAX_DATA: usize = 32;
 
-/// Longest arbitrary byte string the Byzantine peer sends. It stays far below the network's
-/// maximum message size.
+/// Longest message the Byzantine peer sends. It stays far below the network's maximum message size.
 const MAX_RAW: usize = 1024;
 
 /// Number of distinct request ids. It is small so that commitments collide often.
@@ -168,6 +174,66 @@ impl Committable for FuzzResponse {
 
     fn commitment(&self) -> Digest {
         commitment(self.id)
+    }
+}
+
+/// A message on the channel.
+enum Message {
+    Request(FuzzRequest),
+    Response(FuzzResponse),
+}
+
+/// Parses `bytes` as a tag followed by the encoding it names. Returns `None` when the tag is
+/// missing or unknown, when the body does not decode, or when bytes trail the body.
+fn decode(bytes: &[u8]) -> Option<Message> {
+    let (tag, body) = bytes.split_first()?;
+    match *tag {
+        REQUEST => FuzzRequest::decode_cfg(Copying(body), &codec())
+            .ok()
+            .map(Message::Request),
+        RESPONSE => FuzzResponse::decode_cfg(Copying(body), &codec())
+            .ok()
+            .map(Message::Response),
+        _ => None,
+    }
+}
+
+/// A sender that reports each response as not accepted without sending it and forwards every
+/// other message to the sender it wraps.
+#[derive(Clone)]
+struct Muted<S>(S);
+
+impl<S: LimitedSender> LimitedSender for Muted<S> {
+    type PublicKey = S::PublicKey;
+    type Checked<'a>
+        = CheckedMuted<S::Checked<'a>>
+    where
+        Self: 'a;
+
+    fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        self.0.check(recipients).map(CheckedMuted)
+    }
+}
+
+/// The [CheckedSender] of a [Muted] sender.
+struct CheckedMuted<C>(C);
+
+impl<C: CheckedSender> CheckedSender for CheckedMuted<C> {
+    type PublicKey = C::PublicKey;
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        self.0.recipients()
+    }
+
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+        let message = message.into();
+        if message.chunk_at(0).and_then(<[u8]>::first) == Some(&RESPONSE) {
+            return Unreliable::new(Feedback::Closed);
+        }
+        self.0.send(message, priority)
     }
 }
 
@@ -278,13 +344,29 @@ enum Target {
     Some(Vec<u8>),
 }
 
-/// Bytes the Byzantine peer sends.
+/// Body the Byzantine peer sends under a tag.
 #[derive(Debug, Arbitrary)]
 enum Payload {
-    /// A well-formed message with a colliding id.
+    /// A well-formed body with a colliding id.
     Valid { id: u8, data: Vec<u8> },
     /// Arbitrary bytes that may or may not decode.
     Raw(Vec<u8>),
+}
+
+impl Payload {
+    /// Returns the message carrying this body under `tag`. A valid body is the encoding of what
+    /// `valid` builds from its id and data.
+    fn tagged<T: Encode>(self, tag: u8, valid: impl FnOnce(u64, Vec<u8>) -> T) -> Vec<u8> {
+        match self {
+            Self::Valid { id, mut data } => {
+                data.truncate(MAX_DATA);
+                (tag, valid(u64::from(id) % ID_SPACE, data))
+                    .encode()
+                    .to_vec()
+            }
+            Self::Raw(body) => std::iter::once(tag).chain(body).collect(),
+        }
+    }
 }
 
 /// One step of a run.
@@ -309,12 +391,15 @@ enum Operation {
     Cancel { from: u8, id: u8 },
     /// Every held responder answers.
     Release,
-    /// The Byzantine peer sends bytes on the requests channel.
+    /// The Byzantine peer sends a body under the request tag.
     ByzantineRequest { to: u8, payload: Payload },
-    /// The Byzantine peer sends bytes on the responses channel.
+    /// The Byzantine peer sends a body under the response tag.
     ByzantineResponse { to: u8, payload: Payload },
-    /// The Byzantine peer answers each decodable request it has received since its last answer,
-    /// sending one to three copies.
+    /// The Byzantine peer sends arbitrary bytes with no tag added, so a message may be empty or
+    /// open with an unknown tag.
+    ByzantineBytes { to: u8, bytes: Vec<u8> },
+    /// The Byzantine peer answers each request it has received since its last answer, sending one
+    /// to three copies.
     ByzantineAnswer { copies: u8 },
     /// Simulated time passes.
     Sleep { ms: u16 },
@@ -392,6 +477,8 @@ struct Model {
     originators: Vec<Sent>,
     /// Decodable requests the Byzantine peer sent to each engine.
     byzantine_requests: Vec<Vec<FuzzRequest>>,
+    /// Number of responses each engine sent the Byzantine peer.
+    answered: Vec<usize>,
     /// Engines the Byzantine peer sent undecodable bytes to.
     expect_block: Vec<bool>,
     /// The engine that cannot send responses, if any.
@@ -491,6 +578,75 @@ impl Model {
             );
         }
     }
+
+    /// Drains the messages the Byzantine peer has received and returns each request with its
+    /// origin. Each request must be one its origin addressed to the Byzantine peer, and each
+    /// response must answer a request the Byzantine peer sent the engine it comes from.
+    fn drain(
+        &mut self,
+        receiver: &mut impl Receiver<PublicKey = PublicKey>,
+        peers: &[PublicKey],
+        byzantine: &PublicKey,
+    ) -> Vec<(PublicKey, FuzzRequest)> {
+        let mut requests = Vec::new();
+        while let Some(Ok((origin, bytes))) = receiver.recv().now_or_never() {
+            let index = peers
+                .iter()
+                .position(|peer| peer == &origin)
+                .expect("a message must come from an engine");
+            match decode(bytes.as_ref())
+                .expect("an engine must send a tag followed by the encoding it names")
+            {
+                // An engine sends the Byzantine peer only the requests its originator addressed
+                // to it.
+                Message::Request(request) => {
+                    assert!(
+                        self.originators[index]
+                            .sent
+                            .contains(&(byzantine.clone(), request.clone())),
+                        "the Byzantine peer must only receive requests their origin addressed to it"
+                    );
+                    requests.push((origin, request));
+                }
+
+                // Engines answer only the requester, so the Byzantine peer receives at most one
+                // response per decodable request it sent, and each one answers such a request.
+                Message::Response(response) => {
+                    self.answered[index] += 1;
+                    assert!(
+                        self.answered[index] <= self.byzantine_requests[index].len(),
+                        "an engine must only answer requests the Byzantine peer sent"
+                    );
+                    assert!(
+                        self.byzantine_requests[index]
+                            .iter()
+                            .any(|request| answer(request) == response),
+                        "an engine must send the Byzantine peer only the answers its handler gave"
+                    );
+                }
+            }
+        }
+        requests
+    }
+}
+
+/// Truncates `message` to [MAX_RAW] bytes and sends it from the Byzantine peer to the engine `to`
+/// picks. Records in `model` whether that engine may serve it or must block its sender.
+fn send_byzantine(
+    model: &mut Model,
+    sender: &mut impl Sender<PublicKey = PublicKey>,
+    peers: &[PublicKey],
+    to: u8,
+    mut message: Vec<u8>,
+) {
+    let to = usize::from(to) % peers.len();
+    message.truncate(MAX_RAW);
+    match decode(&message) {
+        Some(Message::Request(request)) => model.byzantine_requests[to].push(request),
+        Some(Message::Response(_)) => {}
+        None => model.expect_block[to] = true,
+    }
+    sender.send(Recipients::One(peers[to].clone()), message, false);
 }
 
 /// Asserts that a mailbox accepted a call. Every engine runs until the harness drops its
@@ -502,15 +658,15 @@ fn expect_running(feedback: Feedback) {
     );
 }
 
-/// Reads gauge `name` of the engine at `index` from the encoded `metrics`.
-fn gauge(metrics: &str, name: &str, index: usize) -> usize {
+/// Reads the metric exported as `name` by the engine at `index` from the encoded `metrics`.
+fn metric(metrics: &str, name: &str, index: usize) -> usize {
     let prefix = format!("engine_{name}{{");
     let label = format!("index=\"{index}\"");
     metrics
         .lines()
         .find(|line| line.starts_with(&prefix) && line.contains(&label))
         .and_then(|line| line.rsplit(' ').next()?.parse().ok())
-        .expect("every engine must export its gauges")
+        .expect("every engine must export its metrics")
 }
 
 /// Reads from the encoded `metrics` how often the engine at `index` counted `status` in `family`. A
@@ -592,7 +748,7 @@ fn fuzz(input: FuzzInput) {
             }
         }
 
-        // Start one engine per honest peer, and register the Byzantine peer's channels.
+        // Start one engine per honest peer, and register the Byzantine peer on the channel.
         let muted = input
             .muted
             .map(|index| peers[usize::from(index) % honest].clone());
@@ -600,13 +756,7 @@ fn fuzz(input: FuzzInput) {
         let mut mailboxes: Vec<Mailbox<PublicKey, FuzzRequest>> = Vec::new();
         for (index, peer) in peers.iter().enumerate() {
             let control = oracle.control(peer.clone());
-            let requests = control.register(REQUESTS, QUOTA).await.unwrap();
-            let mut responses = control.register(RESPONSES, QUOTA).await.unwrap();
-            if muted.as_ref() == Some(peer) {
-                // Registering the channel again closes the sender registered first, so this engine
-                // receives responses and cannot send them.
-                responses.1 = control.register(RESPONSES, QUOTA).await.unwrap().1;
-            }
+            let (sender, receiver) = control.register(CHANNEL, QUOTA).await.unwrap();
             let (engine, mailbox) = Engine::new(
                 context.child("engine").with_attribute("index", index),
                 Config {
@@ -626,19 +776,25 @@ fn fuzz(input: FuzzInput) {
                     response_codec_config: codec(),
                 },
             );
-            engine.start(requests, responses);
+
+            // `Muted` drops only responses, so the engine that cannot send responses still sends
+            // requests.
+            if muted.as_ref() == Some(peer) {
+                engine.start((Muted(sender), receiver));
+            } else {
+                engine.start((sender, receiver));
+            }
             mailboxes.push(mailbox);
         }
         let control = oracle.control(byzantine.clone());
-        let (mut byzantine_requests, mut byzantine_inbox) =
-            control.register(REQUESTS, QUOTA).await.unwrap();
-        let (mut byzantine_responses, mut byzantine_response_inbox) =
-            control.register(RESPONSES, QUOTA).await.unwrap();
+        let (mut byzantine_sender, mut byzantine_inbox) =
+            control.register(CHANNEL, QUOTA).await.unwrap();
 
         // The model starts with nothing sent, processed, or collected.
         let mut model = Model {
             originators: (0..honest).map(|_| Sent::default()).collect(),
             byzantine_requests: vec![Vec::new(); honest],
+            answered: vec![0; honest],
             expect_block: vec![false; honest],
             muted,
             collected: vec![0; honest],
@@ -720,59 +876,24 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
                 Operation::ByzantineRequest { to, payload } => {
-                    let to = usize::from(to) % honest;
-                    let bytes = match payload {
-                        Payload::Valid { id, mut data } => {
-                            data.truncate(MAX_DATA);
-                            FuzzRequest {
-                                id: u64::from(id) % ID_SPACE,
-                                data,
-                            }
-                            .encode()
-                            .to_vec()
-                        }
-                        Payload::Raw(mut bytes) => {
-                            bytes.truncate(MAX_RAW);
-                            bytes
-                        }
-                    };
-                    match FuzzRequest::decode_cfg(bytes.clone(), &codec()) {
-                        Ok(request) => model.byzantine_requests[to].push(request),
-                        Err(_) => model.expect_block[to] = true,
-                    }
-                    byzantine_requests.send(Recipients::One(peers[to].clone()), bytes, false);
+                    let message = payload.tagged(REQUEST, |id, data| FuzzRequest { id, data });
+                    send_byzantine(&mut model, &mut byzantine_sender, &peers, to, message);
                 }
                 Operation::ByzantineResponse { to, payload } => {
-                    let to = usize::from(to) % honest;
-                    let bytes = match payload {
-                        Payload::Valid { id, mut data } => {
-                            data.truncate(MAX_DATA);
-                            FuzzResponse {
-                                id: u64::from(id) % ID_SPACE,
-                                result: data,
-                            }
-                            .encode()
-                            .to_vec()
-                        }
-                        Payload::Raw(mut bytes) => {
-                            bytes.truncate(MAX_RAW);
-                            bytes
-                        }
-                    };
-                    if FuzzResponse::decode_cfg(bytes.clone(), &codec()).is_err() {
-                        model.expect_block[to] = true;
-                    }
-                    byzantine_responses.send(Recipients::One(peers[to].clone()), bytes, false);
+                    let message =
+                        payload.tagged(RESPONSE, |id, result| FuzzResponse { id, result });
+                    send_byzantine(&mut model, &mut byzantine_sender, &peers, to, message);
+                }
+                Operation::ByzantineBytes { to, bytes } => {
+                    send_byzantine(&mut model, &mut byzantine_sender, &peers, to, bytes);
                 }
                 Operation::ByzantineAnswer { copies } => {
-                    while let Some(Ok((origin, bytes))) = byzantine_inbox.recv().now_or_never() {
-                        let Ok(request) = FuzzRequest::decode_cfg(bytes, &codec()) else {
-                            continue;
-                        };
+                    let requests = model.drain(&mut byzantine_inbox, &peers, &byzantine);
+                    for (origin, request) in requests {
                         for _ in 0..=copies % 3 {
-                            byzantine_responses.send(
+                            byzantine_sender.send(
                                 Recipients::One(origin.clone()),
-                                answer(&request).encode(),
+                                (RESPONSE, answer(&request)).encode(),
                                 false,
                             );
                         }
@@ -794,20 +915,9 @@ fn fuzz(input: FuzzInput) {
             expect_running(mailbox.cancel(commitment(ID_SPACE)));
         }
 
-        // Engines answer only the requester, so the Byzantine peer receives at most one response
-        // per decodable request it sent.
-        let mut answered = vec![0usize; honest];
-        while let Some(Ok((origin, _))) = byzantine_response_inbox.recv().now_or_never() {
-            let index = peers
-                .iter()
-                .position(|peer| peer == &origin)
-                .expect("a response must come from an engine");
-            answered[index] += 1;
-            assert!(
-                answered[index] <= model.byzantine_requests[index].len(),
-                "an engine must only answer requests the Byzantine peer sent"
-            );
-        }
+        // Check every message the Byzantine peer has received since its last answer. The requests
+        // it received since then go unanswered.
+        model.drain(&mut byzantine_inbox, &peers, &byzantine);
 
         // Only undecodable bytes block, and only their sender.
         let blocked = oracle.blocked().await.unwrap();
@@ -837,7 +947,7 @@ fn fuzz(input: FuzzInput) {
         // Each engine is collecting exactly the commitments sent and not cancelled since.
         for (index, originator) in model.originators.iter().enumerate() {
             assert_eq!(
-                gauge(&metrics, "outstanding", index),
+                metric(&metrics, "outstanding", index),
                 originator.live.len(),
                 "outstanding commitments must match the model"
             );
@@ -853,7 +963,7 @@ fn fuzz(input: FuzzInput) {
                 .filter(|(holder, ..)| *holder == index)
                 .count();
             assert_eq!(
-                gauge(&metrics, "serve_processing", index),
+                metric(&metrics, "serve_processing", index),
                 held,
                 "pending requests must match the responders a handler holds"
             );
@@ -903,10 +1013,8 @@ fn fuzz(input: FuzzInput) {
             );
 
             // Undecodable bytes are counted as invalid, and nothing else is.
-            let invalid = count(&metrics, "serve", Status::Invalid, index)
-                + count(&metrics, "collect", Status::Invalid, index);
             assert_eq!(
-                invalid > 0,
+                metric(&metrics, "invalid_total", index) > 0,
                 model.expect_block[index],
                 "undecodable bytes, and only they, must be counted as invalid"
             );

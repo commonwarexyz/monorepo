@@ -15,6 +15,7 @@ documentation = "https://docs.rs/commonware-collector"
 workspace = true
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
 commonware-actor.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
@@ -25,6 +26,7 @@ commonware-utils.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 commonware-p2p = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 rstest.workspace = true
@@ -32,3 +34,13 @@ tracing-subscriber.workspace = true
 
 [lib]
 bench = false
+
+[features]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-p2p/arbitrary",
+	"commonware-runtime/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+]

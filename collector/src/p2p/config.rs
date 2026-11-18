@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 /// Configuration for an [Engine](super::Engine).
 #[derive(Clone)]
 pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
-    /// Blocks peers whose requests or responses fail to decode.
+    /// Blocks peers whose messages fail to decode.
     pub blocker: B,
 
     /// Receives each response the engine collects.

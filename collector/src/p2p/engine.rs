@@ -1,6 +1,7 @@
 use super::{
     Config,
     ingress::{Mailbox, Message},
+    wire,
 };
 use crate::{Handler, Monitor};
 use commonware_actor::mailbox;
@@ -11,7 +12,7 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender, utils::codec::wrap};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{
-        Gauge, GaugeExt, MetricsExt as _,
+        Counter, Gauge, GaugeExt, MetricsExt as _,
         status::{self, Status},
     },
 };
@@ -53,13 +54,14 @@ where
     // Sent requests by status. A request sent to at least one peer is a success and a request
     // sent to none is dropped.
     send: status::Counter,
-    // Received responses by status. A collected response is a success, an ignored response is
-    // dropped, and a response that fails to decode is invalid.
+    // Received responses by status. A collected response is a success and an ignored response is
+    // dropped.
     collect: status::Counter,
     // Received requests by status. A request is a success when its response is sent, a failure
-    // when the handler declines it, dropped when its response cannot be sent, and invalid when
-    // it fails to decode.
+    // when the handler declines it, and dropped when its response cannot be sent.
     serve: status::Counter,
+    // Received messages that failed to decode
+    invalid: Counter,
 }
 
 impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
@@ -86,6 +88,10 @@ where
         let send = context.family("send", "Number of sent requests by status");
         let collect = context.family("collect", "Number of received responses by status");
         let serve = context.family("serve", "Number of received requests by status");
+        let invalid = context.counter(
+            "invalid",
+            "Number of received messages that failed to decode",
+        );
 
         (
             Self {
@@ -104,30 +110,29 @@ where
                 send,
                 collect,
                 serve,
+                invalid,
             },
             Mailbox::new(tx),
         )
     }
 
-    /// Starts the engine and returns a handle that resolves once its context is stopped, either
+    /// Starts the engine and returns a handle that resolves once its context is stopped, the
     /// receiver closes, or every [Mailbox] has been dropped and the commands already enqueued have
     /// been handled. A peer that only serves requests must therefore keep its [Mailbox].
     pub fn start(
         mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        spawn_cell!(self.context, self.run(requests, responses))
+        spawn_cell!(self.context, self.run(network))
     }
 
-    async fn run(
-        mut self,
-        requests: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        responses: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) {
-        // Wrap channels
-        let (mut req_tx, mut req_rx) = wrap(self.request_codec_config, requests.0, requests.1);
-        let (mut res_tx, mut res_rx) = wrap(self.response_codec_config, responses.0, responses.1);
+    async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
+        // Wrap channel
+        let (mut sender, mut receiver) = wrap::<_, _, wire::Message<Rq, Rs>>(
+            (self.request_codec_config, self.response_codec_config),
+            network.0,
+            network.1,
+        );
 
         // Requests the handler has neither answered nor declined
         let mut processed: Pool<'_, (P, Result<Rs, oneshot::error::RecvError>)> = Pool::default();
@@ -152,7 +157,11 @@ where
                     recipients,
                 } => {
                     // Collect only from the peers the request was sent to
-                    let recipients = req_tx.send(recipients, request, self.priority_requests);
+                    let recipients = sender.send(
+                        recipients,
+                        wire::Message::Request(request),
+                        self.priority_requests,
+                    );
                     if recipients.is_empty() {
                         debug!(?commitment, "request sent to no peers");
                         self.send.inc(Status::Dropped);
@@ -178,9 +187,9 @@ where
                 };
 
                 // Send the response to the peer that sent the request
-                let sent = res_tx.send(
+                let sent = sender.send(
                     Recipients::One(peer.clone()),
-                    response,
+                    wire::Message::Response(response),
                     self.priority_responses,
                 );
                 if sent.is_empty() {
@@ -191,71 +200,55 @@ where
                 self.serve.inc(Status::Success);
             },
 
-            // Response from a remote handler
-            //
-            // Responses are polled before requests so that a stream of requests cannot starve
-            // this peer's own collections.
-            response = res_rx.recv() => {
-                // Error handling
-                let (peer, msg) = match response {
-                    Ok(r) => r,
-                    Err(err) => {
-                        error!(?err, "response receiver failed");
-                        break;
-                    }
-                };
-                let msg = match msg {
-                    Ok(msg) => msg,
-                    Err(err) => {
-                        self.collect.inc(Status::Invalid);
-                        commonware_p2p::block!(self.blocker, peer, ?err, "invalid response");
-                        continue;
-                    }
-                };
-
-                // Collect the first response from each peer the commitment was sent to
-                let mut status = self.collect.guard(Status::Dropped);
-                let commitment = msg.commitment();
-                let Some((sent, responded)) = self.tracked.get_mut(&commitment) else {
-                    debug!(?commitment, ?peer, "response for unknown commitment");
-                    continue;
-                };
-                if !sent.contains(&peer) {
-                    debug!(?commitment, ?peer, "never sent request");
-                    continue;
-                }
-                if !responded.insert(peer.clone()) {
-                    debug!(?commitment, ?peer, "duplicate response");
-                    continue;
-                }
-                status.set(Status::Success);
-
-                // Send the response to the monitor
-                self.monitor.collected(peer, msg, responded.len());
-            },
-
-            // Request from an originator
-            message = req_rx.recv() => {
+            // Message from the network
+            message = receiver.recv() => {
                 // Error handling
                 let (peer, msg) = match message {
                     Ok(r) => r,
                     Err(err) => {
-                        error!(?err, "request receiver failed");
+                        error!(?err, "receiver failed");
                         break;
                     }
                 };
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        self.serve.inc(Status::Invalid);
-                        commonware_p2p::block!(self.blocker, peer, ?err, "invalid request");
+                        self.invalid.inc();
+                        commonware_p2p::block!(self.blocker, peer, ?err, "invalid message");
                         continue;
                     }
                 };
 
-                // Handle the request
-                let response = self.handler.process(peer.clone(), msg);
-                processed.push(async move { (peer, response.await) });
+                match msg {
+                    // Request from an originator
+                    wire::Message::Request(request) => {
+                        let response = self.handler.process(peer.clone(), request);
+                        processed.push(async move { (peer, response.await) });
+                    }
+
+                    // Response from a remote handler
+                    wire::Message::Response(response) => {
+                        // Collect the first response from each peer the commitment was sent to
+                        let mut status = self.collect.guard(Status::Dropped);
+                        let commitment = response.commitment();
+                        let Some((sent, responded)) = self.tracked.get_mut(&commitment) else {
+                            debug!(?commitment, ?peer, "response for unknown commitment");
+                            continue;
+                        };
+                        if !sent.contains(&peer) {
+                            debug!(?commitment, ?peer, "never sent request");
+                            continue;
+                        }
+                        if !responded.insert(peer.clone()) {
+                            debug!(?commitment, ?peer, "duplicate response");
+                            continue;
+                        }
+                        status.set(Status::Success);
+
+                        // Send the response to the monitor
+                        self.monitor.collected(peer, response, responded.len());
+                    }
+                }
             },
         }
     }

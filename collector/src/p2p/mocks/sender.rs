@@ -1,6 +1,7 @@
 //! Mock sender implementations for testing.
 
 use commonware_actor::{Feedback, Unreliable};
+use commonware_codec::ReadExt as _;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
 use commonware_runtime::IoBufs;
@@ -50,11 +51,11 @@ impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
     }
 }
 
-/// Recipients and priority of each send made through a [Recording] sender.
-pub type Sent<P> = Arc<Mutex<Vec<(Recipients<P>, bool)>>>;
+/// Recipients, first payload byte, and priority of each send made through a [Recording] sender.
+pub type Sent<P> = Arc<Mutex<Vec<(Recipients<P>, u8, bool)>>>;
 
-/// A sender that records the recipients and priority of every send and reports each explicitly
-/// named recipient as sent to.
+/// A sender that records the recipients, first payload byte, and priority of every send and
+/// reports each explicitly named recipient as sent to.
 #[derive(Clone, Debug)]
 pub struct Recording<P: PublicKey> {
     sent: Sent<P>,
@@ -97,8 +98,10 @@ impl<P: PublicKey> CheckedSender for CheckedRecording<P> {
         }
     }
 
-    fn send(self, _message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
-        self.sent.lock().push((self.recipients, priority));
+    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+        let mut payload: IoBufs = message.into();
+        let first = u8::read(&mut payload).expect("a payload must not be empty");
+        self.sent.lock().push((self.recipients, first, priority));
         Unreliable::new(Feedback::Ok)
     }
 }
