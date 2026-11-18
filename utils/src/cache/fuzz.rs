@@ -16,12 +16,11 @@ enum Op {
 }
 
 impl Op {
-    fn arbitrary(u: &mut Unstructured<'_>, keys: u8) -> arbitrary::Result<Self> {
-        let [tag, key, low, high] = u.bytes(4)?.try_into().unwrap();
+    const fn from_bytes([tag, key, low, high]: [u8; 4], keys: u8) -> Self {
         let key = key % keys;
         let value = u16::from_le_bytes([low, high]);
         // Keep clears rare so most sequences can build up cache state.
-        Ok(match tag % 65 {
+        match tag % 65 {
             0..=7 => Self::Get(key),
             8..=15 => Self::Peek(key),
             16..=23 => Self::Put(key, value),
@@ -31,7 +30,7 @@ impl Op {
             48..=55 => Self::Remove(key),
             56..=63 => Self::Retain(key),
             _ => Self::Clear,
-        })
+        }
     }
 }
 
@@ -52,13 +51,13 @@ impl<const WIDE: bool> Plan<WIDE> {
 
 impl<const WIDE: bool> Arbitrary<'_> for Plan<WIDE> {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let (capacities, max_ops) = if WIDE { (20..=47, 511) } else { (1..=7, 255) };
-        let capacity = u.int_in_range(capacities)?;
+        let capacity = u.int_in_range(if WIDE { 20..=47 } else { 1..=7 })?;
         let prefill = u.arbitrary()?;
-        let len = u.int_in_range(0..=max_ops)?;
-        let ops = (0..len)
-            .map(|_| Op::arbitrary(u, Self::KEYS))
-            .collect::<arbitrary::Result<_>>()?;
+        let (ops, _) = u.bytes(u.len())?.as_chunks();
+        let ops = ops
+            .iter()
+            .map(|&op| Op::from_bytes(op, Self::KEYS))
+            .collect();
         Ok(Self {
             capacity,
             prefill,

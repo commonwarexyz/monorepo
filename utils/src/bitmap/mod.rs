@@ -1196,10 +1196,11 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(test, feature = "fuzz")) {
 
     impl arbitrary::Arbitrary<'_> for IsUnsetPlan {
         fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-            let len = u.int_in_range(1..=512usize)?;
-            let start = u.int_in_range(0..=512u64)?.min(len as u64);
-            let end = u.int_in_range(0..=512u64)?.max(start).min(len as u64);
-            let bits: Vec<_> = u.bytes(len)?.iter().map(|byte| byte & 1 == 1).collect();
+            let (start, end) = u.arbitrary::<(u64, u64)>()?;
+            let range = u.len() as u64 + 1;
+            let start = start % range;
+            let end = (end % range).max(start);
+            let bits = u.bytes(u.len())?.iter().map(|byte| byte & 1 == 1).collect();
             Ok(Self { bits, start, end })
         }
     }

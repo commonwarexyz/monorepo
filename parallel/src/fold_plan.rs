@@ -8,17 +8,13 @@ pub(super) fn parallel_strategy() -> Rayon {
     Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap()
 }
 
-const MAX_FOLD_INPUT_LEN: usize = 499;
-
-/// A bounded input for comparing fold and map operations.
+/// An input for comparing fold and map operations.
 #[derive(Debug)]
 pub struct Plan(Vec<i32>);
 
 impl Arbitrary<'_> for Plan {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let len = u.int_in_range(0..=MAX_FOLD_INPUT_LEN)?;
-        // Reject truncated input so minifuzz can retry with more bytes.
-        let (words, _) = u.bytes(len * size_of::<i32>())?.as_chunks();
+        let (words, _) = u.bytes(u.len())?.as_chunks();
         let data = words.iter().copied().map(i32::from_le_bytes).collect();
         Ok(Self(data))
     }
@@ -42,11 +38,11 @@ impl Plan {
 
     #[cfg(test)]
     pub(super) fn regressions() -> [Self; 3] {
-        // Exercise both length boundaries and wrapping arithmetic on every run.
+        // Exercise empty and large inputs, and wrapping arithmetic on every run.
         [
             Self(Vec::new()),
             Self(vec![i32::MAX, i32::MAX, i32::MIN]),
-            Self((1..=MAX_FOLD_INPUT_LEN as i32).collect()),
+            Self((1..=499).collect()),
         ]
     }
 
