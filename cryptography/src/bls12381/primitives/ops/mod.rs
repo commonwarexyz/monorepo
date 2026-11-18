@@ -447,6 +447,48 @@ mod tests {
         batch_verify_rejects_identity_signature::<MinSig>();
     }
 
+    // An identity public key or hashed message pairs to zero, which leaves e(-g, sig). That is not
+    // zero for a signature that is not the identity, so verification must fail.
+    fn verify_rejects_identity_public<V: Variant>() {
+        let (private, _) = keypair::<_, V>(&mut test_rng());
+        let namespace = b"test";
+        let message = b"message";
+        let signature = sign_message::<V>(&private, namespace, message);
+        let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
+        let identity = V::Public::zero();
+
+        assert!(matches!(
+            verify_hashed::<V>(&identity, &hm, &signature),
+            Err(Error::InvalidSignature)
+        ));
+        assert!(matches!(
+            verify_message::<V>(&identity, namespace, message, &signature),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_verify_rejects_identity_public() {
+        verify_rejects_identity_public::<MinPk>();
+        verify_rejects_identity_public::<MinSig>();
+    }
+
+    fn verify_hashed_rejects_identity_message<V: Variant>() {
+        let (private, public) = keypair::<_, V>(&mut test_rng());
+        let signature = sign_message::<V>(&private, b"test", b"message");
+
+        assert!(matches!(
+            verify_hashed::<V>(&public, &V::Signature::zero(), &signature),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_verify_hashed_rejects_identity_message() {
+        verify_hashed_rejects_identity_message::<MinPk>();
+        verify_hashed_rejects_identity_message::<MinSig>();
+    }
+
     fn parse_sign_vector(
         private_key: &str,
         msg: &str,

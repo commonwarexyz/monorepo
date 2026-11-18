@@ -416,6 +416,121 @@ mod tests {
         verify_hashed_rejects_identity_entry::<MinSig>();
     }
 
+    // An identity public key or hashed message pairs to zero, so an entry with one and a
+    // signature that is not the identity breaks the batch equation.
+    fn verify_hashed_rejects_identity_public<V: Variant>() {
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, _) = keypair::<_, V>(&mut rng);
+        let sig1 = sign_message::<V>(&private1, b"test", b"message 1");
+        let sig2 = sign_message::<V>(&private2, b"test", b"message 2");
+        let hm1 = hash_with_namespace::<V>(V::MESSAGE, b"test", b"message 1");
+        let hm2 = hash_with_namespace::<V>(V::MESSAGE, b"test", b"message 2");
+
+        assert!(matches!(
+            verify_hashed::<V>(
+                &mut rng,
+                &[public1, V::Public::zero()],
+                &[hm1, hm2],
+                &[sig1, sig2],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_identity_public() {
+        verify_hashed_rejects_identity_public::<MinPk>();
+        verify_hashed_rejects_identity_public::<MinSig>();
+    }
+
+    fn verify_hashed_rejects_identity_message<V: Variant>() {
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, public2) = keypair::<_, V>(&mut rng);
+        let sig1 = sign_message::<V>(&private1, b"test", b"message 1");
+        let sig2 = sign_message::<V>(&private2, b"test", b"message 2");
+        let hm1 = hash_with_namespace::<V>(V::MESSAGE, b"test", b"message 1");
+
+        assert!(matches!(
+            verify_hashed::<V>(
+                &mut rng,
+                &[public1, public2],
+                &[hm1, V::Signature::zero()],
+                &[sig1, sig2],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_batch_verify_rejects_identity_message() {
+        verify_hashed_rejects_identity_message::<MinPk>();
+        verify_hashed_rejects_identity_message::<MinSig>();
+    }
+
+    fn verify_same_message_detects_identity_public<V: Variant>() {
+        let mut rng = test_rng();
+        let (private1, public1) = keypair::<_, V>(&mut rng);
+        let (private2, _) = keypair::<_, V>(&mut rng);
+        let namespace = b"test";
+        let message = b"message";
+        let entries = [
+            (public1, sign_message::<V>(&private1, namespace, message)),
+            (
+                V::Public::zero(),
+                sign_message::<V>(&private2, namespace, message),
+            ),
+        ];
+
+        assert_eq!(
+            verify_same_message::<_, V, _>(
+                &mut rng,
+                namespace,
+                message,
+                non_empty![@entries.iter().copied()],
+                &Sequential,
+            ),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn test_verify_same_message_detects_identity_public() {
+        verify_same_message_detects_identity_public::<MinPk>();
+        verify_same_message_detects_identity_public::<MinSig>();
+    }
+
+    fn verify_same_signer_rejects_identity_public<V: Variant>() {
+        let mut rng = test_rng();
+        let (private, _) = keypair::<_, V>(&mut rng);
+        let namespace: &[u8] = b"test";
+        let message: &[u8] = b"message";
+        let entries = [(
+            namespace,
+            message,
+            sign_message::<V>(&private, namespace, message),
+        )];
+
+        assert!(matches!(
+            verify_same_signer::<_, V, _>(
+                &mut rng,
+                &V::Public::zero(),
+                non_empty![@entries.iter().copied()],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_verify_same_signer_rejects_identity_public() {
+        verify_same_signer_rejects_identity_public::<MinPk>();
+        verify_same_signer_rejects_identity_public::<MinSig>();
+    }
+
     fn verify_hashed_rejects_malleability<V: Variant>() {
         let mut rng = test_rng();
         let (private1, public1) = keypair::<_, V>(&mut rng);
