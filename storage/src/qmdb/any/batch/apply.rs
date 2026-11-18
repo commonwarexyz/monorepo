@@ -1,4 +1,4 @@
-//! Apply merkleized batches to the journal, snapshot index, and activity bitmap.
+//! Apply merkleized batches to the journal, key index, and activity bitmap.
 
 use super::{DiffCursors, DiffEntry, DiffMerge, MerkleizedBatch};
 use crate::{
@@ -35,7 +35,7 @@ const PROBE_CHUNK: usize = 64;
 /// line as well as the key. Does nothing for an index whose lookups do not warm its updates (see
 /// [`UnorderedIndex::LOOKUP_WARMS_UPDATE`]).
 fn probe_index<'a, F: Family, K: Key + 'a, I: UnorderedIndex<Value = Location<F>>>(
-    snapshot: &I,
+    index: &I,
     keys: impl Iterator<Item = &'a K>,
 ) {
     if !I::LOOKUP_WARMS_UPDATE {
@@ -43,15 +43,15 @@ fn probe_index<'a, F: Family, K: Key + 'a, I: UnorderedIndex<Value = Location<F>
     }
     let mut probed = 0u64;
     for key in keys {
-        probed ^= snapshot.get(key).next().map_or(0, |loc| **loc);
+        probed ^= index.get(key).next().map_or(0, |loc| **loc);
     }
     std::hint::black_box(probed);
 }
 
-/// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
+/// Apply a single diff entry to the key index and activity bitmap in lockstep:
 /// install the entry's `Active` location and clear the key's prior location.
 fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
-    snapshot: &mut I,
+    index: &mut I,
     bitmap: &mut bitmap::Prunable<N>,
     key: &impl Key,
     entry: &DiffEntry<F, V>,
@@ -59,12 +59,12 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
 ) {
     match entry {
         DiffEntry::Active { loc, .. } => match old_loc {
-            Some(old) => update_known_loc::<F, _>(snapshot, key, old, *loc),
-            None => snapshot.insert(key, *loc),
+            Some(old) => update_known_loc::<F, _>(index, key, old, *loc),
+            None => index.insert(key, *loc),
         },
         DiffEntry::Deleted { .. } => {
             if let Some(old) = old_loc {
-                delete_known_loc::<F, _>(snapshot, key, old);
+                delete_known_loc::<F, _>(index, key, old);
             }
         }
     }
@@ -77,14 +77,14 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
 }
 
 impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S> {
-    /// Publish this batch's key-level changes to the in-memory snapshot index and activity bitmap.
+    /// Publish this batch's key-level changes to the in-memory key index and activity bitmap.
     ///
-    /// `snapshot` and `bitmap` must hold the state already applied through the first `db_size`
+    /// `index` and `bitmap` must hold the state already applied through the first `db_size`
     /// operations, the last of which is the commit they currently end at. On return they reflect
     /// `self.bounds.tip`.
     fn apply_to_index<I: UnorderedIndex<Value = Location<F>>, const N: usize>(
         &self,
-        snapshot: &mut I,
+        index: &mut I,
         bitmap: &mut bitmap::Prunable<N>,
         db_size: u64,
     ) {
@@ -95,9 +95,9 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
             // With no ancestors there is nothing to merge and no fixups to look up, so each chunk
             // of the diff is probed and then applied.
             for chunk in self.diff.chunks(PROBE_CHUNK) {
-                probe_index(snapshot, chunk.iter().map(|(key, _)| key));
+                probe_index(index, chunk.iter().map(|(key, _)| key));
                 for (key, entry) in chunk {
-                    apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+                    apply_diff(index, bitmap, key, entry, entry.base_old_loc());
                 }
             }
         } else {
@@ -148,9 +148,9 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
                 if chunk.is_empty() {
                     break;
                 }
-                probe_index(snapshot, chunk.iter().map(|(key, _, _)| *key));
+                probe_index(index, chunk.iter().map(|(key, _, _)| *key));
                 for &(key, entry, old) in &chunk {
-                    apply_diff(snapshot, bitmap, key, entry, old);
+                    apply_diff(index, bitmap, key, entry, old);
                 }
             }
         }
@@ -218,14 +218,14 @@ where
         let db_size = *self.log.size();
 
         // The journal append and the in-memory index application touch disjoint state (the log vs
-        // the snapshot and bitmap), so run them concurrently. The index application is spawned as a
+        // the index and bitmap), so run them concurrently. The index application is spawned as a
         // job on the strategy while the journal append proceeds on this task. The job owns the
-        // snapshot until it returns it, so this method requires `I: 'static`. A journal failure
+        // index until it returns it, so this method requires `I: 'static`. A journal failure
         // leaves the instance unusable either way (mutable storage failures are fatal and consume
         // the database), so the index job's effects on error do not need to be rolled back.
         let strategy = self.strategy().clone();
         let log = self.log;
-        let mut snapshot = self.snapshot;
+        let mut index = self.index;
         let index_batch = Arc::clone(&batch);
         let index_bitmap = Arc::clone(&self.bitmap);
 
@@ -239,14 +239,14 @@ where
                 .map(|diff| diff.len())
                 .sum::<usize>();
         let index_job = strategy.spawn(work_hint, move |_| {
-            index_batch.apply_to_index(&mut snapshot, &mut index_bitmap.write(), db_size);
-            snapshot
+            index_batch.apply_to_index(&mut index, &mut index_bitmap.write(), db_size);
+            index
         });
 
         // Apply journal (handles its own partial ancestor skipping) while the index job runs.
-        let (log, snapshot) = futures::join!(log.apply_batch(&batch.journal_batch), index_job);
+        let (log, index) = futures::join!(log.apply_batch(&batch.journal_batch), index_job);
         self.log = log?;
-        self.snapshot = snapshot;
+        self.index = index;
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;

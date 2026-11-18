@@ -32,7 +32,7 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned index for the snapshot, dividing the key space
+    //! A variant of [super] that uses a partitioned key index, dividing the key space
     //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
     //!
     //! See [Db] for the generic type, or use the convenience aliases:
@@ -348,7 +348,7 @@ pub mod test {
     /// reopening it at a range of worker counts reconstructs the identical root and key-value
     /// state. Unlike the `any` equivalence tests, the current root commits to the activity bitmap,
     /// so this exercises the parallel build's bitmap reconstruction (`for_each_value` +
-    /// last-commit) over a pruned prefix, not just the snapshot index and MMR.
+    /// last-commit) over a pruned prefix, not just the key index and MMR.
     #[boxed]
     async fn check_current_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
@@ -416,7 +416,7 @@ pub mod test {
         let root = db.root();
         drop(db);
 
-        // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
+        // Reopen at each concurrency. All rebuild (index + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
             let mut cfg = fixed_config_partitioned::<OneCap>(partition);

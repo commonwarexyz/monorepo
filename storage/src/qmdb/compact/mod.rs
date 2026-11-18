@@ -50,6 +50,12 @@ use commonware_parallel::Strategy;
 pub use db::{Db, MerkleizedBatch, UnmerkleizedBatch, initial_root};
 pub use operation::Operation;
 pub(in crate::qmdb) use operation::sealed;
+use std::sync::Arc;
+pub use witness::VerifiedWitness;
+
+/// Owned immutable snapshot of a compact database's state. Unlike the live database, which also
+/// serves older retained witnesses, it serves only that exact state (see [`VerifiedWitness`]).
+pub type Snapshot<F, O, D> = Arc<VerifiedWitness<F, D, O>>;
 
 /// Configuration for a compact authenticated db.
 #[derive(Clone)]
