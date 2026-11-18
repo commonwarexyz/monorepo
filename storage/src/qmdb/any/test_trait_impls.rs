@@ -12,7 +12,7 @@ use super::{
 use crate::{
     Context,
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
-    journal::contiguous::Mutable,
+    journal::{authenticated::Backing, contiguous::Mutable},
     merkle::{Family, Location, Proof},
     qmdb::{Error, floor::Policy, operation::Key, value::ValueEncoding},
 };
@@ -150,7 +150,7 @@ impl<F, E, C, I, H, U, const N: usize, S> DbAny for Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item = Operation<F, U>>,
+    C: Backing<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,
@@ -216,7 +216,7 @@ impl<F, E, C, I, H, U, const N: usize, S> Provable for Db<F, E, C, I, H, U, N, S
 where
     F: Family,
     E: Context,
-    C: Mutable<Item = Operation<F, U>>,
+    C: Backing<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,

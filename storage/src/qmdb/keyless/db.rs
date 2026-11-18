@@ -115,7 +115,7 @@ where
             false,
         )
         .await?;
-        let metrics = Metrics::new(context);
+        let metrics = Metrics::new(context, *journal.retained_start());
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
             (journal, _) = journal
@@ -203,7 +203,7 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
@@ -225,7 +225,7 @@ where
     /// Return the inactivity floor declared by the last committed batch, which is the upper bound
     /// on [`Self::prune`]'s `loc`.
     ///
-    /// This logical boundary may precede the retained start in [`Self::bounds`].
+    /// This logical boundary may precede the start of [`Self::bounds`].
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
@@ -286,7 +286,7 @@ where
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
+    /// - Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is readable but is not a
     ///   commit op.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -329,7 +329,7 @@ where
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -339,7 +339,10 @@ where
     /// - Returns [`Error::PruneBeyondMinRequired`] if `prune_loc` > the inactivity floor.
     #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         if prune_loc > self.inactivity_floor_loc {
@@ -349,6 +352,8 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(prune_loc).await?;
+        self.metrics
+            .set_retained_start(*self.journal.retained_start());
         self.update_metrics();
         Ok(self)
     }
