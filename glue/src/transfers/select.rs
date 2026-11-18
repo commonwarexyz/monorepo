@@ -8,7 +8,7 @@ use ahash::RandomState;
 use commonware_parallel::Strategy;
 use commonware_storage::qmdb::any::batch::Slot;
 use commonware_utils::{
-    Array,
+    Amount, Array,
     prefetch::{self, Lookahead},
 };
 use std::{convert::Infallible, ops::Range};
@@ -38,15 +38,15 @@ pub struct Selection<K, A: Account> {
     /// Each registered key's starting account, `None` for a key the database does not hold.
     reads: Vec<Option<A>>,
     /// Each registered key's starting balance.
-    starts: Vec<u64>,
+    starts: Vec<A::Amount>,
     /// Each registered key's starting account with the accepted effects applied.
     accounts: Vec<A>,
     /// The sum of the accepted debits to each registered key.
-    debits: Vec<u64>,
+    debits: Vec<A::Amount>,
     /// The sum of the accepted credits to each registered key.
-    credits: Vec<u64>,
+    credits: Vec<A::Amount>,
     /// Scratch space for the changes of the transfer being applied, each with its key's index.
-    changes: Vec<(usize, Change<A::Effect>)>,
+    changes: Vec<(usize, Change<A>)>,
     /// Scratch space for each account as it was before an effect of the transfer being applied,
     /// with its key's index.
     undo: Vec<(usize, A)>,
@@ -147,8 +147,8 @@ impl<K: Array, A: Account> Selection<K, A> {
         self.starts
             .extend(self.accounts[self.reads.len()..].iter().map(A::balance));
         self.reads.extend(reads);
-        self.debits.resize(self.index.len(), 0);
-        self.credits.resize(self.index.len(), 0);
+        self.debits.resize(self.index.len(), A::Amount::ZERO);
+        self.credits.resize(self.index.len(), A::Amount::ZERO);
     }
 
     /// Applies `transfers` in order, returning whether each was accepted.
@@ -197,8 +197,9 @@ impl<K: Array, A: Account> Selection<K, A> {
         // Apply every change before checking any key, so each key is checked against all of the
         // transfer's changes to it, as when the batch settles. A change's effect saves its key's
         // account and then applies to it, in the order listed. Its debit and credit are both
-        // checked against `u64::MAX` before either is added to its key's sums, so the two are added
-        // together or not at all. A refused effect or a sum past `u64::MAX` cannot settle.
+        // checked against the largest amount before either is added to its key's sums, so the two
+        // are added together or not at all. A refused effect or a sum past the largest amount
+        // cannot settle.
         self.undo.clear();
         let mut applied = 0;
         let mut fits = true;
@@ -210,7 +211,7 @@ impl<K: Array, A: Account> Selection<K, A> {
                     break;
                 }
             }
-            let debit = if change.debit == 0 {
+            let debit = if change.debit == A::Amount::ZERO {
                 None
             } else if let Some(sum) = self.debits[index].checked_add(change.debit) {
                 Some(sum)
@@ -218,7 +219,7 @@ impl<K: Array, A: Account> Selection<K, A> {
                 fits = false;
                 break;
             };
-            let credit = if change.credit == 0 {
+            let credit = if change.credit == A::Amount::ZERO {
                 None
             } else if let Some(sum) = self.credits[index].checked_add(change.credit) {
                 Some(sum)
@@ -235,8 +236,8 @@ impl<K: Array, A: Account> Selection<K, A> {
             applied += 1;
         }
 
-        // Each touched key's debits must fit its starting balance, and its final balance must fit
-        // in a `u64`.
+        // Each touched key's debits must fit its starting balance, and its final balance must not
+        // exceed the largest amount.
         fits = fits
             && self.changes.iter().all(|&(index, _)| {
                 self.starts[index]
@@ -250,8 +251,12 @@ impl<K: Array, A: Account> Selection<K, A> {
         // it was before the transfer.
         if !fits {
             for &(index, ref change) in &self.changes[..applied] {
-                self.debits[index] -= change.debit;
-                self.credits[index] -= change.credit;
+                self.debits[index] = self.debits[index]
+                    .checked_sub(change.debit)
+                    .expect("a key's debit sum must include each applied debit");
+                self.credits[index] = self.credits[index]
+                    .checked_sub(change.credit)
+                    .expect("a key's credit sum must include each applied credit");
             }
             while let Some((index, account)) = self.undo.pop() {
                 self.accounts[index] = account;
@@ -280,7 +285,10 @@ impl<K: Array, A: Account> Selection<K, A> {
             let default = A::default();
             for (index, slot) in range.zip(slots) {
                 let start = self.reads[index].clone().unwrap_or_default();
-                let balance = self.starts[index] - self.debits[index] + self.credits[index];
+                let balance = self.starts[index]
+                    .checked_sub(self.debits[index])
+                    .and_then(|remaining| remaining.checked_add(self.credits[index]))
+                    .expect("every accepted transfer must leave its keys able to settle");
                 *slot = settled_slot(self.accounts[index].clone(), balance, &start, &default);
             }
             Ok::<_, Infallible>(())

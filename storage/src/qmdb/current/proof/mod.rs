@@ -775,7 +775,7 @@ mod tests {
         strategy: &S,
     ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
         let inputs = db::read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
-        Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
+        Ok(grafting::grafted_leaf_digests::<H, _, N>(strategy, inputs))
     }
 
     #[test]

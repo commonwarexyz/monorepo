@@ -7,7 +7,8 @@ use crate::{
     },
     qmdb::{
         self,
-        keyless::{Db, Metrics, Operation, operation::OperationCodec},
+        keyless::{Db, Operation, operation::OperationCodec},
+        metrics::Metrics,
         sync,
     },
 };
@@ -100,6 +101,13 @@ where
 
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
         Ok(self)
+    }
+
+    async fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
     }
 
     async fn local_pinned_nodes(

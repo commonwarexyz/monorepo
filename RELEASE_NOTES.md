@@ -1,5 +1,239 @@
 # Release Notes
 
+## v2026.10.1
+
+### Marshal
+
+The coding marshal's `shards::Mailbox` drops its public-key type parameter, so
+name it `Mailbox<B, C, H>`, including in `MarshaledConfig::shards`.
+`Mailbox::gather(commitment, round)` replaces `discovered` and `notarized`, and
+`proposed` is renamed to `disperse`. When certification is the first call to
+report a commitment to the shard engine, the engine can now check the shard the
+leader sent this validator, count it toward rebuilding the block, and relay it
+without learning the leader. The engine also no longer needs to know the leader
+to block the sender of a shard whose index is neither the sender's nor the
+engine's own. A node outside the participant set no longer receives a successful
+`subscribe_assigned_shard_verified` notification, so do not wait for one on such
+a node. Vote, certificate, and shard encodings are unchanged ([#5681]).
+
+`BlockProvider::subscribe_parent` now takes `bound: Option<Round>` after the
+block, and `AncestorStream::new` takes it before `fetch_duration`. Once a block
+finalized in that round or a later one is processed, a provider may stop
+fetching the parent. The subscription then completes only if the parent becomes
+available locally. Pass either of two rounds. The first is the round consensus
+assigned to the block the ancestry walk starts from. The second is the round of
+the consensus request the walk serves, such as the proposal being verified or
+built. Pass `None` only when every block the walk reaches has been checked
+against its own parent, as in certified or finalized ancestry.
+`CommitmentFallback::FetchByCommitment` and `Annotation::Untrusted` gain a
+`round: Option<Round>` field, and `Request::untrusted` takes the round as its
+third argument. A `round` of `None` leaves the request to be retired by height
+alone ([#5717]).
+
+Marshal now retires an ancestry walk's request for an uncertified block once
+marshal has processed a block finalized in the round the request carries or a
+later round. Marshal still retires the request once the processed height reaches
+the height the block's child claims for it. With stable leaders and optimistic
+validation, a leader could pick that height. A validator could then keep
+retrying a fetch that no peer can answer, until the chain reached that height.
+`Inline`, `Deferred`, and `glue::stateful` pass the round of the proposal or
+block they act on. `Mailbox::ancestry` passes the round of
+`DigestFallback::FetchByRound` and no round with `DigestFallback::Wait`, so
+start a `Wait` walk only from a block whose ancestry has been checked, such as a
+certified or finalized block. The coding marshal ignores `bound` and reads the
+parent's round from each child's consensus context ([#5717]).
+
+`Deferred` now checks that a newly proposed block names its consensus context's
+parent before the vote to notarize the block, instead of after the vote.
+`verify` answers `false` for a newly proposed block that names another parent.
+`certify` then answers `false` for that block without waiting for the parent.
+Certification requires the same parent, so no block that can be certified loses
+a vote. With stable leaders and optimistic validation, a validator that voted
+for a newly proposed block that names another parent could verify the block's
+child and then fetch and cache ancestors that no round of consensus named
+([#5715]).
+
+A vote journaled before the upgrade replays without `Deferred`'s parent check,
+and a validator on an earlier release still votes for a block that names another
+parent. A validator can therefore still fetch ancestors that no round of
+consensus named until every validator has upgraded and a view at or after the
+last view any of them voted on before upgrading has finalized. `Deferred` now
+relies on the vote-time check and no longer checks the parent link of the block
+it builds on. Until every validator has upgraded and such a view has finalized,
+an upgraded leader whose application returns a block from `Application::prepare`
+can build on a block that names another parent. That block never certifies, so
+the build is wasted. A leader that voted for the build under `Handoff::Vote`
+cannot propose again in that view ([#5715]).
+
+`Deferred` and coding `Marshaled` now stop verifying a block once certification
+is requested for a different block of its round. That request cancels a
+verification that is running or still waiting for its block or parent. The
+`Application::verify` docs now state that several calls can be outstanding for
+one round when its leader equivocates, and that an implementation must give each
+its own verdict without cancelling or replacing an earlier one ([#5682]).
+
+When the `view_retention` window reaches back past the start of the epoch of the
+previously witnessed finalization round, marshal now counts each view the window
+lacks in that epoch as one block height below the epoch instead of as one whole
+earlier epoch, and keeps the whole epoch containing the lowest such height.
+Where the `epocher` cannot place those heights, each earlier epoch still counts
+for one view. The first prune after upgrading destroys the caches of earlier
+epochs that the window no longer covers ([#5646]).
+
+Marshal no longer caches a block fetched by commitment when the block's height
+maps to an epoch later than the latest epoch its cache has recorded. Marshal
+still delivers the block. With stable leaders and optimistic validation, an
+ancestry walk that `Mailbox::ancestry` starts from a notarized coded block could
+fetch a parent that claims a height in a far later epoch. Caching that parent
+raised the latest recorded epoch. Neither pruning nor upgrading lowers that
+epoch, and startup probes every epoch from the oldest unpruned one up to it
+([#5717]).
+
+### DKG
+
+`SecretStore::put_dealing` and `get_dealing` each gain a `V: Variant` type
+parameter and take the dealing's public message as `public: &DealerPubMsg<V>`
+after the dealer. Add the type parameter and the argument to these two methods
+in every implementation, and include the public message in each private
+dealing's key. A validator loses the private dealings of the epoch in progress
+at the upgrade unless its store also reads the previous key when the new key
+finds nothing. The store needs that fallback until it prunes that epoch. The
+reshare store now asks the secret store for the private half of a journaled
+dealing, using the dealing's public message. It restores the dealing only when
+the secret store returns a private half. With the new key, a player no longer
+panics on every resume after interruptions leave only the public half of one
+dealing and only the private half of a different dealing from the same dealer. A
+dealer that follows the protocol does not send one player two different dealings
+in an epoch ([#5728]).
+
+A store that switches to the new key without reading its previous key as a
+fallback no longer finds the private dealings it wrote before the upgrade. After
+a rollback, the earlier release does not find the private dealings written
+since. With the fallback, a store returns for the earlier dealings what the
+earlier release returned. The `commonware-dkg` example's `Secrets` store now
+keys a dealing by a digest of its dealer and public message and has no fallback
+([#5728]).
+
+A validator that restarts without dealings it acknowledged in the current epoch
+finishes that epoch with no share for the next epoch once a log from the dealer
+of one of those dealings is included. Without that share, the validator cannot
+vote or deal in the next epoch. It gets a share again only from a later reshare
+that succeeds with it as a player. Until the dealing window closes, the
+validator also accepts a different dealing from a dealer it already
+acknowledged. That can let a faulty dealer make the validator panic each time it
+verifies the epoch's last block and so keep it from finishing the epoch. Dealers
+start sending dealings at an epoch's first block, so count as faulty each
+validator rolled back and each validator upgraded to a store that does not read
+its previous key as a fallback. Each counts as faulty from the end of the epoch
+it restarted in until it holds a share again ([#5728]).
+
+### Simplex
+
+Once Simplex has requested `certify` for a view, it no longer requests `verify`
+for that view before a restart. Under marshal's `Deferred`, that later `verify`
+could run the application's verification a second time. A validator whose
+`certify` request comes first therefore no longer casts a late notarize vote for
+that view or nullifies it early on a `false` verification verdict. That
+validator can still vote to finalize if certification succeeds before the view
+is nullified. The voter now also drops the receiver of a pending `verify` when a
+certificate for a conflicting proposal of the same view arrives ([#5681]).
+
+The `Automaton::verify` docs now state that consensus may drop the receiver
+before a verdict arrives. The `CertifiableAutomaton::certify` docs clarify that
+a round can carry conflicting payloads, so state must be keyed by `(round,
+payload)` and not by either alone, and that certification can be requested for a
+payload this participant was never asked to verify ([#5681]).
+
+### Crash Recovery
+
+Opening a paged blob for writing, as journals and the stores built on them do at
+startup, now clears a checksum slot that a torn write left on its partial last
+page. A torn shrink or append could leave part of a checksum in that slot, and a
+second torn write to the page after a restart could complete it, revalidating
+bytes that the shrink or the earlier recovery had discarded.
+`paged::Recovery::open` durably zeroes such a slot before opening completes,
+including on pages written by earlier releases. The page format is unchanged
+([#5660]).
+
+### Memory and Metrics
+
+Commonware's `futures` and `futures-util` dependencies now require at least
+0.3.34, including in downstream builds. Version 0.3.32 has a
+`FuturesUnordered::into_iter` leak that can retain task allocations when
+`glue::stateful` verification resumes after a finalization or prune ([#5583]).
+
+The resolver's `peer_performance` gauge drops a peer's series when the peer
+leaves the tracked set. When the DKG reshare actor prepares an epoch, it drops
+the `latest_share` series of peers outside that epoch's dealers and the
+`latest_ack` series of peers outside its players. A peer that keeps its role
+keeps its value ([#5528]).
+
+### Resolver
+
+The p2p resolver now tries pending requests in queue order when their deadlines
+match, with fresh requests still ahead of retries. Marshal's fresh requests for
+blocks by commitment that queue at the same instant behind a rate-limited peer
+are therefore tried in that order instead of digest order ([#5698]).
+
+The resolver's p2p and opaque engines now apply a verdict that a consumer has
+already sent, or the drop of the verdict's sender, before they add a fetch for
+the same key. A repeat fetch that the consumer issues afterwards for a
+subscriber retired by that verdict or drop could be lost, leaving its caller
+waiting, when the engine handled the repeat first. The deterministic runtime
+does not produce that order. The repeat now starts a new fetch, or receives that
+delivery's response while a later subscriber keeps the key in flight. The
+`Consumer::deliver` docs now state that a verdict does not retire a fetch issued
+after it. They also state that a fetch issued before the verdict for a delivered
+subscriber may be retired with that subscriber. `delivery::Tracker` gains
+`try_completion`. It takes the completion of a key's delivery if the consumer
+has already sent its verdict or dropped the verdict's sender, and returns `None`
+otherwise. `next_completion` reports the wait of a delivery taken this way as
+`Aborted` ([#5722]).
+
+### Cryptography
+
+The `lthash` docs no longer estimate at least 200 bits of security and instead
+describe a published collision attack on its 1024-element, 16-bit state, which
+puts collision resistance far below 128 bits. The attack needs colliding sets of
+at least 2^72 elements combined, so it does not apply while an adversary cannot
+get that many elements of its choosing into the sets being compared. The hash
+function is unchanged ([#5590]).
+
+### Testing
+
+With the `commonware-glue/test-utils` feature,
+`simulate::action::Crash::ProcessedHeight` now takes `participants:
+NonEmptyVec<P>` instead of `participant: P`, so wrap a single participant in a
+`NonEmptyVec`. `ProcessedHeight` crashes the listed validators together once all
+of them are running and report a processed height inside `heights`. The run
+fails if any listed validator reports a height past `heights` before the crash.
+`simulate::plan::Plan` now applies scheduled crashes, scheduled restarts, and
+`Crash::Random` ticks before it handles finalization updates, so a steady stream
+of updates no longer starves them. A run that configures scheduled or random
+crashes can therefore take longer ([#5726]).
+
+`commonware_runtime::mocks` adds `MutationFaults`, `MutationFaultContext`, and
+`MutationFaultBlob` for recovery tests. `MutationFaults::allow` lets a set
+number of mutating storage operations succeed and then fails every later one
+([#5673]). `MutationFaults::park_after` also lets a set number succeed, but then
+leaves every later one pending so that it never completes ([#5692]).
+
+[#5528]: https://github.com/commonwarexyz/monorepo/pull/5528
+[#5583]: https://github.com/commonwarexyz/monorepo/pull/5583
+[#5590]: https://github.com/commonwarexyz/monorepo/pull/5590
+[#5646]: https://github.com/commonwarexyz/monorepo/pull/5646
+[#5660]: https://github.com/commonwarexyz/monorepo/pull/5660
+[#5673]: https://github.com/commonwarexyz/monorepo/pull/5673
+[#5681]: https://github.com/commonwarexyz/monorepo/pull/5681
+[#5682]: https://github.com/commonwarexyz/monorepo/pull/5682
+[#5692]: https://github.com/commonwarexyz/monorepo/pull/5692
+[#5698]: https://github.com/commonwarexyz/monorepo/pull/5698
+[#5715]: https://github.com/commonwarexyz/monorepo/pull/5715
+[#5717]: https://github.com/commonwarexyz/monorepo/pull/5717
+[#5722]: https://github.com/commonwarexyz/monorepo/pull/5722
+[#5726]: https://github.com/commonwarexyz/monorepo/pull/5726
+[#5728]: https://github.com/commonwarexyz/monorepo/pull/5728
+
 ## v2026.10.0
 
 <details>

@@ -7,7 +7,8 @@ use crate::{
     },
     qmdb::{
         self, Error,
-        immutable::{self, Metrics, Operation},
+        immutable::{self, Operation},
+        metrics::Metrics,
         operation::Key,
         sync,
         value::ValueEncoding,
@@ -96,7 +97,7 @@ where
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
         // Replay the log from the inactivity floor to build the snapshot.
-        let snapshot = immutable::build_snapshot(
+        let snapshot = immutable::db::build_snapshot(
             context.child("snapshot"),
             db_config.translator,
             inactivity_floor_loc,
@@ -122,6 +123,13 @@ where
 
     async fn persist_sync_result(self) -> Result<Self, Error<F>> {
         Ok(self)
+    }
+
+    async fn discard_local_state(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), Error<F>> {
+        sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
     }
 
     async fn local_pinned_nodes(

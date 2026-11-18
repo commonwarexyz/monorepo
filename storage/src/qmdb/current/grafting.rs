@@ -104,10 +104,23 @@ pub fn graftable_chunks<F: Graftable>(ops_leaves: u64, grafting_height: u32) -> 
     (ops_leaves - birth_chunk_0) / chunk_size + 1
 }
 
-/// Compute grafted leaf digests for resolved `(chunk_idx, chunk_ops_digest, chunk)` triples:
-/// each leaf is `hash(chunk || chunk_ops_digest)`, except all-zero chunks preserve
-/// `chunk_ops_digest` directly (zero-chunk identity).
-pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
+/// Returns the grafted leaf digest for a bitmap `chunk` and the root of the ops subtree it covers.
+fn grafted_leaf_digest<H: Hasher>(
+    hasher: &merkle::hasher::Standard<H>,
+    chunk: &[u8],
+    ops_subtree_root: H::Digest,
+) -> H::Digest {
+    // An all-zero chunk grafts to the ops subtree root itself (the zero-chunk identity). Any other
+    // chunk grafts to `hash(chunk || ops_subtree_root)`.
+    if chunk.iter().all(|&b| b == 0) {
+        ops_subtree_root
+    } else {
+        hasher.hash(&[chunk, ops_subtree_root.as_ref()])
+    }
+}
+
+/// Compute the grafted leaf digest of each resolved `(chunk_idx, chunk_ops_digest, chunk)` triple.
+pub(super) fn grafted_leaf_digests<H: Hasher, S: Strategy, const N: usize>(
     strategy: &S,
     inputs: Vec<(usize, H::Digest, [u8; N])>,
 ) -> Vec<(usize, H::Digest)> {
@@ -115,14 +128,7 @@ pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
         inputs,
         || qmdb::hasher::<H>(),
         |h, (chunk_idx, chunk_ops_digest, chunk)| {
-            if chunk == BitMap::<N>::EMPTY_CHUNK {
-                (chunk_idx, chunk_ops_digest)
-            } else {
-                (
-                    chunk_idx,
-                    h.hash(&[chunk.as_slice(), chunk_ops_digest.as_ref()]),
-                )
-            }
+            (chunk_idx, grafted_leaf_digest(h, &chunk, chunk_ops_digest))
         },
     )
 }
@@ -167,9 +173,8 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 // 2. **Ops position**: Position in the full operations tree.
 // 3. **Grafted position**: Position in the grafted tree, whose leaves correspond 1:1 with chunks.
 //
-// All conversions rely on a single family identity: given the leftmost leaf at position P of a
-// perfect subtree, the subtree root at height h is at `P + 2^(h+1) - 2`, and conversely the
-// leftmost leaf under a subtree root at position P and height h is at `P + 2 - 2^(h+1)`.
+// All conversions go through the family's `subtree_root_position` and `leftmost_leaf`, which map
+// between the leftmost leaf of a perfect subtree and that subtree's root at a given height.
 
 /// Convert an ops-family position (at or above the grafting height) to a grafted-tree position.
 ///
@@ -388,14 +393,7 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                     return ops_subtree_root;
                 };
 
-                // For all-zero chunks, the grafted leaf is the ops subtree root (identity).
-                // For non-zero chunks: grafted_leaf = hash(chunk || ops_subtree_root).
-                let chunk = self.chunks[local];
-                if chunk.iter().all(|&b| b == 0) {
-                    ops_subtree_root
-                } else {
-                    self.hash(&[chunk, ops_subtree_root.as_ref()])
-                }
+                grafted_leaf_digest(&self.hasher, self.chunks[local], ops_subtree_root)
             }
         }
     }

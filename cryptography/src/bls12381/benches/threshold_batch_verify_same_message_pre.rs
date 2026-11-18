@@ -1,3 +1,4 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{
     Signer as _,
     bls12381::{
@@ -16,7 +17,12 @@ fn bench_threshold_batch_verify_same_message_pre(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
-        for &n in &[5, 10, 20, 50, 100, 250, 500] {
+        let sizes: &[u32] = match Inputs::current() {
+            Inputs::Smoke => &[5],
+            _ => &[5, 10, 20, 50, 100, 250, 500],
+        };
+
+        for &n in sizes {
             let t = N3f1::quorum(n);
             let f = n - t;
             for invalid in [0, f] {

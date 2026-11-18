@@ -190,6 +190,11 @@ impl Hasher for Sha256 {
 
     #[inline]
     fn hash(parts: &[&[u8]]) -> Self::Digest {
+        // Merkle-shaped parts take a single-message kernel when the CPU has one.
+        #[cfg(target_arch = "x86_64")]
+        if let Some(digest) = simd::hash_single(parts) {
+            return digest;
+        }
         hash_specialized(parts)
     }
 
@@ -454,8 +459,12 @@ mod tests {
     }
 
     /// Pin every specialized fast-path arm against the streaming implementation.
+    ///
+    /// The arms are also called directly because [Sha256::hash] can hand these
+    /// shapes to a single-message kernel.
     #[test]
     fn test_sha256_hash_specialized_arms() {
+        // Split one counting buffer into each specialized shape.
         let data: Vec<u8> = (0u8..72).collect();
         let shapes: [&[&[u8]]; 4] = [
             &[&data[..8], &data[8..40], &data[40..72]],
@@ -465,14 +474,15 @@ mod tests {
         ];
         for parts in shapes {
             let oneshot = Sha256::hash(parts);
+            let streamed = stream(parts);
 
-            let mut hasher = Sha256::default();
-            for part in parts {
-                hasher.update(part);
-            }
-            let (_, streamed) = hasher.finalize();
-
+            // The one-shot hash and the arm alone both match streaming.
             assert_eq!(oneshot, streamed, "mismatch for shape {parts:?}");
+            assert_eq!(
+                hash_specialized(parts),
+                streamed,
+                "arm mismatch for shape {parts:?}"
+            );
         }
     }
 
@@ -531,6 +541,128 @@ mod tests {
             [&backing[1..33], &backing[17..49]],
             [&backing[2..34], &backing[18..50]],
         );
+    }
+
+    /// Split `message` into consecutive parts of `lengths`.
+    fn split<'a>(message: &'a [u8], lengths: &[usize]) -> Vec<&'a [u8]> {
+        let mut rest = message;
+        lengths
+            .iter()
+            .map(|&len| {
+                let (part, tail) = rest.split_at(len);
+                rest = tail;
+                part
+            })
+            .collect()
+    }
+
+    /// Hash `parts` one part at a time through the streaming hasher.
+    fn stream(parts: &[&[u8]]) -> Digest {
+        let mut hasher = Sha256::default();
+        for part in parts {
+            hasher.update(part);
+        }
+        hasher.finalize().1
+    }
+
+    /// Whether this build runs the SHA-NI kernels on this CPU.
+    #[cfg(target_arch = "x86_64")]
+    fn kernels_enabled() -> bool {
+        let enabled = cfg!(all(
+            target_feature = "sha",
+            target_feature = "avx2",
+            target_feature = "ssse3",
+            target_feature = "sse4.1",
+        ));
+        let detected = cfg!(feature = "std")
+            && std::arch::is_x86_feature_detected!("sha")
+            && std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("ssse3")
+            && std::arch::is_x86_feature_detected!("sse4.1");
+        enabled || detected
+    }
+
+    /// Check every merkle shape the single-message kernels take against
+    /// streaming its parts, with fixed inputs.
+    #[rstest::rstest]
+    // MMR node: position, left digest, right digest.
+    #[case::mmr_node(&[8, 32, 32])]
+    // BMT node: left digest, right digest.
+    #[case::bmt_node(&[32, 32])]
+    // MMR leaf: 8-byte position, digest.
+    #[case::mmr_leaf(&[8, 32])]
+    // BMT leaf: 4-byte position, digest.
+    #[case::bmt_leaf(&[4, 32])]
+    fn test_hash_single_shape_matches_streaming(#[case] lengths: &[usize]) {
+        // Uniform messages set every word to an extreme, and counting messages
+        // give each byte a distinct value so a byte-order mistake changes the
+        // digest. The last message starts one byte into its allocation to
+        // exercise unaligned loads.
+        let total: usize = lengths.iter().sum();
+        let messages: [Vec<u8>; 5] = [
+            vec![0; total],
+            vec![0xff; total],
+            (0..total).map(|i| i as u8).collect(),
+            (0..total).map(|i| 0xff - i as u8).collect(),
+            (0..=total).map(|i| (i as u8).wrapping_mul(31)).collect(),
+        ];
+        let messages = [
+            &messages[0][..],
+            &messages[1][..],
+            &messages[2][..],
+            &messages[3][..],
+            &messages[4][1..],
+        ];
+
+        // The one-shot digest of the shape matches streaming its parts, and
+        // a kernel produces it wherever the kernels are enabled.
+        for message in messages {
+            let parts = split(message, lengths);
+            let expected = stream(&parts);
+            assert_eq!(Sha256::hash(&parts), expected);
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(
+                simd::hash_single(&parts),
+                kernels_enabled().then_some(expected)
+            );
+        }
+    }
+
+    /// A message that misses every single-message kernel shape by a byte or by
+    /// its split takes no kernel and still matches streaming.
+    #[rstest::rstest]
+    // The MMR leaf's position, one byte short.
+    #[case::position_7(&[7, 32])]
+    // The MMR leaf's position, one byte long.
+    #[case::position_9(&[9, 32])]
+    // The BMT leaf's position, one byte short.
+    #[case::position_3(&[3, 32])]
+    // The BMT leaf's position, one byte long.
+    #[case::position_5(&[5, 32])]
+    // A leaf's digest, one byte short.
+    #[case::digest_31(&[8, 31])]
+    // A BMT node's right digest, one byte long.
+    #[case::digest_33(&[32, 33])]
+    // An MMR node's right digest, one byte short.
+    #[case::node_short(&[8, 32, 31])]
+    // An MMR node followed by a fourth part.
+    #[case::node_extra(&[8, 32, 32, 1])]
+    // An MMR node passed as one part.
+    #[case::contiguous_node(&[72])]
+    // An MMR leaf passed as one part.
+    #[case::contiguous_leaf(&[40])]
+    fn test_hash_single_near_miss_matches_streaming(#[case] lengths: &[usize]) {
+        // Split a counting message into the near-miss shape.
+        let total: usize = lengths.iter().sum();
+        let message: Vec<u8> = (0..total).map(|i| i as u8).collect();
+        let parts = split(&message, lengths);
+
+        // No single-message kernel takes the shape.
+        #[cfg(target_arch = "x86_64")]
+        assert!(simd::hash_single(&parts).is_none());
+
+        // The one-shot digest still matches streaming its parts.
+        assert_eq!(Sha256::hash(&parts), stream(&parts));
     }
 
     /// Checks [Sha256::hash_many] on `strategy` against hashing each message alone.

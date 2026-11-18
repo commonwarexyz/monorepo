@@ -143,7 +143,7 @@
 //! height, it uses standard hashing. At the grafting height, it detects the boundary and
 //! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks the
 //! grafted leaf is `hash(chunk || ops_subtree_root)`, and for all-zero chunks it is the ops subtree
-//! root itself (the identity optimization in `grafting::Verifier::node`). Above the grafting
+//! root itself (the identity optimization in `grafting::Verifier::node_digest`). Above the grafting
 //! height, it resumes standard hashing. If the reconstructed root matches the expected root and bit
 //! _i_ is set in the chunk, the operation is proven active.
 //!
@@ -265,7 +265,7 @@
 //! individual height-`gh` peaks for each chunk in the pair, and those map to grafted _leaves_
 //! (height 0 in the grafted tree), which are not pinned peaks.
 //!
-//! To avoid this, [`Db::prune`] defers bitmap pruning for chunks whose chunk-pair
+//! To avoid this, [`Db::prune`] rejects locations that would prune a chunk whose chunk-pair
 //! parent has not yet been born in the ops tree (see `Db::sync_boundary`). Once the parent is born,
 //! every ops peak within the pruned region is at height `gh+1` or above, and maps to a pinned peak
 //! or an ancestor of pinned peaks that can be reconstructed by hashing children (see
@@ -352,6 +352,7 @@ use commonware_runtime::Spawner;
 use commonware_utils::bitmap::Prunable as BitMap;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
+use tracing::warn;
 
 pub mod batch;
 mod db;
@@ -496,7 +497,7 @@ where
             "chunk size must be some multiple of the digest size",
         );
         // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-        // the status bitmap tree to be aligned with the underlying operations MMR.
+        // the status bitmap tree to be aligned with the underlying operations tree.
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
@@ -504,8 +505,18 @@ where
     let metadata_partition = cfg.grafted_metadata_partition.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
-    let (metadata, pruned_chunks, pinned_nodes) =
+    let (mut metadata, mut pruned_chunks, mut pinned_nodes) =
         db::init_metadata(context.child("metadata"), &metadata_partition).await?;
+
+    // An interrupted destroy can leave pruning metadata from the old database beside a log reset
+    // to position zero. Normal pruning never produces that combination.
+    if pruned_chunks > 0 && J::span(context.child("span"), &cfg.log).await? == (0..0) {
+        warn!("crash repair: discarding grafted metadata beside an empty log");
+        metadata.clear();
+        metadata = metadata.sync().await?;
+        pruned_chunks = 0;
+        pinned_nodes.clear();
+    }
 
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)

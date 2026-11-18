@@ -38,6 +38,17 @@ struct Peer<P: PublicKey> {
 /// unlikely to match the ID of a new request.
 pub type ID = u64;
 
+/// The order in which pending keys are tried. Fields compare in declaration order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Order {
+    /// Whether the key was already attempted. Fresh requests precede retries.
+    retry: bool,
+    /// The earliest time the key may be attempted.
+    deadline: SystemTime,
+    /// The key's arrival position. It orders keys of one class with equal deadlines.
+    sequence: u64,
+}
+
 /// Tracks an active request that has been sent to a peer.
 struct ActiveRequest<P, Key> {
     key: Key,
@@ -209,10 +220,10 @@ where
 
     /// Manages pending requests. When a request is registered (for both the first time and after
     /// a retry), it is added to this set.
-    ///
-    /// Fresh requests precede retries. Within each class, requests are ordered
-    /// by the next time they should be attempted.
-    pending: PrioritySet<Key, (bool, SystemTime)>,
+    pending: PrioritySet<Key, Order>,
+
+    /// Next sequence number for pending requests.
+    pending_sequence: u64,
 
     /// If no peers are ready to handle a request (all filtered out or send failed), the waiter is set
     /// to the next time to try the request.
@@ -283,6 +294,7 @@ where
             requests: AHashMap::new(),
             fetch_timeout: config.fetch_timeout,
             pending: PrioritySet::new(),
+            pending_sequence: 0,
             waiter: None,
             retry_delay: config.retry_delay,
             priority_requests: config.priority_requests,
@@ -379,7 +391,7 @@ where
         // Detach the queue to leave skipped entries untouched and remove only the sent key.
         let pending = mem::replace(&mut self.pending, PrioritySet::new());
         let mut sent = None;
-        for (key, (_, deadline)) in pending.iter() {
+        for (key, Order { deadline, .. }) in pending.iter() {
             // Each key must wait for its own deadline. Preserve the earliest future
             // wakeup and keep scanning: fresh keys precede retries, so later keys
             // may already be due.
@@ -475,18 +487,38 @@ where
         self.waiter = None;
     }
 
-    /// Adds a key to the pending queue, ahead of all retries.
+    /// Enqueues `key` as a fresh request or a retry due at `deadline`.
+    fn add_pending(&mut self, key: Key, retry: bool, deadline: SystemTime) {
+        assert!(!self.pending.contains(&key));
+
+        // Each key takes the next sequence number, so keys of the same class and deadline are
+        // tried in arrival order.
+        let sequence = self.pending_sequence;
+        self.pending_sequence = sequence
+            .checked_add(1)
+            .expect("pending sequence must not overflow");
+
+        // A previous pending key may have pushed the waiter far into the future
+        // because no eligible peer could serve it. A newly queued key can still
+        // be fetchable, so wake pending processing immediately.
+        self.waiter = None;
+        self.pending.put(
+            key,
+            Order {
+                retry,
+                deadline,
+                sequence,
+            },
+        );
+    }
+
+    /// Adds a fresh key to the pending queue, ahead of retries.
     ///
     /// # Panics
     ///
     /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
-        assert!(!self.pending.contains(&key));
-        // A previous pending key may have pushed the waiter far into the future
-        // because no eligible peer could serve it. A new ready key can still be
-        // fetchable, so wake pending processing immediately.
-        self.waiter = None;
-        self.pending.put(key, (false, self.context.current()));
+        self.add_pending(key, false, self.context.current());
     }
 
     /// Schedules another attempt after a dispatched request did not resolve the key, advancing
@@ -499,13 +531,8 @@ where
         assert!(!self.pending.contains(&key));
         let retries = self.retries.entry(key.clone()).or_default();
         *retries = retries.saturating_add(1);
-
-        // A previous pending key may have pushed the waiter far into the future
-        // because no eligible peer could serve it. Clear the stale global waiter
-        // so this retry can drive pending processing again.
-        self.waiter = None;
         let deadline = self.context.current() + self.retry_delay;
-        self.pending.put(key, (true, deadline));
+        self.add_pending(key, true, deadline);
     }
 
     /// Returns the deadline for the next pending retry.
@@ -516,7 +543,7 @@ where
         }
 
         // Return the greater of the waiter and the next pending deadline
-        let pending_deadline = self.pending.peek().map(|(_, (_, deadline))| *deadline);
+        let pending_deadline = self.pending.peek().map(|(_, order)| order.deadline);
         pending_deadline.max(self.waiter)
     }
 
@@ -1715,7 +1742,34 @@ mod tests {
 
             let keys: Vec<_> =
                 std::iter::from_fn(|| fetcher.pending.pop().map(|(key, _)| key)).collect();
-            assert_eq!(keys, vec![MockKey(3), MockKey(4), MockKey(1), MockKey(2)]);
+            assert_eq!(keys, vec![MockKey(4), MockKey(3), MockKey(1), MockKey(2)]);
+        });
+    }
+
+    /// Retries due at the same instant are fetched in the order they were queued.
+    #[test]
+    fn test_equal_deadline_retries_preserve_arrival_order() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // One peer accepts every request.
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
+            let peer = PrivateKey::from_seed(1).public_key();
+            fetcher.reconcile(&[peer]);
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
+
+            // Queue three retries out of key order, then wait until they are due.
+            for key in [3, 1, 2] {
+                fetcher.add_retry(MockKey(key));
+            }
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Each fetch sends the earliest queued retry.
+            for (index, key) in [3, 1, 2].into_iter().enumerate() {
+                fetcher.fetch(&mut sender);
+                assert_eq!(fetcher.len_active(), index + 1);
+                assert!(fetcher.requests.values().any(|req| req.key == MockKey(key)));
+                assert!(!fetcher.pending.contains(&MockKey(key)));
+            }
         });
     }
 
@@ -2395,6 +2449,53 @@ mod tests {
             // clear_targets() remaining key
             fetcher.clear_targets(&MockKey(2));
             assert!(fetcher.targets.is_empty());
+        });
+    }
+
+    /// Fresh requests queued at one instant behind a rate-limited peer are sent in arrival order.
+    #[test]
+    fn test_rate_limited_pending_preserves_arrival_order() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // One peer accepts one request per second.
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
+            let peer = PrivateKey::from_seed(1).public_key();
+            fetcher.reconcile(&[peer]);
+            let mut sender = WrappedSender::new(LimitedMockSender::new(
+                SuccessMockSenderInner,
+                Quota::per_second(NZU32!(1)),
+                context.child("rate_limiter"),
+            ));
+
+            // Exhaust the peer's token before queuing requests at the same instant.
+            fetcher.add_ready(MockKey(99));
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.requests.values().any(|req| req.key == MockKey(99)));
+            for key in [3, 1, 2] {
+                fetcher.add_ready(MockKey(key));
+                fetcher.fetch(&mut sender);
+                assert_eq!(fetcher.len_active(), 1);
+            }
+            assert_eq!(fetcher.len_pending(), 3);
+            assert_eq!(
+                fetcher.get_pending_deadline(),
+                Some(context.current() + Duration::from_secs(1))
+            );
+
+            // Nothing is sent before the peer's next token.
+            context.sleep(Duration::from_millis(999)).await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.len_active(), 1);
+            assert_eq!(fetcher.len_pending(), 3);
+
+            // The next token sends the earliest queued key and keeps the others pending.
+            context.sleep(Duration::from_millis(1)).await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.len_active(), 2);
+            assert_eq!(fetcher.len_pending(), 2);
+            assert!(fetcher.requests.values().any(|req| req.key == MockKey(3)));
+            assert!(fetcher.pending.contains(&MockKey(1)));
+            assert!(fetcher.pending.contains(&MockKey(2)));
         });
     }
 

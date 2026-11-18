@@ -1,6 +1,7 @@
 //! Random key-lookup benchmark for Archive.
 
 use super::utils::{Archive, Key, Variant, append_random};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner,
     benchmarks::{context, tokio},
@@ -13,21 +14,27 @@ use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the archive.
-#[cfg(not(full_bench))]
-const ITEMS: u64 = 10_000;
-#[cfg(full_bench)]
-const ITEMS: u64 = 250_000;
+fn n_items() -> u64 {
+    match Inputs::current() {
+        Inputs::Smoke => 1_000,
+        Inputs::Standard => 10_000,
+        Inputs::Full => 250_000,
+    }
+}
 
-#[cfg(not(full_bench))]
-const READS: [usize; 1] = [1_000];
-#[cfg(full_bench)]
-const READS: [usize; 3] = [1_000, 10_000, 50_000];
+fn n_reads() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Smoke => &[100],
+        Inputs::Standard => &[1_000],
+        Inputs::Full => &[1_000, 10_000, 50_000],
+    }
+}
 
 fn select_keys(keys: &[Key], reads: usize) -> Vec<Key> {
     let mut rng = TestRng::new(42);
     let mut selected_keys = Vec::with_capacity(reads);
     for _ in 0..reads {
-        selected_keys.push(keys[rng.random_range(0..ITEMS as usize)].clone());
+        selected_keys.push(keys[rng.random_range(0..keys.len())].clone());
     }
     selected_keys
 }
@@ -36,7 +43,7 @@ fn select_indices(reads: usize) -> Vec<u64> {
     let mut rng = TestRng::new(42);
     let mut selected_indices = Vec::with_capacity(reads);
     for _ in 0..reads {
-        selected_indices.push(rng.random_range(0..ITEMS));
+        selected_indices.push(rng.random_range(0..n_items()));
     }
     selected_indices
 }
@@ -75,10 +82,10 @@ fn bench_get(c: &mut Criterion) {
             let runner = tokio::Runner::new(cfg.clone());
             for mode in ["serial", "concurrent"] {
                 for pattern in ["key", "index"] {
-                    for reads in READS {
+                    for &reads in n_reads() {
                         c.bench_function(
                             &format!(
-                                "{}/variant={} mode={} pattern={} comp={} reads={}",
+                                "{}/variant={} mode={} pattern={} comp={} items={} reads={}",
                                 module_path!(),
                                 variant.name(),
                                 mode,
@@ -86,6 +93,7 @@ fn bench_get(c: &mut Criterion) {
                                 compression
                                     .map(|l| l.to_string())
                                     .unwrap_or_else(|| "off".into()),
+                                n_items(),
                                 reads
                             ),
                             |b| {
@@ -94,7 +102,7 @@ fn bench_get(c: &mut Criterion) {
                                     keys = commonware_runtime::tokio::Runner::new(cfg.clone())
                                         .start(|ctx| async move {
                                             let a = Archive::init(ctx, variant, compression).await;
-                                            let (_, keys) = append_random(a, ITEMS).await;
+                                            let (_, keys) = append_random(a, n_items()).await;
                                             keys
                                         });
                                     initialized = true;

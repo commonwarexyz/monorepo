@@ -1,12 +1,11 @@
-use crate::common::{N_LEAVES, SAMPLE_SIZE, StandardHasher, single_samples};
+use crate::common::{SAMPLE_SIZE, StandardHasher, n_leaves, single_samples};
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{Bagging::ForwardFold, Family};
 use criterion::{BatchSize, Criterion, criterion_group};
-use futures::executor::block_on;
 
 /// Times single-leaf proof verification, with the proofs generated in setup.
 fn bench_verify_single_element_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         c.bench_function(
             &format!(
                 "{}/n={n} samples={SAMPLE_SIZE} family={family}",
@@ -17,13 +16,10 @@ fn bench_verify_single_element_family<F: Family>(c: &mut Criterion, family: &str
                     || {
                         let (mem, root, samples) = single_samples::<F>(n);
                         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-                        let proofs = block_on(async {
-                            let mut proofs = Vec::with_capacity(samples.len());
-                            for (loc, element) in samples {
-                                proofs.push((loc, element, mem.proof(&hasher, loc, 0).unwrap()));
-                            }
-                            proofs
-                        });
+                        let mut proofs = Vec::with_capacity(samples.len());
+                        for (loc, element) in samples {
+                            proofs.push((loc, element, mem.proof(&hasher, loc, 0).unwrap()));
+                        }
                         (root, proofs)
                     },
                     |(root, proofs)| {

@@ -398,7 +398,8 @@ impl Read for Certificate {
 /// Generates an Ed25519 signing scheme wrapper for a specific protocol.
 ///
 /// This macro creates a complete wrapper struct with constructors, `Scheme` trait
-/// implementation, and a `fixture` function for testing.
+/// implementation, and a `fixture` function for testing when this crate's `mocks` feature is
+/// enabled.
 ///
 /// # Parameters
 ///
@@ -426,27 +427,27 @@ impl Read for Certificate {
 #[macro_export]
 macro_rules! impl_certificate_ed25519 {
     ($subject:ty, $namespace:ty, $faults:ty) => {
-        /// Generates a test fixture with Ed25519 identities and signing schemes.
-        ///
-        /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
-        /// scheme instances share a consistent ordering.
-        #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
-        pub fn fixture<R>(
-            rng: &mut R,
-            namespace: &[u8],
-            n: u32,
-        ) -> $crate::certificate::mocks::Fixture<Scheme>
-        where
-            R: rand_core::CryptoRng,
-        {
-            $crate::ed25519::certificate::mocks::fixture(
-                rng,
-                namespace,
-                n,
-                Scheme::signer,
-                Scheme::verifier,
-            )
+        $crate::cfg_mocks! {
+            /// Generates a test fixture with Ed25519 identities and signing schemes.
+            ///
+            /// Returns a [`commonware_cryptography::certificate::mocks::Fixture`] whose keys and
+            /// scheme instances share a consistent ordering.
+            pub fn fixture<R>(
+                rng: &mut R,
+                namespace: &[u8],
+                n: u32,
+            ) -> $crate::certificate::mocks::Fixture<Scheme>
+            where
+                R: rand_core::CryptoRng,
+            {
+                $crate::ed25519::certificate::mocks::fixture(
+                    rng,
+                    namespace,
+                    n,
+                    Scheme::signer,
+                    Scheme::verifier,
+                )
+            }
         }
 
         /// Ed25519 signing scheme wrapper.
@@ -689,6 +690,7 @@ mod tests {
         Faults, N3f1, NZUsize, Participant, TestRng, TryCollect, non_empty, ordered::Set, test_rng,
     };
     use rand_core::Rng;
+    use scheme::Scheme;
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
@@ -711,8 +713,15 @@ mod tests {
         }
     }
 
-    // Use the macro to generate the test scheme
-    impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
+    // Use the macro to generate the test scheme. The tests build schemes from keys of their own, so
+    // its fixture goes unused.
+    #[allow(dead_code)]
+    mod scheme {
+        use super::TestSubject;
+        use commonware_utils::N3f1;
+
+        impl_certificate_ed25519!(TestSubject, Vec<u8>, N3f1);
+    }
 
     fn setup_signers(rng: &mut impl CryptoRng, n: u32) -> (Vec<Scheme>, Scheme) {
         let private_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();

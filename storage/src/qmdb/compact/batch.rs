@@ -1,13 +1,12 @@
 //! Shared helpers for compact QMDB batches.
 
 use crate::{
-    merkle::{self, Family, batch, compact, hasher::Hasher as _},
+    merkle::{self, Family, batch, compact},
     qmdb,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::Widen;
 use std::sync::Arc;
 
 /// Encode operations, append them to a compact Merkle batch, merkleize, and compute the post-apply
@@ -30,24 +29,13 @@ where
     Op: EncodeShared + 'static,
 {
     let ops = ops.into();
-    let first_leaf = batch.leaves();
     let ancestors = batch.retain_ancestors();
     let mem = merkle.snapshot();
     let strategy = merkle.strategy().clone();
     strategy
-        .spawn(ops.len(), move |strategy| {
+        .spawn(ops.len(), move |_| {
             let hasher = qmdb::hasher::<H>();
-            let leaf_digests =
-                strategy.map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
-                    let offset: u64 = Widen::widen(i);
-                    let pos = F::location_to_position(first_leaf + offset);
-                    buf.clear();
-                    op.write(buf);
-                    hasher.leaf_digest(pos, buf.as_slice())
-                });
-
-            let batch = batch.add_leaf_digests(leaf_digests);
-            let merkleized = batch.merkleize(&mem, &hasher);
+            let merkleized = batch.add_many(&hasher, &ops).merkleize(&mem, &hasher);
             let root = merkleized.root(&hasher, inactive_peaks)?;
             drop(ancestors);
             Ok((merkleized, root))

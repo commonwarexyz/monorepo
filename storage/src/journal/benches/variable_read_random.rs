@@ -1,4 +1,5 @@
 use crate::{append_fixed_random_data, get_variable_journal};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
@@ -20,11 +21,16 @@ const PARTITION: &str = "variable-random-test-partition";
 /// Value of items_per_section to use in the journal config.
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10_000);
 
-/// Number of items to write to the journal we will be reading from.
-const ITEMS_TO_WRITE: u64 = 5_000_000;
-
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
+
+/// Number of items to write to the journal we will be reading from.
+fn items_to_write() -> u64 {
+    match Inputs::current() {
+        Inputs::Smoke => 10_000,
+        _ => 5_000_000,
+    }
+}
 
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
@@ -34,8 +40,9 @@ async fn bench_run_serial(
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
+    let items = items_to_write();
     for _ in 0..items_to_read {
-        let pos = rng.random_range(0..ITEMS_TO_WRITE);
+        let pos = rng.random_range(0..items);
         black_box(reader.read(pos).await.expect("failed to read data"));
     }
     journal
@@ -48,9 +55,10 @@ async fn bench_run_concurrent(
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
+    let items = items_to_write();
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
-        let pos = rng.random_range(0..ITEMS_TO_WRITE);
+        let pos = rng.random_range(0..items);
         futures.push(reader.read(pos));
     }
     try_join_all(futures).await.expect("failed to read data");
@@ -64,8 +72,9 @@ async fn bench_run_read_many(
 ) -> Journal<Context, FixedBytes<ITEM_SIZE>> {
     let (journal, reader) = journal.snapshot().await.unwrap();
     let mut rng = test_rng();
+    let items = items_to_write();
     let mut positions: Vec<u64> = (0..items_to_read)
-        .map(|_| rng.random_range(0..ITEMS_TO_WRITE))
+        .map(|_| rng.random_range(0..items))
         .collect();
     positions.sort_unstable();
     positions.dedup();
@@ -83,7 +92,12 @@ fn bench_variable_read_random(c: &mut Criterion) {
     let mut initialized = false;
     let runner = tokio::Runner::new(cfg.clone());
     for mode in ["serial", "concurrent", "read_many"] {
-        for items_to_read in [100, 1_000, 10_000, 100_000] {
+        let reads: &[usize] = match Inputs::current() {
+            Inputs::Smoke => &[100],
+            _ => &[100, 1_000, 10_000, 100_000],
+        };
+
+        for &items_to_read in reads {
             c.bench_function(
                 &format!(
                     "{}/mode={} items={} size={}",
@@ -97,7 +111,7 @@ fn bench_variable_read_random(c: &mut Criterion) {
                     if !initialized {
                         Runner::new(cfg.clone()).start(|ctx| async move {
                             let j = get_variable_journal(ctx, PARTITION, ITEMS_PER_SECTION).await;
-                            append_fixed_random_data::<_, ITEM_SIZE>(j, ITEMS_TO_WRITE).await;
+                            append_fixed_random_data::<_, ITEM_SIZE>(j, items_to_write()).await;
                         });
                         initialized = true;
                     }
