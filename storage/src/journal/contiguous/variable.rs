@@ -695,9 +695,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         (next < self.bounds.end && !next.is_multiple_of(self.items_per_blob.get())).then_some(next)
     }
 
-    /// Fill `out[i]` for each readable position whose offset and frame are already in the page
-    /// cache or the in-memory tail and whose frame decodes. When completion is requested, record
-    /// each miss with its cached offsets and the bounds imposed by neighboring frames.
+    /// Fill `out` with frames that can be validated and decoded from the cache or in-memory tail.
+    /// With `completion`, record each miss with its known offsets and neighboring byte bounds.
+    /// A standalone probe leaves the frames bordering each unresolved range for the follow-up read.
     fn read_many_sync_pass(
         &self,
         positions: &[u64],
@@ -5326,28 +5326,30 @@ mod tests {
                     Some(appended[130].clone())
                 ]
             );
-            let (items, misses) = reader.probe_parts(&positions);
             let expected: Vec<_> = positions
                 .iter()
                 .map(|&p| appended[p as usize].clone())
                 .collect();
-            assert_eq!(
-                items,
-                expected
-                    .iter()
-                    .enumerate()
-                    .map(|(i, v)| (i != 2).then(|| v.clone()))
-                    .collect::<Vec<_>>()
-            );
-            assert_eq!(misses.len(), 1);
-            assert_eq!(misses[0].position, 64);
             let frame_len = reader.offsets.try_read_sync(63).unwrap()
                 - reader.offsets.try_read_sync(62).unwrap();
             let end_before_gap = reader.offsets.try_read_sync(63).unwrap() + frame_len;
             let start_after_gap = reader.offsets.try_read_sync(129).unwrap();
+            let (_, misses) = reader.probe_parts(&positions);
+            assert_eq!(misses.len(), 1);
+            assert_eq!(misses[0].position, 64);
             assert_eq!(misses[0].bounds, end_before_gap..start_after_gap);
             assert!(reader.offsets.try_read_sync(64).is_none());
-            assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
+            let before = context.encode();
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "j_cache_hits") - counter(&before, "j_cache_hits"),
+                4
+            );
+            assert_eq!(
+                counter(&after, "j_cache_misses") - counter(&before, "j_cache_misses"),
+                1
+            );
 
             // Completion must enforce each carried bound even for a single miss.
             let frame_end = reader.offsets.read(65).await.unwrap();
