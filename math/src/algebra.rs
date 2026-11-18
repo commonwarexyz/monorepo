@@ -6,9 +6,12 @@
 //! use methods which don't require copying unnecessarily.
 #[cfg(not(feature = "std"))]
 use alloc::vec;
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, Write};
 use commonware_parallel::Strategy;
 use core::{
-    fmt::Debug,
+    fmt::{Debug, Display, Formatter},
+    hash::{Hash, Hasher},
     iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
@@ -620,7 +623,10 @@ pub trait PairingGroup: CryptoGroup {
 /// [`Twin::new`] wraps an element `X` of `G::Twin`, and [`Twin::into_inner`]
 /// and [`AsRef`] return it. `Twin::new(X).pairing(&A)` returns
 /// `A.pairing(&X)`. `Twin<Twin<G>>` wraps `G` rather than being `G`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// A `Twin<G>` has the same encoding, hash, hash to the group, and formatting
+/// as the element it wraps.
+#[derive(Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Twin<G: PairingGroup>(G::Twin);
 
@@ -761,6 +767,19 @@ impl<G: PairingGroup> CryptoGroup for Twin<G> {
     }
 }
 
+impl<G: PairingGroup> HashToGroup for Twin<G>
+where
+    G::Twin: HashToGroup,
+{
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
+        Self(G::Twin::hash_to_group(domain_separator, message))
+    }
+
+    fn rand_to_group(rng: impl CryptoRng) -> Self {
+        Self(G::Twin::rand_to_group(rng))
+    }
+}
+
 // The batch methods pass their slices to `G`'s in the other order, so they use
 // any faster versions that `G` overrides them with, without copying elements.
 impl<G: PairingGroup> PairingGroup for Twin<G> {
@@ -807,6 +826,63 @@ impl<G: PairingGroup> PairingGroup for Twin<G> {
         G::mul_each(&mut scaled, scalars, strategy);
         G::multi_pairing(&scaled, Self::as_inner_slice(lefts), strategy)
     }
+}
+
+// `derive` would bound `G` by `Copy` and `Hash`, which the wrapped element
+// does not need, so these impls bound `G::Twin` instead.
+impl<G: PairingGroup> Copy for Twin<G> where G::Twin: Copy {}
+
+impl<G: PairingGroup> Hash for Twin<G>
+where
+    G::Twin: Hash,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+// `Debug` and `Display` print the wrapped element alone, so a `Twin<G>` prints
+// like the element it wraps rather than as `Twin(..)`.
+impl<G: PairingGroup> Debug for Twin<G> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        Debug::fmt(&self.0, f)
+    }
+}
+
+impl<G: PairingGroup> Display for Twin<G>
+where
+    G::Twin: Display,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        Display::fmt(&self.0, f)
+    }
+}
+
+impl<G: PairingGroup> Write for Twin<G>
+where
+    G::Twin: Write,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+}
+
+impl<G: PairingGroup> Read for Twin<G>
+where
+    G::Twin: Read,
+{
+    type Cfg = <G::Twin as Read>::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
+        G::Twin::read_cfg(buf, cfg).map(Self)
+    }
+}
+
+impl<G: PairingGroup> FixedSize for Twin<G>
+where
+    G::Twin: FixedSize,
+{
+    const SIZE: usize = G::Twin::SIZE;
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
