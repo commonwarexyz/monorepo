@@ -72,7 +72,7 @@ where
 
     /// Return a future that reads into the page cache the applied operations a batch reads to
     /// link the keys it creates or deletes into the key order. See
-    /// [crate::qmdb::any::db::Db::prefetch_neighbors].
+    /// [`any::Db::prefetch_neighbors`](crate::qmdb::any::Db::prefetch_neighbors).
     pub fn prefetch_neighbors<W: Borrow<K>, D: Borrow<K>>(
         &self,
         writes: &[W],
