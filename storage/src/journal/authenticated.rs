@@ -1428,6 +1428,28 @@ where
     }
 }
 
+/// The nodes held in memory, resident or pinned, which include every peak. A node rebuilt from
+/// operations reads as absent.
+impl<F, E, C, H, S> Readable for Journal<F, E, C, H, S>
+where
+    F: Family,
+    E: Context,
+    C: Contiguous<Item: EncodeShared>,
+    H: Hasher,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+
+    fn size(&self) -> Position<F> {
+        Readable::size(&self.merkle)
+    }
+
+    fn get_node(&self, pos: Position<F>) -> Option<H::Digest> {
+        Readable::get_node(&self.merkle, pos)
+    }
+}
+
 /// A journal under initialization, with read access before its retained end is finalized.
 ///
 /// Finishing consumes this owner. A live journal cannot regain recovery access. Opening may

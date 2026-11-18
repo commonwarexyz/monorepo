@@ -1,7 +1,7 @@
 use crate::{
     CertifiableBlock, Heightable,
     marshal::{
-        ancestry::BlockProvider,
+        ancestry::{AncestorStream, BlockProvider},
         coding::{
             shards,
             types::{CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants},
@@ -18,6 +18,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
+use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
 
@@ -219,16 +220,47 @@ where
     fn subscribe_parent(
         &self,
         block: &Digested<Self::Block>,
+        _bound: Option<Round>,
     ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+        // The provider bounds the request by the parent round in the block's consensus context,
+        // because the commitment binds that context and voters compare it with their own. The
+        // height by itself is not a safe bound, because a validator can vote for a coded block
+        // before it holds the block, and so before it has checked the height against the
+        // parent. The caller's bound is never earlier than the parent round, so it adds nothing
+        // and is ignored.
         let receiver = block.height().previous().map(|parent_height| {
+            let context = block.context();
             self.subscribe_by_commitment(
-                block.context().parent.1,
+                context.parent.1,
                 CommitmentFallback::FetchByCommitment {
                     height: parent_height,
+                    round: Some(Round::new(context.round.epoch(), context.parent.0)),
                 },
             )
         });
         async move { receiver?.await.ok().map(|block| block.inner_digested()) }
+    }
+}
+
+impl<S, B, C, H, P> Mailbox<S, Coding<B, C, H, P>>
+where
+    S: Scheme,
+    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>> + Codec,
+    C: CodingScheme,
+    H: Hasher,
+    P: PublicKey,
+{
+    /// Returns a stream over the ancestry of `initial` (see [`AncestorStream::new`]).
+    ///
+    /// The stream passes no bound because the coding provider bounds each parent request by the
+    /// parent round in the child's consensus context.
+    pub(super) fn unbounded_ancestry<E: Clock>(
+        &self,
+        clock: Arc<E>,
+        initial: impl IntoIterator<Item = Digested<B>>,
+        fetch_duration: Timed,
+    ) -> AncestorStream<Self, E> {
+        AncestorStream::new(clock, self.clone(), initial, None, fetch_duration)
     }
 }
 

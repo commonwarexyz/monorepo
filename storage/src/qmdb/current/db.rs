@@ -947,20 +947,18 @@ pub(super) fn combine_roots<H: Hasher>(
     }
 }
 
-/// Gather the components that bind an ops root to a canonical [Db] root.
+/// Gather the components that bind an ops root to a canonical [Db] root using
+/// memory-resident nodes.
 ///
 /// See the [Root structure](super) section in the module documentation.
 ///
-/// `ops_leaves` must be a single consistent snapshot of the ops tree's leaf count, taken
-/// in the same logical instant as the bitmap state passed via `status`. Both the pending
-/// chunk derivation and `compute_grafted_root` use this value to compute `graftable_chunks`;
-/// deriving them from independent snapshots risks the inconsistent state where a chunk is
-/// counted in one path but not the other.
-pub(super) async fn compute_ops_root_witness<
+/// `ops_leaves`, `status`, and `storage` must describe the same snapshot so the pending
+/// chunk is identified at the correct grafting boundary.
+pub(super) fn compute_ops_root_witness<
     F: merkle::Graftable,
     H: Hasher,
     B: bitmap::Readable<N>,
-    S: MerkleStorage<F, Digest = H::Digest>,
+    S: Readable<Family = F, Digest = H::Digest>,
     const N: usize,
 >(
     status: &B,
@@ -968,18 +966,16 @@ pub(super) async fn compute_ops_root_witness<
     ops_leaves: Location<F>,
     inactivity_floor: Location<F>,
 ) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
-    let grafted_root =
-        compute_grafted_root::<F, H, B, S, N>(status, storage, ops_leaves, inactivity_floor)
-            .await?;
+    let grafting_height = grafting::height::<N>();
+    let grafted_root = compute_grafted_root::<F, H>(storage, inactivity_floor, grafting_height)?;
     let hasher = qmdb::hasher::<H>();
 
     // The partial chunk is at `status.complete_chunks()`, while a pending chunk is at the
     // graftable boundary. In MMB at grafting height >= 3, both can coexist.
-    let pending_chunk_digest =
-        pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
-            .map(|chunk| hasher.digest(&chunk))
-            .try_into()
-            .expect("pending_chunk must be consistent with family");
+    let pending_chunk_digest = pending_chunk::<F, B, N>(status, ops_leaves, grafting_height)?
+        .map(|chunk| hasher.digest(&chunk))
+        .try_into()
+        .expect("pending_chunk must be consistent with family");
     let partial_chunk =
         partial_chunk::<B, N>(status).map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
     Ok(OpsRootWitness {
@@ -995,7 +991,7 @@ pub(super) async fn compute_ops_root_witness<
 pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
-    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    ops_tree: &(impl MerkleStorage<F, Digest = H::Digest> + Readable<Family = F, Digest = H::Digest>),
     inactivity_floor: Location<F>,
     strategy: &S,
 ) -> Result<
@@ -1011,7 +1007,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
+    let ops_leaves = Location::<F>::try_from(MerkleStorage::size(ops_tree))?;
     let (grafted_tree, mut graft_roots) =
         build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
             .await?;
@@ -1019,31 +1015,20 @@ where
     let storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
     let witness =
-        compute_ops_root_witness::<F, H, _, _, N>(bitmap, &storage, ops_leaves, inactivity_floor)
-            .await?;
+        compute_ops_root_witness::<F, H, _, _, N>(bitmap, &storage, ops_leaves, inactivity_floor)?;
     Ok((grafted_tree, graft_roots, witness))
 }
 
-/// Compute the root of the grafted structure represented by `storage`.
+/// Compute the root of the grafted structure from its memory-resident peaks.
 ///
 /// Only **graftable** chunks (those whose h=G ancestor has been born in the ops tree) are
 /// committed by the grafted tree. The most recently completed but ungraftable chunk, if
 /// any, is hashed into the canonical root directly by [`combine_roots`] as the pending
 /// chunk, not by this function.
-///
-/// `ops_leaves` must come from the same single snapshot as `status` to preserve the
-/// `pruned_chunks <= graftable_chunks <= complete_chunks` invariant.
-pub(super) async fn compute_grafted_root<
-    F: merkle::Graftable,
-    H: Hasher,
-    B: bitmap::Readable<N>,
-    S: MerkleStorage<F, Digest = H::Digest>,
-    const N: usize,
->(
-    status: &B,
-    storage: &S,
-    ops_leaves: Location<F>,
+fn compute_grafted_root<F: merkle::Graftable, H: Hasher>(
+    storage: &impl Readable<Family = F, Digest = H::Digest>,
     inactivity_floor: Location<F>,
+    grafting_height: u32,
 ) -> Result<H::Digest, Error<F>> {
     let size = storage.size();
     let leaves = Location::try_from(size)?;
@@ -1053,19 +1038,9 @@ pub(super) async fn compute_grafted_root<
     for (peak_pos, _) in F::peaks(size) {
         let digest = storage
             .get_node(peak_pos)
-            .await?
             .ok_or_else(|| merkle::Error::<F>::MissingNode(peak_pos))?;
         peaks.push(digest);
     }
-
-    // Validate bitmap invariants (pending <= 1, pruned <= graftable).
-    let grafting_height = grafting::height::<N>();
-    graftable_chunk_window(
-        ops_leaves,
-        Widen::widen(status.complete_chunks()),
-        Widen::widen(status.pruned_chunks()),
-        grafting_height,
-    )?;
 
     let inactive_peaks =
         grafting::chunk_aligned_inactive_peaks::<F>(leaves, inactivity_floor, grafting_height)?;

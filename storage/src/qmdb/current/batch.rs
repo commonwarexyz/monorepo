@@ -10,7 +10,6 @@ use crate::{
     merkle::{
         self, Graftable, Location, Position, Readable,
         batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
-        storage::Storage as MerkleStorage,
     },
     qmdb::{
         Error,
@@ -185,23 +184,6 @@ impl<R: Readable, B: Readable<Family = R::Family, Digest = R::Digest>> Readable
             return Some(d);
         }
         self.base.get_node(pos)
-    }
-}
-
-impl<R: Readable, B: Readable<Family = R::Family, Digest = R::Digest>> MerkleStorage<R::Family>
-    for Layered<'_, R, B>
-{
-    type Digest = R::Digest;
-
-    fn size(&self) -> Position<R::Family> {
-        Readable::size(self)
-    }
-
-    async fn get_node(
-        &self,
-        pos: Position<R::Family>,
-    ) -> Result<Option<R::Digest>, merkle::Error<R::Family>> {
-        Ok(Readable::get_node(self, pos))
     }
 }
 
@@ -974,8 +956,7 @@ where
         &grafted_storage,
         overlay_ops_leaves,
         inner.bounds.inactivity_floor,
-    )
-    .await?;
+    )?;
     let canonical_root = ops_root_witness.root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
@@ -2249,7 +2230,10 @@ mod tests {
             merkle::Location::new(zero * (N * 8) as u64),
             grafting::height::<N>(),
         );
-        let raw = db.any.log.get_node(pos).await.unwrap().unwrap();
+        let raw = merkle::storage::Storage::get_node(&db.any.log, pos)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(mirror.nodes.get(&pos), Some(&raw));
         db.destroy().await.unwrap();
     }

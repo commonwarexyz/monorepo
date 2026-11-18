@@ -462,7 +462,7 @@ where
                         return Some(false);
                     }
 
-                    let ancestry_stream = marshal.ancestor_stream(
+                    let ancestry_stream = marshal.unbounded_ancestry(
                         Arc::new(runtime_context.child("ancestor_stream")),
                         [block.inner_digested(), parent.inner_digested()],
                         ancestor_fetch_duration,
@@ -728,7 +728,7 @@ where
                 return Resolved::Reuse(parent.commitment(), parent);
             }
 
-            let ancestor_stream = marshal.ancestor_stream(
+            let ancestor_stream = marshal.unbounded_ancestry(
                 context.clone(),
                 [parent.inner_digested()],
                 ancestor_fetch_duration,
