@@ -543,6 +543,13 @@ mod test {
         assert_eq!(format!("{twin}"), format!("{x}"));
     }
 
+    #[test]
+    #[should_panic(expected = "elements and scalars must have the same length")]
+    fn test_mul_each_panics_on_length_mismatch() {
+        let mut elements = [G::generator(); 2];
+        G::mul_each(&mut elements, &[F::one()], &commonware_parallel::Sequential);
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::super::*;
@@ -599,5 +606,12 @@ mod twin {
             Twin::<G>::scaled_multi_pairing(&lefts, &rights, &scalars, &Sequential),
             Twin::<G>::multi_pairing(&products, &rights, &Sequential)
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "elements and scalars must have the same length")]
+    fn test_twin_mul_each_panics_on_length_mismatch() {
+        let mut elements = [Twin::<G>::generator(); 2];
+        Twin::<G>::mul_each(&mut elements, &[F::one()], &Sequential);
     }
 }

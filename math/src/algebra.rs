@@ -216,8 +216,7 @@ pub trait Multiplicative:
 /// - `*=` agrees with `*`,
 /// - scalar multiplication satisfies `(a + b) * x = a * x + b * x`,
 /// - [`Space::msm`] satisfies `msm(points, scalars) = sum_i points[i] * scalars[i]`,
-/// - [`Space::mul_each`] multiplies each `elements[i]` that has a scalar by
-///   `scalars[i]`,
+/// - [`Space::mul_each`] multiplies each `elements[i]` by `scalars[i]`,
 /// - when `R: Multiplicative`, `((a * x) * y) = a * (x * y)`,
 /// - when `R: Ring`, `a * 1 = a` and `a * 0 = 0`.
 ///
@@ -249,11 +248,11 @@ pub trait Space<R>:
         msm_naive(points, scalars)
     }
 
-    /// Multiplies `elements[i]` by `scalars[i]` in place, for each index `i`
-    /// that both slices have.
+    /// Multiplies `elements[i]` by `scalars[i]` in place, for each index `i`.
     ///
-    /// Elements beyond the scalars are unchanged, and scalars beyond the
-    /// elements are ignored.
+    /// # Panics
+    ///
+    /// Panics if `elements` and `scalars` differ in length.
     //
     // The default runs the multiplications on `strategy`. An override can use
     // batch instructions or share work across elements.
@@ -261,6 +260,11 @@ pub trait Space<R>:
     where
         R: Sync,
     {
+        assert_eq!(
+            elements.len(),
+            scalars.len(),
+            "elements and scalars must have the same length"
+        );
         // `Strategy` has no for-each operation, so this `fold` carries a `()`
         // accumulator and only multiplies elements in place.
         strategy.fold(
@@ -1083,11 +1087,10 @@ pub mod test_suites {
 
     fn check_mul_each_eq_naive<R: Sync, K: Space<R>>(points: &[K], scalars: &[R]) {
         use commonware_parallel::Sequential;
-        // Points without a scalar keep their value.
         let expected: Vec<K> = points
             .iter()
-            .enumerate()
-            .map(|(i, p)| scalars.get(i).map_or_else(|| p.clone(), |s| p.clone() * s))
+            .zip(scalars)
+            .map(|(p, s)| p.clone() * s)
             .collect();
         let mut products = points.to_vec();
         K::mul_each(&mut products, scalars, &Sequential);
@@ -1114,9 +1117,7 @@ pub mod test_suites {
         check_scale_assign(a, c);
         let (points, scalars): (Vec<K>, Vec<R>) = u.arbitrary::<Vec<(K, R)>>()?.into_iter().unzip();
         check_msm_eq_naive(&points, &scalars);
-        // Draw the scalars separately, so the lengths can differ.
-        let points: Vec<K> = u.arbitrary()?;
-        let scalars: Vec<R> = u.arbitrary()?;
+        let (points, scalars): (Vec<K>, Vec<R>) = u.arbitrary::<Vec<(K, R)>>()?.into_iter().unzip();
         check_mul_each_eq_naive(&points, &scalars);
         Ok(())
     }
