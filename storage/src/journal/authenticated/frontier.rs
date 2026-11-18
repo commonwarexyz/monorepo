@@ -48,7 +48,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
 
     /// Whether a state sync appended operations that no boundary has been recorded for since.
     pub(crate) fn sync_incomplete(&self) -> bool {
-        self.record().2
+        self.metadata.get(&FRONTIER_KEY).is_some_and(|r| r.2)
     }
 
     /// Durably record `location` as the boundary, with `pins`. This ends an incomplete sync.
