@@ -48,6 +48,7 @@ const CONCURRENT_FILLS: usize = 8;
 struct Level<D> {
     /// Ordinal of the first node.
     first: u64,
+    /// Digests of the nodes from ordinal `first` on, in ordinal order.
     nodes: VecDeque<D>,
 }
 
@@ -66,6 +67,7 @@ impl<D: Copy> Level<D> {
 /// Nodes at or above `height`. Nodes of one height are born in ordinal order, including delayed
 /// MMB parents.
 struct Resident<D> {
+    /// The lowest resident height.
     height: u32,
     /// Level `i` holds height `height + i`.
     levels: Vec<Level<D>>,
@@ -375,6 +377,7 @@ pub(crate) enum Chunk<F: Family, D> {
     Leaves {
         /// The chunk's first leaf.
         start: u64,
+        /// One digest per leaf from `start`, in position order.
         digests: Vec<D>,
     },
 }
@@ -383,6 +386,7 @@ pub(crate) enum Chunk<F: Family, D> {
 pub(crate) struct SubtreeNodes<F: Family, D> {
     /// The subtree's first leaf.
     start: u64,
+    /// The height of the subtree's root, so it spans `2^height` leaves.
     height: u32,
     /// The lowest height in `rows`.
     min_height: u32,
@@ -442,7 +446,7 @@ struct TaskJournal<C> {
 
 /// The Merkle digests of an authenticated journal. Only `mem` is shared with batches.
 pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
-    /// Nodes added since the last [Self::flush], plus the peaks and pins it keeps.
+    /// Peaks of the current size and of earlier sizes until [Self::flush], plus the boundary pins.
     mem: Arc<Mem<F, D>>,
     /// Boxed to keep the database handles that move this tree by value small enough for
     /// debug-build test stacks.
@@ -1104,9 +1108,11 @@ mod tests {
     };
 
     struct Operations {
+        /// The locations the journal reports as retained.
         bounds: Range<u64>,
         /// The location `reads` counts from.
         origin: u64,
+        /// Reads of each location from `origin`, in location order.
         reads: Vec<AtomicUsize>,
         /// A location whose stored operation differs from the one replayed, or `u64::MAX`.
         corrupt: AtomicU64,

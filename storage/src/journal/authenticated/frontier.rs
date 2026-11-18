@@ -76,10 +76,9 @@ mod tests {
     use commonware_cryptography::sha256::Digest as D;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
-    /// Main's Merkle metadata, raw byte values in this partition, fails to decode as a frontier, so
-    /// a database written by main fails to open with `Corruption` instead of panicking.
+    /// Opening a frontier whose record does not decode returns a metadata corruption error.
     #[test]
-    fn rejects_legacy_metadata() {
+    fn rejects_undecodable_record() {
         deterministic::Runner::default().start(|context| async move {
             let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
                 context.child("legacy"),

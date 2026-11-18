@@ -50,7 +50,7 @@ use tracing::{error, warn};
 /// inactivity floor.
 ///
 /// Merkleization re-grafts a dirty chunk from its retained root without reading the ops tree,
-/// which holds that node in memory only if its resident height is at most the grafting height.
+/// which need not hold that node in memory when its resident height exceeds the grafting height.
 /// Roots are stored densely from chunk `start`. The ops tree only appends, so a retained root
 /// never changes.
 pub(super) struct GraftRoots<D> {
@@ -947,8 +947,7 @@ pub(super) fn combine_roots<H: Hasher>(
     }
 }
 
-/// Gather the components that bind an ops root to a canonical [Db] root using
-/// memory-resident nodes.
+/// Gather the components that bind an ops root to a canonical [Db] root using nodes held in memory.
 ///
 /// See the [Root structure](super) section in the module documentation.
 ///
@@ -1019,7 +1018,7 @@ where
     Ok((grafted_tree, graft_roots, witness))
 }
 
-/// Compute the root of the grafted structure from its memory-resident peaks.
+/// Compute the root of the grafted structure from its peaks held in memory.
 ///
 /// Only **graftable** chunks (those whose h=G ancestor has been born in the ops tree) are
 /// committed by the grafted tree. The most recently completed but ungraftable chunk, if

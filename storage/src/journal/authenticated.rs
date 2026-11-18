@@ -28,10 +28,8 @@
 //! needed from the operations in its aligned region of leaves.
 //!
 //! A prune commits the operations, writes the frontier at the new boundary, then deletes
-//! operation blobs. A state sync marks the frontier before it appends operations, writes its
-//! boundary only after its root is verified, and deletes the operations before it after that.
-//! Startup finishes a deletion that a crash interrupted, and refuses a journal whose frontier is
-//! marked, since its operations may mix local ones with unverified ones.
+//! operation blobs. A state sync writes its boundary only after its root is verified, then deletes
+//! the operation blobs before it. Startup finishes a deletion that a crash interrupted.
 //!
 //! # Ownership
 //!
@@ -296,6 +294,7 @@ where
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
     pub(crate) journal: C,
 
+    /// Hasher and peak-bagging mode for the Merkle structure's digests and roots.
     pub(crate) hasher: StandardHasher<H>,
 }
 
@@ -520,8 +519,9 @@ where
 
     /// Return the digests [`Family::nodes_to_pin`] lists for `location`, in that order.
     ///
-    /// Returns [`merkle::Error::ElementPruned`] if one of them is pruned, and
-    /// [`merkle::Error::RangeOutOfBounds`] if `location` is past the end.
+    /// Returns [`merkle::Error::ElementPruned`] if a node was pruned,
+    /// [`merkle::Error::LocationOverflow`] if `location` exceeds the family limit, or
+    /// [`merkle::Error::RangeOutOfBounds`] if a valid `location` is past the journal's end.
     pub async fn pinned_nodes_at(
         &self,
         location: Location<F>,
@@ -1147,7 +1147,9 @@ where
     ///
     /// Initialization durably discards the suffix before returning. When the journal retains
     /// its first item and no item matches at or below `max_size`, it is emptied and its frontier
-    /// discarded, whatever that frontier recorded. A cap below retained history, or pruned
+    /// discarded, whatever that frontier recorded. If that emptying is interrupted, repeat this
+    /// call with the same `max_size` before any other open. Until then [Self::new] can fail or find
+    /// the journal fully pruned at the old frontier. A cap below retained history, or pruned
     /// history with no matching retained item, returns a pruning error.
     #[boxed]
     pub async fn init_at_most(
@@ -1452,7 +1454,8 @@ pub trait BackingRecovery: Send + Sync + Sized {
     /// Discard stored items and establish an empty journal at `size` during initialization.
     fn reset(self, size: u64) -> impl Future<Output = Result<Self, JournalError>> + Send;
 
-    /// Durably retain at most `size` items and publish the live journal.
+    /// Durably retain the items in `bounds().start..min(size, bounds().end)` and publish the live
+    /// journal. Returns [JournalError::ItemPruned] if `size` lies below the retained start.
     fn finish(self, size: u64) -> impl Future<Output = Result<Self::Journal, JournalError>> + Send;
 
     /// Select the latest retained item satisfying `predicate` below an exclusive ceiling.
