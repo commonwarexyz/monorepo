@@ -31,6 +31,7 @@
 //!
 //! A block's groups must be contiguous and block numbers must not decrease. The
 //! replayer folds all of a block's groups into one batch and ignores the tx index.
+//! A trace ends between groups: one that stops inside a header or a record is malformed.
 //!
 //! Keys are `Sha256(addr)` (accounts) and `Sha256(addr || slot)` (storage): a
 //! uniform, collision-free 32-byte mapping. Account values are the 72-byte record
@@ -54,8 +55,10 @@
 //!   REPLAY_ALIGNED         size logical pages so each physical page fills 4096 bytes
 //!   REPLAY_N               bitmap chunk bytes, read at build time (default 32)
 //!
-//! Without `REPLAY_KEEP`, the replay deletes `storage_dir` first, and exits instead if the
-//! directory holds a `.protected` file.
+//! Without `REPLAY_KEEP`, the replay starts from an empty `storage_dir`. It opens the trace
+//! first, then deletes what `storage_dir` holds only if an earlier replay created the
+//! directory, which a `.trace_replay` file in it records. It exits instead if the directory
+//! holds anything else, or a `.protected` file.
 
 use commonware_allocator::mimalloc::{Config, MiMalloc};
 use commonware_codec::RangeCfg;
@@ -195,6 +198,58 @@ struct BlockMuts {
     reads: Vec<Key>,
 }
 
+/// Records, in a storage directory, that this benchmark created it.
+const OWNED_MARKER: &str = ".trace_replay";
+
+/// Leave `storage_dir` empty and marked as this benchmark's, ready for a fresh database.
+///
+/// A directory that already holds something is deleted only if an earlier replay marked it.
+/// Otherwise the replay exits, as it does for a directory holding a `.protected` file.
+fn fresh_storage_dir(storage_dir: &str) {
+    let dir = std::path::Path::new(storage_dir);
+    let occupied = match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!("inspect storage_dir {storage_dir}: {e}"),
+    };
+    if occupied {
+        if dir.join(".protected").exists() {
+            eprintln!("refusing to wipe protected storage_dir {storage_dir}");
+            std::process::exit(2);
+        }
+        if !dir.join(OWNED_MARKER).exists() {
+            eprintln!(
+                "refusing to wipe storage_dir {storage_dir}: no {OWNED_MARKER} file says an \
+                 earlier replay created it. Remove it by hand, or set REPLAY_KEEP to reopen it."
+            );
+            std::process::exit(2);
+        }
+        std::fs::remove_dir_all(dir).expect("remove the previous replay's database");
+    }
+    std::fs::create_dir_all(dir).expect("create storage_dir");
+    std::fs::write(dir.join(OWNED_MARKER), b"").expect("mark storage_dir");
+}
+
+/// Read the next record-group header, or `None` when the trace ends cleanly before one.
+///
+/// # Panics
+///
+/// Panics if the trace ends partway through a header.
+fn read_header(r: &mut impl Read) -> Option<[u8; 16]> {
+    let mut hdr = [0u8; 16];
+    let mut filled = 0;
+    while filled < hdr.len() {
+        match r.read(&mut hdr[filled..]) {
+            Ok(0) if filled == 0 => return None,
+            Ok(0) => panic!("trace ends {filled} bytes into a group header"),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => panic!("read trace header: {e}"),
+        }
+    }
+    Some(hdr)
+}
+
 // The per-block sync counter resets inside flush_block!; its reset is dead at the final
 // (post-loop) flush since the drain + full sync below cover durability regardless.
 #[allow(unused_assignments)]
@@ -232,16 +287,18 @@ fn main() {
     // Prune to the inactivity floor every N blocks (0 = never; unpruned = log-structured
     // worst case). A production node prunes, so the default replays realistically.
     let prune_every: u64 = raw.get(8).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+    // Open the trace before touching storage, so a bad path deletes nothing. The trace streams
+    // from a file, or from stdin when the path is "-" (e.g. `zstd -dc trace.zst | trace_replay -`),
+    // so the whole file never has to fit in RAM.
+    let reader: Box<dyn Read> = if trace_path == "-" {
+        Box::new(std::io::stdin())
+    } else {
+        Box::new(std::fs::File::open(&trace_path).expect("open trace file"))
+    };
+
     // Fresh DB each run so size + throughput reflect this corpus alone.
     if std::env::var("REPLAY_KEEP").is_err() {
-        if std::path::Path::new(&storage_dir)
-            .join(".protected")
-            .exists()
-        {
-            eprintln!("refusing to wipe protected storage_dir {storage_dir}");
-            std::process::exit(2);
-        }
-        std::fs::remove_dir_all(&storage_dir).ok();
+        fresh_storage_dir(&storage_dir);
     }
 
     eprintln!(
@@ -340,14 +397,6 @@ fn main() {
             init_start.elapsed().as_secs_f64()
         );
 
-        // Stream the trace from a file, or from stdin when the path is "-"
-        // (e.g. `zstd -dc trace.zst | trace_replay -`), so the whole file never
-        // has to fit in RAM.
-        let reader: Box<dyn Read> = if trace_path == "-" {
-            Box::new(std::io::stdin())
-        } else {
-            Box::new(std::fs::File::open(&trace_path).expect("open trace file"))
-        };
         let mut r = BufReader::with_capacity(1 << 20, reader);
         let mut cur_block: Option<u64> = None;
         let mut muts = BlockMuts {
@@ -506,14 +555,8 @@ fn main() {
             }};
         }
 
-        let mut hdr = [0u8; 16];
-        loop {
-            // Read the next record-group header; a clean EOF here ends the stream.
-            match r.read_exact(&mut hdr) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => panic!("read trace header: {e}"),
-            }
+        // The trace ends cleanly only between record groups.
+        while let Some(hdr) = read_header(&mut r) {
             let block = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
             let nrec = u32::from_le_bytes(hdr[12..16].try_into().unwrap());
 
@@ -521,6 +564,8 @@ fn main() {
                 if cur_block.is_some() {
                     flush_block!();
                     if blocks_done >= max_blocks {
+                        // The block just flushed is the last one replayed.
+                        cur_block = None;
                         break;
                     }
                 }
@@ -577,7 +622,8 @@ fn main() {
                 }
             }
         }
-        if cur_block.is_some() && !(muts.storage.is_empty() && muts.accounts.is_empty()) {
+        // Flush the block the trace ended in, whether it wrote anything or only read.
+        if cur_block.is_some() {
             flush_block!();
         }
         // Drain the last in-flight pipelined sync, then a full sync: it persists metadata, makes
