@@ -432,15 +432,18 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
-        let start_moved = self.target.range.start() != new_target.range.start();
-        self.journal = self.journal.resize(new_target.range.start()).await?;
-        if start_moved {
+        let new_start = new_target.range.start();
+        self.journal = self.journal.resize(new_start).await?;
+        if new_start != self.target.range.start() {
             self.pinned_nodes = None;
+            // A journal reset at the new start needs its boundary pins before it can reopen.
+            if self.journal.size() == new_start {
+                self.mark_before_append = true;
+            }
 
             // A source may prune up to the new lower bound, so a request below a moved bound
             // may never be answered. Requests are also tracked by start location, so one kept at the
             // new bound would block the boundary request there.
-            let new_start = new_target.range.start();
             self.outstanding_requests
                 .retain(|request| request.start() > new_start);
         }

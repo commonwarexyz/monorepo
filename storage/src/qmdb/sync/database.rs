@@ -58,10 +58,10 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
 /// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
 /// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
-/// it already reaches the target, calls [`Self::mark_sync_incomplete`] before appending its first
-/// fetched operation to a nonempty journal, fetches and verifies the remaining operations, builds
-/// the database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the target, and
-/// only then calls [`Self::persist_sync_result`].
+/// it already reaches the target, calls [`Self::mark_sync_incomplete`] before appending to reused
+/// history or a journal reset at a nonzero start, and fetches and verifies the remaining operations.
+/// It builds the database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the
+/// target, and only then calls [`Self::persist_sync_result`].
 ///
 /// [`Source`]: super::Source
 pub trait Database: Sized + Send {
@@ -92,10 +92,10 @@ pub trait Database: Sized + Send {
     /// so the database refuses to open with [`crate::qmdb::Error::IncompleteSync`] until
     /// [`Self::persist_sync_result`] records the synced state.
     ///
-    /// Appended operations follow the local ones the sync keeps, which it verifies only at the end.
-    /// The engine skips the mark for a journal that starts empty at zero, whose operations are all
-    /// verified against the target. Databases whose journal holds nothing across a restart must
-    /// explicitly return `Ok(())`.
+    /// The mark covers both local operations verified only at the end and a journal reset at a
+    /// nonzero start whose boundary pins have yet to be persisted. A journal filled from genesis
+    /// can reopen at a verified commit. Databases whose journal holds nothing across a restart
+    /// must explicitly return `Ok(())`.
     fn mark_sync_incomplete(
         context: Self::Context,
         config: &Self::Config,
@@ -216,8 +216,9 @@ mod tests {
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sequence::U64,
+        NZU16, NZU64, NZUsize, channel::ring, non_empty_range, range::NonEmptyRange, sequence::U64,
     };
+    use rstest::rstest;
     use std::sync::Arc;
 
     type Op = Operation<MmrFamily, U64>;
@@ -671,6 +672,78 @@ mod tests {
             let db = KeylessDb::init(context.child("reopen"), local_config, None)
                 .await
                 .unwrap();
+            assert_eq!(db.root(), target.root);
+        });
+    }
+
+    /// Interrupt a pruned sync before its first commit, or after a target update has reset the
+    /// journal and a commit has arrived. Both opens must identify the unfinished sync.
+    #[rstest]
+    #[case::before_first_commit(false, 8)]
+    #[case::after_target_update(true, 12)]
+    fn interrupted_pruned_sync_is_retried(#[case] update_target: bool, #[case] stop_at: u64) {
+        deterministic::Runner::default().start(|context| async move {
+            // Commits at 0, 8 and 15. The target starts at 4, inside the first batch.
+            let source = Arc::new(
+                keyless_db(
+                    context.child("source"),
+                    keyless_config("-source"),
+                    4,
+                    &[&[1, 2, 3, 4, 5, 6, 7], &[8, 9, 10, 11, 12, 13]],
+                )
+                .await,
+            );
+            let target = Target {
+                root: source.root(),
+                range: non_empty_range!(source.sync_boundary(), source.bounds().end),
+            };
+            let mut local = keyless_config("");
+            local.log.items_per_blob = NZU64!(2);
+            let config = |target, limit, update_rx| Config {
+                context: context.child("sync"),
+                source: ServesBefore {
+                    inner: source.clone(),
+                    limit,
+                },
+                target,
+                max_outstanding_requests: NZUsize!(1),
+                fetch_batch_size: NZU64!(2),
+                apply_batch_size: NZU64!(2),
+                db_config: local.clone(),
+                update_rx,
+                finish_rx: None,
+                reached_target_tx: None,
+            };
+
+            let (tx, rx) = ring::channel(NZUsize!(1));
+            let initial = if update_target {
+                let genesis =
+                    keyless_db(context.child("genesis"), keyless_config("-genesis"), 0, &[]).await;
+                assert!(tx.send_lossy(target.clone()));
+                Target {
+                    root: genesis.root(),
+                    range: non_empty_range!(genesis.sync_boundary(), genesis.bounds().end),
+                }
+            } else {
+                target.clone()
+            };
+            let interrupted = config(initial, Location::new(stop_at), update_target.then_some(rx));
+            assert!(matches!(
+                sync::sync::<KeylessDb, _>(interrupted).await,
+                Err(sync::Error::Source(_))
+            ));
+            assert!(matches!(
+                KeylessDb::init(context.child("reopen"), local.clone(), None).await,
+                Err(qmdb::Error::IncompleteSync)
+            ));
+            let start = target.range.start();
+            assert!(matches!(
+                KeylessDb::init(context.child("capped"), local.clone(), Some(start)).await,
+                Err(qmdb::Error::Journal(crate::journal::Error::ItemPruned(n))) if n == *start
+            ));
+
+            let retry = config(target.clone(), target.range.end(), None);
+            let db = sync::sync::<KeylessDb, _>(retry).await.unwrap();
             assert_eq!(db.root(), target.root);
         });
     }

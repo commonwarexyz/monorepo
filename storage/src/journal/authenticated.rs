@@ -1200,8 +1200,10 @@ where
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
 
-        // A pruned journal from an incomplete sync may retain no matching operation.
-        if bounds.start != 0 && frontier.sync_incomplete() {
+        // A pruned journal from an incomplete sync may retain no matching operation. An
+        // explicit cap must still report when its requested prefix has been pruned.
+        let sync_incomplete = frontier.sync_incomplete();
+        if max_size.is_none() && bounds.start != 0 && sync_incomplete {
             return Err(Error::IncompleteSync);
         }
 
@@ -1223,7 +1225,7 @@ where
         let (boundary, pins) = if bounds.start == 0 && selected_end == 0 {
             (Location::new(0), Vec::new())
         } else {
-            if frontier.sync_incomplete() {
+            if sync_incomplete {
                 return Err(Error::IncompleteSync);
             }
             if *boundary < bounds.start
