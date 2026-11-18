@@ -83,11 +83,9 @@
 //! * <https://github.com/drand/tlock> tlock: Timelock Encryption/Decryption Made Practical
 
 use crate::{
-    bls::{
-        ops::hash_with_namespace,
-        variant::{DST, Variant},
-    },
+    bls::{ops::hash_with_namespace, variant::Variant},
     bls12381::primitives::group::Scalar,
+    curve::DST,
     sha256::Digest,
 };
 #[cfg(not(feature = "std"))]

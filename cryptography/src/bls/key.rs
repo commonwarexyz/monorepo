@@ -1,7 +1,7 @@
 //! Secret keys and shares of them.
 
-use super::variant::{ScalarReadCfg, Variant};
-use crate::Secret;
+use super::variant::Variant;
+use crate::{Secret, curve::ScalarReadCfg};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt as _, Write};
 use commonware_math::algebra::{CryptoGroup, Random};

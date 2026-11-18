@@ -99,6 +99,8 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(feature = "std")]
     use std::{sync::Arc, vec::Vec};
 
+    pub mod curve;
+
     pub mod secret;
     pub use crate::secret::Secret;
 

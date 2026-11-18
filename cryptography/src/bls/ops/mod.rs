@@ -22,11 +22,8 @@ pub mod aggregate;
 pub mod batch;
 pub mod threshold;
 
-use super::{
-    Error,
-    key::Private,
-    variant::{DST, Variant},
-};
+use super::{Error, key::Private, variant::Variant};
+use crate::curve::DST;
 use commonware_codec::Encode;
 use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, PairingGroup, Random};
 use commonware_parallel::Sequential;

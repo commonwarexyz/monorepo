@@ -128,14 +128,12 @@ mod evrf;
 
 use crate::{
     Signer as _, Verifier as _,
-    bls::{
-        sharing::{Mode, ModeVersion, Sharing},
-        variant::ScalarReadCfg,
-    },
+    bls::sharing::{Mode, ModeVersion, Sharing},
     bls12381::primitives::{
         group::{G1, Private, Scalar, Share, SmallScalar},
         variant::MinPk,
     },
+    curve::ScalarReadCfg,
     transcript::{Summary, Transcript, Version},
 };
 use bytes::{BufMut, Bytes};
