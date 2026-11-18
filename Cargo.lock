@@ -1939,6 +1939,7 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-formatting",
+ "commonware-invariants",
  "commonware-macros",
  "commonware-math",
  "commonware-p2p",
@@ -1968,19 +1969,9 @@ dependencies = [
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
- "commonware-invariants",
- "commonware-macros",
  "commonware-math",
- "commonware-p2p",
- "commonware-parallel",
- "commonware-runtime",
  "commonware-utils",
- "futures",
  "libfuzzer-sys",
- "rand 0.10.2",
- "rand_core 0.10.1",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

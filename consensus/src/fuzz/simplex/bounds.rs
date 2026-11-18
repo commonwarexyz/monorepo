@@ -75,7 +75,10 @@ pub fn quorum(n: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::{Configuration, N4F1C3, N4F3C1},
+        *,
+    };
     use commonware_utils::{Faults, N3f1};
 
     #[test]
@@ -125,8 +128,6 @@ mod tests {
 
     #[test]
     fn test_can_finalize_logic() {
-        use crate::{Configuration, N4F1C3, N4F3C1};
-
         // N4F1C3: 4 nodes, 1 faulty - can finalize (1 <= 1)
         assert!(N4F1C3.can_finalize());
 

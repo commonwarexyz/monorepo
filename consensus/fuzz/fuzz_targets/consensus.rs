@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 
 libfuzzer_sys::fuzz_target!(|input: &[u8]| {
     let mut u = Unstructured::new(input);
-    if let Ok(plan) = commonware_consensus_fuzz::fuzz::Plan::arbitrary(&mut u) {
+    if let Ok(plan) = commonware_consensus::fuzz::Plan::arbitrary(&mut u) {
         let _ = plan.run(&mut u);
     }
 });

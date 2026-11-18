@@ -1,20 +1,19 @@
 //! Plans for connected Simplex property checks.
 
-use crate::{
-    FuzzInput, HANDOFF_DECISIONS, N4F1C3, Standard, fuzz, simplex::Simplex,
-    strategy::StrategyChoice, utils::Partition,
+use super::{
+    FuzzInput, HANDOFF_DECISIONS, Mode, N4F1C3, Scheme, strategy::StrategyChoice, utils::Partition,
 };
-use arbitrary::{Arbitrary, Unstructured};
-use commonware_consensus::{
+use crate::{
     Handoff,
     types::{TermLength, ViewDelta},
 };
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::NZU32;
 
-pub(crate) const TERM_LENGTH_BOUNDARIES: [TermLength; 2] =
+pub(super) const TERM_LENGTH_BOUNDARIES: [TermLength; 2] =
     [TermLength::ONE, TermLength::new(NZU32!(5))];
 
-pub(crate) fn connected_input(seed: u64, containers: u64, term_length: TermLength) -> FuzzInput {
+pub(super) fn connected_input(seed: u64, containers: u64, term_length: TermLength) -> FuzzInput {
     FuzzInput {
         raw_bytes: seed.to_be_bytes().to_vec(),
         partition: Partition::Connected,
@@ -25,15 +24,15 @@ pub(crate) fn connected_input(seed: u64, containers: u64, term_length: TermLengt
         heterogeneous_optimism: true,
         handoff: Handoff::Wait,
         degraded_network: false,
-        strategy: StrategyChoice::AnyScope,
+        strategy: StrategyChoice::Any,
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ConnectedPlan {
-    pub(crate) seed: u64,
-    pub(crate) term_length: TermLength,
-    pub(crate) handoff: Handoff<()>,
+pub(in crate::fuzz) struct ConnectedPlan {
+    pub(in crate::fuzz) seed: u64,
+    pub(in crate::fuzz) term_length: TermLength,
+    pub(in crate::fuzz) handoff: Handoff<()>,
 }
 
 impl Arbitrary<'_> for ConnectedPlan {
@@ -50,11 +49,12 @@ impl Arbitrary<'_> for ConnectedPlan {
 }
 
 impl ConnectedPlan {
-    pub(crate) fn run<P: Simplex>(self) {
+    pub(in crate::fuzz) fn run(self, scheme: Scheme) {
         const CONTAINERS: u64 = 30;
-        fuzz::<P, Standard>(FuzzInput {
+        let input = FuzzInput {
             handoff: self.handoff,
             ..connected_input(self.seed, CONTAINERS, self.term_length)
-        });
+        };
+        scheme.run(input, Mode::Standard);
     }
 }

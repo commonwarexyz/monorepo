@@ -216,9 +216,7 @@ install-dylint-toolchain:
 fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     set -euo pipefail
-    fuzz_dir="{{fuzz_dir}}"
-    fuzz_args=(--fuzz-dir "$fuzz_dir")
-    targets=$(cargo {{nightly_version}} fuzz list "${fuzz_args[@]}" | python3 .github/scripts/hash_partition.py {{partition}})
+    targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
     if [ -z "$targets" ]; then
         exit 0
     fi
@@ -227,20 +225,14 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     # serializes the links against the fuzz sessions while most cores sit idle.
     # cargo-fuzz builds one target or all of them, so until this recipe exits the
     # manifest lists only this partition's targets.
-    manifest="$(cd "$fuzz_dir" && pwd -P)/Cargo.toml"
+    manifest={{fuzz_dir}}/Cargo.toml
     cp "$manifest" "$manifest.orig"
     trap 'mv "$manifest.orig" "$manifest"' EXIT
     python3 .github/scripts/keep_fuzz_targets.py "$manifest" $targets
-    # Enable the required features of the bins retained for this partition.
-    features=$(cargo {{nightly_version}} metadata --format-version 1 --no-deps --manifest-path "$manifest" |
-        jq -r --arg manifest "$manifest" '[.packages[] | select(.manifest_path == $manifest) | .targets[] | select(.kind | index("bin")) | ."required-features"[]?] | unique | join(",")')
-    if [ -n "$features" ]; then
-        fuzz_args+=(--features "$features")
-    fi
-    cargo {{nightly_version}} fuzz build "${fuzz_args[@]}"
+    cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
-        cargo {{nightly_version}} fuzz run "$target" "${fuzz_args[@]}" -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
-        rm -f "$fuzz_dir"/target/*/release/"$target"
+        cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
+        rm -f {{fuzz_dir}}/target/*/release/$target
     done
 
 # Run cargo-hack with feature powerset

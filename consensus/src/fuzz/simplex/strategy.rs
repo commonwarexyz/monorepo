@@ -1,5 +1,5 @@
-use crate::EPOCH;
-use commonware_consensus::{
+use super::EPOCH;
+use crate::{
     Viewable,
     simplex::types::Proposal,
     types::{Epoch, Round, View},
@@ -15,18 +15,6 @@ pub trait Strategy: Send + Sync {
         last_finalized_view: u64,
         last_notarized_view: u64,
         last_nullified_view: u64,
-    ) -> Proposal<Sha256Digest>;
-
-    fn proposal_with_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
-    ) -> Proposal<Sha256Digest>;
-
-    fn proposal_with_parent_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
     ) -> Proposal<Sha256Digest>;
 
     fn mutate_proposal(
@@ -79,12 +67,12 @@ pub trait Strategy: Send + Sync {
 
 #[derive(Clone, Copy, Debug)]
 pub enum StrategyChoice {
-    SmallScope {
+    Small {
         fault_rounds: u64,
         fault_rounds_bound: u64,
     },
-    AnyScope,
-    FutureScope {
+    Any,
+    Future {
         fault_rounds: u64,
         fault_rounds_bound: u64,
     },
@@ -124,22 +112,6 @@ impl Strategy for SmallScope {
             View::new(parent),
             payload,
         )
-    }
-
-    fn proposal_with_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
-    ) -> Proposal<Sha256Digest> {
-        proposal_with_view(proposal, view)
-    }
-
-    fn proposal_with_parent_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
-    ) -> Proposal<Sha256Digest> {
-        proposal_with_parent_view(proposal, view)
     }
 
     fn mutate_proposal(
@@ -290,22 +262,6 @@ impl Strategy for AnyScope {
             View::new(parent),
             payload,
         )
-    }
-
-    fn proposal_with_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
-    ) -> Proposal<Sha256Digest> {
-        proposal_with_view(proposal, view)
-    }
-
-    fn proposal_with_parent_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
-    ) -> Proposal<Sha256Digest> {
-        proposal_with_parent_view(proposal, view)
     }
 
     fn mutate_proposal(
@@ -492,22 +448,6 @@ impl Strategy for FutureScope {
         )
     }
 
-    fn proposal_with_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
-    ) -> Proposal<Sha256Digest> {
-        proposal_with_view(proposal, view)
-    }
-
-    fn proposal_with_parent_view(
-        &self,
-        proposal: &Proposal<Sha256Digest>,
-        view: u64,
-    ) -> Proposal<Sha256Digest> {
-        proposal_with_parent_view(proposal, view)
-    }
-
     fn mutate_proposal(
         &self,
         rng: &mut impl Rng,
@@ -601,7 +541,10 @@ impl Strategy for FutureScope {
     }
 }
 
-fn proposal_with_view(proposal: &Proposal<Sha256Digest>, view: u64) -> Proposal<Sha256Digest> {
+const fn proposal_with_view(
+    proposal: &Proposal<Sha256Digest>,
+    view: u64,
+) -> Proposal<Sha256Digest> {
     Proposal::new(
         Round::new(Epoch::new(EPOCH), View::new(view)),
         proposal.parent,

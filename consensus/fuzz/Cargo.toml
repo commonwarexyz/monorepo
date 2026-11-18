@@ -12,37 +12,18 @@ cargo-fuzz = true
 [lints.cargo]
 unused_dependencies = "allow"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
-
-[features]
-fuzz = []
-
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
-commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
+commonware-consensus = { workspace = true, features = ["arbitrary", "fuzz"] }
 commonware-cryptography.workspace = true
-commonware-macros.workspace = true
 commonware-math.workspace = true
-commonware-p2p = { workspace = true, features = ["mocks"] }
-commonware-parallel.workspace = true
-commonware-runtime.workspace = true
-commonware-utils = { workspace = true, features = ["arbitrary"] }
-futures.workspace = true
+commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
-rand.workspace = true
-rand_core.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-
-[dev-dependencies]
-commonware-invariants.workspace = true
 
 [[bin]]
 name = "consensus"
 path = "fuzz_targets/consensus.rs"
-required-features = ["fuzz"]
 test = false
 doc = false
 bench = false
