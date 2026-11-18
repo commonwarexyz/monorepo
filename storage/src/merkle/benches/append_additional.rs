@@ -25,16 +25,14 @@ fn make_elements(n: usize, sampler: &mut TestRng) -> Vec<sha256::Digest> {
 fn make_mem<F: Family>(elements: &[sha256::Digest]) -> Mem<F, sha256::Digest> {
     let h = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
-    {
-        let batch = {
-            let mut batch = mem.new_batch();
-            for digest in elements {
-                batch = batch.add(&h, digest);
-            }
-            batch.merkleize(&mem, &h)
-        };
-        mem.apply_batch(&batch).unwrap();
-    }
+    let batch = {
+        let mut batch = mem.new_batch();
+        for digest in elements {
+            batch = batch.add(&h, digest);
+        }
+        batch.merkleize(&mem, &h)
+    };
+    mem.apply_batch(&batch).unwrap();
     mem
 }
 

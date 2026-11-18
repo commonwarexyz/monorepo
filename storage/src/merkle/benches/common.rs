@@ -35,18 +35,16 @@ fn build<F: Family>(n: usize) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<sh
     let mut mem = Mem::<F, _>::new();
     let mut elements = Vec::with_capacity(n);
     let mut sampler = test_rng();
-    {
-        let batch = {
-            let mut batch = mem.new_batch();
-            for _ in 0..n {
-                let element = sha256::Digest::random(&mut sampler);
-                batch = batch.add(&hasher, &element);
-                elements.push(element);
-            }
-            batch.merkleize(&mem, &hasher)
-        };
-        mem.apply_batch(&batch).unwrap();
-    }
+    let batch = {
+        let mut batch = mem.new_batch();
+        for _ in 0..n {
+            let element = sha256::Digest::random(&mut sampler);
+            batch = batch.add(&hasher, &element);
+            elements.push(element);
+        }
+        batch.merkleize(&mem, &hasher)
+    };
+    mem.apply_batch(&batch).unwrap();
     let root = mem.root(&hasher, 0).unwrap();
     (mem, root, elements)
 }
