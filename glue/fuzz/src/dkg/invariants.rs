@@ -15,6 +15,7 @@
 
 use super::{
     BootstrapInfo, Digest, Directory, EPOCH_LENGTH, Info, MockGroup, PublicKey,
+    report::{Invariant, Judged, Target},
     schedule::Schedule,
     scheme::{Registration, Scheme},
 };
@@ -199,6 +200,34 @@ pub struct Counts {
     pub blocks: usize,
     /// Panics tolerated because they stop a half of the compromised identity.
     pub tolerated_panics: usize,
+}
+
+impl Counts {
+    /// What a bootstrap run of `target` with these counts reports, in the
+    /// units of `SPEC.md`, section 8.1. `repeated` is the number of reports
+    /// an engine repeated after a restart, each compared with its first
+    /// under I1 (see [`check_reports_agree`]).
+    ///
+    /// The counts are those of a run that executed its scenario, whose panic
+    /// record and engines I8 judged and whose blocks I9 judged, once each.
+    pub fn judged(&self, target: Target, repeated: usize) -> Judged {
+        // No correct engine reported: the subsets are compared with one
+        // another, and a lone one is compared with nothing.
+        let unreported = self.completed == 0;
+        let subsets = if unreported && self.reconstructions < 2 {
+            0
+        } else {
+            self.reconstructions
+        };
+        let failed = self.completed > 0 && self.successes == 0;
+        Judged::new(target)
+            .with(Invariant::I1, self.agreements + repeated + self.successes)
+            .with(Invariant::I2, self.shares)
+            .with(Invariant::I3, subsets)
+            .with(Invariant::I6, usize::from(failed))
+            .with(Invariant::I8, 1)
+            .with(Invariant::I9, 1)
+    }
 }
 
 /// I1: any two correct engines that completed the same ceremony hold the
@@ -1045,12 +1074,33 @@ pub struct ReshareCounts {
     pub tolerated_panics: usize,
 }
 
+impl ReshareCounts {
+    /// What a run of `target` over reshare engines with these counts
+    /// reports, in the units of `SPEC.md`, section 8.1.
+    ///
+    /// The counts are those of a run that executed its scenario, whose panic
+    /// record and engines I8 judged and whose blocks I9 judged, once each.
+    pub fn judged(&self, target: Target) -> Judged {
+        Judged::new(target)
+            .with(Invariant::I1, self.agreements)
+            .with(Invariant::I2, self.shares + self.registrations)
+            .with(Invariant::I3, self.reconstructions)
+            .with(Invariant::I4, self.continuities)
+            .with(Invariant::I5, self.isolations)
+            .with(Invariant::I6, self.failures)
+            .with(Invariant::I8, 1)
+            .with(Invariant::I9, 1)
+            .with(Invariant::I18, self.placements)
+    }
+}
+
 /// I1, for a reshare: any two correct engines that completed the same
 /// ceremony hold an identical description of the epoch it leads into.
 ///
 /// Returns the description the engines agree on for every epoch any of them
 /// holds one for, with epoch zero's from the run's configuration, and the
-/// number of comparisons made.
+/// number of comparisons made. The description of epoch zero is configured
+/// and is the result of no ceremony, so a comparison with it is not counted.
 pub(crate) fn check_epoch_agreement(reshare: &Reshare) -> (BTreeMap<Epoch, Info>, usize) {
     let mut agreed: BTreeMap<Epoch, (Option<usize>, &Info)> = BTreeMap::new();
     agreed.insert(Epoch::zero(), (None, &reshare.genesis));
@@ -1071,7 +1121,7 @@ pub(crate) fn check_epoch_agreement(reshare: &Reshare) -> (BTreeMap<Epoch, Info>
                  {epoch}: {held:?} != {info:?}",
                 node.engine,
             );
-            comparisons += 1;
+            comparisons += usize::from(!epoch.is_zero());
         }
     }
     let agreed = agreed
@@ -1622,12 +1672,15 @@ pub(crate) fn check_reshare(
 ///
 /// `first` and `second` are what two runs of the same input measured, which
 /// the regression suite of every driver compares when it replays an input.
+/// Returns the number of comparisons made, which is one: the count of I10
+/// belongs to this check and no run reports it.
 #[cfg(test)]
-pub(crate) fn check_replay<T: PartialEq + fmt::Debug>(first: T, second: T) {
+pub(crate) fn check_replay<T: PartialEq + fmt::Debug>(first: T, second: T) -> usize {
     assert!(
         first == second,
         "I10 violated: two runs of one input measured different things: {first:?} != {second:?}",
     );
+    1
 }
 
 /// A finalization of a chain the probe target fabricates.
@@ -2038,8 +2091,24 @@ pub struct ProbeCounts {
     pub artifacts: usize,
     /// Floors checked against the delivered samples under I12.
     pub floors: usize,
-    /// Artifacts compared with the fabricated chain under I13.
+    /// Runs whose first artifact was compared with the fabricated chain
+    /// under I13: zero or one.
     pub comparisons: usize,
+}
+
+impl ProbeCounts {
+    /// What a probe run with these counts reports, in the units of
+    /// `SPEC.md`, section 8.1.
+    ///
+    /// The counts are those of a run that executed its program, whose panic
+    /// record and engines I8 judged once.
+    pub fn judged(&self) -> Judged {
+        Judged::new(Target::Probe)
+            .with(Invariant::I8, 1)
+            .with(Invariant::I12, self.floors)
+            .with(Invariant::I13, self.artifacts)
+            .with(Invariant::I14, self.refusals + self.admissions)
+    }
 }
 
 /// I12: the floor of the artifact the discovering probe emitted is the
@@ -2122,7 +2191,8 @@ pub(crate) fn check_probe_floor(run: &ProbeRun) -> usize {
 /// of the fabricated chain held, and every subscription resolved with the
 /// same artifact.
 ///
-/// Returns the number of artifacts compared with the chain.
+/// Returns the number of artifacts judged: the first against the chain, and
+/// each later one against the first.
 pub(crate) fn check_probe_artifact(run: &ProbeRun) -> usize {
     let mut artifacts = run.steps.iter().filter_map(|step| match step {
         ProbeStep::Resolved(artifact) => Some(artifact),
@@ -2132,7 +2202,9 @@ pub(crate) fn check_probe_artifact(run: &ProbeRun) -> usize {
         return 0;
     };
     let epoch = artifact.floor.epoch();
+    let mut judged = 1;
     for other in artifacts {
+        judged += 1;
         assert!(
             other.floor == artifact.floor
                 && other.finalization == artifact.finalization
@@ -2180,7 +2252,7 @@ pub(crate) fn check_probe_artifact(run: &ProbeRun) -> usize {
             artifact.info,
             run.chain.genesis,
         );
-        return 1;
+        return judged;
     }
     let Some((finalization, info)) = run.chain.boundaries.get(&epoch) else {
         panic!(
@@ -2208,7 +2280,7 @@ pub(crate) fn check_probe_artifact(run: &ProbeRun) -> usize {
         "I13 violated: the artifact carries the boundary of epoch {epoch}, which no source of \
          the fabricated chain holds",
     );
-    1
+    judged
 }
 
 /// What I14 requires of the discovering probe's blocker for one delivery.
@@ -2678,7 +2750,7 @@ pub(crate) fn check_probe(run: &ProbeRun) -> ProbeCounts {
         blocked_peers: run.blocked.len(),
         artifacts,
         floors: check_probe_floor(run),
-        comparisons: check_probe_artifact(run),
+        comparisons: check_probe_artifact(run).min(1),
     }
 }
 
@@ -2837,6 +2909,26 @@ pub struct SyncCounts {
     /// The height of the newest floor the joiner entered from, if marshal
     /// delivered its block to the joiner.
     pub floor: Option<Height>,
+    /// Steps a clause of I15 judged: a start that follows a selected floor,
+    /// a start that follows or finds a completion, and a floor selected
+    /// after an earlier one.
+    pub judged_steps: usize,
+    /// Blocks and epoch descriptions the joiner committed, each of which I17
+    /// judged.
+    pub judged_commits: usize,
+}
+
+impl SyncCounts {
+    /// What a state-sync run with these counts, and with the counts
+    /// `reshare` of its reshare engines, reports, in the units of `SPEC.md`,
+    /// section 8.1.
+    pub fn judged(&self, reshare: &ReshareCounts) -> Judged {
+        reshare
+            .judged(Target::StateSync)
+            .with(Invariant::I15, self.judged_steps)
+            .with(Invariant::I16, self.floors)
+            .with(Invariant::I17, self.judged_commits)
+    }
 }
 
 /// I15: an engine state syncs once, and durably.
@@ -2880,6 +2972,7 @@ pub(crate) fn check_single_sync(node: &Chain) -> SyncCounts {
                          completed at height {height}, at step {index}: {start:?}",
                     );
                     counts.later += 1;
+                    counts.judged_steps += 1;
                 } else {
                     if let Some(selected) = floor {
                         assert!(
@@ -2887,6 +2980,7 @@ pub(crate) fn check_single_sync(node: &Chain) -> SyncCounts {
                             "I15 violated: engine {engine} lost the floor of round {selected} \
                              of its interrupted state sync by step {index}: {start:?}",
                         );
+                        counts.judged_steps += 1;
                     }
                     floor = floor.max(start.resumed);
                 }
@@ -2908,6 +3002,7 @@ pub(crate) fn check_single_sync(node: &Chain) -> SyncCounts {
                          round {selected} back to round {} at step {index}",
                         material.round,
                     );
+                    counts.judged_steps += 1;
                 }
                 floor = Some(material.round);
                 counts.entries += 1;
@@ -3112,6 +3207,7 @@ pub(crate) fn check_state_sync(sync: &StateSync) -> SyncCounts {
     let mut counts = check_single_sync(joiner);
     (counts.floors, counts.pairings) = check_floor_provenance(sync);
     (counts.blocks, counts.descriptions) = check_agreement_after_sync(sync);
+    counts.judged_commits = joiner.committed.len() + joiner.delivered.len();
     counts.floor = joiner
         .steps
         .iter()
@@ -5167,6 +5263,10 @@ mod state_sync_tests {
                 blocks: 100,
                 descriptions: 4,
                 floor: Some(Height::new(LATE)),
+                judged_steps: 0,
+
+                // Twenty-five blocks and one description.
+                judged_commits: 26,
             }
         );
     }

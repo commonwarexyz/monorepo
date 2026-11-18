@@ -115,6 +115,12 @@ pub(super) fn failing_schedule() -> Vec<(u128, Event)> {
     vec![(50, Event::Crash(0)), (32_050, Event::Restart(0))]
 }
 
+/// The bytes of an input of the state-sync target, decoded the way
+/// libFuzzer's are, on which the one ceremony of the run fails: the restart
+/// schedule its tape draws crashes two engines in the inclusion window, and
+/// the run still completes.
+pub(super) const FAILED_STATE_SYNC: [u8; 2] = [0x36, 0xf5];
+
 /// The committee never changes.
 pub(super) const STAY: [Rotation; ROTATIONS] = [Rotation::Stay; ROTATIONS];
 

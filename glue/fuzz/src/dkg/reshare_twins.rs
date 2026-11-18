@@ -40,12 +40,12 @@ use super::{
     joiner::Entry,
     network::halve,
     public_keys,
+    report::{Judged, Report, Target},
     reshare_cluster::Session,
     reshare_input::PEERS,
     reshare_network::{Masks, Scripted, Simplex, Twins},
     reshare_stack::{self, Config},
-    runner::{self, Report},
-    signers,
+    runner, signers,
     store::Secrets,
 };
 use crate::stateful::{
@@ -82,6 +82,9 @@ pub struct ReshareReport {
     /// Registrations of an epoch the engine holds a share for, each required
     /// to carry that share under I2.
     pub signers: usize,
+    /// How many records the check of each invariant judged, in the units of
+    /// `SPEC.md`, section 8.1.
+    pub judged: Judged,
 }
 
 impl fmt::Display for ReshareReport {
@@ -91,7 +94,7 @@ impl fmt::Display for ReshareReport {
             "[{TARGET}] outcome={} asked={} epochs={} correct_nodes={} boundaries={} successes={} \
              failures={} agreements={} registrations={} signers={} shares={} players={} \
              reconstructions={} continuities={} isolations={} carried={} blocks={} \
-             placements={} dealer_logs={} epoch_infos={} deviations={} tolerated_panics={}",
+             placements={} dealer_logs={} epoch_infos={} deviations={} tolerated_panics={} {}",
             self.outcome,
             self.asked,
             self.counts.epochs,
@@ -114,13 +117,22 @@ impl fmt::Display for ReshareReport {
             self.counts.epoch_infos,
             self.deviations,
             self.counts.tolerated_panics,
+            self.judged,
         )
     }
 }
 
-impl Report for ReshareReport {
-    fn measured(&self) -> bool {
+impl ReshareReport {
+    /// Whether a correct engine was delivered the description of an epoch,
+    /// which the checks then compared.
+    pub const fn measured(&self) -> bool {
         self.counts.boundaries > 0
+    }
+}
+
+impl Report for ReshareReport {
+    fn judged(&self) -> Judged {
+        self.judged
     }
 }
 
@@ -188,6 +200,7 @@ fn execute(input: DkgReshareFuzzInput, plant: impl Plant) -> (ReshareReport, Vec
             deviations: 0,
             counts: ReshareCounts::default(),
             signers: 0,
+            judged: Judged::new(Target::Reshare),
         };
         return (report, panics);
     };
@@ -204,6 +217,7 @@ fn execute(input: DkgReshareFuzzInput, plant: impl Plant) -> (ReshareReport, Vec
             ..counts
         },
         signers,
+        judged: counts.judged(Target::Reshare),
     };
     (report, panics)
 }

@@ -40,8 +40,8 @@ use super::{
     invariants::{self, Bootstrap, Bootstrapper, Counts, Ending, Instance},
     pacing::{PacedCounts, Trace},
     public_keys,
-    runner::{self, Report},
-    stack,
+    report::{Judged, Report, Target},
+    runner, stack,
     store::Secrets,
 };
 use crate::stateful::runner::{Panic, network_sized};
@@ -107,6 +107,9 @@ pub struct BootstrapRestartsReport {
     pub after_blocks: u64,
     /// The simulated time the run took.
     pub elapsed: Duration,
+    /// How many records the check of each invariant judged, in the units of
+    /// `SPEC.md`, section 8.1.
+    pub judged: Judged,
 }
 
 impl fmt::Display for BootstrapRestartsReport {
@@ -116,7 +119,7 @@ impl fmt::Display for BootstrapRestartsReport {
             "[{TARGET}] outcome={} correct_nodes={} completed={} successes={} agreements={} \
              shares={} reconstructions={} blocks={} crashes={} restarts={} dealing={} \
              inclusion={} finished={} with_share={} repeated_reports={} {} followed={} \
-             expired={} after_ms={} after_blocks={} elapsed_ms={}",
+             expired={} after_ms={} after_blocks={} elapsed_ms={} {}",
             self.outcome,
             self.counts.correct_nodes,
             self.counts.completed,
@@ -138,13 +141,14 @@ impl fmt::Display for BootstrapRestartsReport {
             self.after.as_millis(),
             self.after_blocks,
             self.elapsed.as_millis(),
+            self.judged,
         )
     }
 }
 
 impl Report for BootstrapRestartsReport {
-    fn measured(&self) -> bool {
-        self.counts.completed > 0
+    fn judged(&self) -> Judged {
+        self.judged
     }
 }
 
@@ -209,6 +213,7 @@ fn measure((observed, panics): (Observations, Vec<Panic>)) -> (BootstrapRestarts
         after: observed.after,
         after_blocks: observed.after_blocks,
         elapsed: observed.elapsed,
+        judged: counts.judged(Target::BootstrapRestarts, repeated_reports),
     };
     (report, observed.paced)
 }

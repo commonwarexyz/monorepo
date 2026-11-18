@@ -42,10 +42,9 @@ use super::{
     environment::{self, Program, Stack},
     invariants::{self, Instance, Reshare, ReshareCounts},
     pacing::{PacedCounts, Trace},
+    report::{Judged, Report, Target},
     reshare_cluster::{Cluster, ReshareRestartCounts, Session},
-    reshare_stack,
-    runner::{self, Report},
-    signers,
+    reshare_stack, runner, signers,
 };
 use crate::stateful::runner::network_sized;
 use commonware_runtime::deterministic;
@@ -85,6 +84,9 @@ pub struct ReshareRestartsReport {
     pub overflows: usize,
     /// The simulated time the run took.
     pub elapsed: Duration,
+    /// How many records the check of each invariant judged, in the units of
+    /// `SPEC.md`, section 8.1.
+    pub judged: Judged,
 }
 
 impl fmt::Display for ReshareRestartsReport {
@@ -96,7 +98,7 @@ impl fmt::Display for ReshareRestartsReport {
              reconstructions={} continuities={} isolations={} carried={} kept={} blocks={} \
              crashes={} restarts={} dealing={} inclusion={} boundary={} finished={} resumed={} \
              across={} repeated={} {} followed={} expired={} after_ms={} after_blocks={} \
-             overflows={} elapsed_ms={}",
+             overflows={} elapsed_ms={} {}",
             self.outcome,
             self.asked,
             self.counts.epochs,
@@ -131,13 +133,22 @@ impl fmt::Display for ReshareRestartsReport {
             self.after_blocks,
             self.overflows,
             self.elapsed.as_millis(),
+            self.judged,
         )
     }
 }
 
-impl Report for ReshareRestartsReport {
-    fn measured(&self) -> bool {
+impl ReshareRestartsReport {
+    /// Whether a correct engine was delivered the description of an epoch,
+    /// which the checks then compared.
+    pub const fn measured(&self) -> bool {
         self.counts.boundaries > 0
+    }
+}
+
+impl Report for ReshareRestartsReport {
+    fn judged(&self) -> Judged {
+        self.judged
     }
 }
 
@@ -192,6 +203,7 @@ fn execute<S: Stack>(
         after_blocks: observed.after_blocks,
         overflows: observed.overflows,
         elapsed: observed.elapsed,
+        judged: counts.judged(Target::ReshareRestarts),
     };
     (report, observed.paced, observed.reshare)
 }

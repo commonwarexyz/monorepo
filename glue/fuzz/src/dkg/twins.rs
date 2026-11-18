@@ -33,7 +33,8 @@ use super::{
     invariants::{self, Bootstrap, Bootstrapper, Counts, Ending},
     network::{Mask, Twins, halve},
     public_keys,
-    runner::{self, Report},
+    report::{Judged, Report, Target},
+    runner,
     stack::{self, Completion, MAX_SUPPORTED_MODE},
     store::Secrets,
 };
@@ -61,6 +62,9 @@ pub struct BootstrapReport {
     pub outcome: Outcome,
     /// How much each check compared.
     pub counts: Counts,
+    /// How many records the check of each invariant judged, in the units of
+    /// `SPEC.md`, section 8.1.
+    pub judged: Judged,
 }
 
 impl fmt::Display for BootstrapReport {
@@ -68,7 +72,7 @@ impl fmt::Display for BootstrapReport {
         write!(
             f,
             "[{TARGET}] outcome={} correct_nodes={} completed={} successes={} agreements={} \
-             shares={} reconstructions={} blocks={} tolerated_panics={}",
+             shares={} reconstructions={} blocks={} tolerated_panics={} {}",
             self.outcome,
             self.counts.correct_nodes,
             self.counts.completed,
@@ -78,13 +82,14 @@ impl fmt::Display for BootstrapReport {
             self.counts.reconstructions,
             self.counts.blocks,
             self.counts.tolerated_panics,
+            self.judged,
         )
     }
 }
 
 impl Report for BootstrapReport {
-    fn measured(&self) -> bool {
-        self.counts.completed > 0
+    fn judged(&self) -> Judged {
+        self.judged
     }
 }
 
@@ -115,6 +120,7 @@ fn execute(input: DkgBootstrapFuzzInput, plant: impl Plant) -> (BootstrapReport,
         let report = BootstrapReport {
             outcome: Outcome::NoCase,
             counts: Counts::default(),
+            judged: Judged::new(Target::Bootstrap),
         };
         return (report, panics);
     };
@@ -128,6 +134,7 @@ fn execute(input: DkgBootstrapFuzzInput, plant: impl Plant) -> (BootstrapReport,
             tolerated_panics,
             ..counts
         },
+        judged: counts.judged(Target::Bootstrap, 0),
     };
     (report, panics)
 }

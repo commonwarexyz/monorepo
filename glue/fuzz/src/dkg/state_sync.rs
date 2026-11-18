@@ -67,10 +67,9 @@ use super::{
     },
     joiner::Entry,
     pacing::{PacedCounts, Trace},
+    report::{Judged, Report},
     reshare_cluster::{Cluster, ReshareRestartCounts, Session},
-    reshare_stack,
-    runner::{self, Report},
-    signers,
+    reshare_stack, runner, signers,
     state_sync_input::Place,
 };
 use crate::stateful::runner::{LINK, network_sized};
@@ -158,6 +157,9 @@ pub struct StateSyncReport {
     pub overlaps: usize,
     /// The simulated time the run took.
     pub elapsed: Duration,
+    /// How many records the check of each invariant judged, in the units of
+    /// `SPEC.md`, section 8.1.
+    pub judged: Judged,
 }
 
 /// The epoch `height` lies in and its place in that epoch, for the report.
@@ -202,7 +204,7 @@ impl fmt::Display for StateSyncReport {
              registrations={} signers={} shares={} players={} reconstructions={} \
              continuities={} isolations={} carried={} blocks={} placements={} crashes={} \
              restarts={} dealing={} inclusion={} boundary={} finished={} discovering={} {} \
-             joiner_paced_crashes={} overlaps={} elapsed_ms={}",
+             joiner_paced_crashes={} overlaps={} elapsed_ms={} {}",
             self.sync.floors,
             self.sync.pairings,
             self.sync.blocks,
@@ -234,15 +236,22 @@ impl fmt::Display for StateSyncReport {
             self.joiner_paced,
             self.overlaps,
             self.elapsed.as_millis(),
+            self.judged,
         )
     }
 }
 
-impl Report for StateSyncReport {
+impl StateSyncReport {
     /// Whether the joiner committed a block above its floor that another
     /// engine committed too, so that I17 compared something.
-    fn measured(&self) -> bool {
+    pub const fn measured(&self) -> bool {
         self.sync.blocks > 0
+    }
+}
+
+impl Report for StateSyncReport {
+    fn judged(&self) -> Judged {
+        self.judged
     }
 }
 
@@ -303,6 +312,7 @@ fn execute<S: Stack>(
         joiner_paced: observed.paced.interrupted(observed.sync.joiner),
         overlaps: observed.paced.overlaps(),
         elapsed: observed.elapsed,
+        judged: sync.judged(&counts),
     };
     (report, observed.paced)
 }
@@ -594,7 +604,8 @@ mod tests {
         context::EngineContext,
         environment::DOWNTIME_STEP,
         fixtures::{
-            self, OUTSIDER, ROTATE, Retaining, STAY, Sampled, Watched, decode, sample, tape,
+            self, FAILED_STATE_SYNC, OUTSIDER, ROTATE, Retaining, STAY, Sampled, Watched, decode,
+            sample, tape,
         },
         invariants::Startup,
         joiner::Lapse,
@@ -1437,7 +1448,13 @@ mod tests {
     /// calls.
     #[test]
     fn decoded_inputs_run_through_the_entry_point() {
-        for bytes in [&[][..], &[0x5a], &[0x01, 0x02, 0x03], &[0xff; 24]] {
+        for bytes in [
+            &[][..],
+            &[0x5a],
+            &[0x01, 0x02, 0x03],
+            &[0xff; 24],
+            &FAILED_STATE_SYNC,
+        ] {
             let input: DkgStateSyncFuzzInput = decode(bytes);
             fuzz_dkg_state_sync(input.clone());
             let report = observed(input).0;

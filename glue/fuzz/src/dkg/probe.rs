@@ -43,8 +43,9 @@ use super::{
     network::harness,
     probe_input::SOURCES,
     public_keys,
+    report::{Judged, Report},
     reshare_stack::{Variant, archives, backfill_config, marshal_config, max_message_size, peers},
-    runner::{self, Report},
+    runner,
     schedule::directory_of,
     scheme::{Scheme, certificate_verifier},
     signers,
@@ -178,6 +179,9 @@ pub struct ProbeReport {
     pub events: [usize; KINDS.len()],
     /// How much each check compared.
     pub counts: ProbeCounts,
+    /// How many records the check of each invariant judged, in the units of
+    /// `SPEC.md`, section 8.1.
+    pub judged: Judged,
 }
 
 impl ProbeReport {
@@ -203,7 +207,7 @@ impl fmt::Display for ProbeReport {
             f,
             " solicitations={} fetches={} latest_replies={} boundary_replies={} block_replies={} \
              deliveries={} refusals={} admissions={} unsettled={} blocks={} blocked_peers={} \
-             artifacts={} floors={} comparisons={}",
+             artifacts={} floors={} comparisons={} {}",
             self.counts.solicitations,
             self.counts.fetches,
             self.counts.latest_replies,
@@ -218,13 +222,14 @@ impl fmt::Display for ProbeReport {
             self.counts.artifacts,
             self.counts.floors,
             self.counts.comparisons,
+            self.judged,
         )
     }
 }
 
 impl Report for ProbeReport {
-    fn measured(&self) -> bool {
-        Self::measured(self)
+    fn judged(&self) -> Judged {
+        self.judged
     }
 }
 
@@ -283,10 +288,12 @@ fn observe_planted(
 
 /// Measurement point, outside the runtime so a violation is never caught.
 fn measure(observed: &Observations) -> ProbeReport {
+    let counts = invariants::check_probe(&observed.run);
     ProbeReport {
         outcome: observed.outcome,
         events: observed.events,
-        counts: invariants::check_probe(&observed.run),
+        counts,
+        judged: counts.judged(),
     }
 }
 
@@ -1987,7 +1994,7 @@ mod tests {
         assert!(
             report
                 .to_string()
-                .ends_with("artifacts=0 floors=0 comparisons=0")
+                .contains("artifacts=0 floors=0 comparisons=0 ")
         );
     }
 

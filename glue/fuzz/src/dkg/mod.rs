@@ -73,6 +73,9 @@
 //! - `runner` is what every driver shares around a run: the entry point a
 //!   fuzz target calls, the runtime the run executes on, and the reason a run
 //!   stopped.
+//! - `report` is what a run reports of each invariant, the aggregate of those
+//!   reports over the runs of a fuzz process, and where the process writes
+//!   it.
 //! - `environment` is what the restart drivers share: the crash and restart
 //!   schedule, the link conditions, the late start of an identity, the
 //!   supervision of every engine instance across its restarts, and where a
@@ -115,6 +118,8 @@
 
 mod app;
 mod context;
+#[cfg(test)]
+mod dkg_acceptance;
 mod environment;
 mod faulty;
 #[cfg(test)]
@@ -127,6 +132,7 @@ mod network;
 mod pacing;
 mod probe;
 mod probe_input;
+mod report;
 mod reshare_cluster;
 mod reshare_input;
 mod reshare_network;
@@ -157,6 +163,10 @@ pub use mock::{MockGroup, MockPoint};
 pub use pacing::PacedCounts;
 pub use probe::{ProbeOutcome, ProbeReport, fuzz_dkg_probe, run_dkg_probe};
 pub use probe_input::DkgProbeFuzzInput;
+pub use report::{
+    AGGREGATE_INTERVAL, Aggregate, Emitter, Entry, Invariant, Judged, Report, Sink, Stderr, Tally,
+    Target, fold,
+};
 pub use reshare_cluster::ReshareRestartCounts;
 pub use reshare_input::{DkgReshareFuzzInput, Rotation};
 pub use reshare_restarts::{

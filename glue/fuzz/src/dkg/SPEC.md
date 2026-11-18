@@ -68,8 +68,9 @@ The DKG module enables threshold key generation without a trusted dealer,
 while resharing allows validator set changes while preserving the threshold public key. It composes the
 Feldman-Desmedt ceremony with p2p dealing, on-chain dealer logs, epoch transitions, crash
 recovery, and state sync for late joiners. A defect in that composition can leave correct nodes
-with different outputs, with shares that do not match the public key, with a group key that
-changes across a reshare, or with a share published on chain.
+with different outputs, with shares that do not match the public key, or with a group key that
+changes across a reshare. It can also leave a correct player's share published on chain. No
+invariant checks that last defect since I7 was withdrawn (Choices made, item 4; section 12).
 
 Existing fuzzing does not cover this. `cryptography/fuzz` drives the ceremony functions directly,
 with no actors, network, storage, or blocks.
@@ -99,120 +100,122 @@ invariants must hold whenever a ceremony completes.
 
 ## 3. Technical requirements
 
+A sentence of a requirement that carries MUST, MUST NOT, or MAY is binding. A sentence without
+one explains or scopes the binding sentences beside it: it gives a reason, a consequence, or a
+fact about the code under test, and it adds no obligation of its own.
+
 - **R1. Focused fuzz targets.** The feature MUST expose independently runnable libFuzzer
   targets, listed in section 5.2: Twins over bootstrap, Twins over reshare, restarts over
   bootstrap, restarts over reshare, the probe protocol, and late-joiner state sync. Targets MAY
   share library machinery, but each MUST retain its own corpus.
   Note, that corpuses are not stored in the repo and fuzzing campaigns are started with empty corpuses.
-- **R2. Thin targets.** Every fuzz-target file MUST only instantiate libFuzzer and invoke a
-  library entry point. All harness logic belongs in `glue/fuzz/src/dkg`.
-- **R3. Fuzz-only implementation.** Every file changed by this feature MUST be under
-  `glue/fuzz/`. No file under `glue/src`, `cryptography/src`, `consensus/src`, or elsewhere in
-  the workspace may be modified, with one exception: adding a dependency to
-  `glue/fuzz/Cargo.toml` necessarily records it in the workspace `Cargo.lock`. All exercised
-  behavior MUST be reached through public APIs of the existing crates.
-- **R4. Deterministic execution.** Every target MUST run under
-  `commonware_runtime::deterministic` runtime with its randomness supplied by `FuzzRng` over the input.
-  Scheduling and randomized choices MUST depend only on the input bytes. No entropy-backed
-  randomness and no wall-clock time may be used.
-- **R5. Input sampling.** Each target's input MUST be decoded so that
-  the head of the input (at most 8 bytes) seeds a fixed-size stream of `FuzzRng` output,
-  the literal input overwrites that stream from its start, at the same offsets and as far as the
-  stream reaches, and the structured controls are drawn
-  from the stream. The rest of the stream is the run's tape, which seeds the deterministic
-  runtime and every sampler in the harness. Every input, including an empty one, MUST therefore
-  sample a complete session, and a short input MUST NOT collapse every control to its minimum.
-  The tape MUST NOT be printed in `Debug` output; its length may be.
+- **R2. Thin targets.** Every fuzz-target file MUST only instantiate libFuzzer and invoke a library
+  entry point. All harness logic MUST be in `glue/fuzz/src/dkg`.
+- **R3. Fuzz-only implementation.** Every file changed by this feature MUST be under `glue/fuzz/`.
+  A file under `glue/src`, `cryptography/src`, `consensus/src`, or elsewhere in the workspace MUST
+  NOT be modified, with one exception: adding a dependency to `glue/fuzz/Cargo.toml` necessarily
+  records it in the workspace `Cargo.lock`. All exercised behavior MUST be reached through public
+  APIs of the existing crates.
+- **R4. Deterministic execution.** Every target MUST run under `commonware_runtime::deterministic`
+  runtime with its randomness supplied by `FuzzRng` over the input. Scheduling and randomized
+  choices MUST depend only on the input bytes. Entropy-backed randomness and wall-clock time MUST
+  NOT be used.
+- **R5. Input sampling.** Each target's input MUST be decoded so that the head of the input (at
+  most 8 bytes) seeds a fixed-size stream of `FuzzRng` output, the literal input overwrites that
+  stream from its start, at the same offsets and as far as the stream reaches, and the structured
+  controls are drawn from the stream. The rest of the stream is the run's tape, which MUST seed the
+  deterministic runtime and every sampler in the harness. Every input, including an empty one, MUST
+  therefore sample a complete session, and a short input MUST NOT collapse every control to its
+  minimum. The tape MUST NOT be printed in `Debug` output; its length MAY be.
 - **R6. Mock group.** Every target MUST instantiate the DKG module, the ceremony, and every
   threshold operation over the mock group. The mock group MUST be defined in the fuzz crate using
   only public API. It MUST preserve the algebra of the real groups, so that every check in the
   ceremony returns the verdict it would return on the real curve. Its decoder MUST reject
-  non-canonical encodings and the identity, as the real groups do. No real BLS curve operation,
-  pairing, or hash-to-curve may run in any target.
+  non-canonical encodings and the identity, as the real groups do. A real BLS curve operation,
+  pairing, or hash-to-curve MUST NOT run in any target.
 - **R7. Consensus scheme.** In the reshare Twins, reshare restart, and state-sync targets,
   consensus MUST sign with the mock threshold scheme built from the `SchemeInfo` each node
   registers for each epoch. Marshal and the probe MUST verify with the certificate verifier
   derived from the group public key, which is the same for every epoch. In the probe target the
   fabricated chain MUST be signed and verified the same way. The bootstrap targets use the
   ed25519 Simplex chain that `bootstrap::Engine` owns.
-- **R8. Identities.** Identity keys are real ed25519 keys in every target.
-- **R9. Ceremony parameters.** Every ceremony MUST use the `N3f1` fault model and `Reveal::V1`.
-  The input MUST select the sharing mode among the modes the DKG module supports. All nodes of a
-  run use the same parameters.
-- **R10. Committee.** The committee (validator set) MUST always have 4 members. The bootstrap targets run 4
-  identities. The reshare and state-sync targets run 5 identities; each epoch's committee is 4 of
-  them, and the input MUST decide, per epoch, whether the committee stays the same or the outside
-  identity replaces one member. The first committee's output comes from a trusted `deal` over the
-  mock group.
-- **R11. Session bounds.** A reshare run covers a fuzz-selected number of epochs between 1 and 3.
-  The epoch length starts at 32 blocks. It MAY be reduced only after measurement shows that
+- **R8. Identities.** Identity keys MUST be real ed25519 keys in every target.
+- **R9. Ceremony parameters.** Every ceremony MUST use the `N3f1` fault model and `Reveal::V1`. The
+  input MUST select the sharing mode among the modes the DKG module supports. All nodes of a run
+  MUST use the same parameters.
+- **R10. Committee.** The committee (validator set) MUST always have 4 members. The bootstrap
+  targets MUST run 4 identities. The reshare and state-sync targets MUST run 5 identities; each
+  epoch's committee is 4 of them, and the input MUST decide, per epoch, whether the committee stays
+  the same or the outside identity replaces one member. The first committee's output MUST come from
+  a trusted `deal` over the mock group.
+- **R11. Session bounds.** A reshare run MUST cover a fuzz-selected number of epochs between 1 and
+  3. The epoch length MUST start at 32 blocks. It MAY be reduced only after measurement shows that
   fault-free ceremonies still succeed at the shorter length. Within a target every bound (node
   count, epoch count, event count, simulated duration, storage) MUST be fixed across all inputs.
 - **R12. Bootstrap stack.** In the bootstrap targets every engine MUST run the real
-  `bootstrap::Engine` over the six channels it requires. The harness supplies only what the
+  `bootstrap::Engine` over the six channels it requires. The harness MUST supply only what the
   engine's configuration asks for: a secret store, a peer manager, and a blocker.
 - **R13. Reshare stack.** In the reshare and state-sync targets every engine MUST run the real
   marshal actor in the Standard `Deferred` configuration, the real `reshare::Actor`, the real
   `reshare::Application` wrapper, the real `orchestrator::Actor` with its per-epoch Simplex
-  engines, and the real `probe::Actor`. The block type and the inner application are defined by
-  the harness and carry no state beyond what the DKG module needs. `StatefulActor` and QMDB are
-  not part of the stack.
+  engines, and the real `probe::Actor`. The block type and the inner application MUST be defined by
+  the harness and MUST NOT carry state beyond what the DKG module needs. `StatefulActor` and QMDB
+  MUST NOT be part of the stack.
 - **R14. Harness-supplied traits.** The harness MUST implement `SecretStore`, `Registrar`,
-  `ParticipantsProvider`, and the epoch-keyed scheme provider. These implementations MUST honor
-  the contracts documented on the traits, so that a panic the DKG module raises on a contract
-  violation can never be caused by the harness. The registrar builds a scheme only in the role
-  the registered material names. On material no such scheme can be built from it fails closed:
-  it records the registration, serves no scheme for the epoch, and never resolves. I2 judges
-  the record.
+  `ParticipantsProvider`, and the epoch-keyed scheme provider. These implementations MUST honor the
+  contracts documented on the traits, so that a panic the DKG module raises on a contract violation
+  can never be caused by the harness. The registrar MUST build a scheme only in the role the
+  registered material names. On material no such scheme can be built from it MUST fail closed: it
+  records the registration, serves no scheme for the epoch, and never resolves. I2 judges the
+  record.
 - **R15. Twins topology.** The Twins targets MUST run one more engine than identities: 5 engines
-  over 4 identities for bootstrap, 6 over 5 for reshare. The compromised identity's two halves
-  are built from the real code, share the identity key, and each have their own storage
-  partitions and their own secret store. In the reshare target both halves start with the
-  compromised identity's share of the first output: the input selects the identity outside the
-  first committee among the identities other than the compromised one. The Twins targets MUST
-  NOT restart any engine.
+  over 4 identities for bootstrap, 6 over 5 for reshare. The compromised identity's two halves MUST
+  be built from the real code, MUST share the identity key, and MUST each have their own storage
+  partitions and their own secret store. In the reshare target both halves MUST start with the
+  compromised identity's share of the first output: the input MUST select the identity outside the
+  first committee among the identities other than the compromised one. The Twins targets MUST NOT
+  restart any engine.
 - **R16. Restart scope.** The restart targets MUST run correct nodes only and accept a
-  fuzz-controlled schedule that crashes and restarts them. A restart is an in-run abort and
-  re-initialisation on the same deterministic runtime. All storage partitions and the node's
-  secret store MUST survive it. No state-loss variant (a wiped secret store or journal, storage
-  rolled back behind the secret store) may be produced. A crash MAY fall between any two writes
-  of a node: after it the secret store may be ahead of the node's journals, or behind them, by
-  the writes that were in flight at the crash, and a journal may lack writes that had resolved
-  but whose sync had not completed. That is not state loss: nothing that was durable when its
-  write resolved is lost.
-- **R17. Link conditions.** In the Twins targets every link MUST be fixed and lossless; the only
-  network faults are the twins partition and the DKG mask. In the restart targets the input MUST
-  control link conditions among correct nodes: latency, jitter, delivery rate, and temporary
-  cuts. Message bytes MUST NOT be corrupted on a link between correct nodes in any target.
-- **R18. Safety only.** The feature targets safety. It MUST NOT assert liveness. A run that
-  stalls, a ceremony that fails, and a run that reaches its simulated timeout are healthy
-  outcomes, and the invariants are checked over whatever was reached.
-- **R19. Deterministic regression suite.** Every target MUST have ordinary tests in the fuzz
-  crate, driven by fixed inputs, that use the same library entry points and oracles as libFuzzer.
-  For every invariant in section 8 that a run checks, the suite MUST contain at least one
-  negative control: a fault planted inside the harness at the observation boundary that makes
-  exactly that invariant fail. An invariant that another invariant always reports first in a
-  target may have its control in another target or over built records. I11 constrains the
-  working tree, not a run, and is verified at delivery (section 10, step 1).
+  fuzz-controlled schedule that crashes and restarts them. A restart MUST be an in-run abort and
+  re-initialisation on the same deterministic runtime. All storage partitions and the node's secret
+  store MUST survive it. A state-loss variant (a wiped secret store or journal, storage rolled back
+  behind the secret store) MUST NOT be produced. A crash MAY fall between any two writes of a node:
+  after it the secret store can be ahead of the node's journals, or behind them, by the writes that
+  were in flight at the crash, and a journal can lack writes that had resolved but whose sync had
+  not completed. That is not state loss: nothing that was durable when its write resolved is lost.
+- **R17. Link conditions.** In the Twins targets every link MUST be fixed and lossless; the twins
+  partition and the DKG mask MUST be the only network faults. In the restart targets the input MUST
+  control link conditions among correct nodes: latency, jitter, delivery rate, and temporary cuts.
+  Message bytes MUST NOT be corrupted on a link between correct nodes in any target.
+- **R18. Safety only.** The feature targets safety. It MUST NOT assert liveness. A run that stalls,
+  a ceremony that fails, and a run that reaches its simulated timeout MUST be treated as healthy
+  outcomes, and the invariants MUST be checked over whatever was reached.
+- **R19. Deterministic regression suite.** Every target MUST have ordinary tests in the fuzz crate,
+  driven by fixed inputs, that use the same library entry points and oracles as libFuzzer. For
+  every invariant in section 8 that a run checks, the suite MUST contain at least one negative
+  control: a fault planted inside the harness at the observation boundary that makes exactly that
+  invariant fail. An invariant that another invariant always reports first in a target MAY have its
+  control in another target or over built records. I11 constrains the working tree, not a run, and
+  is verified at delivery (section 10, step 1).
 - **R20. Reuse of fuzzing primitives.** The implementation MUST reuse existing fuzzing primitives
   wherever one fits and MUST NOT duplicate them in `glue/fuzz`. This covers the primitives the
   published crates provide (`FuzzRng`, the twins scenario generator and elector, the simulated
   network and its split-channel plumbing, the marshal mocks, the deterministic runtime) and the
   machinery already in `glue/fuzz/src/stateful` (tape handling, the split forwarders and routers,
-  the restart, panic-hook, and report helpers). New code is written only for what no existing
+  the restart, panic-hook, and report helpers). New code MUST be written only for what no existing
   primitive provides: the mock group, the DKG block, applications, stores, the DKG mask, the
   drivers' DKG-specific wiring, and the invariants. A primitive that fits only after being made
-  generic MUST be generalized and shared, not copied; the stateful targets MUST remain
-  behaviorally equivalent, apart from the prefix their Twins targets take from the input (P5).
-  The feature MUST NOT depend on `commonware-consensus-fuzz-*` or on the `test-utils` feature
-  of `commonware-glue`.
-- **R21. Probe target construction.** The probe target MUST run one discovering `dkg::probe`
-  actor and three serving ones over real marshal actors seeded with a fabricated chain, plus one
-  tracked identity that is not a dealer. No consensus and no ceremony runs. Boundary blocks carry
-  `EpochInfo` over the mock group: epoch 0's output is a `deal` output, and each later epoch's is
-  a reshare of the one before through the real dealer and player state machines, so every
-  epoch's output carries the group key the chain is verified with. The epoch length is 2. A
-  source MAY be seeded from a foreign chain built the same way from a different dealt key.
+  generic MUST be generalized and shared, not copied; the stateful targets MUST remain behaviorally
+  equivalent, apart from the prefix their Twins targets take from the input (P5). The feature MUST
+  NOT depend on `commonware-consensus-fuzz-*` or on the `test-utils` feature of `commonware-glue`.
+- **R21. Probe target construction.** The probe target MUST run one discovering `dkg::probe` actor
+  and three serving ones over real marshal actors seeded with a fabricated chain, plus one tracked
+  identity that is not a dealer. The target MUST NOT run consensus or a ceremony. Boundary blocks
+  MUST carry `EpochInfo` over the mock group: epoch 0's output MUST be a `deal` output, and each
+  later epoch's MUST be a reshare of the one before through the real dealer and player state
+  machines, so every epoch's output carries the group key the chain is verified with. The epoch
+  length MUST be 2. A source MAY be seeded from a foreign chain built the same way from a different
+  dealt key.
 - **R22. Probe adversary program.** The probe target's structured input MUST bound and control
   what each source holds, the minimum epoch, and a program of events: subscribe, unsubscribe,
   attach a marshal, release a captured response, duplicate it, replay it from the non-dealer,
@@ -221,13 +224,13 @@ invariants must hold whenever a ceremony completes.
   probe has. The harness MUST NOT reimplement floor selection, response verification, or probe
   state transitions.
 - **R23. Late-joiner state sync.** The state-sync target MUST run 5 correct identities. The input
-  selects one as the joiner; the other four start at genesis. The joiner starts once a
+  MUST select one as the joiner; the other four MUST start at genesis. The joiner MUST start once a
   fuzz-selected height has been applied, which MUST be able to fall in any phase of any epoch of
-  the run. It discovers its boundary through the real probe, builds its state-sync material from
-  the probe's artifact, and starts the reshare stack from it. The input MUST also control an
+  the run. It MUST discover its boundary through the real probe, build its state-sync material from
+  the probe's artifact, and start the reshare stack from it. The input MUST also control an
   optional restart of the joiner at a chosen delay after it starts and a schedule of up to three
-  restarts across all nodes. Links are fixed. Every node starts a real probe at every boot and
-  attaches its marshal to it.
+  restarts across all nodes. Links MUST be fixed. Every node MUST start a real probe at every boot
+  and attach its marshal to it.
 - **R24. Joiner caller contract.** The harness plays the role the DKG module documents for its
   caller. It MUST keep the joiner's floor durable across restarts, MUST pass a persisted floor to
   the probe when it restarts, MUST pair the artifact's `EpochInfo` with the later-by-round of the
@@ -238,9 +241,9 @@ invariants must hold whenever a ceremony completes.
   `dkg-all` feature that is part of the default set, as the stateful targets are.
 - **R26. One home for the invariants.** Every invariant in section 8 that is checked at run time
   MUST be defined in `glue/fuzz/src/dkg/invariants.rs`, as the stateful invariants are defined in
-  `glue/fuzz/src/stateful/invariants.rs`. That file holds the observation records the checks read
-  and the checks themselves, for all six targets, the probe target included. Drivers record
-  observations and call into it; they MUST NOT define a check of their own.
+  `glue/fuzz/src/stateful/invariants.rs`. That file MUST hold the observation records the checks
+  read and the checks themselves, for all six targets, the probe target included. Drivers MUST
+  record observations and call into it; they MUST NOT define a check of their own.
 - **R27. Network limit.** The simulated network of every target MUST refuse a message larger than
   the limit the code under test computes for itself: in the bootstrap targets the bound
   `bootstrap::max_payload_size` gives for the committee, and in every other target the largest of
@@ -251,16 +254,25 @@ invariants must hold whenever a ceremony completes.
   network's key-only peer manager. Every other target MUST carry an address for every peer of an
   epoch in the epoch's `EpochInfo` and track peers through the DKG module's `AddressableManager`,
   over the peer manager of the engine's own identity, so that the peer sets one engine activates
-  are not another's. The probe target's members run no engine and never restart: they track over
-  the network's peer manager, which gives every member the set the discovering probe activates.
-  Every identity starts with the network's initial set of every identity, which keeps it
-  reachable whatever committee it is in; an engine restarted in a run starts again from
-  that set alone and activates its epochs anew. The first `EpochInfo` and the participants
+  are not another's. The probe target's members run no engine and never restart: they MUST track
+  over the network's peer manager, which gives every member the set the discovering probe
+  activates. Every identity MUST start with the network's initial set of every identity, which
+  keeps it reachable whatever committee it is in; an engine restarted in a run MUST start again
+  from that set alone, and it activates its epochs anew. The first `EpochInfo` and the participants
   provider MUST supply a directory of exactly the epoch's dealers, players, and next players.
 - **R29. Reshare mailbox.** In the reshare Twins, reshare restart, and state-sync targets the
   input MUST choose the size of the reshare actor's mailbox: one, two, or four messages in half of
   the runs, and room for a hundred in the others. A small mailbox overflows when marshal and the
   application call the actor while it is busy, so that its overflow policy runs.
+- **R30. Unmeasured invariants are reported.** At its measurement point every run MUST report,
+  for each invariant that section 8 applies to its target and that is checked at run time, how
+  many records the check of that invariant judged. An invariant whose count is zero MUST be
+  reported as unmeasured, by its id and with the reason section 8.1 fixes for it, and MUST NOT
+  be reported or counted as passing. The report MUST be per invariant: the count of one
+  invariant MUST NOT stand for another. An unmeasured invariant MUST NOT fail the run (R18).
+  Section 8.1 states which invariants a target's report holds, what one unit of each count is,
+  and the one reason each invariant gives. Section 5.4 states where the report is read and
+  what a fuzz process writes.
 
 ## 4. Properties
 
@@ -334,6 +346,37 @@ The CI fuzz job discovers targets from the manifest, so no other list needs upda
 Any change to a consumed interface that alters its contract is a change to this feature's
 dependencies and must be re-audited against this document.
 
+### 5.4 Report interface (R30)
+
+This subsection is normative. It fixes the interface the regression tests read and what a
+fuzz process writes.
+
+- **The report of a run is a value.** The library function that runs a target, which its fuzz
+  entry point and its fixed-input tests both call (R19), MUST return the run's report. The
+  report MUST give, for each id its target has in the report column of section 8.1, the count
+  and, where the count is zero, the reason, and it MUST say how the run ended. A regression test
+  MUST read these from the returned value and MUST NOT parse printed text.
+- **The smoke aggregate is a value.** The fuzz crate MUST have one function that folds the
+  reports of a sequence of runs of one target into the aggregate: the number of runs and, for
+  each id the target has in the report column of section 8.1, the number of runs whose count
+  for it was above zero and the number of runs whose count for it was zero. The two numbers of
+  an id sum to the number of runs. A test reads the aggregate from the function's value.
+- **The aggregate is always written.** Every fuzz process MUST write the aggregate over the
+  runs it has completed so far to standard error, whatever its environment: at intervals while
+  it runs, and once more at its end. Each time it is one line,
+  `[<target>] aggregate runs=<n> I1=<m>/<u> I2=<m>/<u> ...`, with one
+  `I<k>=<measured>/<unmeasured>` entry for each id the target has in the report column of
+  section 8.1, in ascending order of `k`. The line written at the end MUST cover every run the
+  process completed. The end is one the process reaches by itself, as when libFuzzer's limit
+  of runs or of time is reached. A process that is killed, or that aborts on a violation
+  (section 11, Failure reporting), writes no last line, and its latest line stands. The smoke
+  run of section 10, step 6 is read from its last aggregate line.
+- **The report of a run is written on request.** A fuzz process writes the full report of
+  each run to standard error only when the environment variable `GLUE_FUZZ_LOG` is set, the
+  switch the rest of `glue/fuzz` uses. An unmeasured invariant does not make a run print: I6
+  is unmeasured in most runs (12.1, rows 11 and 25). The form of that printed report is not
+  fixed by this document, and no test reads it.
+
 ## 6. Adversary model (normative)
 
 - **A1. Message layer.** In the Twins targets, each of the compromised identity's channels that
@@ -379,7 +422,8 @@ dependencies and must be re-audited against this document.
 2. **Execution.** The twins scenario partitions the prefix (A1). The DKG mask applies for the
    whole ceremony.
 3. **Measurement.** The run ends when every correct engine has reported a `Completion`, when a
-   correct engine stops, or when the simulated timeout expires. I1-I3 and I6-I11 are checked.
+   correct engine stops, or when the simulated timeout expires. I1-I3, I6, I8, and I9 are
+   checked (section 8.1).
    Results are compared among the correct engines that completed. With every completion the
    harness records the share the engine's secret store holds at that moment, and the store keeps
    every share it was ever given. I2 is checked at each completion against the share recorded
@@ -405,17 +449,18 @@ dependencies and must be re-audited against this document.
    applies to the ceremony, and the faulty application is active on the secondary half. The
    committee schedule follows R10.
 3. **Measurement.** The run ends when every correct node has processed the last boundary block of
-   the selected epochs or the simulated timeout expires. I1-I11 are checked at every boundary a
-   correct node processed and at the end, and I18 over every finalized block a correct node was
-   delivered.
+   the selected epochs or the simulated timeout expires. I1-I6, I8, and I9 are checked at every
+   boundary a correct node processed and at the end, and I18 over every finalized block a
+   correct node was delivered (section 8.1).
 
 ### 7.3 `dkg_bootstrap_restarts` and `dkg_reshare_restarts`
 
 1. **Setup.** Correct nodes only: four identities for bootstrap, five for reshare.
 2. **Execution.** A bounded schedule crashes and restarts nodes per R16 while link conditions
    follow R17.
-3. **Measurement.** As in 7.1 and 7.2. I1-I6 and I8-I11 are checked, and I18 in the reshare
-   restart target. In `dkg_bootstrap_restarts` every completion of every instance of an engine is
+3. **Measurement.** As in 7.1 and 7.2: `dkg_bootstrap_restarts` checks the invariants 7.1
+   lists, and `dkg_reshare_restarts` those 7.2 lists, I18 included (section 8.1). In
+   `dkg_bootstrap_restarts` every completion of every instance of an engine is
    recorded with the share its store held then. I1 compares the engines' first completions with
    one another and every later completion with its engine's first. A crash between the write of a
    share and the completion leaves a share that no completion of that instance accompanies; the
@@ -434,8 +479,13 @@ dependencies and must be re-audited against this document.
    has taken it. When the responder the probe asked delivers the whole boundary block while no
    subscription is open and the probe's marshal is not attached, the driver opens a
    subscription, which the probe answers with the artifact it then holds.
-3. **Measurement.** If the discovering probe emits an artifact, I12-I14 are checked against the
-   recorded source state. No artifact is required. I8, I10, and I11 apply throughout.
+3. **Measurement.** If the discovering probe emits an artifact, I12 and I13 are checked against
+   the recorded source state. No artifact is required. A run without one reports I12 and I13 as
+   unmeasured (R30). I14 does not depend on an artifact: it is checked at every delivery to the
+   discovering probe, and its count (R30) is the number of deliveries for which it required a
+   block or required that the sender not be blocked. A delivery for which nothing is required
+   (Choices made, item 11) is not counted. I14 is unmeasured only when that count is zero, with
+   the reason that no delivery was judged. I8 applies throughout (section 8.1).
 
 ### 7.5 `dkg_state_sync`
 
@@ -443,16 +493,20 @@ dependencies and must be re-audited against this document.
 2. **Join.** At the selected height the joiner starts, discovers its boundary, and enters per
    R24.
 3. **Crashes.** The joiner's optional restart and the general restart schedule run.
-4. **Measurement.** As in 7.2, with the joiner included from its floor upward. I1-I6, I8-I11,
-   I15-I17, and I18 are checked. A joiner whose sync never completes is a healthy outcome.
+4. **Measurement.** As in 7.2, with the joiner included from its floor upward. I1-I6, I8, I9,
+   I15-I17, and I18 are checked (section 8.1). A joiner whose sync never completes is a healthy
+   outcome. It is reported with every invariant it left unmeasured (R30).
 
 ## 8. Invariants
 
-I1-I6 apply to correct nodes in the four ceremony targets and the state-sync target. I7 is
-withdrawn. I8, I10, and I11 apply to every target. I9 applies to every target that runs more
-than one correct node. I12-I14 apply to the probe target and I15-I17 to the state-sync
-target. I18 applies to the targets that run the reshare stack: the reshare Twins, reshare
-restart, and state-sync targets.
+I1-I3 and I6 apply to correct nodes in the four ceremony targets and the state-sync target. I4
+and I5 judge the boundary of a reshare and apply to correct nodes in the targets that run one:
+the reshare Twins, reshare restart, and state-sync targets. I7 is withdrawn. I8 and I10 apply
+to every target. I11 constrains the working tree, not a run (R19): it holds for the feature as
+a whole and is verified at delivery. I9 applies to every target that runs more than one correct
+node. I12-I14 apply to the probe target and I15-I17 to the state-sync target. I18 applies to
+the targets that run the reshare stack: the reshare Twins, reshare restart, and state-sync
+targets. Section 8.1 gives the same sets as one table.
 
 - **I1. Output agreement.** Any two correct nodes that completed the same ceremony MUST hold the
   same result for it: the same outcome and, for a reshare, an identical `EpochInfo`; for a
@@ -494,7 +548,7 @@ restart, and state-sync targets.
   share.
 - **I7. Withdrawn.** It required that no correct identity appear in `Output::revealed()`. The
   number is kept so that the later invariants keep theirs. No target checks the secrecy of a
-  correct player's share; see section 12, item 4.
+  correct player's share; see Choices made, item 4.
 - **I8. No panic, except in a compromised half.** No correct engine and no harness task may
   panic, and a correct engine MUST keep running until the run ends. R14, R16, and R24 keep the
   harness inside the contracts whose violation the DKG module answers with a deliberate panic.
@@ -567,11 +621,71 @@ An invariant MUST NOT be disabled, weakened, or narrowed to make a configuration
 configuration that cannot satisfy one is either a reportable defect or an exclusion recorded in
 section 9.
 
+### 8.1 Run-time invariants per target, their counts, and their reasons
+
+This subsection is normative. It makes R30 exact: which invariants a run's report holds, what
+one unit of each count is, and which reason an unmeasured invariant gives.
+
+**Per target.** A run's report MUST hold exactly one entry for each id in the report column of
+its target's row, and no entry for any other id.
+
+| Target | In the report of every run | Counted by the replay check |
+|---|---|---|
+| `dkg_bootstrap`, `dkg_bootstrap_restarts` | I1-I3, I6, I8, I9 | I10 |
+| `dkg_reshare`, `dkg_reshare_restarts` | I1-I6, I8, I9, I18 | I10 |
+| `dkg_probe` | I8, I12-I14 | I10 |
+| `dkg_state_sync` | I1-I6, I8, I9, I15-I18 | I10 |
+
+I4 and I5 judge the boundary of a reshare, which a bootstrap run does not have. I7 is withdrawn.
+I9 has no entry in the probe target, where I14 governs blocking (I9). I11 is not checked at run
+time and is counted nowhere: it constrains the working tree and is verified at delivery (R19;
+section 10, step 1).
+
+I10 is checked on two runs of one fixed input, not inside a run. One unit of its count is one
+comparison by the shared check, which compares the two whole reports, their R30 entries
+included. The count belongs to the replay check of the regression suite, which is made after
+both runs: a run's report has no I10 entry. A libFuzzer run replays nothing, so the smoke
+aggregate (section 5.4) has none either. Section 10, step 7 holds for I10 in a target when the
+suite of that target makes at least one replay comparison.
+
+**Count.** These rules hold for every count.
+
+1. One unit is one judgement: the invariant's rule applied once to the record, or to the group
+   of records, that the table below names.
+2. A record for which the invariant requires nothing adds no unit.
+3. A record checked more than once under one invariant adds one unit.
+4. A count covers the whole run: every epoch, every correct engine and, where engines restart,
+   every instance of an engine.
+5. An invariant is measured in a run when its count is above zero, and unmeasured when it is
+   zero.
+
+| Id | One unit | Reason when the count is zero |
+|---|---|---|
+| I1 | One comparison of two results of one ceremony: the result a correct engine holds, with the result of another correct engine, so that `k` engines that hold a result of one ceremony give `k - 1` units; and in `dkg_bootstrap_restarts` a later completion of an engine, with that engine's first (7.3). In the bootstrap targets, one more for an agreed successful result, which is judged against the ceremony that was run. In a reshare run the result of a ceremony is the `EpochInfo` of the epoch it leads into; the configured `EpochInfo` of epoch 0 is the result of no ceremony and adds no unit | `no result was compared` |
+| I2 | One distinct share a correct engine holds or held for an epoch, judged against that epoch's agreed output or, in a bootstrap no correct engine reported, against the committee (7.1). One more for each `SchemeInfo` a correct engine registered, judged against that epoch's agreed output. A requirement to hold a share adds no unit of its own | `no share or registration was recorded` |
+| I3 | One subset of exactly `required()` shares that correct engines hold of one output, whose recovered signature was judged: verified under the output's group public key or, in a bootstrap no correct engine reported, compared with that of another subset (7.1). A lone subset in that case is compared with nothing and adds no unit. The clause on `required() - 1` shares adds no unit | `too few shares of one output` |
+| I4 | One epoch boundary: the `EpochInfo` the correct engines hold of an epoch past the first, judged against the one of the epoch before it. One unit for a boundary, however many engines processed it | `no ceremony completed` |
+| I5 | One mixed set (Choices made, item 2) of `required()` shares after a successful reshare. It is interpolated under both sharings (item 7) and adds one unit | `no mixed set of shares` |
+| I6 | One failed ceremony that a correct engine reported: a failed reshare, whose carried output is compared with the previous one and under which every share a correct engine held for the previous epoch is judged; or a failed bootstrap, after which the holdings of every correct engine are examined | `no failed ceremony was reported` |
+| I8 | One for the run: its whole panic record and its watch over the correct engines, judged at the end of the run. The count is zero only for a run that executed no scenario | `nothing ran` |
+| I9 | One for the run: the network's whole record of blocks, judged at the end of the run. The count is zero only for a run that executed no scenario | `nothing ran` |
+| I12 | One floor: the floor of the artifact the discovering probe emitted, judged against the replies of Choices made, item 12. A probe selects one floor, so the count of a run is 0 or 1 | `no artifact was emitted` |
+| I13 | One artifact the discovering probe emitted, one for each subscription it answered with an artifact: the first judged against the fabricated chain, each later one against the first | `no artifact was emitted` |
+| I14 | One delivery to the discovering probe for which the check required a block or required that the sender not be blocked (7.4, step 3) | `no delivery was judged` |
+| I15 | One step of the joiner's caller record that a clause of I15 judges: a start that follows a selected floor, a start that follows or finds a completion, or a floor selected after an earlier one. The joiner's first start, its first floor, and the completion itself are judged by no clause and add no unit | `no start followed a floor` |
+| I16 | One entry: the floor a syncing start of the joiner entered from, with the `EpochInfo` paired with it, judged against what the nodes that started at genesis finalized | `no floor was entered` |
+| I17 | One block or one `EpochInfo` the joiner committed, compared with what every other engine committed at that height or for that epoch and traced to the nodes that started at genesis. Marshal delivers the joiner nothing below its floor (Choices made, item 21) | `no sync completed` |
+| I18 | One finalized block above height zero that marshal delivered to a correct engine, judged by its height and the kind of its payload. A block delivered to several engines adds one unit for each | `no block was delivered` |
+
+**Reason.** An unmeasured invariant MUST give the reason of its row, word for word, and no
+other. The reason names the record the check lacked. When several causes hold together, as when
+the simulated timeout expires before any ceremony completes, each unmeasured invariant still
+gives the reason of its row. How the run ended, the expiry of its simulated timeout included,
+MUST be stated once in the report, for the run, and is never the reason of an invariant.
+
 ## 9. Out of scope
 
 - **Liveness.** Excluded by R18. No progress requirement is asserted in any target.
-- **Reporting of runs that measured nothing.** The harness does not label or count runs in which
-  no ceremony completed. Whether the oracle code is reached is read from libFuzzer coverage.
 - **The outcome of a bootstrap no correct engine reported.** The oracle reads outputs only from
   reports (section 11, Observation), and a bootstrap engine reports its outcome only in its
   completion, so when a run ends with a share written and no completion recorded, the share is
@@ -592,16 +706,33 @@ section 9.
 - **A failed reshare under Twins.** One compromised dealer of four cannot keep three correct
   dealers' logs out of the inclusion window by its messages alone. A ceremony of `dkg_reshare`
   fails only where the scenario scripts the leaders of the whole epoch and leaves too few
-  correct dealers a view to lead (section 12, item 22). The restart targets keep one identity
-  impaired at a time (section 12, item 1) and reach a failed ceremony on a few sampled inputs
+  correct dealers a view to lead (Choices made, item 22). The restart targets keep one identity
+  impaired at a time (Choices made, item 1) and reach a failed ceremony on a few sampled inputs
   in a thousand.
+- **A failed bootstrap under Twins.** No input of `dkg_bootstrap` is known to fail a ceremony.
+  A ceremony fails when fewer than three of the four dealers get a log into a finalized block
+  of the inclusion window, and a dealer posts its log in a block it proposes itself.
+  `bootstrap::Engine` owns its elector, a round robin, so no scenario scripts a leader (A1)
+  and every correct dealer leads views of the window. The three correct engines are a quorum
+  on fixed, lossless links (R15, R17), and the DKG mask moves only the compromised identity's
+  own dealings (A2). In 4,330 logged runs of the target, 2,587 on new inputs and 1,743
+  replays of the corpus they left, every ceremony succeeded at all three correct engines, as
+  it did in 8 fixed inputs of the regression suite, with a prefix of 1, 9, and 16 views and
+  with no bound.
+  This is likely and not proven: an input in which the compromised leader's equivocation
+  costs a correct dealer every one of its views in the window was not found and not ruled
+  out. Section 10, step 7 therefore excepts I6 in this target (Choices made, item 29).
 - **State loss.** Excluded by R16.
 - **Restarting the compromised identity.** Excluded by R15.
 - **Corrupted bytes between correct nodes.** Excluded by R17.
 - **The stateful layer.** `StatefulActor`, QMDB, and their interplay with DKG state sync are not
   part of any target (R13).
-- **Other configurations.** Committee sizes other than 4, the coding marshal variant, and marshal
-  pruning.
+- **Other configurations.** Committee sizes other than 4 are excluded by R10. The coding marshal
+  variant is excluded by R13 in the reshare and state-sync targets, which run marshal in the
+  Standard `Deferred` configuration; the probe target builds its marshal actors over the same
+  Standard variant. Marshal pruning is excluded with the stateful layer (R13): in a node that
+  layer prunes marshal, the DKG module does not, and the harness does not prune in its place.
+  Section 12.1, rows 8, 26, and 27, gives what each exclusion costs and how to lift it.
 - **Modifying any file outside `glue/fuzz/`.** Excluded by R3.
 
 ## 10. Delivery and end-to-end verification
@@ -614,7 +745,11 @@ use the nightly pinned by CI (`nightly` under `[tools]` in `.github/toolchains.t
 2. **The target is thin.** The target file contains only the libFuzzer entry point and a call
    into the library (R2).
 3. **Everything compiles and lints clean.** `cargo check -p commonware-glue-fuzz --tests`
-   succeeds and `cargo clippy -p commonware-glue-fuzz --tests` reports no warnings.
+   succeeds on the stable toolchain. Stable Cargo may warn there that it does not know the
+   workspace's `lints.cargo` manifest key; that warning is about the toolchain, not about this
+   crate. `cargo +<clippy> clippy -p commonware-glue-fuzz --tests` reports no warnings, where
+   `<clippy>` is the Clippy version pinned by CI (`clippy` under `[tools]` in
+   `.github/toolchains.toml`).
 4. **The regression suite passes.** `cargo nextest run -p commonware-glue-fuzz dkg::` runs every
    fixed-input scenario of the target. The suite holds the negative controls R19 requires: at least
    one for each invariant a run checks, in some target or, where R19 allows it, over built records.
@@ -623,8 +758,19 @@ use the nightly pinned by CI (`nightly` under `[tools]` in `.github/toolchains.t
 6. **A smoke run is clean.** A short run of the target over its own corpus completes with no
    crash, hang, or out-of-memory, and with no invariant firing on a correct run. Executions per
    second are measured and reported. This document sets no throughput floor.
+7. **The checks are not vacuous.** Each run reports, per invariant, how many records its check
+   judged (R30). Across the regression suite of a target, every invariant that section 8 applies
+   to that target and that is checked at run time MUST have a count above zero in at least one
+   run. The one exception is I6 in `dkg_bootstrap`: no input of that target is known to fail a
+   ceremony (section 9), so its regression suite MUST instead show, in at least one run, I6
+   reported as unmeasured with the reason `no failed ceremony was reported` (section 8.1), and
+   it MUST keep the negative control of I6 that R19 requires. `dkg_bootstrap_restarts` is not
+   excepted. The smoke run of step 6 reports, per invariant, how many runs measured it and how
+   many did not. The invariants of a target are the ids of its row in section 8.1. For I10 the count
+   is the replay check's. The smoke run reports in the last aggregate line its process writes
+   (section 5.4), which has no entry for I10.
 
-Passing steps 1-6 for a target constitutes acceptance of that target.
+Passing steps 1-7 for a target constitutes acceptance of that target.
 
 ## 11. Construction rules (normative)
 
@@ -657,10 +803,20 @@ implementation and may change without amending this document.
   engines involved, and the epoch or height, and the harness MUST print the run's structured
   controls and its tape before the process aborts. Together they rebuild the input as a
   fixed-input test; the bytes libFuzzer saves reproduce the run directly.
+- **Report emission.** The aggregate a fuzz process writes MUST be the fold of section 5.4 over
+  the reports of the runs the process completed, and writing it MUST NOT change what a run
+  does or measures. The interval between two aggregate lines MUST be counted in completed
+  runs, never in time (R4). The length of the interval, and how the process catches its own
+  end, are the build's to choose. Whether libFuzzer's exit path lets the harness write at the
+  end was not verified when this rule was written. A build that cannot write there is a
+  finding against this document: the document changes first, and the build does not work
+  around it.
 
-## 12. Choices made in the harness
+## Choices made in the harness
 
-These were not decided explicitly. Each is stated as the harness currently has it.
+These were not decided explicitly. Each is stated as the harness currently has it. The section
+carries no number, so that Future work is section 12 and the last numbered section. Other
+sections refer to it as "Choices made" and to its entries by item number.
 
 1. **One node down at a time.** The restart schedule keeps at most one correct identity down at
    any moment, as stateful does: the fault bound is f = 1, so outages never overlap. A write held
@@ -678,7 +834,7 @@ These were not decided explicitly. Each is stated as the harness currently has i
 3. **Negative reconstruction check in I3.** "One fewer" is checked through the recovery
    function, which must return an error. A direct interpolation of fewer shares is not checked,
    because the evaluation points it needs are private to the cryptography crate.
-4. **I7 withdrawn by the user.** It held only under synchrony: every correct ack reaches every
+4. **I7 withdrawn.** It held only under synchrony: every correct ack reaches every
    correct dealer before the dealer's window closes. The DKG module closes that window at a
    block height. A correct node that the compromised identity keeps a block from sends its
    dealings late, can close its window holding some correct acks and not others, and then
@@ -686,6 +842,17 @@ These were not decided explicitly. Each is stated as the harness currently has i
    player, which is the two reveals listing needs. No such run was observed in about 2,000.
    With I7 gone, a correct dealer that loses a valid ack and a correct player that fails to
    acknowledge a valid dealing are not detected.
+
+   I7 would not have been a secrecy check even where it held. `Output::revealed()` is not a
+   complete record of what the adversary knows: it lists a player only when `f + 1` selected
+   dealers reveal its dealing, and in a reshare an adversary that already knew a correct
+   player's previous share can work out a correct player's new share from fewer reveals, so
+   that player is not listed. Since #5708 the ceremony's documentation also states the secrecy
+   of the shared secret across a reshare as a conditional bound: it holds only if the adversary
+   knew at most `f` correct players' previous shares before the reshare
+   (`cryptography/src/bls12381/dkg/feldman_desmedt.rs`, lines 175-184, and the documentation of
+   `Output::revealed`). No target checks that bound. Section 12 records what a check of it
+   needs.
 5. **Scenario and leaders in the reshare target.** The twins scenario is drawn over the five
    identities, not over a committee, because the committee of an epoch depends on the outcome of
    the ceremonies before it. The scenario's scripted leaders are used (A1): a scripted leader
@@ -702,7 +869,7 @@ These were not decided explicitly. Each is stated as the harness currently has i
    registrar builds a scheme from, so material it fails closed on (R14) is a violation at a correct
    engine. A share or a registration for an epoch that no correct engine holds a description of is a
    violation. The first cut only counted a correct engine that completed a successful ceremony as a
-   player of its output and held no share of it; the user decided that this is a violation. An
+   player of its output and held no share of it; it was decided that this is a violation. An
    engine has completed the ceremony once it registered the scheme of the epoch the ceremony
    introduces, which the DKG module does only after it stored the share, so the check cannot fire on
    an engine that has not yet written its share. A node that enters an epoch without having played
@@ -1078,3 +1245,255 @@ These were not decided explicitly. Each is stated as the harness currently has i
     prefix all completed with every ceremony successful, and of the 14 without a bound all
     completed and 6 held a failed ceremony, which I1, I2 and I6 then judge as in the restart
     targets. All 60 decoded bootstrap runs completed, at every prefix. No invariant fired.
+23. **Unmeasured runs (R30).** Until this change section 9 excluded the reporting of runs that
+    measured nothing: the harness did not label or count them, and the reach of the oracle was
+    read from libFuzzer coverage. Withdrawn after the spec review (CR-001): a run that cannot
+    measure an invariant is reported as unmeasured, never as passing. Nothing that was detected
+    is lost. What is new: a campaign whose runs no longer reach a ceremony, an artifact, or a
+    sync is visible.
+24. **I14's count (R30, 7.4).** I14 judges deliveries, not artifacts, so a probe run without an
+    artifact can still measure it. Its count is the deliveries for which the check required a
+    block or required none. A delivery for which nothing is required (item 11) is left out, so
+    that a run in which every delivery is of that kind reports I14 as unmeasured and not as
+    passing. From the spec review (CR-007): until then 7.4 said that a run without an artifact
+    reports I12-I14 as unmeasured.
+25. **Units of the R30 counts (8.1).** R30 said "how many records the check judged" and fixed
+    the unit for I14 only (item 24). The acceptance list for R30 (2026-11-18) could
+    therefore assert zero against positive and no exact value. Section 8.1 now names one unit
+    for each invariant, by the rules it states. What is worth knowing about the choices:
+    - I1 counts comparisons, and leaves out the configured `EpochInfo` of epoch 0, so that a
+      reshare run in which no ceremony completed does not show I1 as measured.
+    - I6 counts failed ceremonies, not shares, so that a failed bootstrap, after which no share
+      is held, is measured.
+    - I8 and I9 forbid an event. In a target of correct nodes only, a passing run records no
+      block, so a unit per recorded block could never be above zero there and section 10,
+      step 7 could not pass. Their unit is the run.
+    - I15 counts only the steps one of its three clauses judges. A joiner that starts once and
+      completes its sync leaves I15 unmeasured. Measuring it takes a start of the joiner after
+      a floor was selected.
+    - I10 compares two runs, so its count is the replay check's and no report carries it.
+
+    What the harness detects is unchanged: no check was added, removed, or changed.
+26. **One reason per invariant (R30, 8.1).** Until this change R30 named the reason as "the
+    reason the run gives (no ceremony completed, no artifact was emitted, no delivery was
+    judged, no sync completed, the run timed out)". It did not say which invariant gives which,
+    nor which one a run gives when two hold. The five also did not cover every case: a run
+    whose ceremonies all succeed leaves I6 unmeasured, and none of the five is true of it.
+    Section 8.1 now gives each invariant one reason, which names the record its check lacked.
+    Four of the five strings stay: `no ceremony completed` (I4), `no artifact was emitted` (I12,
+    I13), `no delivery was judged` (I14), and `no sync completed` (I17). "The run timed out" is
+    no longer the reason of an invariant: it is true of the run and not of a check, so the
+    report states it once, as how the run ended. Nothing that was reported is lost. New
+    strings: those of I1-I3, I5, I6, I8, I9, I15, I16, and I18 in the table of 8.1.
+27. **Report surface (5.4).** R30 fixed what is reported, not where, and 12.2, step 5 left it
+    open. Section 5.4 fixes the part the regression tests need: the report is the value the run
+    function returns, and the smoke aggregate is the value of one function over such reports.
+    Each of the six targets already has a run function that returns a report
+    (`run_dkg_bootstrap` and its five siblings), and it is what the fixed-input tests call.
+    Where a fuzz process writes the report and the aggregate was a separate decision: R30 was
+    accepted so that a campaign whose runs no longer reach a ceremony, an artifact, or a sync
+    is visible (item 23), and the place of the output decides whether a campaign shows it. A
+    first text of this item printed a run only on request, through `GLUE_FUZZ_LOG`. It was
+    withdrawn the same day, before any review: a campaign run without the variable would show
+    nothing. The decision of 2026-11-18 was "Compact aggregate always": every fuzz process
+    always writes a short per-invariant aggregate, at intervals and at its end, and the full
+    report of each run only with `GLUE_FUZZ_LOG`. Two options were not taken: writing both
+    only with the variable, and printing every run that has an unmeasured invariant, as the
+    stateful harness prints a run that measured nothing (`glue/fuzz/src/stateful/runner.rs`),
+    which here would print nearly every run because of I6. Beside the decision, these are the
+    writer's choices: standard error, where the report line of `glue/fuzz` goes today; the
+    form of the aggregate line; that the end is one the process reaches by itself; and that
+    the interval is counted in runs (section 11, Report emission).
+28. **Per-target set of run-time invariants (7.1-7.5, 8, 8.1).** Until this change section 8
+    said "I1-I6 apply to correct nodes in the four ceremony targets and the state-sync target"
+    and "I8, I10, and I11 apply to every target", and the measurement steps listed "I1-I3 and
+    I6-I11" (7.1), "I1-I11" (7.2), "I1-I6 and I8-I11" for both restart targets (7.3), "I8, I10,
+    and I11" (7.4), and "I1-I6, I8-I11, I15-I17, and I18" (7.5). The lists put I4 and I5 on the
+    bootstrap targets, which have no reshare boundary; they spanned the withdrawn I7; and they
+    listed I10 and I11 as checks of a run, where I10 compares two runs and I11 constrains the
+    working tree (R19). Section 8 and 7.1-7.5 now agree with the table of 8.1. The table is the
+    matrix of the R30 acceptance list, which is right, with one refinement: I10 stays in
+    every row, and its count is the replay check's, not a run's. No check was added or removed:
+    no bootstrap target checked I4 or I5 before.
+29. **I6 in `dkg_bootstrap` is excepted from section 10, step 7.** Until this change step 7
+    required, for every target, a count above zero in at least one regression run for every
+    invariant of its row in 8.1, I6 in `dkg_bootstrap` included. The review of items 25 to 28
+    found (SR-001) that the document did not know whether a bootstrap ceremony can fail under
+    that target's adversary (R15, R17, A1, A2). A check then found no failing input, in the
+    4,330 runs section 9 gives, and the reason section 9 gives from the code. A failed
+    bootstrap under Twins is likely unreachable and not proven so. The decision of
+    2026-11-18 was "A: exclude I6 on bootstrap": step 7 excludes I6 on `dkg_bootstrap`; its
+    regression suite must show I6 reported as unmeasured with its reason; I6 keeps its
+    negative control there. Three options were not taken: widening the bootstrap adversary
+    until a ceremony fails, which needs a change under `glue/src`; letting a planted failure
+    count as the measured run, which is not a healthy run; and removing I6 from the target's
+    row in 8.1, which loses the check if a failure ever becomes reachable. What is no longer
+    required: a real failed ceremony in the regression suite of `dkg_bootstrap`. What stays:
+    the check runs in every run of the target, its entry stays in every report (8.1), its
+    negative control stays (R19), and `dkg_bootstrap_restarts` is not excepted. The exception
+    is about what the regression suite must show, not about what a run reports: a run of
+    `dkg_bootstrap` in which a correct engine reports a failed ceremony gives I6 a count
+    above zero, as R30 and 8.1 require. Future work 12.1, row 28 records the cost.
+
+## 12. Future work
+
+Nothing in this section is normative. It adds no requirement, property, adversary rule, or
+invariant, and it changes none. Lifting a row that names an R, P, A, or I id is a change to
+that id: it starts in this document and needs a decision first.
+
+### 12.1 Choices that narrow coverage or scope
+
+Each choice below narrows what the targets reach or what the oracle judges. "Where" names the
+id or the item that states the choice. "How to lift it" is a direction, not a design.
+
+| # | Choice | Where | What it costs | How to lift it |
+|---|---|---|---|---|
+| 1 | Safety only | R18; section 9, Liveness | A stall, a ceremony that never completes, and a node that never rejoins are healthy outcomes. No defect of progress is reported | Change R18 to assert progress in a window with no fault: past a bounded prefix every view is whole (A1), and the restart schedule is bounded (7.3) |
+| 2 | Runs that measured nothing are not reported | Choices made, item 23 (was section 9, Reporting of runs that measured nothing) | Lifted by R30 | Lifted by R30 |
+| 3 | A bootstrap outcome is read from completions only | Section 9, The outcome of a bootstrap no correct engine reported; 7.1 | When a run ends between the write of a share and the next report, I6 is not checked, and with three holders the I3 clause compares nothing | The engine exposes its stored final block through no interface (7.1). Lifting needs a public read of it under `glue/src` (see row 20) |
+| 4 | No coverage target | Section 9, Coverage targets | Nothing shows when a target stops reaching new code of `glue/src/dkg` | Track line coverage of `glue/src/dkg` per target from the campaign's coverage reports, and act on the gaps |
+| 5 | Mock group only | R6, G8; section 9, Real BLS | A defect that needs the real curve (an encoding, a subgroup check, a pairing) is out of reach here. `cryptography/fuzz` runs the ceremony over `MinPk` and `MinSig`, without the DKG module (`cryptography/fuzz/fuzz_targets/bls12381_dkg_feldman_desmedt.rs`) | A variant of one ceremony target over `MinSig`, run at a low rate. It changes R6 and G8 |
+| 6 | Identities stay on ed25519 | R8; section 9, A mock identity signer | Run time only. No coverage is lost | As section 9 states: reconsider when measurement shows ed25519 is a visible share of run time |
+| 7 | One fault model and one reveal rule | R9 | `N5f1` (`utils/src/faults.rs`) is never run. `Reveal::V0` is never run either; it is deprecated in `feldman_desmedt.rs` | Let the input select the fault model. The committee size changes with it (row 8) |
+| 8 | Committee of 4, at most 3 epochs of 32 blocks | R10, R11; section 9, Other configurations | `f` is always 1. Quorum arithmetic for `f > 1` is not exercised, and no run chains more than three reshares | A second fixed committee size with `f = 2`. Its run time per ceremony is not measured |
+| 9 | The compromised identity runs real code only | A2, A3, A4; section 9, Cryptographically invalid ceremony messages to correct nodes | No correct node receives a dealing with a bad share or commitment, or an ack with a bad signature, so its handling of them is not exercised. `cryptography/fuzz` covers the ceremony functions, not the actors | A faulty dealer built in the fuzz crate that sends such messages on the DKG channel. It is a new adversary rule |
+| 10 | No Simplex fault beyond the twins partition | Section 9, Consensus-level faults beyond the twins partition; R20 | The DKG module is not run under other Simplex deviations | R20 forbids a dependency on `commonware-consensus-fuzz-*`, so a deviation is either written in `glue/fuzz` or R20 changes |
+| 11 | One identity impaired at a time in the restart and state-sync targets | Choices made, items 1 and 17; section 9, A failed reshare under Twins | In the restart targets a few sampled inputs in a thousand fail a ceremony (item 1), and `dkg_state_sync` fails one only in the same ways (item 17). In these targets I6 and the failure branch of I1 rest mostly on fixed inputs and negative controls. Row 25 covers `dkg_reshare` | A schedule in which a link cut coincides with an outage, or a held write keeps an identity from its dealing window, more often: the two ways item 1 names |
+| 12 | No state loss | R16; section 9, State loss | A wiped or rolled-back secret store or journal is never produced, so what the DKG module does on one is not exercised | A separate target with its own oracle, since the module answers a corrupt secret store with a deliberate panic (I8). It changes R16 and P3 |
+| 13 | The Twins targets restart nothing, and the restart targets run correct nodes only | R15, R16, P2; section 9, Restarting the compromised identity | No run has both a Byzantine dealer and a crash. The #5721 path is unreachable (12.2, step 3) | 12.2, step 3 |
+| 14 | No corrupted bytes between correct nodes | R17; section 9, Corrupted bytes between correct nodes | A correct node's handling of bytes that do not decode on the DKG channel is not exercised in the ceremony targets | Junk on the DKG channel sent by the compromised identity, as the probe program sends junk (R22). It is a new adversary rule |
+| 15 | No stateful layer | R13; section 9, The stateful layer; Choices made, items 15 and 16 | `StatefulActor`, QMDB, and the stateful startup plan are replaced by the harness's own caller record, so their interplay with DKG state sync is not run. I15 checks the harness's caller only (item 19) | A target that runs the stateful stack with the DKG module. It changes R13 |
+| 16 | Bootstrap takes no scripted leader and no faulty application | A1, A3 | `bootstrap::Engine` owns its elector and its application, so the bootstrap Twins target has the partition and the DKG mask as its only faults | Needs a way to supply either from outside, which is a change under `glue/src` (row 20) |
+| 17 | The "one fewer" check goes through the recovery function | Choices made, item 3 | A direct interpolation of `required() - 1` shares is not checked | The evaluation points are private to the cryptography crate. Lifting needs a public way to get them (row 20) |
+| 18 | I7 withdrawn; no check of share secrecy | I7; Choices made, item 4 | A share of a correct player published on chain, a correct dealer that loses a valid ack, and a correct player that does not acknowledge a valid dealing are not detected | 12.2, steps 1 and 2 |
+| 19 | Dealer logs are recorded by kind only | I18; Choices made, item 9 | Which dealer signed a log, how many logs a dealer has on chain, whether a log verifies, and what a log reveals are not judged. No check can read a selected log | Record each finalized dealer log as a whole (12.2, step 1) |
+| 20 | Fuzz-only change scope | R3, G7, I11; section 9, Modifying any file outside `glue/fuzz/` | No hook or read access is added to the code under test. Rows 3, 16, and 17 cannot be lifted | Each access is a separate decision |
+| 21 | An unsynced change that another task syncs is not looked for | Choices made, item 14 | A blob change made without a sync survives a crash if another task of the engine synced the blob while the write was held. The harness does not model that | Track which task synced which blob while a write is held |
+| 22 | Only one position of `RESTARTS_BEFORE_JOIN` is fuzzed | Choices made, item 17 | A state sync into an epoch whose ceremony failed, and the walk back in `recovered_share`, are next to unreachable | Fuzz the other position too. Item 17 states its cost: two of four members can be out before the join |
+| 23 | Two caller obligations make no difference in `dkg_state_sync` | Choices made, item 15; R24 | Handing the floor on record to the probe, and pairing with the later floor by round, are covered by unit tests of the harness's caller only | Produce a member that is an epoch behind the floor on record when the joiner restarts |
+| 24 | Two known blind spots of the state-sync oracle | Choices made, item 19 | An engine that never follows, and a probe that picks the lowest reply of its sample, are caught by no invariant of `dkg_state_sync` | Not designed. For the second, I12 judges the probe's selection in `dkg_probe` |
+| 25 | In `dkg_reshare` a ceremony fails only under a prefix without a bound | Choices made, items 8 and 22; section 9, A failed reshare under Twins | Of 60 decoded inputs of `dkg_reshare`, 6 held a failed ceremony: 6 of the 14 with a prefix without a bound, and none of the 46 with a bounded prefix (item 22). One draw in five sets no bound. A failed reshare is therefore reached far more often here than in the restart targets (row 11), but never next to a bounded prefix. No bootstrap ceremony is known to fail under Twins: none did in 4,330 logged runs of `dkg_bootstrap` (section 9; row 28) | Draw a prefix without a bound, or a sustained scenario, more often (item 22). Under a bounded prefix the compromised dealer cannot fail a ceremony by its messages alone (section 9), so a failure there needs a fault the Twins targets exclude: a restart (R15) or a lossy link (R17) |
+| 26 | Standard marshal variant only | R13; section 9, Other configurations | The DKG module is generic over the marshal variant in the reshare actor and in the probe (`glue/src/dkg/reshare/actor/dealing.rs`, `glue/src/dkg/reshare/actor/follower.rs`, `glue/src/dkg/probe/mod.rs`). The harness builds it over the Standard variant in every target that configures marshal (`Variant` in `glue/fuzz/src/dkg/reshare_stack.rs`), so the module over the coding variant, with coded blocks and their commitments, is never run here. The module's own tests run probe discovery over the coding variant (`glue/src/dkg/probe/actor/discovery.rs`, tests) | A second stack over `marshal::coding`, chosen by the input or as targets of its own. It changes R13 |
+| 27 | Marshal is never pruned | R13; section 9, Other configurations | In a node the stateful layer prunes marshal (`PruneConfig` in `glue/src/stateful/actor/core/mod.rs`), and R13 leaves that layer out. Nothing under `glue/src/dkg` and nothing in the harness calls marshal's `prune`. The DKG module documents what pruning must keep (`glue/src/dkg/mod.rs`, Marshal Retention): a restart loads the epoch's `EpochInfo` from the boundary block, serving the probe needs the boundary finalization and block of every epoch served, and no runtime check enforces the retention rule. A restart, a serving probe, and a joiner beside pruned history are never run | The harness prunes marshal in the caller's role, inside the documented retention rule so that P3 still holds. It is a new requirement beside R24 |
+| 28 | I6 is excepted from the non-vacuity step in `dkg_bootstrap` | Section 10, step 7; section 9, A failed bootstrap under Twins; Choices made, item 29 | In the 4,330 observed runs of `dkg_bootstrap` (section 9), the failed-bootstrap clause of I6 was not judged: those runs leave I6 unmeasured. In the current regression suite the clause rests on its negative control (R19). A run of the target in which a correct engine reports a failed ceremony still gives I6 a count above zero (R30, 8.1). Step 7 still requires a count above zero in `dkg_bootstrap_restarts` | An input of `dkg_bootstrap` that fails a ceremony: if one is found, it joins the regression suite and the exception goes. Making one reachable by a scripted elector needs a change under `glue/src` (rows 16 and 20) |
+
+### 12.2 Next planned steps
+
+Steps 1 to 4 are not built. Step 5 is built and stays here as its record. Each names what it
+rests on and what is still open.
+
+1. **A bounded-exposure invariant.** This is the checkable form of the bound that Choices made,
+   item 4 quotes: if the adversary knew at most `f` correct players' previous shares before a
+   reshare, it knows at most `f` correct players' shares after it.
+   - *What it is.* A count, with no group arithmetic. The mock group gives away every discrete
+     logarithm (`glue/fuzz/src/dkg/mock.rs`, module documentation), so a check that tries a
+     recovery proves nothing. The inputs are, per epoch, the selected dealers
+     (`Output::dealers()`), the reveal set of each selected dealer's log
+     (`DealerLog::summary()`), and the set of correct players counted as exposed, carried from
+     the epoch before. The first output of a reshare run is a trusted deal (R10), so the carried
+     set starts empty. The check does not read `Output::revealed()`.
+   - *What it rests on.* The step from one epoch to the next was derived by hand for a
+     committee of 4 with `f = 1`, and checked a second time. It is not derived for a general
+     `f`, nor for a failed ceremony followed by a retry from the same shares.
+   - *What it would find.* A selected log that reveals more than `f` dealings, fewer than
+     `2f + 1` selected logs, and exposure that grows from reshare to reshare. It does not close
+     the ack-loss gap of step 2: a reveal a correct dealer did not need stays within `f` per
+     log.
+   - *First.* A prototype in `cryptography/fuzz`, where the ceremony is driven directly and the
+     selected logs are at hand. That is outside this feature (R3) and needs a spec of its own.
+     The existing target there only calls `FuzzPlan::run`, which is defined in
+     `cryptography/src/bls12381/dkg/feldman_desmedt.rs`, so the prototype either drives the
+     public dealer and player interfaces from the fuzz side or needs a change under
+     `cryptography/src`.
+   - *Then, in this feature.* Only after the harness records the selected dealer logs. Today
+     `Records::placed` keeps the payload kind of a block and drops the log
+     (`glue/fuzz/src/dkg/invariants.rs`, lines 699-755), and the delivered `EpochInfo` names
+     the selected dealers without their logs. The record must hold every finalized dealer log
+     as a whole, and the check needs a sound rule for which log of a selected dealer the
+     ceremony used, since a dealer can have more than one log on the chain (Choices made,
+     item 9). The invariant would take the next free number and enter section 8 through an
+     update of this document, with its negative control (R19).
+2. **The ack-loss gap.** Choices made, item 4 records two defects nothing detects: a correct
+   dealer that loses a valid ack, and a correct player that does not acknowledge a valid
+   dealing. Both show as a correct dealer's log that reveals a correct player.
+   - *Why no check is sound today.* That same log is legitimate in every ceremony target. In
+     the Twins targets every input has a prefix of at least one view (A1), in which the
+     compromised identity can keep a block from a correct node; that node deals late and can
+     close its window, which closes at a block height, holding some correct acks and not
+     others (Choices made, item 4). In the restart and state-sync targets a crash, a lossy link,
+     or a cut can keep an ack from a dealer (R16, R17, R23). The harness cannot tell a needed
+     reveal from an unneeded one.
+   - *What would make one possible.* Evidence, per dealer and player, that the ack reached the
+     dealer before the dealer closed its window. With that evidence the rule would be: a log
+     of a correct dealer that reveals a correct player whose valid ack it had received in
+     time is a defect. It
+     needs three records the harness does not keep: the delivery of each ack on the DKG
+     channel between correct nodes, the moment each dealer closes its window, and the log
+     bodies of step 1. Whether the second can be observed through public interfaces was not
+     checked. A narrower form, a run with no fault at all in which no correct dealer may
+     reveal anything, was not checked for soundness either: it needs a measurement that
+     fault-free runs never reveal.
+   - *State.* Not designed. It would be a new invariant and needs a decision.
+3. **The #5721 path.** One dealer sends two different dealings in one epoch, and the correct
+   player that receives them restarts between them. The property at stake is that replay never
+   pairs a journaled public message with the private half of another message
+   (`glue/src/dkg/reshare/store.rs`, lines 204-217).
+   - *Why no target reaches it.* Only the compromised identity deals twice (A2), and only in
+     the Twins targets, which restart no engine (R15). The restart and state-sync targets run
+     correct nodes only (R16, R23), and a correct dealer sends the same dealing again after a
+     restart, because its seed is durable before it deals (`commit_epoch` in
+     `glue/src/dkg/reshare/store.rs`, and the actor's order of calls). The probe target runs no
+     ceremony (R21).
+   - *What covers it instead.* The production regression `issue_5721_regression` and the test
+     after it (`glue/src/dkg/reshare/store.rs`, lines 1290-1388). They interrupt a dealing at
+     the secret store and before each journal mutation, for different dealings from one
+     dealer, at the level of the store.
+   - *What lifting it would take.* A change of R15, to restart a correct engine in a Twins
+     target, or of R16 and P2, to put a dealer that deals twice into a restart target. The
+     Twins targets pace no write (Choices made, item 13), so the crash would also need the
+     pacing of the restart targets to fall between the two writes of one dealing. I2 and I8
+     would see a consequence, not the pairing itself. Comparing a player's ack before and
+     after the crash is not enough: the sequence can crash before a first ack exists.
+   - *State.* Not planned. The review of the study found no reason to build it now, given the
+     production regression.
+4. **The `SecretStore` contract for dealings (optional text).** Since #5728 the trait documents
+   that a private dealing is valid only with its own public message
+   (`glue/src/dkg/mod.rs`, `put_dealing` and `get_dealing`). R14 binds the harness to that
+   contract by reference and does not spell it out. The harness's store returns a private
+   dealing only for the public message it was stored with, and panics when a different private
+   dealing is stored again for the same epoch, dealer, and public message
+   (`glue/fuzz/src/dkg/store.rs`, `put_dealing`). At a correct engine I8 reports that panic.
+   The assertion is sound in the mock group:
+   one public message and one player position fix one valid private dealing. A sentence for section 11,
+   Secret stores, would read: "A store returns a private dealing only for the public message
+   it was stored with, and storing a dealing again for the same public message cannot change
+   it." It is not added there yet: section 11 is normative, and the sentence waits for the
+   review of this document.
+5. **Per-invariant counts in the harness (R30).** R30 and section 10, step 7 require every run
+   to report, per invariant, how many records its check judged, and to report an invariant with
+   a count of zero as unmeasured. The harness does this since the build of 2026-11-18.
+   - *What the harness had before.* One flag per run: each of the six drivers' reports
+     answered `measured()` with one `bool`, and the runner wrapped every report in `OnRequest`,
+     a report printed only on request, whose `unexpected()` is `false`. One flag can hide an
+     unmeasured invariant behind another that ran, which R30 forbids.
+   - *What was open, and is decided.* Where a fuzz process writes the report of a run and the
+     smoke aggregate, and when: R30 fixes what is reported, not where. The decision of
+     2026-11-18 was "Compact aggregate always" (section 5.4; Choices made, item 27): every fuzz
+     process always writes the aggregate, at intervals and at its end, and the report of each
+     run only when `GLUE_FUZZ_LOG` is set. Counts per invariant will show I6 as unmeasured in
+     most runs, because a failed ceremony is rare (12.1, rows 11 and 25); R30 does not fail
+     such a run, and the run is not printed for it.
+   - *What the build chose.* An interval of 250 completed runs between two aggregate lines
+     (`AGGREGATE_INTERVAL`, `glue/fuzz/src/dkg/report.rs`), and the C library's `atexit` to
+     catch the end of the process (`glue/fuzz/src/dkg/runner.rs`; section 11, Report
+     emission). Measured on macOS: a process that reaches libFuzzer's limit of runs writes its
+     last aggregate line, and a process ended by SIGTERM writes none. Not measured: a process
+     that aborts on a violation, and Linux. The `atexit` call is the harness's one unsafe
+     block. Miri cannot call `atexit`, so by the decision of 2026-11-18 ("Keep it, skip
+     Miri") that one call has no Miri test.
+   - *State.* Built. Every report holds one entry for each id of its target's row in 8.1
+     (`Report::judged`), `fold` gives the aggregate, and `Emitter` writes it, all in
+     `glue/fuzz/src/dkg/report.rs`. The acceptance tests written from this document are in
+     `glue/fuzz/src/dkg/dkg_acceptance.rs` and `glue/fuzz/tests/dkg_delivery_acceptance.rs`.
+     They hold one coverage test of section 10, step 7 for each of the six targets, and all
+     six pass.

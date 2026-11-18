@@ -3,16 +3,23 @@
 //! correct engines, and what every driver reads of the network afterwards.
 //!
 //! The network itself, the panic record, and the report line come from
-//! [`crate::stateful::runner`].
+//! [`crate::stateful::runner`]. The aggregate a fuzz process writes over its
+//! runs comes from [`super::report`].
 
-use super::{PublicKey, invariants};
+use super::{
+    PublicKey, invariants,
+    report::{Emitter, Entry, Report, Stderr},
+};
 use crate::stateful::runner::{self, Panic, Reportable};
 use commonware_macros::select;
 use commonware_p2p::simulated::Oracle;
 use commonware_runtime::{Clock as _, Handle, Runner as _, deterministic};
-use commonware_utils::FuzzRng;
+use commonware_utils::{
+    FuzzRng,
+    sync::{Mutex, Once},
+};
 use futures::future::{join_all, select_all};
-use std::{fmt, future::Future, time::Duration};
+use std::{ffi::c_int, fmt, future::Future, time::Duration};
 
 /// Why a run stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,15 +45,10 @@ impl fmt::Display for Outcome {
     }
 }
 
-/// What one run of a driver observed, as its report line prints it.
-pub(super) trait Report: fmt::Display {
-    /// Whether the run's checks compared something.
-    fn measured(&self) -> bool;
-}
-
 /// A report that is printed only on request. No target requires a run to
 /// measure anything: a run in which no ceremony completed, no artifact was
-/// emitted, or no joiner synced is healthy.
+/// emitted, or no joiner synced is healthy, and so is a run that left an
+/// invariant unmeasured.
 struct OnRequest<R>(R);
 
 impl<R: Report> fmt::Display for OnRequest<R> {
@@ -57,7 +59,7 @@ impl<R: Report> fmt::Display for OnRequest<R> {
 
 impl<R: Report> Reportable for OnRequest<R> {
     fn measured(&self) -> bool {
-        self.0.measured()
+        self.0.judged().entries().iter().any(Entry::measured)
     }
 
     fn unexpected(&self) -> bool {
@@ -65,16 +67,70 @@ impl<R: Report> Reportable for OnRequest<R> {
     }
 }
 
+/// The aggregate of every target this process has run, each written to
+/// standard error. A fuzz process runs one target.
+static EMITTERS: Mutex<Vec<Emitter<Stderr>>> = Mutex::new(Vec::new());
+
+unsafe extern "C" {
+    /// The C library's `atexit`: call `callback` when the process exits by
+    /// returning from `main` or by calling `exit`.
+    fn atexit(callback: extern "C" fn()) -> c_int;
+}
+
+/// Write the aggregate over every run the process completed. Registered to
+/// run when the process ends by itself, as when libFuzzer reaches its limit
+/// of runs or of time. A process that is killed or that aborts does not get
+/// here.
+extern "C" fn finish() {
+    for emitter in EMITTERS.lock().iter_mut() {
+        emitter.finish();
+    }
+}
+
+/// Ask the C library to call `callback` when the process ends by itself.
+fn at_exit(callback: extern "C" fn()) {
+    // SAFETY: `atexit` is the C library's, which every process links. It
+    // keeps the pointer it is given until the process ends, and a function
+    // lives that long.
+    //
+    // Miri cannot call `atexit`. By the user's decision of 2026-11-18 this
+    // one call is exempt from the Miri test that unsafe code otherwise gets.
+    let registered = unsafe { atexit(callback) };
+    assert_eq!(registered, 0, "the exit handler must register");
+}
+
+/// Fold the report of a completed run into the aggregate of its target, and
+/// write the aggregate when its interval of runs is over.
+fn emit<R: Report>(report: &R) {
+    static AT_EXIT: Once = Once::new();
+    AT_EXIT.call_once(|| at_exit(finish));
+    let target = report.judged().target();
+    let mut emitters = EMITTERS.lock();
+    let position = emitters
+        .iter()
+        .position(|emitter| emitter.aggregate().target() == target)
+        .unwrap_or_else(|| {
+            emitters.push(Emitter::new(target, Stderr));
+            emitters.len() - 1
+        });
+    emitters[position].completed(report);
+}
+
 /// Run `input`, whose tape is `raw_bytes`, the way a fuzz target does: a
-/// failure prints the input's controls and its tape, and the report of the
-/// run is printed if reports were asked for.
+/// failure prints the input's controls and its tape, the report of the run
+/// is folded into the aggregate the process writes, and the report itself is
+/// printed if reports were asked for.
 pub(super) fn fuzz<I: fmt::Debug, R: Report>(
     raw_bytes: Vec<u8>,
     input: I,
     run: impl FnOnce(I) -> R,
 ) {
     let controls = format!("{input:?}");
-    runner::report_input(&controls, &raw_bytes, || OnRequest(run(input)));
+    runner::report_input(&controls, &raw_bytes, || {
+        let report = run(input);
+        emit(&report);
+        OnRequest(report)
+    });
 }
 
 /// Run `root` as the root task of a deterministic runtime seeded with
@@ -131,4 +187,17 @@ pub(super) async fn blocked(
         .blocked()
         .await
         .expect("the network must report its blocks")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn noted() {}
+
+    /// Miri cannot call `atexit`, so this test is outside the `miri` group.
+    #[test]
+    fn exit_handler_registers() {
+        at_exit(noted);
+    }
 }
