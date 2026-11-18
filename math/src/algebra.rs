@@ -4,6 +4,8 @@
 //! so that the familiar `+`, `+=`, etc. operators can be used. The traits are also
 //! designed with performant implementations in mind, so implementations try to
 //! use methods which don't require copying unnecessarily.
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use commonware_parallel::Strategy;
 use core::{
     fmt::Debug,
@@ -434,6 +436,261 @@ pub trait HashToGroup: CryptoGroup {
     }
 }
 
+/// A [`CryptoGroup`] with a pairing.
+///
+/// A pairing `o : (G1, G2) -> GT` takes an element of `G1` and an element of
+/// `G2`, and returns an element of `GT`. This trait writes `GT` additively, so a
+/// pairing is written `A o X` rather than the more familiar `e(A, X)`.
+/// The implementor is `G1`, [`Self::Twin`] is `G2`, and [`Self::Target`] is
+/// `GT`.
+/// To run code generic over a [`PairingGroup`] `G` with the two groups swapped,
+/// pass [`Twin<G>`] in place of `G`, as BLS signatures do when they choose which
+/// group holds the public keys.
+///
+/// The pairing is bilinear:
+///
+///   - `0 o X = 0 = A o 0`,
+///   - `(A + B) o X = A o X + B o X`,
+///   - `A o (X + Y) = A o X + A o Y`.
+///
+/// [`Self::pairing`] computes one pairing. [`Self::pairings`] computes several,
+/// and [`Self::multi_pairing`] computes their sum. Both have default
+/// implementations, which an implementation can override to share work across
+/// pairs, such as the single final exponentiation that a sum of Tate pairings
+/// needs.
+pub trait PairingGroup: CryptoGroup {
+    /// The group that this group pairs with.
+    type Twin: CryptoGroup<Scalar = Self::Scalar>;
+
+    /// The target group `GT` of the pairing.
+    type Target: CryptoGroup<Scalar = Self::Scalar>;
+
+    /// Returns `self o other`.
+    fn pairing(&self, other: &Self::Twin) -> Self::Target;
+
+    /// Writes `lefts[i] o rights[i]` to `outputs[i]` for each index `i`.
+    ///
+    /// The default computes each pairing with [`Self::pairing`] on `strategy`. An
+    /// override can use batch instructions, which raise throughput even on one
+    /// thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lefts`, `rights`, and `outputs` differ in length.
+    //
+    // The batch methods take the left and right elements as separate slices
+    // rather than one slice of pairs. Callers often hold them apart already, as
+    // batch verification holds public keys and hashed messages, and code that
+    // swaps the two groups passes the same slices in the other order instead of
+    // copying every pair.
+    fn pairings(
+        lefts: &[Self],
+        rights: &[Self::Twin],
+        outputs: &mut [Self::Target],
+        strategy: &impl Strategy,
+    ) {
+        assert_eq!(
+            lefts.len(),
+            rights.len(),
+            "lefts and rights must have the same length"
+        );
+        assert_eq!(
+            lefts.len(),
+            outputs.len(),
+            "lefts and outputs must have the same length"
+        );
+        // `Strategy` has no for-each operation, so this `fold` carries a `()`
+        // accumulator and only writes outputs. The zip gives each pair its own
+        // output slot: a task writes its pairing in place, however the strategy
+        // splits the items.
+        strategy.fold(
+            lefts.iter().zip(rights).zip(outputs),
+            || (),
+            |(), ((p, q), out)| *out = p.pairing(q),
+            |(), ()| (),
+        );
+    }
+
+    /// Returns the sum of `lefts[i] o rights[i]` over each index `i`, or zero if
+    /// both slices are empty.
+    ///
+    /// The default sums the outputs of [`Self::pairings`], so an override of that
+    /// method also speeds up this one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lefts` and `rights` differ in length.
+    fn multi_pairing(
+        lefts: &[Self],
+        rights: &[Self::Twin],
+        strategy: &impl Strategy,
+    ) -> Self::Target {
+        let mut outputs = vec![Self::Target::zero(); lefts.len()];
+        Self::pairings(lefts, rights, &mut outputs, strategy);
+        strategy.fold(
+            &outputs,
+            Self::Target::zero,
+            |mut acc, out| {
+                acc += out;
+                acc
+            },
+            |mut a, b| {
+                a += &b;
+                a
+            },
+        )
+    }
+}
+
+/// An element of the group that `G` pairs with, as a [`PairingGroup`] whose
+/// twin is `G`.
+///
+/// [`Twin::new`] wraps an element `X` of `G::Twin`, and [`Twin::into_inner`]
+/// and [`AsRef`] return it. `Twin::new(X).pairing(&A)` returns
+/// `A.pairing(&X)`. `Twin<Twin<G>>` wraps `G` rather than being `G`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Twin<G: PairingGroup>(G::Twin);
+
+// Generic `From` impls cannot replace these methods. `From<G::Twin> for Twin<G>`
+// conflicts with core's `From<T> for T`, because `G::Twin` may be `Twin<G>`, and
+// `From<Twin<G>> for G::Twin` breaks the orphan rule.
+impl<G: PairingGroup> Twin<G> {
+    /// Wraps `x`.
+    pub const fn new(x: G::Twin) -> Self {
+        Self(x)
+    }
+
+    /// Returns the wrapped element.
+    pub fn into_inner(self) -> G::Twin {
+        self.0
+    }
+
+    /// Returns `twins` as a slice of the elements they wrap, without copying.
+    const fn as_inner_slice(twins: &[Self]) -> &[G::Twin] {
+        // SAFETY: `Twin<G>` is `#[repr(transparent)]` over its only field, of type
+        // `G::Twin`, so both types have the same size, alignment, and valid values.
+        // The pointer and length therefore describe `twins.len()` initialized
+        // `G::Twin` values, borrowed for the lifetime of `twins`.
+        unsafe { core::slice::from_raw_parts(twins.as_ptr().cast(), twins.len()) }
+    }
+}
+
+impl<G: PairingGroup> AsRef<G::Twin> for Twin<G> {
+    fn as_ref(&self) -> &G::Twin {
+        &self.0
+    }
+}
+
+impl<G: PairingGroup> Object for Twin<G> {}
+
+impl<'a, G: PairingGroup> Add<&'a Self> for Twin<G> {
+    type Output = Self;
+
+    fn add(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 + &rhs.0)
+    }
+}
+
+impl<'a, G: PairingGroup> AddAssign<&'a Self> for Twin<G> {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        self.0 += &rhs.0;
+    }
+}
+
+impl<'a, G: PairingGroup> Sub<&'a Self> for Twin<G> {
+    type Output = Self;
+
+    fn sub(self, rhs: &'a Self) -> Self::Output {
+        Self(self.0 - &rhs.0)
+    }
+}
+
+impl<'a, G: PairingGroup> SubAssign<&'a Self> for Twin<G> {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        self.0 -= &rhs.0;
+    }
+}
+
+impl<G: PairingGroup> Neg for Twin<G> {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self(-self.0)
+    }
+}
+
+impl<G: PairingGroup> Additive for Twin<G> {
+    fn zero() -> Self {
+        Self(G::Twin::zero())
+    }
+
+    fn double(&mut self) {
+        self.0.double();
+    }
+}
+
+impl<'a, G: PairingGroup> Mul<&'a G::Scalar> for Twin<G> {
+    type Output = Self;
+
+    fn mul(self, rhs: &'a G::Scalar) -> Self::Output {
+        Self(self.0 * rhs)
+    }
+}
+
+impl<'a, G: PairingGroup> MulAssign<&'a G::Scalar> for Twin<G> {
+    fn mul_assign(&mut self, rhs: &'a G::Scalar) {
+        self.0 *= rhs;
+    }
+}
+
+impl<G: PairingGroup> Space<G::Scalar> for Twin<G> {
+    fn msm(points: &[Self], scalars: &[G::Scalar], strategy: &impl Strategy) -> Self {
+        Self(G::Twin::msm(
+            Self::as_inner_slice(points),
+            scalars,
+            strategy,
+        ))
+    }
+}
+
+impl<G: PairingGroup> CryptoGroup for Twin<G> {
+    type Scalar = G::Scalar;
+
+    fn generator() -> Self {
+        Self(G::Twin::generator())
+    }
+}
+
+// The batch methods pass their slices to `G`'s in the other order, so they use
+// any faster versions that `G` overrides them with, without copying elements.
+impl<G: PairingGroup> PairingGroup for Twin<G> {
+    type Twin = G;
+    type Target = G::Target;
+
+    fn pairing(&self, other: &G) -> G::Target {
+        other.pairing(&self.0)
+    }
+
+    fn pairings(lefts: &[Self], rights: &[G], outputs: &mut [G::Target], strategy: &impl Strategy) {
+        G::pairings(rights, Self::as_inner_slice(lefts), outputs, strategy);
+    }
+
+    fn multi_pairing(lefts: &[Self], rights: &[G], strategy: &impl Strategy) -> G::Target {
+        G::multi_pairing(rights, Self::as_inner_slice(lefts), strategy)
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl<'a, G: PairingGroup> arbitrary::Arbitrary<'a> for Twin<G>
+where
+    G::Twin: arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(u.arbitrary()?))
+    }
+}
+
 /// A trait for objects that can be randomly sampled.
 ///
 /// The only stipulation about this sampling process is that the result
@@ -632,13 +889,7 @@ pub mod test_suites {
         check_scale_distributes(a.clone(), b, x);
         let c: R = u.arbitrary()?;
         check_scale_assign(a, c);
-        let len: usize = u.int_in_range(0..=16)?;
-        let points: Vec<K> = (0..len)
-            .map(|_| u.arbitrary())
-            .collect::<arbitrary::Result<_>>()?;
-        let scalars: Vec<R> = (0..len)
-            .map(|_| u.arbitrary())
-            .collect::<arbitrary::Result<_>>()?;
+        let (points, scalars): (Vec<K>, Vec<R>) = u.arbitrary::<Vec<(K, R)>>()?.into_iter().unzip();
         check_msm_eq_naive(&points, &scalars);
         Ok(())
     }
@@ -721,6 +972,98 @@ pub mod test_suites {
     pub fn fuzz_hash_to_group<G: HashToGroup>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         let data: [[u8; 4]; 4] = u.arbitrary()?;
         check_hash_to_group::<G>(data);
+        Ok(())
+    }
+
+    fn check_pairing_zero<G: PairingGroup>(a: G, x: G::Twin) {
+        assert_eq!(G::zero().pairing(&x), G::Target::zero(), "0 o X != 0");
+        assert_eq!(a.pairing(&G::Twin::zero()), G::Target::zero(), "A o 0 != 0");
+    }
+
+    fn check_pairing_linear_left<G: PairingGroup>(a: G, b: G, x: G::Twin) {
+        assert_eq!(
+            (a.clone() + &b).pairing(&x),
+            a.pairing(&x) + &b.pairing(&x),
+            "(A + B) o X != A o X + B o X"
+        );
+    }
+
+    fn check_pairing_linear_right<G: PairingGroup>(a: G, x: G::Twin, y: G::Twin) {
+        assert_eq!(
+            a.pairing(&(x.clone() + &y)),
+            a.pairing(&x) + &a.pairing(&y),
+            "A o (X + Y) != A o X + A o Y"
+        );
+    }
+
+    fn check_pairing_scalar<G: PairingGroup>(a: G, x: G::Twin, s: G::Scalar) {
+        let expected = a.pairing(&x) * &s;
+        assert_eq!(
+            (a.clone() * &s).pairing(&x),
+            expected,
+            "(A * s) o X != (A o X) * s"
+        );
+        assert_eq!(a.pairing(&(x * &s)), expected, "A o (X * s) != (A o X) * s");
+    }
+
+    fn check_pairings_eq_naive<G: PairingGroup>(lefts: &[G], rights: &[G::Twin]) {
+        use commonware_parallel::Sequential;
+        // Start each output one generator away from its expected value, so the check
+        // below catches any output that `pairings` leaves unwritten.
+        let mut outputs: Vec<G::Target> = lefts
+            .iter()
+            .zip(rights)
+            .map(|(a, x)| a.pairing(x) + &G::Target::generator())
+            .collect();
+        G::pairings(lefts, rights, &mut outputs, &Sequential);
+        for ((a, x), out) in lefts.iter().zip(rights).zip(&outputs) {
+            assert_eq!(*out, a.pairing(x), "pairings does not match pairing");
+        }
+    }
+
+    fn check_multi_pairing_eq_naive<G: PairingGroup>(lefts: &[G], rights: &[G::Twin]) {
+        use commonware_parallel::Sequential;
+        let mut expected = G::Target::zero();
+        for (a, x) in lefts.iter().zip(rights) {
+            expected += &a.pairing(x);
+        }
+        assert_eq!(
+            G::multi_pairing(lefts, rights, &Sequential),
+            expected,
+            "multi_pairing does not match the sum of pairings"
+        );
+    }
+
+    /// Checks the [`PairingGroup`] laws on arbitrary inputs.
+    ///
+    /// Each call runs one check, since pairings are expensive: that the pairing is
+    /// bilinear, or that [`PairingGroup::pairings`] or
+    /// [`PairingGroup::multi_pairing`] agrees with [`PairingGroup::pairing`].
+    ///
+    /// It does not check that the pairing is non-degenerate. The [`Space`] suites
+    /// cover [`PairingGroup::Twin`] and [`PairingGroup::Target`] as groups.
+    pub fn fuzz_pairing_group<G>(u: &mut Unstructured<'_>) -> arbitrary::Result<()>
+    where
+        G: PairingGroup + for<'a> Arbitrary<'a>,
+        G::Twin: for<'a> Arbitrary<'a>,
+        G::Scalar: for<'a> Arbitrary<'a>,
+    {
+        match u.int_in_range(0u8..=5)? {
+            0 => check_pairing_zero::<G>(u.arbitrary()?, u.arbitrary()?),
+            1 => check_pairing_linear_left::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
+            2 => check_pairing_linear_right::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
+            3 => check_pairing_scalar::<G>(u.arbitrary()?, u.arbitrary()?, u.arbitrary()?),
+            4 => {
+                let (lefts, rights): (Vec<G>, Vec<G::Twin>) =
+                    u.arbitrary::<Vec<_>>()?.into_iter().unzip();
+                check_pairings_eq_naive(&lefts, &rights);
+            }
+            _ => {
+                let (lefts, rights): (Vec<G>, Vec<G::Twin>) =
+                    u.arbitrary::<Vec<_>>()?.into_iter().unzip();
+                check_multi_pairing_eq_naive(&lefts, &rights);
+            }
+        }
         Ok(())
     }
 
