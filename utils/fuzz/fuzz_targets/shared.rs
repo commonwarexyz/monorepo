@@ -21,6 +21,7 @@ use arbitrary::Arbitrary;
 use commonware_utils::{
     futures::{Shared, WeakShared},
     sync::Mutex,
+    vec::NonEmptyVec,
 };
 use futures::task::ArcWake;
 use libfuzzer_sys::fuzz_target;
@@ -109,7 +110,7 @@ enum Operation {
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     clones: u8,
-    operations: Vec<Operation>,
+    operations: NonEmptyVec<Operation>,
 }
 
 /// A waker that counts its wakes.

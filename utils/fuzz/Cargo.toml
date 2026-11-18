@@ -203,3 +203,10 @@ path = "fuzz_targets/iter.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "prefetch"
+path = "fuzz_targets/prefetch.rs"
+test = false
+doc = false
+bench = false
