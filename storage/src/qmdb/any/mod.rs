@@ -131,7 +131,7 @@ use crate::{
         },
         bitmap::Shared,
         metrics::Metrics,
-        operation::Key,
+        operation::{Committable as _, Key},
         single_operation_root,
         value::ValueEncoding,
     },
@@ -171,7 +171,7 @@ where
     U: Update,
     Operation<F, U>: Codec,
 {
-    single_operation_root::<F, H>(&Operation::<F, U>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, U>::initial_commit())
 }
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
@@ -312,8 +312,7 @@ where
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let commit = Operation::Commit(None, Location::new(0));
-        (log, _) = log.append(&commit).await?;
+        (log, _) = log.append(&Operation::initial_commit()).await?;
         log = log.sync().await?;
     }
 

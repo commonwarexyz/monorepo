@@ -18,7 +18,7 @@ use crate::{
         build_snapshot_from_log, delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
-        operation::{Committable as _, Floored as _, Key, Operation as _},
+        operation::{Committable as _, Key, Operation as _},
         update_known_loc,
         value::{VariableEncoding, VariableValue},
     },
@@ -409,23 +409,21 @@ where
         let mut log = pending.finish(size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
-            (log, _) = log
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (log, _) = log.append(&Operation::initial_commit()).await?;
         }
 
         // Persist recovery repairs and any genesis commit so the next startup need not repeat them.
         let log = log.sync().await?;
 
-        let last_commit_loc =
-            Location::new(log.size().checked_sub(1).expect("commit should exist"));
+        let size = Location::new(log.size());
+        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&log, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
 
         // Build the snapshot only from the durable selected prefix.
         let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-        let op = log.read(*last_commit_loc).await?;
-        let inactivity_floor_loc = op.inactivity_floor().expect("last op should be a commit");
 
         // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
         // below the inactivity floor are inactive.

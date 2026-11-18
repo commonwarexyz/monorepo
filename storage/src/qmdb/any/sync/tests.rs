@@ -1575,7 +1575,7 @@ macro_rules! db_any_harness_methods {
         }
 
         fn ops_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {
-            $crate::qmdb::sync::Database::ops_root(db)
+            $crate::qmdb::sync::Database::target(db).root
         }
 
         fn canonical_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {

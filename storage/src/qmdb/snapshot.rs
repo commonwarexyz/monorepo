@@ -8,7 +8,7 @@ use crate::{
     },
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
-    qmdb::operation::{Floored, Operation},
+    qmdb::operation::{Committable, Operation},
     translator::Translator,
 };
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
@@ -87,7 +87,7 @@ where
                         cache.put(loc, op.into_key().expect("operation without key"));
                     }
                 }
-            } else if op.inactivity_floor().is_some() {
+            } else if op.is_commit() {
                 callback(loc == last_commit_loc, None);
             }
         }

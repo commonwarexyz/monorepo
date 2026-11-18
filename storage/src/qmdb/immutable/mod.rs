@@ -75,8 +75,12 @@
 //! ```
 
 use crate::{
-    merkle::{Family, Location, full::Config as MerkleConfig},
-    qmdb::{operation::Key, single_operation_root, value::ValueEncoding},
+    merkle::{Family, full::Config as MerkleConfig},
+    qmdb::{
+        operation::{Committable as _, Key},
+        single_operation_root,
+        value::ValueEncoding,
+    },
     translator::Translator,
 };
 use commonware_codec::EncodeShared;
@@ -110,7 +114,7 @@ where
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
-    single_operation_root::<F, H>(&Operation::<F, K, V>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, K, V>::initial_commit())
 }
 
 /// Configuration for a [Db].

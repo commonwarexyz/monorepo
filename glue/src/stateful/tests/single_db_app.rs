@@ -55,9 +55,7 @@ use commonware_storage::{
     qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
-use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
-};
+use commonware_utils::{NZDuration, NZU64, NZUsize, range::NonEmptyRange, test_rng};
 use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 
@@ -246,13 +244,12 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
         };
         Some(Proposed { block, merkleized })
     }
