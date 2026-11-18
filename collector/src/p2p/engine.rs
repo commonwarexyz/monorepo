@@ -56,7 +56,7 @@ where
     // Received requests being served
     serve_processing: Gauge,
     // Received requests rejected by either pending request limit
-    serve_limited_total: Counter,
+    serve_limited_global: Counter,
     serve_limited_per_peer: Counter,
     // Sent requests by status. A request sent to at least one peer is a success and a request
     // sent to none is dropped.
@@ -93,14 +93,14 @@ where
             "serve_processing",
             "Number of received requests being served",
         );
-        let limited = |limit| {
-            context.child("serve").with_attribute("limit", limit).counter(
-                "limited",
-                "Number of received requests rejected by pending request limits",
-            )
-        };
-        let serve_limited_total = limited("total");
-        let serve_limited_per_peer = limited("per_peer");
+        let serve_limited_global = context.counter(
+            "serve_limited_global",
+            "Number of requests rejected at the global pending request limit",
+        );
+        let serve_limited_per_peer = context.counter(
+            "serve_limited_per_peer",
+            "Number of requests rejected at the per-peer pending request limit",
+        );
         let send = context.family("send", "Number of sent requests by status");
         let collect = context.family("collect", "Number of received responses by status");
         let serve = context.family("serve", "Number of received requests by status");
@@ -121,7 +121,7 @@ where
                 tracked: HashMap::new(),
                 outstanding,
                 serve_processing,
-                serve_limited_total,
+                serve_limited_global,
                 serve_limited_per_peer,
                 send,
                 collect,
@@ -291,7 +291,7 @@ where
                 // Admit the request only if both limits have room.
                 if processed.len() >= self.max_pending_requests.get() {
                     debug!(?peer, "total pending request limit reached");
-                    self.serve_limited_total.inc();
+                    self.serve_limited_global.inc();
                     continue;
                 }
                 let pending = pending_by_peer.entry(peer.clone()).or_default();

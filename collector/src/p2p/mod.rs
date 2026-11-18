@@ -90,7 +90,7 @@
 //! The engine keeps at most [Config::max_pending_requests] requests pending across all peers
 //! and at most [Config::max_pending_requests_per_peer] from one peer. When either limit is full,
 //! the engine drops the decoded request before calling [Handler::process](crate::Handler::process)
-//! and increments `serve_limited_total` with `limit="total"` or `limit="per_peer"`. If both limits
+//! and increments `serve_limited_global_total` or `serve_limited_per_peer_total`. If both limits
 //! are full, it counts the total limit. It does not block the peer or send a response.
 //!
 //! An admitted request holds its slot until the engine receives the handler's answer or sees
@@ -2580,6 +2580,7 @@ mod tests {
             let (engine, _mailbox) = Engine::new(
                 context
                     .child("engine")
+                    .with_attribute("limit", "caller")
                     .with_attribute("public_key", &peers[0]),
                 Config {
                     blocker: oracle.control(peers[0].clone()),
@@ -2635,13 +2636,9 @@ mod tests {
 
             // Each rejection is counted once and in no serve status.
             let encoded = context.encode();
-            for limit in ["per_peer", "total"] {
-                let label = format!("limit=\"{limit}\"");
-                let peer = format!("public_key=\"{to}\"");
-                assert!(encoded.lines().any(|line| line.starts_with("engine_serve_limited_total{")
-                    && line.contains(&label)
-                    && line.contains(&peer)
-                    && line.ends_with(" 1")));
+            for name in ["serve_limited_global_total", "serve_limited_per_peer_total"] {
+                let expected = format!("engine_{name}{{limit=\"caller\",public_key=\"{to}\"}} 1");
+                assert!(encoded.lines().any(|line| line == expected), "{expected}");
             }
             assert_eq!(engine_count(&context, "serve", Status::Success, to), 1);
             assert_eq!(engine_count(&context, "serve", Status::Failure, to), 1);
