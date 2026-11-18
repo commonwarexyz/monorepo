@@ -47,6 +47,8 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
     fn commit(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
     /// Returns the key and value an operation sets, or `None` for a commit.
     fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)>;
+    /// Number of set operations in the in-memory index.
+    fn snapshot_len(db: &Self::Db) -> usize;
     /// Returns the value stored under `key`, if any.
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
@@ -107,6 +109,7 @@ where
 
         assert_eq!(H::ops_root(&synced_db), target_root);
         assert_eq!(H::inactivity_floor(&synced_db), first_commit_end);
+        assert_eq!(H::snapshot_len(&synced_db), late_ops.len());
 
         // Keys from the second batch (after the floor) should be findable.
         for op in &late_ops {
@@ -115,14 +118,11 @@ where
             }
         }
 
-        // Keys from the first batch (before the floor) should NOT be in the snapshot.
+        // The source still indexes the first batch, but both databases hide its keys.
         for op in &early_ops {
             if let Some((key, _)) = H::op_kv(op) {
-                assert_eq!(
-                    H::lookup(&synced_db, key).await,
-                    None,
-                    "key from before floor should not be in synced snapshot"
-                );
+                assert_eq!(H::lookup(&target_db, key).await, None);
+                assert_eq!(H::lookup(&synced_db, key).await, None);
             }
         }
 
@@ -369,6 +369,10 @@ pub(crate) mod harnesses {
                 Operation::Set(key, value) => Some((key, value)),
                 Operation::Commit(_, _) => None,
             }
+        }
+
+        fn snapshot_len(db: &Self::Db) -> usize {
+            db.snapshot.len()
         }
 
         async fn lookup(db: &Self::Db, key: &Self::Key) -> Option<Self::Value> {

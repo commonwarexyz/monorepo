@@ -2,7 +2,6 @@ use crate::common::{SAMPLE_SIZE, StandardHasher, n_leaves, range_samples};
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{Bagging::ForwardFold, Family};
 use criterion::{BatchSize, Criterion, criterion_group};
-use futures::executor::block_on;
 use std::hint::black_box;
 
 /// Times range proof generation without verification.
@@ -20,11 +19,9 @@ fn bench_range_proof_family<F: Family>(c: &mut Criterion, family: &str) {
                         || range_samples::<F>(n, range),
                         |(mem, _, samples)| {
                             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-                            block_on(async {
-                                for (range, _) in samples.iter() {
-                                    black_box(mem.range_proof(&hasher, range.clone(), 0).unwrap());
-                                }
-                            })
+                            for (range, _) in samples.iter() {
+                                black_box(mem.range_proof(&hasher, range.clone(), 0).unwrap());
+                            }
                         },
                         BatchSize::LargeInput,
                     )
