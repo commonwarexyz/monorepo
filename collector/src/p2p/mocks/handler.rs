@@ -63,8 +63,7 @@ impl crate::Handler for Handler {
         &mut self,
         origin: Self::PublicKey,
         request: Self::Request,
-        responder: oneshot::Sender<Self::Response>,
-    ) {
+    ) -> oneshot::Receiver<Self::Response> {
         let request_id = request.id;
 
         // Determine if we should respond
@@ -78,6 +77,7 @@ impl crate::Handler for Handler {
         });
 
         // Send response if configured
+        let (responder, receiver) = oneshot::channel();
         if let Some(response) = self.responses.get(&request_id) {
             responder.send_lossy(response.clone());
         } else if self.respond_by_default {
@@ -86,6 +86,7 @@ impl crate::Handler for Handler {
                 result: u64::from(request.data.wrapping_mul(2)),
             });
         }
+        receiver
     }
 }
 
@@ -116,8 +117,9 @@ impl crate::Handler for Deferring {
         &mut self,
         _origin: Self::PublicKey,
         request: Self::Request,
-        responder: oneshot::Sender<Self::Response>,
-    ) {
+    ) -> oneshot::Receiver<Self::Response> {
+        let (responder, receiver) = oneshot::channel();
         let _ = self.sender.send((request, responder));
+        receiver
     }
 }

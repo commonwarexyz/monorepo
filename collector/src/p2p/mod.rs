@@ -88,9 +88,9 @@
 //! # Serving Requests
 //!
 //! The engine calls [Handler::process](crate::Handler::process) from its event loop and keeps a
-//! request pending until the handler sends on or drops its responder. Nothing limits how many
-//! requests are pending or for how long, so a handler that answers later must bound the requests
-//! it holds from each peer.
+//! request pending until the handler sends its response or drops the sender. Nothing limits how
+//! many requests are pending or for how long, so a handler that answers later must bound the
+//! requests it holds from each peer.
 //!
 //! # Backpressure
 //!
@@ -2253,8 +2253,9 @@ mod tests {
         type Request = Request;
         type Response = Response;
 
-        fn process(&mut self, _: PublicKey, _: Request, _: oneshot::Sender<Response>) {
+        fn process(&mut self, _: PublicKey, _: Request) -> oneshot::Receiver<Response> {
             let _ = self.calls.send(Call::Process);
+            oneshot::channel().1
         }
     }
 

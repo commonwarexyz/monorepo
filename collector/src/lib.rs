@@ -60,16 +60,15 @@ commonware_macros::stability_scope!(ALPHA {
         /// A response must have the commitment of the request it answers.
         type Response: Committable<Commitment = <Self::Request as Committable>::Commitment> + Codec;
 
-        /// Processes a `request` from an [Originator] and may send a response on `responder`.
+        /// Processes a `request` from an [Originator] and returns the receiver of its response.
         ///
-        /// `process` must return promptly. A handler that cannot answer yet keeps `responder` and
-        /// sends on it later, and a handler that declines the request drops it.
+        /// `process` must return promptly. A handler that cannot answer yet sends the response
+        /// later, and a handler that declines the request drops the sender.
         fn process(
             &mut self,
             origin: Self::PublicKey,
             request: Self::Request,
-            responder: oneshot::Sender<Self::Response>,
-        );
+        ) -> oneshot::Receiver<Self::Response>;
     }
 
     /// A [Monitor] receives the responses collected from [Handler]s.

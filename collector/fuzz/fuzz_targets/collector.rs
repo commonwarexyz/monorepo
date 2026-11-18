@@ -238,12 +238,12 @@ impl Handler for RecordingHandler {
         &mut self,
         origin: PublicKey,
         request: FuzzRequest,
-        responder: oneshot::Sender<FuzzResponse>,
-    ) {
+    ) -> oneshot::Receiver<FuzzResponse> {
         self.log
             .processed
             .lock()
             .push((self.index, origin, request.clone()));
+        let (responder, receiver) = oneshot::channel();
         match behavior(&request) {
             Behavior::Respond => {
                 responder.send_lossy(answer(&request, false));
@@ -254,6 +254,7 @@ impl Handler for RecordingHandler {
             Behavior::Drop => drop(responder),
             Behavior::Hold => self.log.held.lock().push((self.index, request, responder)),
         }
+        receiver
     }
 }
 

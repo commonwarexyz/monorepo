@@ -179,7 +179,7 @@ where
 
             // Response from the local handler
             (peer, response) = processed.next_completed() => {
-                // A dropped responder means the handler declined the request
+                // A dropped sender means the handler declined the request
                 let Ok(response) = response else {
                     self.serve.inc(Status::Failure);
                     continue;
@@ -262,9 +262,8 @@ where
                 };
 
                 // Handle the request
-                let (tx, rx) = oneshot::channel();
-                self.handler.process(peer.clone(), msg, tx);
-                processed.push(async move { (peer, rx.await) });
+                let response = self.handler.process(peer.clone(), msg);
+                processed.push(async move { (peer, response.await) });
             },
         }
     }
