@@ -830,14 +830,21 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 lookup_idx += 1;
             }
             while gaps.next_if(|gap| gap.slots.end <= idx).is_some() {}
-            let bounds = gaps
-                .peek()
-                .filter(|gap| gap.slots.contains(&idx))
-                .map_or(0..u64::MAX, |gap| gap.bounds.clone());
+            let gap = gaps.peek().filter(|gap| gap.slots.contains(&idx));
+            let offset = match offsets[lookup_idx] {
+                Some(offset) => MissStart::Cached(offset),
+                // A nonzero lower bound comes from an earlier frame in this blob.
+                None if gap.is_some_and(|gap| gap.slots.start == idx && gap.bounds.start > 0)
+                    && positions[idx - 1] + 1 == position =>
+                {
+                    MissStart::AtPreviousEnd
+                }
+                None => MissStart::Missing,
+            };
             misses.push(Miss {
                 position,
-                bounds,
-                offset: offsets[lookup_idx],
+                bounds: gap.map_or(0..u64::MAX, |gap| gap.bounds.clone()),
+                offset,
                 end: self
                     .next_in_blob(position)
                     .and_then(|_| offsets[lookup_idx + 1]),
@@ -846,14 +853,22 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     }
 }
 
+/// How completion obtains and validates a missed frame's start offset.
+#[derive(Debug, PartialEq, Eq)]
+enum MissStart {
+    Cached(u64),
+    Missing,
+    /// Fetch the offset and require it to match the preceding frame's exclusive end.
+    AtPreviousEnd,
+}
+
 /// A position the sync pass couldn't serve.
 struct Miss {
     /// Limits imposed by already validated frames on either side in this blob.
     bounds: Range<u64>,
     /// The item's position.
     position: u64,
-    /// Where the frame starts, if the sync pass found it.
-    offset: Option<u64>,
+    offset: MissStart,
     /// Where the frame ends, if the sync pass found its same-blob successor's offset. A blob's last
     /// readable frame has no such successor, and completion ends it at the blob's size.
     end: Option<u64>,
@@ -911,7 +926,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         // dropping a successor that is also the next miss.
         let mut lookups = Vec::new();
         for miss in misses {
-            if miss.offset.is_none() {
+            if !matches!(miss.offset, MissStart::Cached(_)) {
                 lookups.push(miss.position);
             }
             if miss.end.is_none() {
@@ -964,7 +979,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             let size = blob.size();
             let mut ranges = Vec::with_capacity(misses.len());
             for miss in misses {
-                let offset = miss.offset.unwrap_or_else(|| lookup(miss.position));
+                let offset = match miss.offset {
+                    MissStart::Cached(offset) => offset,
+                    MissStart::Missing | MissStart::AtPreviousEnd => lookup(miss.position),
+                };
                 let end = miss
                     .end
                     .or_else(|| self.next_in_blob(miss.position).map(&mut lookup))
@@ -980,6 +998,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                     .map_or(0, |&(offset, len)| offset + len as u64);
                 if end <= offset
                     || offset < previous_end.max(miss.bounds.start)
+                    || (miss.offset == MissStart::AtPreviousEnd && offset != miss.bounds.start)
                     || end > size.min(miss.bounds.end)
                 {
                     return Err(Error::Corruption(format!(
@@ -5161,7 +5180,7 @@ mod tests {
             // The sync pass resolves position 0's offset but cannot serve its frame.
             let (items, misses) = reader.probe_parts(&[0]);
             assert!(items[0].is_none());
-            assert_eq!(misses[0].offset, Some(0));
+            assert_eq!(misses[0].offset, MissStart::Cached(0));
 
             // read_many consults the offsets journal only in its sync pass (position 0 and
             // its successor, both cache hits): completion reuses the carried offset rather
@@ -5219,7 +5238,7 @@ mod tests {
             assert!(reader.offsets.try_read_sync(64).is_some());
             let (items, misses) = reader.probe_parts(&[63]);
             assert!(items[0].is_none());
-            assert!(misses[0].offset.is_none());
+            assert_eq!(misses[0].offset, MissStart::Missing);
             assert!(misses[0].end.is_some());
 
             // The sync pass reads the successor's offset and completion reads only the start.
@@ -5334,10 +5353,12 @@ mod tests {
                 - reader.offsets.try_read_sync(62).unwrap();
             let end_before_gap = reader.offsets.try_read_sync(63).unwrap() + frame_len;
             let start_after_gap = reader.offsets.try_read_sync(129).unwrap();
-            let (_, misses) = reader.probe_parts(&positions);
+            let (_, mut misses) = reader.probe_parts(&positions);
             assert_eq!(misses.len(), 1);
             assert_eq!(misses[0].position, 64);
             assert_eq!(misses[0].bounds, end_before_gap..start_after_gap);
+            let (_, sparse) = reader.probe_parts(&[63, 65, 66, 129]);
+            assert_eq!(sparse.len(), 2);
             assert!(reader.offsets.try_read_sync(64).is_none());
             let before = context.encode();
             assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
@@ -5351,6 +5372,17 @@ mod tests {
                 1
             );
 
+            // Consecutive positions share an exact boundary. Sparse requests may skip frames.
+            misses[0].bounds.start -= 1;
+            assert!(matches!(
+                reader.fetch_misses(&misses).await,
+                Err(Error::Corruption(_))
+            ));
+            assert_eq!(
+                reader.fetch_misses(&sparse).await.unwrap(),
+                appended[65..67]
+            );
+
             // Completion must enforce each carried bound even for a single miss.
             let frame_end = reader.offsets.read(65).await.unwrap();
             for bounds in [
@@ -5359,7 +5391,7 @@ mod tests {
             ] {
                 let miss = Miss {
                     position: 64,
-                    offset: None,
+                    offset: MissStart::Missing,
                     end: None,
                     bounds,
                 };
@@ -5869,9 +5901,9 @@ mod tests {
             let (items, misses) = reader.probe_parts(&positions);
             assert!(items.iter().all(Option::is_none));
             let miss = |p: u64| misses.iter().find(|miss| miss.position == p).unwrap();
-            assert!(miss(0).offset.is_none() && miss(0).end.is_none());
-            assert!(miss(255).offset.is_none() && miss(255).end.is_none());
-            assert!(miss(257).offset.is_some() && miss(257).end.is_none());
+            assert!(miss(0).offset == MissStart::Missing && miss(0).end.is_none());
+            assert!(miss(255).offset == MissStart::Missing && miss(255).end.is_none());
+            assert!(matches!(miss(257).offset, MissStart::Cached(_)) && miss(257).end.is_none());
             assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
 
             // With only the offsets page for positions 64 to 127 warm, position 63 knows its end
@@ -5882,9 +5914,9 @@ mod tests {
             let (items, misses) = reader.probe_parts(&positions);
             assert!(items.iter().all(Option::is_none));
             let miss = |p: u64| misses.iter().find(|miss| miss.position == p).unwrap();
-            assert!(miss(63).offset.is_none() && miss(63).end.is_some());
-            assert!(miss(64).offset.is_some() && miss(64).end.is_some());
-            assert!(miss(127).offset.is_some() && miss(127).end.is_none());
+            assert!(miss(63).offset == MissStart::Missing && miss(63).end.is_some());
+            assert!(matches!(miss(64).offset, MissStart::Cached(_)) && miss(64).end.is_some());
+            assert!(matches!(miss(127).offset, MissStart::Cached(_)) && miss(127).end.is_none());
             assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
             drop(reader);
 
