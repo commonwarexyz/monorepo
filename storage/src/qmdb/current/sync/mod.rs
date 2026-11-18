@@ -97,6 +97,10 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    let (metadata, _, _) =
+        db::init_metadata::<F, _, DigestOf<H>, N>(context.child("metadata"), &metadata_partition)
+            .await?;
+
     // Build authenticated log.
     let merkle = Merkle::<F, _, _, S>::init_sync(
         context.child("merkle"),
@@ -179,11 +183,6 @@ where
     )
     .await?;
 
-    // Initialize metadata store and construct the Db.
-    let (metadata, _, _) =
-        db::init_metadata::<F, E, DigestOf<H>>(context.child("metadata"), &metadata_partition)
-            .await?;
-
     let root = ops_root_witness.root::<H>(&any.root());
     let metrics = db::Metrics::new(context);
     let current_db = db::Db {
@@ -199,9 +198,6 @@ where
         halt_before_prune_log: false,
     };
     current_db.update_metrics();
-
-    // Persist metadata so the db can be reopened with init_fixed/init_variable.
-    let current_db = current_db.sync_metadata().await?;
 
     Ok(current_db)
 }
@@ -243,6 +239,14 @@ where
         crate::qmdb::current::init_db(context, config, max_size).await
     }
 
+    async fn validate_sync_config(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<(), qmdb::Error<F>> {
+        db::open_metadata::<F, _, N>(context, &config.grafted_metadata_partition).await?;
+        Ok(())
+    }
+
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -270,13 +274,19 @@ where
     }
 
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
-        Ok(self)
+        // A failed target check must leave a legacy database's chunk size unspecified.
+        self.sync_metadata().await
     }
 
     async fn discard_local_state(
         context: Self::Context,
         config: &Self::Config,
     ) -> Result<(), qmdb::Error<F>> {
+        let (mut metadata, pruned_chunks, _) = db::init_metadata::<F, _, DigestOf<H>, N>(
+            context.child("metadata"),
+            &config.grafted_metadata_partition,
+        )
+        .await?;
         qmdb::sync::discard_local_state::<F, _, H, S>(
             context.child("merkle"),
             config.merkle.clone(),
@@ -285,13 +295,8 @@ where
 
         // Grafted metadata records chunks pruned from operations the log held, so it is
         // discarded with the Merkle structure of those operations.
-        let (mut metadata, pruned_chunks, _) = db::init_metadata::<F, E, DigestOf<H>>(
-            context.child("metadata"),
-            &config.grafted_metadata_partition,
-        )
-        .await?;
         if pruned_chunks > 0 {
-            metadata.clear();
+            metadata.retain(|key, _| key == &db::BITMAP_CHUNK_SIZE_KEY);
             metadata.sync().await?;
         }
         Ok(())

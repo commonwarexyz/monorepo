@@ -146,6 +146,9 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
+/// Bitmap chunk size in bytes for this database.
+pub(super) const BITMAP_CHUNK_SIZE_KEY: U64 = U64::new(2, 0);
+
 /// `(position, digest)` pairs for a grafted tree's pinned nodes, in `Family::nodes_to_pin` order.
 type GraftedPinnedNodes<F, D> = Vec<(Position<F>, D)>;
 
@@ -243,6 +246,7 @@ pub struct Db<
     pub(super) graft_roots: GraftRoots<H::Digest>,
 
     /// Persists:
+    /// - The bitmap chunk size at [BITMAP_CHUNK_SIZE_KEY]
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
     pub(super) metadata: Metadata<E, U64, Vec<u8>>,
@@ -651,6 +655,10 @@ where
     /// Sync the metadata to disk.
     pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
         self.metadata.clear();
+        self.metadata.put(
+            BITMAP_CHUNK_SIZE_KEY,
+            Widen::widen(N).to_be_bytes().to_vec(),
+        );
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
         let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
@@ -1157,27 +1165,40 @@ pub(super) async fn build_grafted_tree<
     Ok((grafted_tree, graft_roots))
 }
 
-/// Load the metadata and recover the pruning state persisted by previous runs.
+/// Open Current's metadata and check the bitmap chunk size if a previous open recorded it.
+pub(super) async fn open_metadata<F: merkle::Graftable, E: Context, const N: usize>(
+    context: E,
+    partition: &str,
+) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+    let cfg = MConfig {
+        partition: partition.into(),
+        codec_config: ((0..).into(), ()),
+    };
+    let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), cfg).await?;
+    if let Some(bytes) = metadata.get(&BITMAP_CHUNK_SIZE_KEY) {
+        let stored = u64::decode(Copying(bytes))
+            .map_err(|_| Error::<F>::DataCorrupted("bitmap chunk size is not a u64"))?;
+        let configured = Widen::widen(N);
+        if stored != configured {
+            return Err(Error::BitmapChunkSizeMismatch { stored, configured });
+        }
+    }
+    Ok(metadata)
+}
+
+/// Recover the pruning state persisted by previous runs.
 ///
-/// The metadata store holds two kinds of entries (keyed by prefix):
+/// Pruning uses two kinds of entries (keyed by prefix):
 /// - **Pruned chunks count** ([PRUNED_CHUNKS_PREFIX]): the number of bitmap chunks that have been
 ///   pruned. This tells us where the active portion of the bitmap begins.
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
 ///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
-///
-/// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
-pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest>(
+pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest, const N: usize>(
     context: E,
     partition: &str,
 ) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error<F>> {
-    let metadata_cfg = MConfig {
-        partition: partition.into(),
-        codec_config: ((0..).into(), ()),
-    };
-    let metadata =
-        Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg).await?;
-
+    let metadata = open_metadata::<F, _, N>(context, partition).await?;
     let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
     let pruned_chunks = match metadata.get(&key) {
         Some(bytes) => u64::from_be_bytes(bytes.as_slice().try_into().map_err(|_| {
@@ -1409,16 +1430,17 @@ mod tests {
         );
     }
 
-    type MmrDb = fixed::Db<
+    type MmrDbWithChunkSize<const BYTES: usize> = fixed::Db<
         mmr::Family,
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,
         Sha256,
         OneCap,
-        32,
+        BYTES,
         commonware_parallel::Sequential,
     >;
+    type MmrDb = MmrDbWithChunkSize<32>;
     type MmbDb = fixed::Db<
         mmb::Family,
         deterministic::Context,
@@ -1445,6 +1467,81 @@ mod tests {
         let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
+    }
+
+    #[test_traced]
+    fn test_bitmap_chunk_size_rejects_bounded_reopen() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let cfg = fixed_config::<OneCap>("chunk-size");
+            let db = MmrDb::init(ctx.child("create"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let genesis = db.bounds().end;
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 1).await;
+            let tip = (db.bounds(), db.root());
+            drop(db);
+
+            let result =
+                MmrDbWithChunkSize::<64>::init(ctx.child("wrong"), cfg.clone(), Some(genesis))
+                    .await;
+            assert!(matches!(
+                result,
+                Err(Error::BitmapChunkSizeMismatch {
+                    stored: 32,
+                    configured: 64
+                })
+            ));
+
+            let db = MmrDb::init(ctx.child("reopen"), cfg, None).await.unwrap();
+            assert_eq!((db.bounds(), db.root()), tip);
+        });
+    }
+
+    #[test_traced]
+    fn test_bitmap_chunk_size_upgrades_legacy_metadata() {
+        for prune in [false, true] {
+            deterministic::Runner::default().start(|ctx| async move {
+                let cfg = fixed_config::<OneCap>("legacy-chunk-size");
+                let db = MmrDb::init(ctx.child("create"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+                let mut db = populate_fixed_db::<mmr::Family, _>(db, 0, 384).await;
+                if prune {
+                    db = populate_fixed_db::<mmr::Family, _>(db, 0, 384).await;
+                    let boundary = db.sync_boundary();
+                    db = db.prune(boundary).await.unwrap();
+                    assert!(db.metadata.get(&U64::new(NODE_PREFIX, 0)).is_some());
+                }
+                let tip = (db.bounds(), db.root());
+                // Keep the pruning records exactly as an older binary wrote them.
+                assert!(db.metadata.remove(&BITMAP_CHUNK_SIZE_KEY).is_some());
+                db.metadata = db.metadata.sync().await.unwrap();
+                drop(db);
+
+                // A failed first open must leave the legacy width unspecified.
+                let result = MmrDbWithChunkSize::<64>::init(
+                    ctx.child("invalid"),
+                    cfg.clone(),
+                    Some(Location::new(0)),
+                )
+                .await;
+                assert!(matches!(result, Err(Error::InvalidInitializationBound)));
+
+                let db = MmrDb::init(ctx.child("upgrade"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+                assert_eq!((db.bounds(), db.root()), tip);
+                drop(db);
+                let result = MmrDbWithChunkSize::<64>::init(ctx.child("wrong"), cfg, None).await;
+                assert!(matches!(
+                    result,
+                    Err(Error::BitmapChunkSizeMismatch {
+                        stored: 32,
+                        configured: 64
+                    })
+                ));
+            });
+        }
     }
 
     /// A child batch must read and merkleize to the same canonical root, including the grafted

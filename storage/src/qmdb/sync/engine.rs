@@ -268,6 +268,9 @@ where
         }
         DB::validate_target(&config.target).map_err(SyncError::Engine)?;
 
+        DB::validate_sync_config(config.context.child("validate_config"), &config.db_config)
+            .await?;
+
         // Recover the operation prefix that can resume this target.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),

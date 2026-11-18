@@ -354,6 +354,10 @@ pub enum Error<F: Family> {
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
 
+    /// Current's configured bitmap chunk size differs from the width recorded on disk, in bytes.
+    #[error("bitmap chunk size mismatch: stored {stored} bytes, configured {configured} bytes")]
+    BitmapChunkSizeMismatch { stored: u64, configured: u64 },
+
     /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),

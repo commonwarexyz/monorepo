@@ -8,8 +8,9 @@
 use crate::qmdb::{
     current::tests::{fixed_config, variable_config},
     sync::{
-        Database as SyncDatabase,
+        self, Database as SyncDatabase,
         harness::{ConfigOf, SyncTestHarness},
+        source::tests::FailSource,
     },
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
@@ -452,6 +453,85 @@ mod harnesses {
 
     pub type OrderedVariableMmrHarness = OrderedVariableHarness<mmr::Family>;
     pub type OrderedVariableMmbHarness = OrderedVariableHarness<mmb::Family>;
+}
+
+#[test_traced]
+fn test_bitmap_chunk_size_validation_during_sync() {
+    type Db<const N: usize> = crate::qmdb::current::unordered::fixed::Db<
+        crate::merkle::mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        crate::translator::TwoCap,
+        N,
+        Sequential,
+    >;
+
+    deterministic::Runner::default().start(|ctx| async move {
+        let cfg = fixed_config::<crate::translator::TwoCap>("chunk-size");
+        let db = Db::<32>::init(ctx.child("create"), cfg.clone(), None)
+            .await
+            .unwrap();
+        let batch = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
+        let bounds = db.bounds();
+        let root = db.root();
+        drop(db);
+
+        let try_sync = |label, range| {
+            sync::sync::<Db<64>, _>(sync::Config {
+                context: ctx.child(label),
+                db_config: cfg.clone(),
+                target: sync::Target {
+                    root: Digest::from([7; 32]),
+                    range,
+                },
+                source: FailSource::new(),
+                fetch_batch_size: NZU64!(1),
+                apply_batch_size: NZU64!(1),
+                max_outstanding_requests: NZUsize!(1),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+        };
+
+        // A target starting past the local tip would clear the journal before fetching.
+        let result = try_sync("wrong", non_empty_range!(bounds.end + 1, bounds.end + 2)).await;
+        assert!(matches!(
+            result,
+            Err(sync::Error::Database(
+                crate::qmdb::Error::BitmapChunkSizeMismatch {
+                    stored: 32,
+                    configured: 64
+                }
+            ))
+        ));
+        let mut db = Db::<32>::init(ctx.child("reopen"), cfg.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!((db.bounds(), db.root()), (bounds.clone(), root));
+
+        // A legacy database can reach target verification with any width. A rejected target
+        // must leave its original width usable.
+        assert!(
+            db.metadata
+                .remove(&super::db::BITMAP_CHUNK_SIZE_KEY)
+                .is_some()
+        );
+        db.metadata = db.metadata.sync().await.unwrap();
+        drop(db);
+        let result = try_sync("legacy", non_empty_range!(bounds.start, bounds.end)).await;
+        assert!(matches!(
+            result,
+            Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+        ));
+        let db = Db::<32>::init(ctx.child("upgrade"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!((db.bounds(), db.root()), (bounds, root));
+    });
 }
 
 /// Regression test: sync a pruned MMB-backed current DB and verify the synced DB has the

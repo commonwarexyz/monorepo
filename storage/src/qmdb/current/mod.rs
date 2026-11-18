@@ -6,6 +6,12 @@
 //! See [`crate::qmdb::any`] for batch API examples (forking, sequential commit, staleness). The
 //! Current layer uses the same batch API.
 //!
+//! The bitmap chunk size `N` (in bytes) determines the grafting height used to compute the
+//! canonical root. Current stores this size in the database metadata.
+//! Reopening with a different size returns [`crate::qmdb::Error::BitmapChunkSizeMismatch`].
+//! For databases created before the size was recorded, the first open must use the original
+//! `N`. A successful open records it for subsequent opens.
+//!
 //! # Batch validity
 //!
 //! Reads through a batch succeed only while the DB is at a state of the batch's chain: its
@@ -59,8 +65,8 @@
 //!   released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte digests,
 //!   that is 32 bytes per 256 operations.
 //!
-//! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
-//!   restore the grafted tree after pruning old bitmap chunks.
+//! - **Bitmap metadata** (`Metadata`): Stores the bitmap chunk size, the pruning boundary, and the
+//!   pinned digests needed to restore the grafted tree after pruning old bitmap chunks.
 //!
 //! # Grafting: combining the activity status bitmap and the ops tree
 //!
@@ -349,7 +355,7 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
-use commonware_utils::bitmap::Prunable as BitMap;
+use commonware_utils::{Widen, bitmap::Prunable as BitMap};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
@@ -504,15 +510,14 @@ where
     let strategy = cfg.merkle.strategy.clone();
     let metadata_partition = cfg.grafted_metadata_partition.clone();
 
-    // Load bitmap metadata (pruned_chunks + pinned nodes for the grafted tree).
     let (mut metadata, mut pruned_chunks, mut pinned_nodes) =
-        db::init_metadata(context.child("metadata"), &metadata_partition).await?;
+        db::init_metadata::<F, _, _, N>(context.child("metadata"), &metadata_partition).await?;
 
     // An interrupted destroy can leave pruning metadata from the old database beside a log reset
     // to position zero. Normal pruning never produces that combination.
     if pruned_chunks > 0 && J::span(context.child("span"), &cfg.log).await? == (0..0) {
         warn!("crash repair: discarding grafted metadata beside an empty log");
-        metadata.clear();
+        metadata.retain(|key, _| key == &db::BITMAP_CHUNK_SIZE_KEY);
         metadata = metadata.sync().await?;
         pruned_chunks = 0;
         pinned_nodes.clear();
@@ -548,6 +553,15 @@ where
     .await?;
 
     let root = ops_root_witness.root::<H>(&any.root());
+    // A legacy database can only record the caller's width once its reconstruction succeeds.
+    if metadata.get(&db::BITMAP_CHUNK_SIZE_KEY).is_none() {
+        metadata = metadata
+            .put_sync(
+                db::BITMAP_CHUNK_SIZE_KEY,
+                Widen::widen(N).to_be_bytes().to_vec(),
+            )
+            .await?;
+    }
     let metrics = Metrics::new(context);
     let db = db::Db {
         any,
