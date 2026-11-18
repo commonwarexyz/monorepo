@@ -703,6 +703,13 @@ where
         Ok(self)
     }
 
+    /// Durably mark the frontier so the journal refuses to open with [Error::IncompleteSync]
+    /// until [Self::persist_boundary] records the boundary.
+    pub(crate) async fn mark_sync_incomplete(mut self) -> Result<Self, Error<F>> {
+        self.frontier = self.frontier.mark_sync_incomplete().await?;
+        Ok(self)
+    }
+
     /// Align the Merkle structure with the journal.
     ///
     /// The Merkle structure must not extend past the journal end. Missing leaves are read and
@@ -1192,6 +1199,11 @@ where
             Frontier::open(context.child("frontier"), merkle_cfg.partition.clone()).await?;
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
+
+        // A pruned journal from an incomplete sync may retain no matching operation.
+        if bounds.start != 0 && frontier.sync_incomplete() {
+            return Err(Error::IncompleteSync);
+        }
 
         // An unbounded reopen preserves a fully pruned journal's append position. Other
         // selections need a retained matching item, except for empty genesis.
@@ -3029,26 +3041,30 @@ mod tests {
         deterministic::Runner::default().start(pinned_nodes_at_errors::<mmb::Family>);
     }
 
-    /// A journal whose frontier marks an incomplete sync refuses to open.
+    /// A journal whose frontier marks an incomplete sync refuses to open, including a pruned one
+    /// that retains no matching operation.
     async fn incomplete_sync_refuses_to_open<F: Family + PartialEq>(context: Context) {
-        drop(create_journal_with_ops::<F>(context.child("initial"), "incomplete", 20).await);
-        mark_sync_incomplete::<F, _, Sha256, _>(
-            context.child("mark"),
-            &merkle_config("incomplete"),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            TestJournal::<F>::new(
-                context.child("reopen"),
-                merkle_config("incomplete"),
-                journal_config("incomplete"),
-                |_| true,
-                ForwardFold,
-            )
-            .await,
-            Err(Error::IncompleteSync)
-        ));
+        for (suffix, prune) in [("incomplete", 0), ("incomplete-pruned", 10)] {
+            let predicate: fn(&TestOp<F>) -> bool = if prune == 0 { |_| true } else { |_| false };
+            let journal = create_journal_with_ops::<F>(context.child("initial"), suffix, 20).await;
+            let (journal, _) = journal.prune(Location::new(prune)).await.unwrap();
+            assert_eq!(journal.bounds().start > 0, prune > 0);
+            drop(journal);
+            mark_sync_incomplete::<F, _, Sha256, _>(context.child("mark"), &merkle_config(suffix))
+                .await
+                .unwrap();
+            assert!(matches!(
+                TestJournal::<F>::new(
+                    context.child("reopen"),
+                    merkle_config(suffix),
+                    journal_config(suffix),
+                    predicate,
+                    ForwardFold,
+                )
+                .await,
+                Err(Error::IncompleteSync)
+            ));
+        }
     }
 
     #[test]

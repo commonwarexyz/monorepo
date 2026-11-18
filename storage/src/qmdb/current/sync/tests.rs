@@ -740,13 +740,16 @@ fn test_current_sync_persist_failure_reopens_at_target() {
     });
 }
 
-/// A catch-up sync interrupted after it writes the grafted metadata but before it records the
-/// boundary reopens at the target under the previous frontier.
-#[test_traced]
-fn test_current_sync_interrupted_between_writes_reopens_at_target() {
+/// A sync that replaces the grafted pins of a different pruned prefix, or fetches a suffix past an
+/// earlier local state, is stopped after each storage mutation in turn. Each stop reopens at the
+/// local state or the target, or refuses to open, and retrying the sync always reaches the target.
+#[test_traced("WARN")]
+fn test_current_sync_interrupted_persist_is_retried() {
+    use commonware_runtime::mocks::{MutationFaultContext, MutationFaults};
+
     type Db = crate::qmdb::current::unordered::fixed::Db<
         crate::merkle::mmr::Family,
-        Context,
+        MutationFaultContext<Context>,
         Digest,
         Digest,
         Sha256,
@@ -754,128 +757,146 @@ fn test_current_sync_interrupted_between_writes_reopens_at_target() {
         32,
         Sequential,
     >;
-    type Ops = crate::journal::contiguous::fixed::Journal<
-        Context,
-        crate::qmdb::any::unordered::fixed::Operation<crate::merkle::mmr::Family, Digest, Digest>,
-    >;
 
-    let executor = deterministic::Runner::default();
-    executor.start(|context: Context| async move {
-        // Build the same history twice. The local database stops earlier and prunes partway,
-        // so its frontier lies before the target start and the sync must fetch a suffix.
-        let key = Digest::from([9u8; 32]);
-        let populate = |label: &'static str, config, rounds: u64, prune_at: Option<u64>| {
-            let context = context.child(label);
-            async move {
-                let mut db: Db = Db::init(context, config, None).await.unwrap();
-                for round in 0..rounds {
-                    let merkleized = db
-                        .new_batch()
-                        .write(key, Some(Digest::from([round as u8; 32])))
-                        .merkleize(&db)
-                        .await
-                        .unwrap();
-                    db = db.apply_batch(merkleized).await.unwrap();
-                    if prune_at == Some(round) {
-                        let boundary = db.sync_boundary();
-                        db = db.prune(boundary).await.unwrap();
+    // The local history differs from the source's only in its first value, or ends earlier.
+    for (first, rounds) in [(2u8, 300u64), (1, 280)] {
+        let mut refused = false;
+        for interrupted in 0.. {
+            let (completed, refusal) =
+                deterministic::Runner::default().start(|context| async move {
+                    let faults = MutationFaults::default();
+                    let context = MutationFaultContext {
+                        inner: context,
+                        faults: faults.clone(),
+                    };
+                    let key = Digest::from([9u8; 32]);
+                    let populate = |label: &'static str, first: u8, rounds: u64| {
+                        let context = context.child(label);
+                        async move {
+                            let config = fixed_config::<crate::translator::TwoCap>(label);
+                            let mut db: Db = Db::init(context, config, None).await.unwrap();
+                            for round in 0..rounds {
+                                let value = if round == 0 { first } else { round as u8 };
+                                let merkleized = db
+                                    .new_batch()
+                                    .write(key, Some(Digest::from([value; 32])))
+                                    .merkleize(&db)
+                                    .await
+                                    .unwrap();
+                                db = db.apply_batch(merkleized).await.unwrap();
+                            }
+                            let boundary = db.sync_boundary();
+                            db.prune(boundary).await.unwrap().sync().await.unwrap()
+                        }
+                    };
+                    let source = populate("source", 1, 300).await;
+                    let local = populate("local", first, rounds).await;
+                    let target = crate::qmdb::sync::Target {
+                        root: SyncDatabase::ops_root(&source),
+                        range: non_empty_range!(source.sync_boundary(), source.bounds().end),
+                    };
+                    let (local_root, canonical_root) = (local.root(), source.root());
+                    assert_ne!(local_root, canonical_root);
+                    assert!(
+                        *target.range.start()
+                            >= 2 * commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS,
+                        "the first value must lie in a pruned chunk"
+                    );
+
+                    // A local log over the source's range holds the source's operations, so only the
+                    // pins of the pruned prefix differ.
+                    if local.bounds() == source.bounds() {
+                        let request = Request::Operations {
+                            size: target.range.end(),
+                            start: target.range.start(),
+                            max_ops: NZU64!(1024),
+                        };
+                        let (local_ops, _) = local.serve(request).await.unwrap();
+                        let (source_ops, _) = source.serve(request).await.unwrap();
+                        let (
+                            Response::Operations {
+                                operations: local_ops,
+                                ..
+                            },
+                            Response::Operations {
+                                operations: source_ops,
+                                ..
+                            },
+                        ) = (local_ops, source_ops)
+                        else {
+                            panic!("expected operations");
+                        };
+                        assert_eq!(local_ops, source_ops);
                     }
-                }
-                db.sync().await.unwrap()
+                    drop(local);
+
+                    let source = std::sync::Arc::new(source);
+                    let sync = |label: &'static str| {
+                        crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+                            context: context.child(label),
+                            db_config: fixed_config::<crate::translator::TwoCap>("local"),
+                            fetch_batch_size: NZU64!(64),
+                            target: target.clone(),
+                            source: source.clone(),
+                            apply_batch_size: NZU64!(1024),
+                            max_outstanding_requests: NZUsize!(4),
+                            update_rx: None,
+                            finish_rx: None,
+                            reached_target_tx: None,
+                        })
+                    };
+                    let reopen = |label: &'static str| {
+                        Db::init(
+                            context.child(label),
+                            fixed_config::<crate::translator::TwoCap>("local"),
+                            None,
+                        )
+                    };
+
+                    // Sync fails exactly when one of its mutations was refused.
+                    faults.allow(interrupted);
+                    let result = sync("sync").await;
+                    let stopped = faults.failed();
+                    faults.disarm();
+                    let scenario =
+                        format!("first {first}, rounds {rounds}, stopped after {interrupted}");
+                    assert_eq!(result.is_err(), stopped, "{scenario}");
+                    if let Ok(db) = result {
+                        assert_eq!(db.root(), canonical_root, "{scenario}");
+                        return (true, false);
+                    }
+
+                    // The stopped sync left the local state, the target, or a database that refuses to
+                    // open.
+                    let refusal = match reopen("reopen").await {
+                        Ok(db) => {
+                            let root = db.root();
+                            assert!(root == local_root || root == canonical_root, "{scenario}");
+                            false
+                        }
+                        Err(crate::qmdb::Error::IncompleteSync) => true,
+                        Err(err) => panic!("{scenario}: unexpected error {err}"),
+                    };
+
+                    // Retrying the sync reaches the target, which survives a reopen.
+                    drop(sync("retry").await.unwrap());
+                    assert_eq!(
+                        reopen("final").await.unwrap().root(),
+                        canonical_root,
+                        "{scenario}"
+                    );
+                    (false, refusal)
+                });
+            refused |= refusal;
+            if completed {
+                break;
             }
-        };
-        let source = populate(
-            "source",
-            fixed_config::<crate::translator::TwoCap>("source"),
-            300,
-            None,
-        )
-        .await;
-        let local_config = fixed_config::<crate::translator::TwoCap>("local");
-        let local = populate("local", local_config.clone(), 280, Some(100)).await;
-        let target = crate::qmdb::sync::Target {
-            root: SyncDatabase::ops_root(&source),
-            range: non_empty_range!(source.sync_boundary(), source.bounds().end),
-        };
-        let canonical_root = source.root();
-        let local_start = local.bounds().start;
-        assert!(
-            local_start < target.range.start(),
-            "the target must start past the local frontier"
-        );
-        assert!(
-            local.bounds().end < target.range.end(),
-            "the sync must fetch a suffix"
-        );
-        drop(local);
-
-        // Run the sync by hand: fetch the missing operations and the boundary pins, build the
-        // database, and check its root.
-        let range = target.range.clone();
-        type Family = crate::merkle::mmr::Family;
-        let mut journal = <Ops as crate::qmdb::sync::Journal<Family>>::new(
-            context.child("journal"),
-            local_config.log.clone(),
-            range.clone(),
-        )
-        .await
-        .unwrap();
-        while <Ops as crate::qmdb::sync::Journal<Family>>::size(&journal) < *range.end() {
-            let (response, _) = source
-                .serve(Request::Operations {
-                    size: range.end(),
-                    start: <Ops as crate::qmdb::sync::Journal<Family>>::size(&journal),
-                    max_ops: NZU64!(64),
-                })
-                .await
-                .unwrap();
-            let Response::Operations { operations, .. } = response else {
-                panic!("expected operations");
-            };
-            journal = <Ops as crate::qmdb::sync::Journal<Family>>::append(journal, operations)
-                .await
-                .unwrap();
         }
-        let journal = <Ops as crate::qmdb::sync::Journal<Family>>::sync(journal)
-            .await
-            .unwrap();
-        let (response, _) = source
-            .serve(Request::Boundary {
-                size: range.end(),
-                start: range.start(),
-            })
-            .await
-            .unwrap();
-        let Response::Boundary { pinned_nodes, .. } = response else {
-            panic!("expected a boundary");
-        };
-        let db = Db::from_sync_result(
-            context.child("sync"),
-            local_config.clone(),
-            journal,
-            Some(pinned_nodes),
-            range,
-            NZU64!(1024),
-        )
-        .await
-        .unwrap();
-        assert_eq!(SyncDatabase::ops_root(&db), target.root);
-
-        // Persist only the first of the two writes, then stop.
-        drop(db.sync_metadata().await.unwrap());
-
-        // The database reopens at the target. The frontier is still the local one, so the
-        // operations before the target start remain readable until the next prune.
-        let reopened: Db = Db::init(context.child("reopened"), local_config, None)
-            .await
-            .unwrap();
-        assert_eq!(SyncDatabase::ops_root(&reopened), target.root);
-        assert_eq!(reopened.root(), canonical_root);
-        assert_eq!(reopened.bounds().start, local_start);
-        assert_eq!(reopened.bounds().end, target.range.end());
-        reopened.destroy().await.unwrap();
-        source.destroy().await.unwrap();
-    });
+        assert!(
+            refused,
+            "first {first}, rounds {rounds}: some stop must refuse to open"
+        );
+    }
 }
 
 /// Emits the `any`-specific sync tests that also run against `current` databases for `$harness`.

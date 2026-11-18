@@ -248,8 +248,8 @@ where
     }
 
     async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
-        // Write the grafted metadata first, as `Db::prune` does, so a catch-up sync interrupted
-        // before the boundary is recorded still opens.
+        // New grafted pins may not match the old frontier, so refuse opens until it is replaced.
+        self.any.log = self.any.log.mark_sync_incomplete().await?;
         self = self.sync_metadata().await?;
         self.any.log = self.any.log.persist_boundary().await?;
         Ok(self)

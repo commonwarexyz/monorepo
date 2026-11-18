@@ -258,8 +258,12 @@ impl ChunkPlan {
         hasher: H,
     ) -> ChunkHasher<F, H> {
         let width = 1u64 << self.height;
+        // A root born past the largest supported size has no position, so its chunk is leaves.
+        let born = chunk.start.saturating_add(F::birth_offset(self.height)) <= *F::MAX_LEAVES;
         ChunkHasher {
-            is_subtree: chunk.start.is_multiple_of(width) && chunk.end - chunk.start == width,
+            is_subtree: chunk.start.is_multiple_of(width)
+                && chunk.end - chunk.start == width
+                && born,
             leaves: Vec::with_capacity((chunk.end - chunk.start) as usize),
             chunk,
             height: self.height,
@@ -1513,6 +1517,52 @@ mod tests {
     #[test]
     fn appends_near_maximum_mmb() {
         deterministic::Runner::default().start(appends_near_maximum::<mmb::Family>);
+    }
+
+    /// Replaying in subtrees up to the largest supported size builds the same tree as replaying
+    /// in batches, including subtrees whose roots are born only past that size.
+    async fn subtrees_near_maximum<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        for height in 4..=7 {
+            let width = 1u64 << height;
+            let boundary = Location::<F>::new(*F::MAX_LEAVES / width * width - 2 * width);
+            let ops = Arc::new(Operations::range(*boundary..*F::MAX_LEAVES));
+            let pins: Vec<_> = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
+            let open =
+                || Tree::<F, D, _>::new(boundary, pins.clone(), &config(5), &context).unwrap();
+            let batched = open()
+                .replay(&*ops, &hasher, F::MAX_LEAVES, NZU64!(7))
+                .await
+                .unwrap();
+            let (released, _released_rx) = mpsc::channel(1);
+            let subtrees = open()
+                .replay_subtrees(
+                    context.child("replay"),
+                    &ops,
+                    &hasher,
+                    F::MAX_LEAVES,
+                    height,
+                    NonZeroUsize::new(2).unwrap(),
+                    released,
+                )
+                .await
+                .unwrap();
+            assert_eq!(subtrees.size(), batched.size(), "height {height}");
+            assert_eq!(
+                subtrees.root(&hasher, 0).unwrap(),
+                batched.root(&hasher, 0).unwrap(),
+                "height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn subtrees_near_maximum_mmr() {
+        deterministic::Runner::default().start(subtrees_near_maximum::<mmr::Family>);
+    }
+    #[test]
+    fn subtrees_near_maximum_mmb() {
+        deterministic::Runner::default().start(subtrees_near_maximum::<mmb::Family>);
     }
 
     /// Each batch in an applied chain proves its leaves after its ancestors are dropped.
