@@ -870,6 +870,139 @@ fn test_current_sync_interrupted_persist_is_retried() {
     }
 }
 
+/// A replica that already holds the target's operations syncs to a start below the boundary it
+/// recorded. Stopped after each storage mutation in turn, it reopens at the target, and retrying
+/// the sync reaches the target.
+#[test_traced("WARN")]
+fn test_current_sync_below_boundary_interrupted_persist_is_retried() {
+    use crate::merkle::Location;
+    use commonware_runtime::mocks::{MutationFaultContext, MutationFaults};
+
+    type Db = crate::qmdb::current::unordered::fixed::Db<
+        crate::merkle::mmr::Family,
+        MutationFaultContext<Context>,
+        Digest,
+        Digest,
+        Sha256,
+        crate::translator::TwoCap,
+        32,
+        Sequential,
+    >;
+
+    // One blob holds every operation, so recording a boundary deletes none before it.
+    let config = |label: &str| {
+        let mut config = fixed_config::<crate::translator::TwoCap>(label);
+        config.log.items_per_blob = NZU64!(4096);
+        config
+    };
+    for interrupted in 0.. {
+        let completed = deterministic::Runner::default().start(|context| async move {
+            // Populate a source and a local replica with the same operations.
+            let faults = MutationFaults::default();
+            let context = MutationFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let key = Digest::from([9u8; 32]);
+            let populate = |label: &'static str| {
+                let context = context.child(label);
+                async move {
+                    let mut db: Db = Db::init(context, config(label), None).await.unwrap();
+                    for round in 0..300u64 {
+                        let merkleized = db
+                            .new_batch()
+                            .write(key, Some(Digest::from([round as u8; 32])))
+                            .merkleize(&db)
+                            .await
+                            .unwrap();
+                        db = db.apply_batch(merkleized).await.unwrap();
+                    }
+                    db.sync().await.unwrap()
+                }
+            };
+            let source = populate("source").await;
+            let local = populate("local").await;
+            let canonical_root = source.root();
+            assert_eq!(local.root(), canonical_root);
+            drop(local);
+
+            // Sync either from the source's boundary or from chunk 1, which lies below it.
+            let (root, end) = (SyncDatabase::ops_root(&source), source.bounds().end);
+            let boundary = source.sync_boundary();
+            let below = Location::new(commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS);
+            assert!(
+                *boundary >= 2 * *below,
+                "chunk 1 must lie below the source's boundary"
+            );
+            let source = std::sync::Arc::new(source);
+            let sync = |label: &'static str, start: Location<crate::merkle::mmr::Family>| {
+                crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+                    context: context.child(label),
+                    db_config: config("local"),
+                    fetch_batch_size: NZU64!(64),
+                    target: crate::qmdb::sync::Target {
+                        root,
+                        range: non_empty_range!(start, end),
+                    },
+                    source: source.clone(),
+                    apply_batch_size: NZU64!(1024),
+                    max_outstanding_requests: NZUsize!(4),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                })
+            };
+            let reopen =
+                |label: &'static str| Db::init(context.child(label), config("local"), None);
+
+            // Record a boundary past chunk 1.
+            drop(sync("record", boundary).await.unwrap());
+
+            // Sync fails exactly when one of its mutations was refused.
+            faults.allow(interrupted);
+            let result = sync("sync", below).await;
+            let stopped = faults.failed();
+            faults.disarm();
+            let scenario = format!("stopped after {interrupted}");
+            assert_eq!(
+                result.is_err(),
+                stopped,
+                "{scenario}: sync must fail exactly when a mutation is refused"
+            );
+            if let Ok(db) = result {
+                assert_eq!(
+                    db.root(),
+                    canonical_root,
+                    "{scenario}: the synced root must match the source"
+                );
+                return true;
+            }
+
+            // The stopped sync leaves the replica at the target.
+            match reopen("reopen").await {
+                Ok(db) => assert_eq!(
+                    db.root(),
+                    canonical_root,
+                    "{scenario}: the reopened root must match the source"
+                ),
+                Err(err) => panic!("{scenario}: reopen must succeed, got {err}"),
+            }
+
+            // Retrying the sync reaches the target, which survives a reopen.
+            drop(sync("retry", below).await.unwrap());
+            assert_eq!(
+                reopen("final").await.unwrap().root(),
+                canonical_root,
+                "{scenario}: the retried root must match the source"
+            );
+            false
+        });
+        if completed {
+            break;
+        }
+    }
+}
+
 /// Emits the `any`-specific sync tests that also run against `current` databases for `$harness`.
 macro_rules! current_sync_tests {
     ($harness:ty) => {

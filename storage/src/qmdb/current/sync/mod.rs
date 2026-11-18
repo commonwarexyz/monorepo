@@ -241,10 +241,17 @@ where
     }
 
     async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
-        // As in Db::prune, the new grafted pins and the older frontier can be recovered together
-        // because both describe prefixes of the same durable operations.
-        self = self.sync_metadata().await?;
-        self.any.log = self.any.log.persist_boundary().await?;
+        // The grafted metadata must never leave a chunk unpruned when the frontier cannot serve its
+        // graft root. A boundary that moves forward writes the metadata first, as Db::prune does.
+        // One that moves back writes the frontier first, which restores access to the earlier roots
+        // before the metadata needs them.
+        if self.any.log.merkle.bounds().start < self.any.log.frontier.boundary().0 {
+            self.any.log = self.any.log.persist_boundary().await?;
+            self = self.sync_metadata().await?;
+        } else {
+            self = self.sync_metadata().await?;
+            self.any.log = self.any.log.persist_boundary().await?;
+        }
         Ok(self)
     }
 
