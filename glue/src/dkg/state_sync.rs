@@ -73,7 +73,8 @@ pub struct Config<B> {
     /// Maximum sharing mode version accepted in persisted epoch information.
     pub max_supported_mode: ModeVersion,
 
-    /// Marshal's codec configuration for the application's blocks.
+    /// Codec configuration for the application's blocks. Must match marshal's configuration
+    /// so the plan can decode checkpointed boundary blocks on restart.
     pub block_codec_config: B,
 }
 
@@ -548,6 +549,10 @@ where
 /// [`Mailbox::attach`](crate::dkg::probe::Mailbox::attach). Clones share the material decision and
 /// the checkpoints, and they serialize their storage access. Separately initialized plans do not,
 /// so initialize only one plan per partition prefix.
+///
+/// Checkpoints store full boundary blocks in [`Metadata`]. Adding or removing a checkpoint
+/// rewrites the entire checkpoint blob, so large application payloads increase the cost of
+/// recording a checkpoint at an epoch transition or during startup.
 ///
 /// A [`Plan::disabled`] plan stores nothing, so every restart reads its epoch's boundary block from
 /// marshal and the probe serves no epoch. Use it for deployments that never restart into a later

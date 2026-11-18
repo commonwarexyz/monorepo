@@ -227,16 +227,18 @@
 //! that entered it through its boundary with the finalization, however far that peer's marshal has
 //! pruned.
 //!
-//! A peer that entered an epoch by state sync has no checkpoint for it, and a peer whose marshal
-//! repaired the boundary block by walking back from a later block may hold no finalization for it.
-//! Neither serves the epoch. Since recording a checkpoint drops older ones, a peer serves only its
-//! recent epochs. Discovery asks every peer for the boundary, so one peer that can serve it
-//! suffices.
+//! A peer that entered an epoch by state sync has no checkpoint for it. If marshal repaired the
+//! boundary block by walking back from a later block, the checkpoint may lack its finalization.
+//! Marshal can archive that finalization later, but it does not update the checkpoint. In either
+//! case the peer cannot serve the epoch. Since recording a checkpoint drops older ones, a peer
+//! serves only its recent epochs. Discovery asks every peer for the boundary, so one peer that
+//! can serve it suffices.
 //!
 //! Under stateful pruning, [`PruneConfig::retained_marshal_blocks`] sets marshal's retention.
-//! Retention bounds how far behind a lagging peer can fall and still catch up, as
-//! [Reconfiguration](#reconfiguration) describes. With an initialized plan, restart and probe
-//! serving do not depend on it.
+//! Retain at least one epoch's worth of blocks (`blocks_per_epoch`) as a starting point for
+//! catch-up. A lagging node needs its epoch's final block and any missing blocks before it. Set a
+//! larger window to cover the lag you expect, as [Reconfiguration](#reconfiguration) describes.
+//! With an initialized plan, restart and probe serving do not depend on this window.
 //!
 //! The reshare actor treats every block marshal has processed as applied, and its journal stores
 //! dealer logs but not the last block it applied, so a node's marshal, application, and reshare
