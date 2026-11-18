@@ -87,10 +87,14 @@
 //!
 //! # Serving Requests
 //!
-//! The engine calls [Handler::process](crate::Handler::process) from its event loop and keeps a
-//! request pending until the handler sends its response or drops the sender. Nothing limits how
-//! many requests are pending or for how long, so a handler that answers later must bound the
-//! requests it holds from each peer.
+//! The engine keeps at most [Config::max_pending_requests] requests pending across all peers
+//! and at most [Config::max_pending_requests_per_peer] from one peer. When either limit is full,
+//! the engine drops the decoded request before calling [Handler::process](crate::Handler::process)
+//! and increments `serve_limited_total`. It does not block the peer or send a response.
+//!
+//! An admitted request holds its slot until the engine receives the handler's answer or sees
+//! that the handler dropped the sender. A peer disconnect does not release the slot. There is
+//! no timeout.
 //!
 //! # Backpressure
 //!
@@ -182,6 +186,8 @@ mod tests {
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 
     const MAILBOX_SIZE: NonZeroUsize = commonware_utils::NZUsize!(1024);
+    const MAX_PENDING_REQUESTS: NonZeroUsize = commonware_utils::NZUsize!(1024);
+    const MAX_PENDING_REQUESTS_PER_PEER: NonZeroUsize = commonware_utils::NZUsize!(1024);
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
@@ -338,6 +344,8 @@ mod tests {
                 monitor,
                 handler,
                 mailbox_size: MAILBOX_SIZE,
+                max_pending_requests: MAX_PENDING_REQUESTS,
+                max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                 priority_requests: false,
                 request_codec_config: (),
                 priority_responses: false,
@@ -853,6 +861,8 @@ mod tests {
                     monitor,
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -917,6 +927,8 @@ mod tests {
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -1073,6 +1085,8 @@ mod tests {
                     monitor: mon,
                     handler,
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -1192,6 +1206,8 @@ mod tests {
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -1715,6 +1731,8 @@ mod tests {
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests,
                     request_codec_config: (),
                     priority_responses,
@@ -1779,6 +1797,8 @@ mod tests {
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: NZUsize!(1),
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -1843,6 +1863,8 @@ mod tests {
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -1981,6 +2003,8 @@ mod tests {
                     monitor: MockMonitor::dummy(),
                     handler,
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -2293,6 +2317,8 @@ mod tests {
                     monitor: ordered.clone(),
                     handler: ordered,
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -2426,6 +2452,8 @@ mod tests {
                     monitor,
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -2487,6 +2515,8 @@ mod tests {
                     monitor: MockMonitor::dummy(),
                     handler: MockHandler::dummy(),
                     mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: MAX_PENDING_REQUESTS,
+                    max_pending_requests_per_peer: MAX_PENDING_REQUESTS_PER_PEER,
                     priority_requests: false,
                     request_codec_config: (),
                     priority_responses: false,
@@ -2506,6 +2536,109 @@ mod tests {
                 mailbox.cancel(Request { id: 1, data: 1 }.commitment()),
                 Feedback::Closed
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_pending_limits_drop_requests_until_a_slot_frees() {
+        /// Sends request `id` from a raw peer to `to` and returns its responder if the handler
+        /// received it.
+        async fn serve(
+            context: &deterministic::Context,
+            sender: &mut Sender<PublicKey, deterministic::Context>,
+            to: &PublicKey,
+            deferred: &mut mpsc::UnboundedReceiver<(Request, oneshot::Sender<Response>)>,
+            id: u64,
+        ) -> Option<oneshot::Sender<Response>> {
+            sender.send(
+                Recipients::One(to.clone()),
+                Request { id, data: 0 }.encode(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+            let (request, responder) = deferred.try_recv().ok()?;
+            assert_eq!(request.id, id);
+            Some(responder)
+        }
+
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // Peer 0 holds at most two requests pending, one per peer, and peers 1 to 3 (A, B,
+            // and C) send raw requests.
+            let (mut oracle, _, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1, 2, 3]).await;
+            for peer in 1..peers.len() {
+                add_link(&mut oracle, LINK.clone(), &peers, 0, peer).await;
+            }
+            let mut connections = connections.into_iter();
+            let (requests, responses) = connections.next().unwrap();
+            let mut raw: Vec<_> = connections
+                .map(|((sender, _), (_, receiver))| (sender, receiver))
+                .collect();
+            let (handler, mut deferred) = DeferringHandler::new();
+            let (engine, _mailbox) = Engine::new(
+                context
+                    .child("engine")
+                    .with_attribute("public_key", &peers[0]),
+                Config {
+                    blocker: oracle.control(peers[0].clone()),
+                    monitor: MockMonitor::dummy(),
+                    handler,
+                    mailbox_size: MAILBOX_SIZE,
+                    max_pending_requests: NZUsize!(2),
+                    max_pending_requests_per_peer: NZUsize!(1),
+                    priority_requests: false,
+                    request_codec_config: (),
+                    priority_responses: false,
+                    response_codec_config: (),
+                },
+            );
+            engine.start(requests, responses);
+            let to = &peers[0];
+
+            // A holds its one slot, B takes the last slot, and the handler never sees A's second
+            // request or C's first.
+            let a = serve(&context, &mut raw[0].0, to, &mut deferred, 1)
+                .await
+                .unwrap();
+            assert!(
+                serve(&context, &mut raw[0].0, to, &mut deferred, 2)
+                    .await
+                    .is_none()
+            );
+            let b = serve(&context, &mut raw[1].0, to, &mut deferred, 3)
+                .await
+                .unwrap();
+            assert!(
+                serve(&context, &mut raw[2].0, to, &mut deferred, 4)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(engine_gauge(&context, "serve_processing", to), 2);
+            assert!(oracle.blocked().await.unwrap().is_empty());
+
+            // An answered request frees A's slot.
+            let response = Response { id: 1, result: 7 };
+            assert!(a.send_lossy(response.clone()));
+            let (_, bytes) = raw[0].1.recv().await.unwrap();
+            assert_eq!(bytes, response.encode().as_ref());
+            let _a = serve(&context, &mut raw[0].0, to, &mut deferred, 5)
+                .await
+                .unwrap();
+
+            // A declined request frees a slot that C can take.
+            drop(b);
+            let _c = serve(&context, &mut raw[2].0, to, &mut deferred, 6)
+                .await
+                .unwrap();
+
+            // Each rejection is counted once and in no serve status.
+            let encoded = context.encode();
+            let limited = format!("engine_serve_limited_total{{public_key=\"{to}\"}} 2");
+            assert!(encoded.lines().any(|line| line == limited));
+            assert_eq!(engine_count(&context, "serve", Status::Success, to), 1);
+            assert_eq!(engine_count(&context, "serve", Status::Failure, to), 1);
+            assert_eq!(engine_count(&context, "serve", Status::Dropped, to), 0);
         });
     }
 }

@@ -9,9 +9,9 @@
 //! After every operation the harness checks what the monitors collected and what the handlers
 //! processed against a model of what the originators asked for. Every mailbox call must be
 //! accepted, so an engine that stops early fails the run. A final settle phase checks response
-//! routing, blocking and the engines' metrics. On reliable links it also checks that every request
-//! a handler answered immediately with its own commitment was collected unless that commitment was
-//! ever cancelled.
+//! routing, blocking and the engines' metrics. On reliable links with admission limits too high
+//! to reach, it also checks that each immediate reply was collected unless the handler changed
+//! the commitment or the originator cancelled it.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_actor::Feedback;
@@ -78,6 +78,9 @@ const MAX_OPERATIONS: usize = 64;
 
 /// Longest sleep between two operations, in milliseconds.
 const MAX_SLEEP_MS: u64 = 500;
+
+/// Pending request limit no run can reach.
+const UNREACHABLE_LIMIT: usize = usize::MAX;
 
 /// Time for every message in flight, and every response it prompts, to arrive.
 const SETTLE: Duration = Duration::from_secs(5);
@@ -211,8 +214,8 @@ type Processed = (usize, PublicKey, FuzzRequest);
 /// The engine that collected a response, its responder, the response, and the reported count.
 type Collected = (usize, PublicKey, FuzzResponse, usize);
 
-/// The engine whose handler holds a responder, the request, and the responder.
-type Held = (usize, FuzzRequest, oneshot::Sender<FuzzResponse>);
+/// The engine and origin of a request, the held request, and its responder.
+type Held = (usize, PublicKey, FuzzRequest, oneshot::Sender<FuzzResponse>);
 
 /// Observations shared by every handler and monitor.
 #[derive(Clone, Default)]
@@ -242,7 +245,7 @@ impl Handler for RecordingHandler {
         self.log
             .processed
             .lock()
-            .push((self.index, origin, request.clone()));
+            .push((self.index, origin.clone(), request.clone()));
         let (responder, receiver) = oneshot::channel();
         match behavior(&request) {
             Behavior::Respond => {
@@ -252,7 +255,11 @@ impl Handler for RecordingHandler {
                 responder.send_lossy(answer(&request, true));
             }
             Behavior::Drop => drop(responder),
-            Behavior::Hold => self.log.held.lock().push((self.index, request, responder)),
+            Behavior::Hold => self
+                .log
+                .held
+                .lock()
+                .push((self.index, origin, request, responder)),
         }
         receiver
     }
@@ -334,6 +341,8 @@ struct FuzzInput {
     seed: u64,
     honest: usize,
     mailbox_size: NonZeroUsize,
+    max_pending_requests: NonZeroUsize,
+    max_pending_requests_per_peer: NonZeroUsize,
     reliable: bool,
     disconnect_on_block: bool,
     latency_ms: u64,
@@ -347,6 +356,16 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let seed = u.arbitrary()?;
         let honest = u.int_in_range(2..=MAX_HONEST)?;
         let mailbox_size = NonZeroUsize::new(u.int_in_range(1..=4)?).unwrap();
+        // Half of the runs use limits small enough to saturate, the rest never limit.
+        let (max_pending_requests, max_pending_requests_per_peer) = if u.arbitrary()? {
+            let total = u.int_in_range(1..=4usize)?;
+            (total, u.int_in_range(1..=total)?)
+        } else {
+            (UNREACHABLE_LIMIT, UNREACHABLE_LIMIT)
+        };
+        let max_pending_requests = NonZeroUsize::new(max_pending_requests).unwrap();
+        let max_pending_requests_per_peer =
+            NonZeroUsize::new(max_pending_requests_per_peer).unwrap();
         let reliable = u.arbitrary()?;
         let disconnect_on_block = u.arbitrary()?;
         let latency_ms = u.int_in_range(1..=100)?;
@@ -360,6 +379,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             seed,
             honest,
             mailbox_size,
+            max_pending_requests,
+            max_pending_requests_per_peer,
             reliable,
             disconnect_on_block,
             latency_ms,
@@ -629,6 +650,8 @@ fn fuzz(input: FuzzInput) {
                         log: log.clone(),
                     },
                     mailbox_size: input.mailbox_size,
+                    max_pending_requests: input.max_pending_requests,
+                    max_pending_requests_per_peer: input.max_pending_requests_per_peer,
                     priority_requests: input.priority_requests,
                     request_codec_config: codec(),
                     priority_responses: input.priority_responses,
@@ -723,7 +746,7 @@ fn fuzz(input: FuzzInput) {
                     expect_running(mailboxes[from].cancel(commitment));
                 }
                 Operation::Release => {
-                    for (_, request, responder) in log.held.lock().drain(..) {
+                    for (_, _, request, responder) in log.held.lock().drain(..) {
                         responder.send_lossy(answer(&request, false));
                     }
                 }
@@ -852,16 +875,26 @@ fn fuzz(input: FuzzInput) {
         // Each engine's metrics agree with the model.
         for index in 0..honest {
             // The engine still waits on exactly the responders its handler holds.
-            let held = log
-                .held
-                .lock()
-                .iter()
-                .filter(|(holder, ..)| *holder == index)
-                .count();
+            let held = log.held.lock();
+            let pending = held.iter().filter(|(holder, ..)| *holder == index).count();
+            for peer in &everyone {
+                let from_peer = held
+                    .iter()
+                    .filter(|(holder, origin, ..)| *holder == index && origin == peer)
+                    .count();
+                assert!(from_peer <= input.max_pending_requests_per_peer.get());
+            }
+            drop(held);
             assert_eq!(
                 gauge(&context, "serve_processing", index),
-                held,
+                pending,
                 "pending requests must match the responders a handler holds"
+            );
+
+            // Requests are held only up to the limit.
+            assert!(
+                pending <= input.max_pending_requests.get(),
+                "held requests must not exceed the pending request limit"
             );
 
             // Every request the handler processed is either still held or counted as served.
@@ -869,7 +902,7 @@ fn fuzz(input: FuzzInput) {
                 + count(&context, "serve", Status::Failure, index)
                 + count(&context, "serve", Status::Dropped, index);
             assert_eq!(
-                served + held,
+                served + pending,
                 model.processed[index],
                 "served and pending requests must add up to the requests processed"
             );
@@ -901,7 +934,8 @@ fn fuzz(input: FuzzInput) {
 
         // On reliable links, every request a handler answered immediately with its own commitment
         // is collected unless that commitment was ever cancelled.
-        if input.reliable {
+        // Saturated engines may drop requests, so completeness is only checked without limits.
+        if input.reliable && input.max_pending_requests.get() == UNREACHABLE_LIMIT {
             for (index, originator) in model.originators.iter().enumerate() {
                 for (request, targets) in &originator.requests {
                     let commitment = request.commitment();

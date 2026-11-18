@@ -19,6 +19,14 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     /// The Backpressure section of the [module](super) docs describes what waits behind it.
     pub mailbox_size: NonZeroUsize,
 
+    /// Maximum number of inbound requests awaiting a handler response across all peers.
+    pub max_pending_requests: NonZeroUsize,
+
+    /// Maximum number of requests from one peer that can await a handler response.
+    ///
+    /// A value at least as large as [Self::max_pending_requests] adds no further limit.
+    pub max_pending_requests_per_peer: NonZeroUsize,
+
     /// Whether requests are sent with priority over other network messages.
     pub priority_requests: bool,
 

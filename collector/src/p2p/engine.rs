@@ -11,12 +11,15 @@ use commonware_p2p::{Blocker, Receiver, Recipients, Sender, utils::codec::wrap};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{
-        Gauge, GaugeExt, MetricsExt as _,
+        Counter, Gauge, GaugeExt, MetricsExt as _,
         status::{self, Status},
     },
 };
 use commonware_utils::{channel::oneshot, futures::Pool};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroUsize,
+};
 use tracing::{debug, error};
 
 /// Sends requests and collects their responses, and serves the requests of other peers.
@@ -33,6 +36,8 @@ where
     // Configuration
     context: ContextCell<E>,
     blocker: B,
+    max_pending_requests: NonZeroUsize,
+    max_pending_requests_per_peer: NonZeroUsize,
     priority_requests: bool,
     request_codec_config: Rq::Cfg,
     priority_responses: bool,
@@ -50,6 +55,8 @@ where
     outstanding: Gauge,
     // Received requests being served
     serve_processing: Gauge,
+    // Received requests rejected by either pending request limit
+    serve_limited: Counter,
     // Sent requests by status. A request sent to at least one peer is a success and a request
     // sent to none is dropped.
     send: status::Counter,
@@ -85,6 +92,10 @@ where
             "serve_processing",
             "Number of received requests being served",
         );
+        let serve_limited = context.counter(
+            "serve_limited",
+            "Number of received requests rejected by pending request limits",
+        );
         let send = context.family("send", "Number of sent requests by status");
         let collect = context.family("collect", "Number of received responses by status");
         let serve = context.family("serve", "Number of received requests by status");
@@ -93,6 +104,8 @@ where
             Self {
                 context: ContextCell::new(context),
                 blocker: cfg.blocker,
+                max_pending_requests: cfg.max_pending_requests,
+                max_pending_requests_per_peer: cfg.max_pending_requests_per_peer,
                 priority_requests: cfg.priority_requests,
                 request_codec_config: cfg.request_codec_config,
                 priority_responses: cfg.priority_responses,
@@ -103,6 +116,7 @@ where
                 tracked: HashMap::new(),
                 outstanding,
                 serve_processing,
+                serve_limited,
                 send,
                 collect,
                 serve,
@@ -139,6 +153,7 @@ where
 
         // Requests the handler has neither answered nor declined
         let mut processed: Pool<'_, (P, Result<Rs, oneshot::error::RecvError>)> = Pool::default();
+        let mut pending_by_peer: HashMap<P, usize> = HashMap::new();
         select_loop! {
             self.context,
             on_start => {
@@ -179,6 +194,12 @@ where
 
             // Response from the local handler
             (peer, response) = processed.next_completed() => {
+                let pending = pending_by_peer.get_mut(&peer).expect("completed request must be pending");
+                *pending -= 1;
+                if *pending == 0 {
+                    pending_by_peer.remove(&peer);
+                }
+
                 // A dropped sender means the handler declined the request
                 let Ok(response) = response else {
                     self.serve.inc(Status::Failure);
@@ -261,7 +282,20 @@ where
                     }
                 };
 
-                // Handle the request
+                // Admit the request only if both limits have room.
+                if processed.len() >= self.max_pending_requests.get() {
+                    debug!(?peer, "total pending request limit reached");
+                    self.serve_limited.inc();
+                    continue;
+                }
+                let pending = pending_by_peer.entry(peer.clone()).or_default();
+                if *pending >= self.max_pending_requests_per_peer.get() {
+                    debug!(?peer, "per-peer pending request limit reached");
+                    self.serve_limited.inc();
+                    continue;
+                }
+                *pending += 1;
+
                 let response = self.handler.process(peer.clone(), msg);
                 processed.push(async move { (peer, response.await) });
             },
