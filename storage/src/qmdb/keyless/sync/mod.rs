@@ -79,7 +79,7 @@ where
         };
         db.update_metrics();
 
-        db.sync().await
+        Ok(db)
     }
 
     async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
