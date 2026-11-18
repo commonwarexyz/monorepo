@@ -4,7 +4,6 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    types: [opened, synchronize, reopened, edited]
   merge_group:
   # Nightly toolchains are published around 01:05 to 01:15 UTC. A run on main after that saves
   # the nightly build jobs' caches. 03:30 UTC is a quiet hour in both California and Europe, and
@@ -93,11 +92,6 @@ jobs:
   # The fast and slow nextest profiles only select which tests run, so one build of each
   # operating system's test binaries, on a larger runner, serves all of its partitions.
   Tests-Build:
-    if: >-
-      github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
-      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: "Tests (os: ${{ matrix.os }}) (build)"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
@@ -192,11 +186,6 @@ jobs:
         --partition slice:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
 
   Tests-Subset:
-    if: >-
-      github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
-      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")${{ matrix.partition && format(' (partition: {0})', matrix.partition) || '' }}"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -524,22 +513,7 @@ jobs:
     needs: [Tests, Tests-Subset, Stability, Unstable-Public]
     if: always()
     steps:
-      - name: Check stability results
-        run: |
-          if [ "${{ needs.Stability.result }}" != "success" ]; then
-            echo "Stability checks failed"
-            exit 1
-          fi
-          if [ "${{ needs.Unstable-Public.result }}" != "success" ]; then
-            echo "Unstable-Public check failed"
-            exit 1
-          fi
       - name: Check test results
-        if: >-
-          github.event_name != 'pull_request'
-          || github.event.pull_request.stack == null
-          || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-          || github.event.pull_request.stack.position == github.event.pull_request.stack.size
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
             echo "Tests failed"
@@ -547,6 +521,14 @@ jobs:
           fi
           if [ "${{ needs.Tests-Subset.result }}" != "success" ]; then
             echo "Tests-Subset failed"
+            exit 1
+          fi
+          if [ "${{ needs.Stability.result }}" != "success" ]; then
+            echo "Stability checks failed"
+            exit 1
+          fi
+          if [ "${{ needs.Unstable-Public.result }}" != "success" ]; then
+            echo "Unstable-Public check failed"
             exit 1
           fi
           echo "All tests passed!"
@@ -557,11 +539,7 @@ jobs:
     name: "Slow-Tests"
     runs-on: ubuntu-latest
     needs: Tests
-    if: >-
-      always() && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
-      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+    if: always()
     steps:
       - name: Check test results
         run: |
@@ -707,11 +685,6 @@ jobs:
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path storage/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_storage.wasm"
 
   no_std:
-    if: >-
-      github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
-      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -790,11 +763,6 @@ jobs:
         run: zepter run check
 
   build:
-    if: >-
-      github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
-      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: "Build (toolchain: ${{ matrix.toolchain }}, partition: ${{ matrix.partition.name }})"
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -862,11 +830,7 @@ jobs:
     name: "Builds"
     runs-on: ubuntu-latest
     needs: build
-    if: >-
-      always() && (github.event_name != 'pull_request'
-      || github.event.pull_request.stack == null
-      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
-      || github.event.pull_request.stack.position == github.event.pull_request.stack.size)
+    if: always()
     steps:
       - name: Check build results
         run: |
