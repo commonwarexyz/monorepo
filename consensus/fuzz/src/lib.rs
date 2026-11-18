@@ -6,7 +6,7 @@ pub mod strategy;
 pub mod types;
 pub mod utils;
 
-commonware_macros::stability_scope!(ALPHA {
+commonware_macros::stability_scope!(ALPHA, cfg(any(test, feature = "fuzz")) {
     pub mod fuzz;
     mod plan;
 });

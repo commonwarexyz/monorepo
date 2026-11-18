@@ -15,6 +15,9 @@ unused_dependencies = "allow"
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 
+[features]
+fuzz = []
+
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
@@ -39,6 +42,7 @@ commonware-invariants.workspace = true
 [[bin]]
 name = "consensus"
 path = "fuzz_targets/consensus.rs"
+required-features = ["fuzz"]
 test = false
 doc = false
 bench = false
