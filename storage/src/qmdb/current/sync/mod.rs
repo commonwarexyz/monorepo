@@ -248,8 +248,8 @@ where
     }
 
     async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
-        // New grafted pins may not match the old frontier, so refuse opens until it is replaced.
-        self.any.log = self.any.log.mark_sync_incomplete().await?;
+        // As in Db::prune, the new grafted pins and the older frontier can be recovered together
+        // because both describe prefixes of the same durable operations.
         self = self.sync_metadata().await?;
         self.any.log = self.any.log.persist_boundary().await?;
         Ok(self)

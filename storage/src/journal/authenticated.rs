@@ -703,13 +703,6 @@ where
         Ok(self)
     }
 
-    /// Durably mark the frontier so the journal refuses to open with [Error::IncompleteSync]
-    /// until [Self::persist_boundary] records the boundary.
-    pub(crate) async fn mark_sync_incomplete(mut self) -> Result<Self, Error<F>> {
-        self.frontier = self.frontier.mark_sync_incomplete().await?;
-        Ok(self)
-    }
-
     /// Align the Merkle structure with the journal.
     ///
     /// The Merkle structure must not extend past the journal end. Missing leaves are read and

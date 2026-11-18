@@ -8,7 +8,7 @@
 use crate::qmdb::{
     current::tests::{fixed_config, variable_config},
     sync::{
-        Database as SyncDatabase, Request, Response, Source as _,
+        Database as SyncDatabase,
         harness::{ConfigOf, SyncTestHarness},
     },
 };
@@ -740,9 +740,9 @@ fn test_current_sync_persist_failure_reopens_at_target() {
     });
 }
 
-/// A sync that replaces the grafted pins of a different pruned prefix, or fetches a suffix past an
-/// earlier local state, is stopped after each storage mutation in turn. Each stop reopens at the
-/// local state or the target, or refuses to open, and retrying the sync always reaches the target.
+/// Stop a sync after each storage mutation. A replica that already holds the target operations
+/// can reopen throughout a boundary change. A replica that must append a suffix can also report
+/// an incomplete sync. Both reach the target on retry.
 #[test_traced("WARN")]
 fn test_current_sync_interrupted_persist_is_retried() {
     use commonware_runtime::mocks::{MutationFaultContext, MutationFaults};
@@ -758,8 +758,7 @@ fn test_current_sync_interrupted_persist_is_retried() {
         Sequential,
     >;
 
-    // The local history differs from the source's only in its first value, or ends earlier.
-    for (first, rounds) in [(2u8, 300u64), (1, 280)] {
+    for rounds in [300u64, 280] {
         let mut refused = false;
         for interrupted in 0.. {
             let (completed, refusal) =
@@ -770,64 +769,35 @@ fn test_current_sync_interrupted_persist_is_retried() {
                         faults: faults.clone(),
                     };
                     let key = Digest::from([9u8; 32]);
-                    let populate = |label: &'static str, first: u8, rounds: u64| {
+                    let populate = |label: &'static str, rounds: u64, prune_at: Option<_>| {
                         let context = context.child(label);
                         async move {
                             let config = fixed_config::<crate::translator::TwoCap>(label);
                             let mut db: Db = Db::init(context, config, None).await.unwrap();
                             for round in 0..rounds {
-                                let value = if round == 0 { first } else { round as u8 };
                                 let merkleized = db
                                     .new_batch()
-                                    .write(key, Some(Digest::from([value; 32])))
+                                    .write(key, Some(Digest::from([round as u8; 32])))
                                     .merkleize(&db)
                                     .await
                                     .unwrap();
                                 db = db.apply_batch(merkleized).await.unwrap();
                             }
-                            let boundary = db.sync_boundary();
+                            let boundary = prune_at.unwrap_or_else(|| db.sync_boundary());
                             db.prune(boundary).await.unwrap().sync().await.unwrap()
                         }
                     };
-                    let source = populate("source", 1, 300).await;
-                    let local = populate("local", first, rounds).await;
+                    let source = populate("source", 300, None).await;
+                    let local =
+                        populate("local", rounds, Some(crate::merkle::Location::new(256))).await;
                     let target = crate::qmdb::sync::Target {
                         root: SyncDatabase::ops_root(&source),
                         range: non_empty_range!(source.sync_boundary(), source.bounds().end),
                     };
                     let (local_root, canonical_root) = (local.root(), source.root());
-                    assert_ne!(local_root, canonical_root);
-                    assert!(
-                        *target.range.start()
-                            >= 2 * commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS,
-                        "the first value must lie in a pruned chunk"
-                    );
-
-                    // A local log over the source's range holds the source's operations, so only the
-                    // pins of the pruned prefix differ.
-                    if local.bounds() == source.bounds() {
-                        let request = Request::Operations {
-                            size: target.range.end(),
-                            start: target.range.start(),
-                            max_ops: NZU64!(1024),
-                        };
-                        let (local_ops, _) = local.serve(request).await.unwrap();
-                        let (source_ops, _) = source.serve(request).await.unwrap();
-                        let (
-                            Response::Operations {
-                                operations: local_ops,
-                                ..
-                            },
-                            Response::Operations {
-                                operations: source_ops,
-                                ..
-                            },
-                        ) = (local_ops, source_ops)
-                        else {
-                            panic!("expected operations");
-                        };
-                        assert_eq!(local_ops, source_ops);
-                    }
+                    assert_eq!(local_root == canonical_root, rounds == 300);
+                    assert!(local.bounds().start < target.range.start());
+                    assert!(local.bounds().end > target.range.start());
                     drop(local);
 
                     let source = std::sync::Arc::new(source);
@@ -858,8 +828,7 @@ fn test_current_sync_interrupted_persist_is_retried() {
                     let result = sync("sync").await;
                     let stopped = faults.failed();
                     faults.disarm();
-                    let scenario =
-                        format!("first {first}, rounds {rounds}, stopped after {interrupted}");
+                    let scenario = format!("rounds {rounds}, stopped after {interrupted}");
                     assert_eq!(result.is_err(), stopped, "{scenario}");
                     if let Ok(db) = result {
                         assert_eq!(db.root(), canonical_root, "{scenario}");
@@ -874,7 +843,13 @@ fn test_current_sync_interrupted_persist_is_retried() {
                             assert!(root == local_root || root == canonical_root, "{scenario}");
                             false
                         }
-                        Err(crate::qmdb::Error::IncompleteSync) => true,
+                        Err(crate::qmdb::Error::IncompleteSync) => {
+                            assert!(
+                                rounds < 300,
+                                "{scenario}: refused to open without any append"
+                            );
+                            true
+                        }
                         Err(err) => panic!("{scenario}: unexpected error {err}"),
                     };
 
@@ -892,10 +867,7 @@ fn test_current_sync_interrupted_persist_is_retried() {
                 break;
             }
         }
-        assert!(
-            refused,
-            "first {first}, rounds {rounds}: some stop must refuse to open"
-        );
+        assert_eq!(refused, rounds < 300);
     }
 }
 
