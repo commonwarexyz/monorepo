@@ -55,10 +55,10 @@ where
 
 /// Create or open a database and sync it to the target in `config`.
 ///
-/// Before appending to reused history or a journal reset at a nonzero start, sync marks a
-/// persistent journal incomplete. If interrupted, an unbounded `init` on that retained history
-/// returns [`crate::qmdb::Error::IncompleteSync`] until sync completes. A fresh journal filled
-/// from genesis can reopen at its last durable commit.
+/// Local operations must belong to the same canonical history as the target. After an
+/// interruption, ordinary initialization can reopen at a retained commit, including one
+/// short of the target. It can fail if sync reset or truncated history needed for recovery.
+/// To finish a pending sync, call this function again with the trusted target.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,

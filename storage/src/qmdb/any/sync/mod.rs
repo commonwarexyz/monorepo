@@ -106,13 +106,6 @@ where
     type Config = Config<I::Translator, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
 
-    async fn mark_sync_incomplete(
-        context: Self::Context,
-        config: &Self::Config,
-    ) -> Result<(), qmdb::Error<F>> {
-        Ok(authenticated::mark_sync_incomplete::<F, _, H, S>(context, &config.merkle).await?)
-    }
-
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,

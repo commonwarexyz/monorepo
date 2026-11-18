@@ -18,6 +18,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Context};
 use commonware_utils::{NZU64, NZUsize, non_empty_range, probability};
 use rand::Rng as _;
+use std::collections::BTreeMap;
 
 mod harnesses {
     use super::*;
@@ -740,9 +741,8 @@ fn test_current_sync_persist_failure_reopens_at_target() {
     });
 }
 
-/// Stop a sync after each storage mutation. A replica that already holds the target operations
-/// can reopen throughout a boundary change. A replica that must append a suffix can also report
-/// an incomplete sync. Both reach the target on retry.
+/// Stop a boundary change or catch-up after each storage mutation. Each reopen matches the
+/// source at the recovered commit, and retrying reaches the target.
 #[test_traced("WARN")]
 fn test_current_sync_interrupted_persist_is_retried() {
     use commonware_runtime::mocks::{MutationFaultContext, MutationFaults};
@@ -759,9 +759,9 @@ fn test_current_sync_interrupted_persist_is_retried() {
     >;
 
     for rounds in [300u64, 280] {
-        let mut refused = false;
+        let mut saw_intermediate = false;
         for interrupted in 0.. {
-            let (completed, refusal) =
+            let (completed, intermediate) =
                 deterministic::Runner::default().start(|context| async move {
                     let faults = MutationFaults::default();
                     let context = MutationFaultContext {
@@ -774,28 +774,33 @@ fn test_current_sync_interrupted_persist_is_retried() {
                         async move {
                             let config = fixed_config::<crate::translator::TwoCap>(label);
                             let mut db: Db = Db::init(context, config, None).await.unwrap();
+                            let mut commits = BTreeMap::new();
                             for round in 0..rounds {
+                                let value = Digest::from([round as u8; 32]);
                                 let merkleized = db
                                     .new_batch()
-                                    .write(key, Some(Digest::from([round as u8; 32])))
+                                    .write(key, Some(value))
                                     .merkleize(&db)
                                     .await
                                     .unwrap();
                                 db = db.apply_batch(merkleized).await.unwrap();
+                                commits.insert(db.bounds().end, (db.ops_root(), db.root(), value));
                             }
                             let boundary = prune_at.unwrap_or_else(|| db.sync_boundary());
-                            db.prune(boundary).await.unwrap().sync().await.unwrap()
+                            let db = db.prune(boundary).await.unwrap().sync().await.unwrap();
+                            (db, commits)
                         }
                     };
-                    let source = populate("source", 300, None).await;
-                    let local =
+                    let (source, commits) = populate("source", 300, None).await;
+                    let (local, _) =
                         populate("local", rounds, Some(crate::merkle::Location::new(256))).await;
                     let target = crate::qmdb::sync::Target {
                         root: SyncDatabase::ops_root(&source),
                         range: non_empty_range!(source.sync_boundary(), source.bounds().end),
                     };
-                    let (local_root, canonical_root) = (local.root(), source.root());
-                    assert_eq!(local_root == canonical_root, rounds == 300);
+                    let canonical_root = source.root();
+                    let local_end = local.bounds().end;
+                    assert_eq!(local.root() == canonical_root, rounds == 300);
                     assert!(local.bounds().start < target.range.start());
                     assert!(local.bounds().end > target.range.start());
                     drop(local);
@@ -835,23 +840,17 @@ fn test_current_sync_interrupted_persist_is_retried() {
                         return (true, false);
                     }
 
-                    // The stopped sync left the local state, the target, or a database that refuses to
-                    // open.
-                    let refusal = match reopen("reopen").await {
-                        Ok(db) => {
-                            let root = db.root();
-                            assert!(root == local_root || root == canonical_root, "{scenario}");
-                            false
-                        }
-                        Err(crate::qmdb::Error::IncompleteSync) => {
-                            assert!(
-                                rounds < 300,
-                                "{scenario}: refused to open without any append"
-                            );
-                            true
-                        }
-                        Err(err) => panic!("{scenario}: unexpected error {err}"),
-                    };
+                    let db = reopen("reopen").await.unwrap();
+                    let end = db.bounds().end;
+                    assert!(
+                        (local_end..=target.range.end()).contains(&end),
+                        "{scenario}"
+                    );
+                    let (ops_root, root, value) = commits[&end];
+                    assert_eq!(db.ops_root(), ops_root, "{scenario}");
+                    assert_eq!(db.root(), root, "{scenario}");
+                    assert_eq!(db.get(&key).await.unwrap(), Some(value), "{scenario}");
+                    drop(db);
 
                     // Retrying the sync reaches the target, which survives a reopen.
                     drop(sync("retry").await.unwrap());
@@ -860,14 +859,14 @@ fn test_current_sync_interrupted_persist_is_retried() {
                         canonical_root,
                         "{scenario}"
                     );
-                    (false, refusal)
+                    (false, local_end < end && end < target.range.end())
                 });
-            refused |= refusal;
+            saw_intermediate |= intermediate;
             if completed {
                 break;
             }
         }
-        assert_eq!(refused, rounds < 300);
+        assert_eq!(saw_intermediate, rounds < 300);
     }
 }
 

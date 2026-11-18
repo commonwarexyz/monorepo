@@ -88,11 +88,6 @@ pub enum Error<F: Family> {
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
-
-    /// A state sync appended operations and did not record its boundary. The journal opens once a
-    /// sync completes.
-    #[error("incomplete state sync")]
-    IncompleteSync,
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the journal-batch chain.
@@ -345,8 +340,6 @@ where
         match error {
             Error::Journal(inner) => inner,
             Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
-            // Only opening a journal reports an incomplete sync.
-            error @ Error::IncompleteSync => JournalError::Merkle(anyhow::Error::from(error)),
         }
     }
 
@@ -692,8 +685,7 @@ where
         })
     }
 
-    /// Record the boundary of a journal built by [Self::from_components] in its frontier, ending
-    /// an incomplete sync, then prune the operations before it.
+    /// Record the boundary of a journal built by [Self::from_components] before pruning older operations.
     pub async fn persist_boundary(mut self) -> Result<Self, Error<F>> {
         let boundary = self.merkle.bounds().start;
         let pins = self.pinned_nodes_at(boundary).await?;
@@ -1193,13 +1185,6 @@ where
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
 
-        // A pruned journal from an incomplete sync may retain no matching operation. An
-        // explicit cap must still report when its requested prefix has been pruned.
-        let sync_incomplete = frontier.sync_incomplete();
-        if max_size.is_none() && bounds.start != 0 && sync_incomplete {
-            return Err(Error::IncompleteSync);
-        }
-
         // An unbounded reopen preserves a fully pruned journal's append position. Other
         // selections need a retained matching item, except for empty genesis.
         let (boundary, pins) = frontier.boundary();
@@ -1218,9 +1203,6 @@ where
         let (boundary, pins) = if bounds.start == 0 && selected_end == 0 {
             (Location::new(0), Vec::new())
         } else {
-            if sync_incomplete {
-                return Err(Error::IncompleteSync);
-            }
             if *boundary < bounds.start
                 || (*boundary > bounds.end && max_size.is_none_or(|max| max >= *boundary))
             {
@@ -1572,26 +1554,6 @@ impl<E: Context, J: Backing<E>> Stored<E, J> {
         let recovery = J::recover(context, cfg, Some(max_size)).await?;
         Ok(Self::Opened(recovery))
     }
-}
-
-/// Durably mark the frontier under `config` before a state sync appends operations, so the journal
-/// refuses to open with [Error::IncompleteSync] until [Journal::persist_boundary] records the
-/// synced boundary.
-pub(crate) async fn mark_sync_incomplete<F, E, H, S>(
-    context: E,
-    config: &Config<S>,
-) -> Result<(), Error<F>>
-where
-    F: Family,
-    E: Context,
-    H: Hasher,
-    S: Strategy,
-{
-    Frontier::<F, E, H::Digest>::open(context, config.partition.clone())
-        .await?
-        .mark_sync_incomplete()
-        .await?;
-    Ok(())
 }
 
 /// Durably reset the frontier under `config` to genesis before a state sync appends operations
@@ -3056,41 +3018,6 @@ mod tests {
     #[test]
     fn test_pinned_nodes_at_errors_mmb() {
         deterministic::Runner::default().start(pinned_nodes_at_errors::<mmb::Family>);
-    }
-
-    /// A journal whose frontier marks an incomplete sync refuses to open, including a pruned one
-    /// that retains no matching operation.
-    async fn incomplete_sync_refuses_to_open<F: Family + PartialEq>(context: Context) {
-        for (suffix, prune) in [("incomplete", 0), ("incomplete-pruned", 10)] {
-            let predicate: fn(&TestOp<F>) -> bool = if prune == 0 { |_| true } else { |_| false };
-            let journal = create_journal_with_ops::<F>(context.child("initial"), suffix, 20).await;
-            let (journal, _) = journal.prune(Location::new(prune)).await.unwrap();
-            assert_eq!(journal.bounds().start > 0, prune > 0);
-            drop(journal);
-            mark_sync_incomplete::<F, _, Sha256, _>(context.child("mark"), &merkle_config(suffix))
-                .await
-                .unwrap();
-            assert!(matches!(
-                TestJournal::<F>::new(
-                    context.child("reopen"),
-                    merkle_config(suffix),
-                    journal_config(suffix),
-                    predicate,
-                    ForwardFold,
-                )
-                .await,
-                Err(Error::IncompleteSync)
-            ));
-        }
-    }
-
-    #[test]
-    fn test_incomplete_sync_refuses_to_open_mmr() {
-        deterministic::Runner::default().start(incomplete_sync_refuses_to_open::<mmr::Family>);
-    }
-    #[test]
-    fn test_incomplete_sync_refuses_to_open_mmb() {
-        deterministic::Runner::default().start(incomplete_sync_refuses_to_open::<mmb::Family>);
     }
 
     /// A frontier beside retained operations whose pins don't match its boundary, or whose boundary

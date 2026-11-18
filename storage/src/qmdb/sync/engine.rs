@@ -242,11 +242,6 @@ where
 
     /// Tracks whether the current target has already been reported as reached.
     reached_current_target_reported: bool,
-
-    /// Whether the database must mark the sync incomplete before the next append. A journal that
-    /// starts empty at zero holds only operations verified against the target, and opens at any
-    /// of their commits, so it needs no mark.
-    mark_before_append: bool,
 }
 
 #[cfg(test)]
@@ -329,7 +324,6 @@ where
             reached_target_tx: config.reached_target_tx,
             reached_current_target_reported: false,
             metrics,
-            mark_before_append: journal_size > 0,
         };
         engine.schedule_requests();
         engine.record_progress();
@@ -436,10 +430,6 @@ where
         self.journal = self.journal.resize(new_start).await?;
         if new_start != self.target.range.start() {
             self.pinned_nodes = None;
-            // A journal reset at the new start needs its boundary pins before it can reopen.
-            if self.journal.size() == new_start {
-                self.mark_before_append = true;
-            }
 
             // A source may prune up to the new lower bound, so a request below a moved bound
             // may never be answered. Requests are also tracked by start location, so one kept at the
@@ -560,11 +550,6 @@ where
             // at or after it, so the batch is never empty.
             operations.drain(..(*next_loc - *range_start_loc) as usize);
             next_loc += operations.len() as u64;
-            if self.mark_before_append {
-                DB::mark_sync_incomplete(self.context.child("mark_incomplete"), &self.config)
-                    .await?;
-                self.mark_before_append = false;
-            }
             self.journal = self.journal.append(operations).await?;
         }
 
@@ -818,7 +803,6 @@ pub(crate) mod tests {
         journal_size: u64,
         local_state_discards: Arc<AtomicUsize>,
         pinned_node_probes: Arc<AtomicUsize>,
-        incomplete_marks: Arc<AtomicUsize>,
     }
 
     impl crate::qmdb::sync::DatabaseConfig for TestConfig {
@@ -876,14 +860,6 @@ pub(crate) mod tests {
         type Hasher = Sha256;
         type Journal = TestJournal;
         type Op = i32;
-
-        async fn mark_sync_incomplete(
-            _context: Self::Context,
-            config: &Self::Config,
-        ) -> Result<(), qmdb::Error<Self::Family>> {
-            config.incomplete_marks.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
 
         async fn from_sync_result(
             _context: Self::Context,
@@ -966,7 +942,6 @@ pub(crate) mod tests {
                 journal_size,
                 local_state_discards: Arc::new(AtomicUsize::new(0)),
                 pinned_node_probes,
-                incomplete_marks: Arc::default(),
             },
             update_rx: None,
             finish_rx: None,
@@ -1463,48 +1438,6 @@ pub(crate) mod tests {
             let engine = engine.apply_operations().await.unwrap();
             assert_eq!(engine.journal.size(), Location::new(10));
             assert!(engine.fetched_operations.is_empty());
-        });
-    }
-
-    /// The database marks the sync incomplete once, before the engine first appends to its
-    /// journal, and not at all for a sync that appends nothing or starts from an empty journal.
-    #[test]
-    fn marks_sync_incomplete_before_first_append() {
-        deterministic::Runner::default().start(|context| async move {
-            let engine = Engine::new(test_engine_config(
-                context.child("complete"),
-                10,
-                Arc::default(),
-            ))
-            .await
-            .unwrap();
-            let engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.config.incomplete_marks.load(Ordering::SeqCst), 0);
-
-            let mut engine = Engine::new(test_engine_config(
-                context.child("partial"),
-                7,
-                Arc::default(),
-            ))
-            .await
-            .unwrap();
-            engine.fetched_operations.insert(Location::new(7), vec![1]);
-            let mut engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.config.incomplete_marks.load(Ordering::SeqCst), 1);
-            engine
-                .fetched_operations
-                .insert(Location::new(8), vec![2, 3]);
-            let engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.journal.size(), Location::new(10));
-            assert_eq!(engine.config.incomplete_marks.load(Ordering::SeqCst), 1);
-
-            let mut config = test_engine_config(context.child("empty"), 0, Arc::default());
-            config.target.range = non_empty_range!(Location::new(0), Location::new(10));
-            let mut engine = Engine::new(config).await.unwrap();
-            engine.fetched_operations.insert(Location::new(0), vec![1]);
-            let engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.journal.size(), Location::new(1));
-            assert_eq!(engine.config.incomplete_marks.load(Ordering::SeqCst), 0);
         });
     }
 

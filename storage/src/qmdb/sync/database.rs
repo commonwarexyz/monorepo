@@ -58,8 +58,7 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
 /// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
 /// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
-/// it already reaches the target, calls [`Self::mark_sync_incomplete`] before appending to reused
-/// history or a journal reset at a nonzero start, and fetches and verifies the remaining operations.
+/// it already reaches the target. The engine fetches and verifies the remaining operations.
 /// It builds the database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the
 /// target, and only then calls [`Self::persist_sync_result`].
 ///
@@ -87,19 +86,6 @@ pub trait Database: Sized + Send {
 
     /// The hasher producing [`Self::Digest`].
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
-
-    /// Durably record that the engine is about to append operations to the database's journal,
-    /// so the database refuses to open with [`crate::qmdb::Error::IncompleteSync`] until
-    /// [`Self::persist_sync_result`] records the synced state.
-    ///
-    /// The mark covers both local operations verified only at the end and a journal reset at a
-    /// nonzero start whose boundary pins have yet to be persisted. A journal filled from genesis
-    /// can reopen at a verified commit. Databases whose journal holds nothing across a restart
-    /// must explicitly return `Ok(())`.
-    fn mark_sync_incomplete(
-        context: Self::Context,
-        config: &Self::Config,
-    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -450,11 +436,10 @@ mod tests {
                 .await,
                 Err(sync::Error::Source(_))
             ));
-            assert!(
-                KeylessDb::init(context.child("reopen"), local_config.clone(), None)
-                    .await
-                    .is_err()
-            );
+            assert!(matches!(
+                KeylessDb::init(context.child("reopen"), local_config.clone(), None).await,
+                Err(qmdb::Error::Journal(crate::journal::Error::ItemPruned(n))) if n == *target.range.start()
+            ));
 
             // Retrying the sync records the target's boundary, and the database opens again.
             let db = sync::sync::<KeylessDb, _>(Config {
@@ -566,58 +551,7 @@ mod tests {
         }
     }
 
-    /// A sync that appends fetched operations after kept local ones that differ from the target's
-    /// fails its root check and leaves a database that refuses to open, instead of one whose
-    /// root matches neither the local database nor the target.
-    #[test]
-    fn failed_sync_after_appending_refuses_to_open() {
-        deterministic::Runner::default().start(|context| async move {
-            // The databases hold the same commits at 0, 2 and 4 and different values at 1 and 3,
-            // and the source continues to 9.
-            let local_config = keyless_config("");
-            let local = keyless_db(
-                context.child("local"),
-                local_config.clone(),
-                0,
-                &[&[11], &[13]],
-            );
-            drop(local.await);
-            let source_config = keyless_config("-source");
-            let commits: [&[u64]; 4] = [&[22], &[24], &[26], &[28]];
-            let source_db = keyless_db(context.child("source"), source_config, 0, &commits);
-            let source_db = Arc::new(source_db.await);
-            let target = Target {
-                root: source_db.root(),
-                range: non_empty_range!(Location::new(2), Location::new(9)),
-            };
-
-            // The sync keeps the local operations from 2 and appends the source's from 5.
-            let result = sync::sync::<KeylessDb, _>(Config {
-                context: context.child("sync"),
-                source: source_db,
-                target,
-                max_outstanding_requests: NZUsize!(1),
-                fetch_batch_size: NZU64!(2),
-                apply_batch_size: NZU64!(2),
-                db_config: local_config.clone(),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
-            .await;
-            assert!(matches!(
-                result,
-                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
-            ));
-            assert!(matches!(
-                KeylessDb::init(context.child("reopen"), local_config, None).await,
-                Err(qmdb::Error::IncompleteSync)
-            ));
-        });
-    }
-
-    /// A sync interrupted after appending operations leaves a database that refuses to open, and
-    /// syncing again completes it.
+    /// Catch-up interrupted after appending reopens at the last retained commit and can resume.
     #[test]
     fn interrupted_sync_after_appending_is_retried() {
         deterministic::Runner::default().start(|context| async move {
@@ -654,10 +588,19 @@ mod tests {
                 sync::sync::<KeylessDb, _>(config("interrupted", interrupted)).await,
                 Err(sync::Error::Source(_))
             ));
-            assert!(matches!(
-                KeylessDb::init(context.child("refused"), local_config.clone(), None).await,
-                Err(qmdb::Error::IncompleteSync)
-            ));
+            let expected = keyless_db(
+                context.child("prefix"),
+                keyless_config("-prefix"),
+                0,
+                &commits[..3],
+            )
+            .await;
+            let db = KeylessDb::init(context.child("intermediate"), local_config.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(db.bounds().end, Location::new(7));
+            assert_eq!(db.root(), expected.root());
+            drop(db);
 
             // Syncing again records the target's boundary, and the database opens there.
             let complete = ServesBefore {
@@ -676,10 +619,11 @@ mod tests {
         });
     }
 
-    /// Interrupt a pruned sync before its first commit, or after a target update has reset the
-    /// journal and a commit has arrived. Both opens must identify the unfinished sync.
+    /// Interrupt sync after a reset, before or after a commit arrives. Retrying supplies the
+    /// missing boundary pins even when the target changed during sync.
     #[rstest]
     #[case::before_first_commit(false, 8)]
+    #[case::after_target_update_before_fetch(true, 4)]
     #[case::after_target_update(true, 12)]
     fn interrupted_pruned_sync_is_retried(#[case] update_target: bool, #[case] stop_at: u64) {
         deterministic::Runner::default().start(|context| async move {
@@ -732,11 +676,17 @@ mod tests {
                 sync::sync::<KeylessDb, _>(interrupted).await,
                 Err(sync::Error::Source(_))
             ));
-            assert!(matches!(
-                KeylessDb::init(context.child("reopen"), local.clone(), None).await,
-                Err(qmdb::Error::IncompleteSync)
-            ));
             let start = target.range.start();
+            let error = KeylessDb::init(context.child("reopen"), local.clone(), None)
+                .await
+                .expect_err("reset journal reopened without a boundary");
+            match error {
+                qmdb::Error::Journal(crate::journal::Error::ItemPruned(n)) => assert_eq!(n, *start),
+                qmdb::Error::Merkle(crate::merkle::Error::DataCorrupted(
+                    "frontier outside operation journal",
+                )) => {}
+                other => panic!("unexpected reopen error: {other}"),
+            }
             assert!(matches!(
                 KeylessDb::init(context.child("capped"), local.clone(), Some(start)).await,
                 Err(qmdb::Error::Journal(crate::journal::Error::ItemPruned(n))) if n == *start
@@ -744,6 +694,11 @@ mod tests {
 
             let retry = config(target.clone(), target.range.end(), None);
             let db = sync::sync::<KeylessDb, _>(retry).await.unwrap();
+            assert_eq!(db.root(), target.root);
+            drop(db);
+            let db = KeylessDb::init(context.child("after_retry"), local, None)
+                .await
+                .unwrap();
             assert_eq!(db.root(), target.root);
         });
     }
