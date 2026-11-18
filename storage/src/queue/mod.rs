@@ -2,17 +2,17 @@
 //!
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
 //! [Queue::init] returns the queue and its [Reader]. During normal operation, a commit or sync
-//! publishes new items to the reader. On restart, the reader delivers all items that the journal
-//! recovers, including any uncommitted items. The reader must acknowledge each item after
-//! processing. Items acknowledged before restart can be delivered again unless pruned.
+//! publishes new items to the reader. Committed items survive restart unless pruned. On reopen,
+//! the reader also delivers any uncommitted items that the journal recovers. The reader must acknowledge each
+//! item after processing. Items acknowledged before restart can be delivered again unless pruned.
 //!
 //! # Ownership
 //!
 //! Methods that write to storage (`append`, `enqueue`, `commit`, `sync`) take the queue by value
 //! and return it on success. If one returns an error, or its future is dropped before it finishes,
-//! the queue is gone: state that was not yet durable is discarded, but everything already on disk
-//! stays recoverable. The reader then delivers every published item and returns `None`. Reader
-//! methods borrow the reader. A failed read does not invalidate it.
+//! the queue is gone. The existing reader drains its published items and returns `None`. A new
+//! reader can receive additional items on reopen. Reader methods borrow the reader. A failed
+//! read does not invalidate it.
 //!
 //! # Concurrency
 //!
@@ -81,7 +81,7 @@
 //!         reader.ack(position).unwrap();
 //!     }
 //!
-//!     // Persist the queue and prune acknowledged items
+//!     // Persist the queue. Both items remain because they occupy only part of a section.
 //!     queue.sync().await.unwrap();
 //! });
 //! ```

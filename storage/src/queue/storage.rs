@@ -185,8 +185,8 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     }
 
     /// Append a batch of items with a single commit, returning positions `[start, end)`. The
-    /// reader can receive the items once this returns. If the operation is interrupted, the
-    /// reader may receive only a prefix of the batch after restart.
+    /// reader can receive the items once this returns. If the operation fails or is interrupted, a new
+    /// reader may receive none, some, or all of the batch after restart, in order from the start.
     ///
     /// # Errors
     ///
