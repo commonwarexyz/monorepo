@@ -48,6 +48,7 @@ members = [
     "cryptography/curve25519/fuzz",
     "math/fuzz",
     "p2p/fuzz",
+    "parallel/fuzz",
     "runtime/fuzz",
     "simd/fuzz",
     "sol/fuzz",

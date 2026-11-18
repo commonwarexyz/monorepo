@@ -7,11 +7,8 @@ pub mod types;
 pub mod utils;
 
 commonware_macros::stability_scope!(ALPHA {
-    #[cfg(any(test, feature = "fuzz"))]
-    mod plan;
-
-    #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz;
+    mod plan;
 });
 
 use crate::{

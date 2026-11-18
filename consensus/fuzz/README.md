@@ -57,6 +57,11 @@ MINIFUZZ_BRANCH=0x... cargo test -p commonware-consensus-fuzz minifuzz_ed25519_c
 
 #### Continuous Fuzzing
 
+The `consensus` target runs the shared Simplex property plan across signature schemes:
+```bash
+cargo fuzz run consensus
+```
+
 Run continuous fuzzing for a specific target:
 ```bash
 cargo fuzz run simplex_ed25519

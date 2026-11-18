@@ -1,0 +1,25 @@
+[package]
+name = "commonware-parallel-fuzz"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[package.metadata]
+cargo-fuzz = true
+
+[lints.cargo]
+unused_dependencies = "allow"
+
+[dependencies]
+arbitrary.workspace = true
+commonware-parallel = { workspace = true, features = ["fuzz"] }
+libfuzzer-sys.workspace = true
+
+[[bin]]
+name = "parallel"
+path = "fuzz_targets/parallel.rs"
+test = false
+doc = false
+bench = false

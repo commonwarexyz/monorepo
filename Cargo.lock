@@ -2387,6 +2387,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-parallel-fuzz"
+version = "2026.10.0"
+dependencies = [
+ "arbitrary",
+ "commonware-parallel",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "commonware-resolver"
 version = "2026.10.1"
 dependencies = [
