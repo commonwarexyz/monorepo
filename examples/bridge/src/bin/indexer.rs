@@ -15,10 +15,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _,
-    bls12381::primitives::{
-        group::G2,
-        variant::{MinSig, Variant},
-    },
+    bls12381::primitives::variant::{MinSig, Variant},
     ed25519::{self, PublicKey},
     sha256::Digest as Sha256Digest,
 };
@@ -129,10 +126,15 @@ fn main() {
         .expect("public keys are unique");
 
     // Configure networks
-    let mut verifiers: HashMap<G2, Scheme> = HashMap::new();
-    let mut blocks: HashMap<G2, HashMap<Sha256Digest, BlockFormat<Sha256Digest>>> = HashMap::new();
-    let mut finalizations: HashMap<G2, BTreeMap<View, Finalization<Scheme, Sha256Digest>>> =
-        HashMap::new();
+    let mut verifiers: HashMap<<MinSig as Variant>::Public, Scheme> = HashMap::new();
+    let mut blocks: HashMap<
+        <MinSig as Variant>::Public,
+        HashMap<Sha256Digest, BlockFormat<Sha256Digest>>,
+    > = HashMap::new();
+    let mut finalizations: HashMap<
+        <MinSig as Variant>::Public,
+        BTreeMap<View, Finalization<Scheme, Sha256Digest>>,
+    > = HashMap::new();
     let networks = matches
         .get_many::<String>("networks")
         .expect("Please provide networks");

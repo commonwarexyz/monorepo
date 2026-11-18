@@ -8,7 +8,7 @@ use commonware_cryptography::bls12381::{
     tle::{Block, Ciphertext},
 };
 use commonware_math::{
-    algebra::{Additive, CryptoGroup},
+    algebra::{Additive, CryptoGroup, Twin},
     poly::Poly,
 };
 use commonware_utils::Participant;
@@ -58,6 +58,25 @@ pub fn arbitrary_vec_g2(
 ) -> Result<Vec<G2>, arbitrary::Error> {
     let len = u.int_in_range(min..=max)?;
     (0..len).map(|_| arbitrary_g2(u)).collect()
+}
+
+#[allow(unused)]
+pub fn arbitrary_minsig_public(
+    u: &mut Unstructured,
+) -> Result<<MinSig as Variant>::Public, arbitrary::Error> {
+    Ok(Twin::new(arbitrary_g2(u)?))
+}
+
+#[allow(unused)]
+pub fn arbitrary_vec_minsig_public(
+    u: &mut Unstructured,
+    min: usize,
+    max: usize,
+) -> Result<Vec<<MinSig as Variant>::Public>, arbitrary::Error> {
+    Ok(arbitrary_vec_g2(u, min, max)?
+        .into_iter()
+        .map(Twin::new)
+        .collect())
 }
 
 pub type Message = (Vec<u8>, Vec<u8>);
@@ -232,7 +251,7 @@ pub fn arbitrary_ciphertext_minsig(
     u: &mut Unstructured,
 ) -> Result<Ciphertext<MinSig>, arbitrary::Error> {
     Ok(Ciphertext {
-        u: arbitrary_g2(u)?,
+        u: Twin::new(arbitrary_g2(u)?),
         v: Block::new(u.arbitrary()?),
         w: Block::new(u.arbitrary()?),
     })
