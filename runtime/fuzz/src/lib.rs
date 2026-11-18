@@ -1,4 +1,9 @@
-//! Shared input decoding for the runtime fuzz targets.
+//! Shared input decoding and storage models for the runtime fuzz targets.
+
+pub mod storage_faults;
+// `BlobModel::len` is the view length; the model has no emptiness query.
+#[allow(clippy::len_without_is_empty)]
+pub mod storage_model;
 
 use arbitrary::{Result, Unstructured};
 use commonware_utils::{Entropy, FuzzRng};

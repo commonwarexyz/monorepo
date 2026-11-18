@@ -26,8 +26,9 @@ rand.workspace = true
 [features]
 default = []
 storage-differential = []
+storage-faults = []
 iobuf = []
-runtime-all = [ "iobuf", "storage-differential" ]
+runtime-all = [ "iobuf", "storage-differential", "storage-faults" ]
 
 [lib]
 bench = false
@@ -56,6 +57,14 @@ path = "fuzz_targets/storage_differential.rs"
 required-features = ["storage-differential"]
 test = false
 doc = false
+
+[[bin]]
+name = "storage_faults"
+path = "fuzz_targets/storage_faults.rs"
+required-features = ["storage-faults"]
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "iobuf"

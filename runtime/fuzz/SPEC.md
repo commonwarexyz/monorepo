@@ -1,7 +1,10 @@
-# Runtime fuzz harness: storage differential and iobuf
+# Runtime fuzz harness: storage differential, storage faults and iobuf
 
-Status: implemented in `runtime/fuzz/fuzz_targets/storage_differential.rs` and
-`runtime/fuzz/fuzz_targets/iobuf.rs`. Divergences found so far are in `runtime/fuzz/FINDINGS.md`.
+Status: `storage_differential` and `iobuf` are implemented in
+`runtime/fuzz/fuzz_targets/storage_differential.rs` and `runtime/fuzz/fuzz_targets/iobuf.rs`.
+Divergences found so far are in `runtime/fuzz/FINDINGS.md`. `storage_faults` is specified in
+[Target `storage_faults`](#target-storage_faults). Its input is the intents
+file `runtime/fuzz/INTENTS-storage-faults.md`.
 
 ## Goals
 
@@ -19,18 +22,30 @@ This iteration adds two targets that aim at low-hanging bugs:
 - `iobuf`: drive `IoBufMut`, `IoBuf`, `IoBufs`, `IoBufsMut` and `Builder` against a `Vec<u8>`
   model. This is the densest `unsafe` code in the crate (`runtime/src/iobuf/`) and has no fuzzer.
 
+The next iteration adds a third target, for faults and recovery (Future work rows 5 and 6):
+
+- `storage_faults`: run one sequence of `Storage`/`Blob` operations on the deterministic runtime
+  only, with injected operation failures and simulated crashes, and judge every run against a
+  model of the public `Storage` and `Blob` contract. Its goals are SF-G1 to SF-G4 in
+  [Target `storage_faults`](#target-storage_faults).
+
 ## Non-goals for this iteration
 
 - The `iouring` runtime, its storage and network, and its internal state machines.
 - The network traits (`Network`, `Listener`, `Sink`, `Stream`).
 - Oracles for the existing paged-buffer targets (`buffer`, `blob_integrity`).
-- Any change under `runtime/src`. Both targets use public API only.
+- Any change under `runtime/src`, including `cfg(fuzzing)` hooks. Every target uses public API
+  only.
+- Fault and crash testing on tokio. `storage_faults` runs the deterministic runtime only.
+- Concurrency in storage, and crashes inside an operation. Operations are sequential and a crash
+  happens between two operations.
+- A strict mode that disables the allowlist of `storage_differential`.
 
 Every choice that narrows coverage is listed, with a way to lift it, in [Future work](#future-work).
 
 ## Placement and build
 
-Both targets live in `runtime/fuzz` next to `buffer`, `blob_integrity` and `blob_creation`.
+All three targets live in `runtime/fuzz` next to `buffer`, `blob_integrity` and `blob_creation`.
 
 slow.yml fuzzes every `runtime/fuzz` target whose `required-features` are on by default
 (`.github/scripts/fuzz_targets.py`). The new targets run on fuzzcorp only, so each is gated by a
@@ -40,8 +55,9 @@ non-default feature:
 [features]
 default = []
 storage-differential = []
+storage-faults = []
 iobuf = []
-runtime-all = [ "iobuf", "storage-differential" ]
+runtime-all = [ "iobuf", "storage-differential", "storage-faults" ]
 
 [[bin]]
 name = "storage_differential"
@@ -51,6 +67,14 @@ test = false
 doc = false
 
 [[bin]]
+name = "storage_faults"
+path = "fuzz_targets/storage_faults.rs"
+required-features = ["storage-faults"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "iobuf"
 path = "fuzz_targets/iobuf.rs"
 required-features = ["iobuf"]
@@ -58,12 +82,15 @@ test = false
 doc = false
 ```
 
+The `storage-faults` feature and the `storage_faults` entry are added when the target is built.
+
 Build and run (toolchain pin read from `nightly` under `[tools]` in `.github/toolchains.toml`,
 currently `nightly-2026-11-12`):
 
 ```bash
 cargo +nightly-2026-11-12 fuzz build --fuzz-dir runtime/fuzz --features runtime-all
 cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_differential
+cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults
 cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all iobuf
 ```
 
@@ -81,7 +108,9 @@ Environment:
   The harness also assumes the usual 255-byte limit per path component. A filesystem with a
   smaller limit (eCryptfs allows 143) gives the same false reports for the long-but-valid names.
 
-Platforms: both targets build and smoke-run on macOS. Campaigns run on Linux through fuzzcorp,
+`storage_faults` uses no environment variable and no file system.
+
+Platforms: all three targets build and smoke-run on macOS. Campaigns run on Linux through fuzzcorp,
 deployed by the maintainer. Hangs are left to libFuzzer's `-timeout`.
 
 ## Shared input decoding
@@ -98,6 +127,7 @@ operation sequences:
 
 The stream is always `STREAM_BYTES` long: input past it is ignored, so the entropy always comes
 from the same stream bytes. Both targets share this decoder (`decode` in `runtime/fuzz/src/lib.rs`).
+`storage_faults` uses the same decoder, unchanged.
 
 Both targets run under `deterministic::Runner`. The tokio side of `storage_differential` uses no
 RNG: everything it does comes from the decoded sequence.
@@ -424,6 +454,889 @@ both outcomes are errors:
 - `remove(partition, Some(name))` on a missing partition fails with `PartitionMissing` on memory and
   `BlobMissing` on tokio. Both are errors, so this is not reported unless one side succeeds.
 
+## Target `storage_faults`
+
+Status: built. The input is `runtime/fuzz/INTENTS-storage-faults.md`. A number in
+square brackets, such as [11], names the intent a rule comes from. Ids in this part: `SF-G` goals,
+`SF-R` requirements, `SF-I` invariants, `SF-X` exceptions to API coverage, `SF-C` choices the spec
+writer made.
+
+No rule waits for a decision. The two questions the first draft raised were decided on
+2026-11-18, and intents 13 and 17 hold the answers: a failed fused write has two kinds (SF-R16,
+SF-R17), and the trigger of RF-2 is a named coverage exception (SF-X5).
+
+### Definitions
+
+| Term | Meaning |
+|---|---|
+| Session | One start of a `deterministic::Runner`. The first session starts from a `deterministic::Config`, every later one from the checkpoint of the session before it |
+| Crash | The end of a session that another session follows. The root task returns with every handle dropped, `start_and_recover` returns the checkpoint, and the next session starts with `deterministic::Runner::from(checkpoint)`. The runtime decides at this point what happens to every unsynced mutation (`runtime/src/deterministic.rs:689-695`) |
+| Baseline operation | One of the four fixed operations every run starts with (SF-R3) |
+| Input operation | An operation decoded from the fuzz input |
+| Verification operation | An open, read or scan that the oracle issues by itself, to learn the state. It is never decoded from the input |
+| Armed | An input operation is armed when the input gives it a fault (SF-R6) |
+| Fault window | The time during which the storage fault configuration differs from `FaultConfig::default()`. It covers exactly one armed input operation |
+| Injected failure | `Err(Error::Io(_))` returned by an armed input operation |
+| Image | A length and that many bytes |
+| Blob generation | One life of a (partition, name) pair: from the open that creates the blob to the remove that unlinks it. A name that is created again starts a new generation |
+| View | The image that reads through one handle must return |
+| Base | The image of a blob generation at its last durability cut |
+| Log | The mutations issued to a blob generation since its last durability cut, in issue order |
+| Durability cut | An event after which the base equals the view and the log is empty |
+| Reachable image | An image in `Reach_crash` or `Reach_reopen` of a base and a log (see Model) |
+| Seam | The point where the harness receives the `Storage` it drives (SF-R20). A negative control plants its fault there |
+
+### Goals
+
+- **SF-G1.** Find faults-and-recovery bugs in the runtime's own storage contract: what `Storage`
+  and `Blob` promise when operations fail and when the process crashes, with no consumer on top
+  [1, 3].
+- **SF-G2.** Cover every public deterministic `Storage` and `Blob` entry point, both sync styles,
+  and all seven fault kinds of the deterministic fault injection, in one run that combines
+  failures and crashes [4, 5].
+- **SF-G3.** Every failure replays: a fixed input gives the same run every time [20].
+- **SF-G4.** A run is short enough for FuzzCorp: 50 ms per input as a measured target [21].
+
+### Execution
+
+- **SF-R1.** The target MUST run on the deterministic runtime only. It MUST use public API only
+  and MUST NOT change anything under `runtime/src` [2, 18].
+- **SF-R2.** Session 0 MUST start from
+  `deterministic::Config::new().with_rng(FuzzRng::from(entropy))` with
+  `with_storage_fault_config(FaultConfig::default())`, where `entropy` comes from the shared
+  decoder. Faults MUST be armed through `Context::storage_fault_config()`
+  (`runtime/src/deterministic.rs:1101`) and MUST NOT be set in the start configuration.
+- **SF-R3.** A run MUST be, in this order:
+  1. The four baseline operations, unarmed: `Open` slot 0 on partition `p0`, name `a`, versions
+     `0..=0`; `Write` slot 0, offset 0, `BASELINE_LEN` = 64 bytes in one chunk, no `SYNC`;
+     `ReadAt` slot 0, offset 0, 64 bytes; `Sync` slot 0. They MUST be judged like every other
+     operation. Slot 0 stays open for the input operations.
+  2. The input operations, in order. A `Crash` operation is a crash. At most
+     `MAX_EXTRA_CRASHES` = 3 `Crash` operations take effect; a later one MUST be skipped.
+  3. The mandatory crash, after the last input operation.
+  4. The final check: the recovery verification (SF-R10) of the last session. Then the run ends.
+
+  So a run has between 2 and 5 sessions and between 1 and 4 crashes [8]. A session that follows a
+  crash MUST start with the recovery verification. Its input operations MAY be armed again [8].
+- **SF-R4.** Operations MUST be sequential: each call MUST be awaited to its result before the
+  next one starts. A crash MUST happen only between two operations [7]. All handles MUST be
+  dropped before the root task of a session returns.
+- **SF-R5.** The empty input (no bytes) MUST decode to no input operation. Its run is the four
+  baseline operations, the mandatory crash and the final check, with no armed operation and no
+  fault window. This is the full no-fault cycle: open, write, read, sync, crash and restart, scan,
+  reopen and read [10]. Every other input, also one shorter than `SEED_BYTES`, MUST decode
+  through the shared decoder to at least one input operation and run a whole run: the input adds
+  operations and fault windows on top of the same cycle [10]. The baseline operations come first,
+  so no input gives a run without operations.
+
+### Operation set
+
+No input operation for the empty input, and between 1 and `MAX_OPS` = 48 input operations for
+every other input (SF-R5). Handles live in `SLOTS` = 4 slots, each
+held in an `Arc`, so every blob call goes through the `Arc<B>` forwarding implementation
+(`runtime/src/lib.rs:1004`). An operation that names an empty slot is skipped. `Open` on an
+occupied slot first drops the old handle, also when the open then fails.
+
+| Operation | Parameters | Call | Fault it may carry |
+|---|---|---|---|
+| `Open` | slot, partition, name, version range `lo..=hi` with `lo <= hi` drawn from `{0, 1, 2}` | `open_versioned` | open |
+| `OpenDefault` | slot, partition, name | `open` | open |
+| `Write` | slot, offset, 1 to 4 chunks with a total of 0 to `MAX_WRITE` bytes, `SYNC`, `DONT_CACHE` | `write_at` | write; sync (only with `SYNC`) |
+| `ReadAt` | slot, offset, len, `DONT_CACHE` | `read_at` | read |
+| `ReadAtBuf` | slot, offset, len, extra capacity, chunk shape | `read_at_buf` (capacity always at least `len`) | read |
+| `ReadMany` | slot, 1 to `MAX_RANGES` ranges, `DONT_CACHE` | `read_many`, collected | read |
+| `StartReadMany` | slot, 1 to `MAX_RANGES` ranges, await or drop the handle | `start_read_many` | read |
+| `Resize` | slot, len | `resize` | resize |
+| `Sync` | slot | `sync` | sync |
+| `StartSync` | slot, await or drop the handle | `start_sync` | sync |
+| `Remove` | partition, optional name | `remove` | remove |
+| `Scan` | partition | `scan` | scan |
+| `Drop` | slot | drop the handle | none |
+| `Crash` | none | end the session (SF-R3) | none |
+
+Written bytes come from the shared `value(index, position)`: a function of the operation's index
+in the run (baseline operations count) and the byte position, never zero.
+
+- **SF-R30.** The bytes of a failing write MUST differ from the view. For a `Write` that carries
+  a write fault with `failure_rate` 1, the byte submitted at each position below the view length
+  MUST differ from the view's byte there: where `value(index, position)` equals the view's byte,
+  the harness MUST submit `value(index, position) % 255 + 1` instead, which is also never zero.
+  So after the failure the positions that changed are exactly the positions the injector kept
+  (SF-R16).
+
+### Names
+
+- Partitions: `p0`, `p1`. Edge partitions, 1 draw in 16: the empty string and `a/b`. Both are
+  invalid: an open, remove or scan on them must fail (SF-I3c to SF-I3e).
+- Blob names: `a`, `b`, `c`.
+
+At most 6 blobs are live at one time.
+
+### Sizes
+
+All bounds are constants at the top of the harness. None depends on time [21].
+
+| Constant | Value | Bounds |
+|---|---|---|
+| `MAX_OPS` | 48 | input operations per input (0 for the empty input, else 1 to 48) |
+| `MAX_EXTRA_CRASHES` | 3 | `Crash` operations that take effect, on top of the mandatory crash |
+| `SLOTS` | 4 | open handles |
+| `MAX_OFFSET` | 2048 | offset of a `Write` |
+| `MAX_WRITE` | 256 | total bytes of a `Write` |
+| `MAX_SIZE` | 2304 (`MAX_OFFSET + MAX_WRITE`) | length of a `Resize`, and so the length of every blob |
+| `MAX_READ` | 512 | `len` of a read or of one range |
+| `MAX_RANGES` | 4 | ranges of `ReadMany` and `StartReadMany` |
+| `BASELINE_LEN` | 64 | bytes of the baseline write |
+
+- Offsets and lengths are biased toward 0, 1, the bound, and the slot's current view length plus
+  or minus a few bytes.
+- Read offsets go up to `MAX_SIZE + 8`. Reads may also use the overflow-edge offsets `u64::MAX`,
+  `i64::MAX` and `i64::MAX - 8` with a length of 1 to 16 bytes. These must fail.
+- An empty `Write` without `SYNC` has its offset lowered to the view length when it is larger, so
+  it never starts past the end of the blob (SF-X5) [17].
+
+The bounds follow from the 50 ms target. They are derived, and how they are checked, in
+[Run time](#run-time).
+
+### Faults
+
+- **SF-R6.** A fault is one of the values below. Just before an armed input operation the harness
+  MUST write the fault into the configuration returned by `Context::storage_fault_config()`.
+  When the operation has returned, the harness MUST write `FaultConfig::default()` back. No other
+  code MAY change the configuration [9].
+
+  | Fault | Configuration | Carried by |
+  |---|---|---|
+  | open | `open_rate` = 1 | `Open`, `OpenDefault` |
+  | read | `read_rate` = 1 | `ReadAt`, `ReadAtBuf`, `ReadMany`, `StartReadMany` |
+  | sync | `sync_rate` = 1 | `Sync`, `StartSync`, and a `Write` with `SYNC` |
+  | remove | `remove_rate` = 1 | `Remove` |
+  | scan | `scan_rate` = 1 | `Scan` |
+  | write | `write_rate = WriteConfig { failure_rate, retention_rate, mode }` with `failure_rate` 0 or 1, `retention_rate` one of 0, 25, 50, 75, 100 percent, `mode` `Prefix` or `Subset` | `Write` |
+  | resize | `resize_rate = ResizeConfig { failure_rate, partial_rate }` with `failure_rate` 50 or 100 percent and `partial_rate` 0, 50 or 100 percent | `Resize` |
+
+  A `Write` with `SYNC` MAY carry a write fault, a sync fault, or both.
+- **SF-R7.** The harness MUST treat a write fault with `failure_rate` 0 as the crash policy of a
+  write that succeeds, not as a failure. The backend keeps bytes of an unsynced write at a crash
+  only when the write was issued under a `WriteConfig` with a retention rate above zero
+  (`runtime/src/storage/faulty.rs:342-349`, `867-879`), so this fault lets the write be torn at a
+  later crash. The same holds for the resize fault at 50 percent: the resize may succeed, and a
+  success may be kept at a later crash (`faulty.rs:352-363`).
+- **SF-R8.** Decoding MUST keep the success path common: an operation that may carry a fault MUST
+  carry one in 1 draw of 4, and a `Write` that carries a write fault MUST have `failure_rate` 1
+  in 1 draw of 2. The two draws MUST be made by two public samplers of the library module
+  (SF-R19), in the style of the samplers of `storage_differential`, so that a test can call them
+  with fixed bytes:
+  - `sample_armed(u: &mut Unstructured<'_>) -> arbitrary::Result<bool>` MUST draw one selector
+    with `u.int_in_range(0..=3)`, MUST make no other draw, and MUST return `true` exactly when
+    the selector is 3. The decoder MUST call it once for every decoded operation that may carry
+    a fault (the column "Carried by" of SF-R6), and the operation MUST carry a fault exactly
+    when it returns `true`.
+  - `sample_write_fails(u: &mut Unstructured<'_>) -> arbitrary::Result<bool>` MUST draw one
+    selector with `u.int_in_range(0..=1)`, MUST make no other draw, and MUST return `true`
+    exactly when the selector is 1. The decoder MUST call it once for every `Write` that carries
+    a write fault, and that fault MUST have `failure_rate` 1 exactly when it returns `true`, and
+    0 otherwise.
+
+  The decoder MUST NOT decide either point in any other way. Fixed bytes: on
+  `Unstructured::new(&[b])`, `sample_armed` returns `false` for `b` = 0, 1 and 2 and `true` for
+  `b` = 3; `sample_write_fails` returns `false` for `b` = 0 and `true` for `b` = 1; each call
+  reads the one byte. On `Unstructured::new(&[])` both return `false`, so a decoder that ran out
+  of bytes arms nothing. This follows from `Unstructured::int_in_range` of `arbitrary` 1.4.2:
+  for these ranges it reads one byte and reduces it modulo the size of the range, and with no
+  byte left it gives the start of the range.
+
+  History: this spec was accepted on 2026-11-18 with the two rates only. The samplers and
+  their fixed bytes were added the same day, because the acceptance list could not name a fixed
+  input for the two rates (AT-006, "spec unclear"). The rates did not change, and nothing that
+  was detected before is lost (SF-C11).
+- **SF-R9.** Every verification operation MUST run while the configuration equals
+  `FaultConfig::default()`. The configuration MUST also equal the default at every crash, so
+  every session starts without faults (the checkpoint carries the configuration,
+  `runtime/src/deterministic.rs:694`) [9].
+- **SF-R10.** Recovery verification. At the start of every session after a crash, before any
+  input operation, the oracle MUST:
+  1. scan `p0` and `p1`. For a partition the model holds, the scan must succeed and return
+     exactly the model's live names of that partition, each once. For a partition the model does
+     not hold, the scan may fail; when it succeeds it must return no name (all SF-I14b);
+  2. open every live name with `open_versioned(partition, name, 0..=2)`, in the order of
+     (partition, name). The open must succeed (SF-I14b). The checks after an open of SF-R11 run.
+     The image must be in `Reach_crash` of the generation's base and log; SF-R13a names the
+     invariant when it is not (SF-I7 to SF-I11, SF-I13). Then the base becomes that image, the
+     log becomes empty, the history of SF-R13a is dropped, and the handle is dropped.
+- **SF-R11.** Verification reads, and their bounds. A verification read MUST NOT be longer than
+  `MAX_SIZE` and MUST NOT start past `MAX_SIZE`. A size or length that the storage reports MUST
+  NOT be used for a read, a conversion or an allocation before it was checked against
+  `MAX_SIZE`. The oracle MUST learn a blob's state in these three ways, and SF-R31 says which
+  invariant each difference names:
+  1. Checks after an open, for every successful open (baseline, input or verification) with
+     returned size `n`, in this order: the version (SF-I3f for a new blob, SF-I3g for an existing
+     one); `n` is at most `MAX_SIZE`, else the run fails at once, before any read (SF-I18a); a
+     1-byte read at `n` fails and, when `n > 0`, a 1-byte read at `n - 1` succeeds (SF-I18b); for
+     a new blob, `n` is 0 (SF-I3h); for an existing blob with `n > 0`, one read of `n` bytes at 0
+     succeeds (SF-I18b) and gives the image (SF-I12 in a session, SF-R10 at recovery).
+  2. Length search, after an injected failure of a `Write` to the range `o..o+k` or of a `Resize`
+     from `a` to `b`. Let `u` be the larger of the old length and `o + k`, or the larger of `a`
+     and `b`; `u` is at most `MAX_SIZE`. A 1-byte read at `u` must fail. Then a binary search
+     over `0..=u` with 1-byte reads finds the length (a 1-byte read at `x` succeeds exactly when
+     `x` is below the length). The search MUST NOT use more than 12 reads. Then one read gives
+     the whole blob. So this check costs at most 14 reads.
+  3. Unchanged check, after an injected failure of a `Sync`, an awaited `StartSync` or a read
+     operation: a 1-byte read at the view length must fail, a 1-byte read just below it must
+     succeed, and one read of the whole view must return it. After an injected failure of an
+     `Open`, `Remove` or `Scan` on a valid partition the oracle MUST scan that partition
+     instead; the scan follows the rules of SF-R10 item 1.
+
+### Model
+
+The model is the public contract of `Storage` and `Blob` (`runtime/src/lib.rs:685-1001`), with the
+failure and crash rules of the intents on top. It holds:
+
+- which partitions exist, and the live names of each;
+- for each blob generation: its version, its base, its log, and whether it was removed; and,
+  only to name a violated invariant, its history (SF-R13a);
+- for each open handle: its generation, its view, and whether it is still checked.
+
+A live generation has at most one open handle (`Storage::open_versioned`, "Uniqueness"). The
+namespace part and the view transitions come from the shared model (SF-R21). The base, the log and
+the two reach sets are added by this target [19].
+
+#### Log entries and reach sets
+
+| Entry | Recorded for | Replay |
+|---|---|---|
+| `Torn(offset, bytes)` | a successful `Write` without `SYNC`; a fused `Write` that failed by a sync fault (SF-R17) | any subset of the bytes is written, from none to all |
+| `Kept(offset, bytes, mask)` | a successful `Write` with `SYNC`, where the mask marks every byte; a `Write` that failed by a write fault, as one entry for the whole write, where the mask marks the positions that changed (SF-R16) | every marked byte is written |
+| `MaybeResize(len)` | a successful `Resize` | applied or skipped |
+| `ForcedResize(len)` | the intermediate length of a failed `Resize` (SF-R18) | applied |
+
+Replay rules:
+
+- Writing a set of bytes at their positions: when the highest written position is at or past the
+  end of the image, the image grows to that position plus one. Every position that enters the
+  image without being written is zero.
+- A resize cuts the image to `len`, or extends it to `len` with zeros.
+
+A write or a resize adds at most one entry to a log, whatever its fault and its result.
+
+`Reach_crash(base, log)` is the set of images that replaying the whole log over the base can give,
+entry by entry in issue order, over every combination of choices [11]. `Reach_reopen(base, log)`
+is the same set with one more freedom: each `ForcedResize` may also be skipped (SF-C4). So
+`Reach_crash` is a subset of `Reach_reopen`.
+
+- **SF-R12.** The oracle MUST NOT use the retention rate or mode of a write to narrow the set. An
+  image MUST be accepted exactly when it is in the reach set [11].
+- **SF-R13.** The membership test MUST be exact: it MUST accept every image in the set and reject
+  every other image. It MUST be a public function of the library (SF-R19), and the regression
+  suite checks it against a brute-force enumeration (SF-R23). Its input is bounded by the sizes
+  above; its cost per call depends on the algorithm, which is the builder's (Run time). A note
+  for the builder, not a rule: for a fixed sequence of lengths after each entry, the positions
+  are independent, so a search over (entry, length) pairs with a check per position is enough.
+- **SF-R13a.** Naming the invariant a crash image breaks. The model MUST keep a history for each
+  generation: every base and log that a durability cut closed since the generation was created
+  or last recovered, with the kind of the cut (sync or reopen), and for each `Kept` entry whether
+  a failed write or a `SYNC` write made it. The history is used only here. When the image found
+  by the recovery verification is not in `Reach_crash(base, log)`, the run MUST fail, and the
+  violated invariant MUST be the first of these that explains the image. Each step keeps the
+  relaxations of the steps before it:
+  1. SF-I10, when the image is reachable once every `ForcedResize` may also be skipped;
+  2. SF-I9, when it is reachable once every `Kept` entry of a failed write replays as `Torn`;
+  3. SF-I8, when it is reachable once every `Kept` entry of a `SYNC` write replays as `Torn`;
+  4. SF-I7, when it is reachable once the sync cuts after the last reopen cut (or, with no
+     reopen cut, since the creation or last recovery) are undone: the replay starts from the
+     base before the first of them and runs the logs they closed, then the current log;
+  5. SF-I11, when it is reachable once every cut since the creation or last recovery is undone
+     the same way;
+  6. SF-I13 otherwise.
+
+  The steps run only after a violation, so a correct run pays for one membership test per blob.
+
+#### Transitions of operations that succeed
+
+| Event | Effect on the model |
+|---|---|
+| `Open` or `OpenDefault` of a name that is not live | A new generation. The returned version must lie in the requested range (`0` for `OpenDefault`) and is recorded as the generation's version (SF-I3f); the contract does not say which version of the range a new blob gets. The blob must be empty (SF-I3h). Base and view empty, log empty. The partition exists from now on |
+| `Open` or `OpenDefault` of a live name with no open handle (a reopen) | The returned version must be the recorded one (SF-I3g), and the returned size must be the blob's length (SF-I18). The image read after the open (SF-R11) must be in `Reach_reopen` (SF-I12). Then a durability cut: base and view become that image, the log becomes empty [12] |
+| `Write`, not empty, without `SYNC` | The view takes the bytes, growing with a zero gap when needed. The log gets `Torn` |
+| `Write`, not empty, with `SYNC` | The view takes the bytes. The log gets `Kept` [15] |
+| `Write`, empty | Nothing |
+| `Resize(len)` | The view is cut or extended with zeros. The log gets `MaybeResize(len)` |
+| `Sync`; `StartSync` whose awaited handle returns `Ok`; `StartSync` that is not armed and whose handle is dropped (SF-C2) | A durability cut: the base becomes the view, the log becomes empty. This also holds after an earlier failed sync, with no rewrite [15] |
+| `Drop`, and the drop done by `Open` on an occupied slot | The handle and its view are gone. Base and log stay |
+| `Remove` of a name | The name is unlinked and its generation ends: base and log are dropped. Open handles of that generation stay, with their views [16] |
+| `Remove` of a partition | Every name of the partition is unlinked as above, and the partition no longer exists [16] |
+| `Remove` of a name or a partition the model does not hold, on a valid partition | It may succeed or fail: the contract promises neither. Nothing changes either way |
+| `Scan` | Nothing. A scan of a valid partition the model does not hold may fail, or succeed with no name |
+| Crash | For every live generation the image found by the recovery verification must be in `Reach_crash`. Then a durability cut with that image. Every handle is gone |
+
+Reads never change the model. Their rules are SF-I1 and SF-I2.
+
+A handle whose generation was removed stays checked for reads (SF-I15). The first mutation through
+it (`Write`, `Resize`, `Sync`, `StartSync`) makes it unchecked: the contract leaves such a
+mutation unspecified (`runtime/src/lib.rs:794-795`), so its result and every later result through
+that handle are not judged, except the length of returned buffers (SF-X8).
+
+#### Transitions of injected failures
+
+- **SF-R14.** An armed operation that returns `Err(Error::Io(_))` MUST be treated as an injected
+  failure and follow the rules below. An armed operation that returns anything else MUST be
+  judged as if it were not armed (SF-C7).
+- **SF-R15.** After an injected failure of `Open`, `OpenDefault`, `ReadAt`, `ReadAtBuf`,
+  `ReadMany`, `StartReadMany` (awaited), `Sync`, `StartSync` (awaited), `Remove` or `Scan`, the
+  oracle MUST check that nothing the storage shows has changed: no view, no length, no name and
+  no partition (SF-I6) [15, 16]. The model MUST leave the base and the log as they were. For the
+  base and the log this is an assumption, not a check: a failure that performs its durable effect
+  and then returns the error (a sync that syncs, an open that takes its reopen cut) only removes
+  crash choices, and every image it leaves is still in the reach set. The target cannot detect it
+  ([Limits of the proof](#limits-of-the-proof)). An armed `StartSync` or `StartReadMany` whose
+  handle is dropped MUST change nothing in the model, and for `StartSync` the model MUST NOT take
+  a durability cut.
+- **SF-R16.** An injected failure of a `Write` that carries a write fault with `failure_rate` 1.
+  The length search and whole-blob read of SF-R11 give the new view. It MUST satisfy SF-I4a to
+  SF-I4c. When at least one position changed, the whole write MUST be recorded as one
+  `Kept(offset, bytes, mask)` entry whose mask marks the positions that changed: these bytes are
+  durable at once and get no later keep-or-lose choice. This is the first kind of failed write
+  of [13], the write fault. By SF-R30 every submitted byte differs from the byte it would
+  replace, and a byte past the old end is never zero, so the changed positions are exactly the
+  kept positions and no kept byte is left out of the log.
+- **SF-R17.** An injected failure of a `Write` with `SYNC` that carries a sync fault and no write
+  fault with `failure_rate` 1. This is the second kind of failed write of [13], the sync fault in
+  a fused write: all bytes are applied, none is durable, and the caller still gets an error
+  (`runtime/src/storage/faulty.rs:854-865`; unit tests at `faulty.rs:2035` and `2479`). The
+  length search and whole-blob read of SF-R11 give the new view. It MUST satisfy SF-I4a to
+  SF-I4c, and every byte in the write's range MUST be the submitted byte (SF-I4d). The log MUST
+  get `Torn(offset, bytes)` for the whole write: these bytes may tear at a crash like an unsynced
+  write. It is a failed write in the sense of [15]. The oracle checks that the bytes are applied.
+  It cannot check that none is durable: a fused write that made its bytes durable and then
+  returned the error leaves an image that `Torn` also allows
+  ([Limits of the proof](#limits-of-the-proof)).
+- **SF-R18.** An injected failure of a `Resize`. The length search and whole-blob read of SF-R11
+  give the new view. It MUST satisfy SF-I5. When the length changed, the log MUST get
+  `ForcedResize(new length)` [14].
+
+### Oracle
+
+A run fails on the first violation of an invariant below. There is no allowlist [17]:
+
+- **SF-R22.** `storage_faults` MUST NOT have an allowlist. RF-1 to RF-3 stay in `storage_differential`
+  only. Any exception needs a separate decision and a narrow entry in this spec first. The
+  one decision so far is not an allowlist entry: the trigger of RF-2 is never issued (SF-X5) [17].
+
+Behaviour that is not judged, because the contract leaves it open:
+
+- A zero-length read that starts past the end of the blob (the trigger of RF-1).
+- Results through an unchecked handle (SF-X8).
+- Which error variant an operation returns when the model expects a failure, beyond the two
+  documented variants of SF-I3a and SF-I3b (Future work 9).
+- Whether a remove of a target the model does not hold, or a scan of a partition the model does
+  not hold, succeeds or fails on a valid partition. `Storage::remove` and `Storage::scan` promise
+  no error there (`runtime/src/lib.rs:778-805`). Only invented names and a changed namespace are
+  violations.
+- Which version of the requested range a new blob gets. The contract does not choose one
+  (`runtime/src/lib.rs:756-759`).
+- Whether an armed operation fails (SF-C7).
+
+### Invariants
+
+Each row is one invariant with exactly one check. Rows that share a number come from one rule and
+differ by a letter; a number without a letter, such as SF-I4, means all its rows. A violation
+names the row that failed (SF-R19).
+
+- **SF-R31.** Which row a difference names. SF-I1a, SF-I1b, SF-I14a and SF-I16 MUST be measured
+  at baseline and input operations only. A verification operation MUST NOT be judged by those
+  rows: a difference it shows MUST name the row of the check it belongs to, as one observation of
+  that check:
+  1. the checks after an open (SF-R11 item 1) name, in this order, SF-I3f or SF-I3g, SF-I18a,
+     SF-I18b (also when the whole-blob read fails), SF-I3h, and then SF-I12 for a reopen in a
+     session or, at recovery, the crash row that SF-R13a gives;
+  2. the length search and whole-blob read after an injected failed `Write` or `Resize` name the
+     first row of SF-I4 or SF-I5 that the observed length and bytes break; a probe or read that
+     contradicts the search (the read at the bound succeeds, the whole-blob read fails) names
+     SF-I4c or SF-I5a;
+  3. the unchanged check names SF-I6b or SF-I6c for any difference: a probe result, a read error
+     or a byte;
+  4. the scan after an injected failed open, remove or scan names SF-I6a, SF-I6d or SF-I6e for any
+     difference: a scan that fails on a partition the model holds, or names that differ;
+  5. the scans and opens of the recovery verification name SF-I14b: a scan that fails on a
+     partition the model holds, names that differ, or a live name that does not open.
+- **SF-R32.** When a row counts as measured. A row MUST enter `measured` (SF-R19) only when the
+  condition of its "Measured when" cell occurred in the run and the row's check ran on it and
+  passed. A run in which the condition never occurs has not measured the row, and MUST NOT count
+  it as passed. In particular a recovery verification alone measures none of SF-I7 to SF-I13:
+  each needs the history its cell names.
+
+| Id | What must hold | Measured when | Source | Class |
+|---|---|---|---|---|
+| SF-I1a | A read through a checked handle that succeeds returns the view's bytes of its range | every unarmed baseline or input read operation through a checked handle of a live generation that succeeds | `Blob` "Concurrency" (`lib.rs:915-921`) | `read_bytes` |
+| SF-I1b | A read of 1 byte or more through a checked handle succeeds exactly when it ends at or before the view length. A zero-length read that starts at or before the view length succeeds. A read at an overflow-edge offset fails | every unarmed baseline or input read operation through a checked handle of a live generation | `Blob::read_at`: "Read exactly `len` bytes" (`lib.rs:937-945`) | `read_len` |
+| SF-I2a | A successful `read_at_buf` returns the caller's buffers: capacity, chunk shape and start addresses, as in `storage_differential` | every unarmed `ReadAtBuf` that succeeds | `Blob::read_at_buf` (`lib.rs:923-935`) | `buffer_layout` |
+| SF-I2b | `read_many` yields every range index exactly once and no other index, unless it yields an error | every unarmed `ReadMany` | `Blob::read_many` (`lib.rs:947-958`) | `read_many` |
+| SF-I2c | An awaited `start_read_many` that succeeds returns exactly one buffer per range | every unarmed `StartReadMany` whose handle is awaited and succeeds | `Blob::start_read_many` (`lib.rs:961-975`) | `read_many` |
+| SF-I3a | An open that is valid in every other way (valid partition, recorded version inside the range) returns `BlobAlreadyOpen` while a handle of the live generation is alive | every unarmed open of a live name on a valid partition while a handle of its generation is alive and its recorded version is inside the range | `open_versioned` "Uniqueness" (`lib.rs:740-747`) | `open_error` |
+| SF-I3b | An open of a live name whose recorded version is outside the requested range returns `BlobVersionMismatch` | every unarmed open of a live name whose recorded version is outside the requested range | `open_versioned` "Versions" (`lib.rs:756-759`) | `open_error` |
+| SF-I3c | An open on an invalid partition fails | every unarmed open on an invalid partition | `Storage` "Partition Names" (`lib.rs:711-718`) | `open_error` |
+| SF-I3d | A remove on an invalid partition fails | every unarmed `Remove` on an invalid partition | `Storage` "Partition Names" | `partition_name` |
+| SF-I3e | A scan on an invalid partition fails | every unarmed `Scan` on an invalid partition | `Storage` "Partition Names" | `partition_name` |
+| SF-I3f | A blob opened under a name that is not live gets a version inside the requested range (`0` for `OpenDefault`) | every successful open of a name that is not live | `open_versioned` "Versions" | `create` |
+| SF-I3g | An open of a live name returns the version recorded when the generation was created | every successful open of a live name: a reopen in a session, and the opens of the recovery verification | `open_versioned` "Versions"; "An Ok result indicates the blob is durably created" (`lib.rs:749-751`) | `open_version` |
+| SF-I3h | A blob opened under a name that is not live is empty, whatever an earlier generation of that name held | every successful open of a name that is not live | `Storage::remove`: a removed name opens as "a new, independent blob" (`lib.rs:790-792`) | `create` |
+| SF-I4a | After an injected failed `Write`: every byte below the old length and outside the write's range is unchanged | every injected failed `Write`, on the length search and whole-blob read after it (SF-R11) | [13], `Blob` "Durability" (`lib.rs:909-913`) | `failed_write` |
+| SF-I4b | After an injected failed `Write`: every byte inside the write's range is the submitted byte, or the old byte when the position is below the old length, or zero when the position is at or past the old length | every injected failed `Write`, on the same reads | [13] | `failed_write` |
+| SF-I4c | After an injected failed `Write`: the length is the old length, or the highest position that holds its submitted byte plus one when that is larger; every position at or past the old length that does not hold its submitted byte is zero; the blob is never longer than the write's end or the old length | every injected failed `Write`, on the same reads | [13] | `failed_write` |
+| SF-I4d | After a sync fault in a fused write (SF-R17): every byte in the write's range is the submitted byte | every injected failed fused `Write` with a sync fault (SF-R17), on the same reads | [13], second kind | `failed_write` |
+| SF-I5a | After an injected failed `Resize` from length `a` to target `b`: the length is `a`, or one length strictly between `a` and `b` | every injected failed `Resize`, on the length search and whole-blob read after it (SF-R11) | [14] | `failed_resize` |
+| SF-I5b | After an injected failed `Resize`: every byte below the smaller of the old and the new length is unchanged | every injected failed `Resize` where the smaller of the old and the new length is above 0 | [14] | `failed_resize` |
+| SF-I5c | After an injected failed `Resize`: every byte added is zero | every injected failed `Resize` that left the blob longer than before | [14] | `failed_resize` |
+| SF-I6a | An injected failure of an open changes nothing the storage shows: no name, no partition, no blob | every injected failed open on a valid partition, on the scan after it (SF-R11) | SF-C3 | `failed_op_effect` |
+| SF-I6b | An injected failure of a read operation changes nothing the storage shows: the length and bytes of the view are the same | every injected failed read operation, on the unchanged check after it (SF-R11) | SF-C3 | `failed_op_effect` |
+| SF-I6c | An injected failure of a `Sync` or of an awaited `StartSync` changes nothing the storage shows: the length and bytes of the view are the same. Whether it made data durable cannot be seen (SF-R15) | every injected failed `Sync` or awaited `StartSync`, on the unchanged check after it | [15], SF-C3 | `failed_op_effect` |
+| SF-I6d | An injected failure of a remove changes nothing the storage shows: the names are the same | every injected failed `Remove` on a valid partition, on the scan after it | [16] | `failed_op_effect` |
+| SF-I6e | An injected failure of a scan changes nothing the storage shows: the names are the same | every injected failed `Scan` on a valid partition, on the scan after it | SF-C3 | `failed_op_effect` |
+| SF-I7 | A completed sync is a durability cut: everything written and resized before it survives a crash, also when an earlier sync failed | the recovery verification of a generation whose history since its creation or last recovery holds a sync cut that closed a log with at least one entry | `Blob::sync` (`lib.rs:993`), [15] | `crash_image` |
+| SF-I8 | The bytes of a successful `Write` with `SYNC` survive a crash | the recovery verification of a generation whose log or history holds a `Kept` entry of a successful `SYNC` write | `WriteOptions::SYNC` (`lib.rs:859-863`), [15] | `crash_image` |
+| SF-I9 | The bytes a `Write` left in the view after a write fault survive a crash | the recovery verification of a generation whose log or history holds a `Kept` entry of a failed write with at least one marked byte | [13], first kind | `crash_image` |
+| SF-I10 | The intermediate length of a failed `Resize` is replayed at a crash | the recovery verification of a generation whose log or history holds a `ForcedResize` | [14] | `crash_image` |
+| SF-I11 | A successful reopen is a durability cut: the image read after the reopen survives a later crash, and no mutation issued before the reopen can change it at that crash | the recovery verification of a generation whose history holds a reopen cut | `Storage` "Durability" (`lib.rs:692-701`), [12] | `crash_image` |
+| SF-I12 | The image a reopen shows is in `Reach_reopen` | every successful reopen in a session of a generation whose log holds at least one entry, on the image read after it | `Blob`: "When a blob is dropped, any unsynced changes may be discarded" (`lib.rs:905-907`), SF-C5 | `reopen_image` |
+| SF-I13 | Unsynced mutations tear only by the replay rules: an image after a crash that no undoing of SF-I7 to SF-I11 explains is a violation of this row | the recovery verification of a generation whose log holds at least one `Torn` or `MaybeResize` entry | [11], `Blob` "Durability" | `crash_image` |
+| SF-I14a | A scan inside a session that succeeds returns exactly the model's live names of the partition, each once. For a partition the model does not hold it returns no name | every unarmed input `Scan` on a valid partition that succeeds | `Storage::scan` (`lib.rs:802-804`), [16] | `scan` |
+| SF-I14b | After a crash the namespace is the model's: a scan of a partition the model holds succeeds and returns exactly its live names, each once; a scan of a partition the model does not hold fails or returns no name; every live name opens. So every blob whose open returned `Ok` exists, and no blob whose remove returned `Ok` does | the scans and opens of every recovery verification | `open_versioned` "Durability" (`lib.rs:749-751`), `remove` (`lib.rs:782`), [16] | `crash_namespace` |
+| SF-I15 | A read through a handle opened before a remove of its blob follows SF-I1a and SF-I1b against that handle's view, unsynced bytes included | every unarmed read operation through a checked handle of a removed generation | `Storage::remove` "Read-after-remove" (`lib.rs:784-792`), [16] | `removed_read` |
+| SF-I16a | An unarmed open on a valid partition succeeds, unless SF-I3a or SF-I3b names an error | every unarmed baseline or input open on a valid partition for which SF-I3a and SF-I3b name no error | fuzzing guide: unexpected errors panic | `unexpected_error` |
+| SF-I16b | An unarmed `Write` through a checked handle of a live generation succeeds | every unarmed baseline or input `Write` through a checked handle of a live generation | same | `unexpected_error` |
+| SF-I16c | An unarmed `Resize` through a checked handle of a live generation succeeds | every unarmed `Resize` through a checked handle of a live generation | same | `unexpected_error` |
+| SF-I16d | An unarmed `Sync` through a checked handle of a live generation succeeds | every unarmed baseline or input `Sync` through a checked handle of a live generation | same | `unexpected_error` |
+| SF-I16e | The awaited handle of an unarmed `StartSync` through a checked handle of a live generation returns `Ok` | every unarmed awaited `StartSync` through a checked handle of a live generation | same | `unexpected_error` |
+| SF-I16f | An unarmed remove of a name or a partition the model holds succeeds | every unarmed `Remove` of a name or a partition the model holds | `Storage::remove` | `unexpected_error` |
+| SF-I16g | An unarmed scan of a partition the model holds succeeds | every unarmed input `Scan` of a partition the model holds | `Storage::scan` | `unexpected_error` |
+| SF-I17 | No panic, abort or sanitizer report | the whole run | fuzzing guide | none (the panic itself) |
+| SF-I18a | The size an open returns is at most `MAX_SIZE`. The check fails before any read or allocation that uses the size | every successful open, baseline, input or verification | `open_versioned` "Returns" (`lib.rs:768-770`); no operation of the run makes a longer blob | `open_size` |
+| SF-I18b | The size an open returns is the blob's length: a 1-byte read at the size fails, a 1-byte read just below it succeeds, and the read of the whole blob at that size succeeds | every successful open, on the two 1-byte reads and the whole-blob read after it (SF-R11) | `open_versioned` "Returns" | `open_size` |
+
+A read inside the view that fails is SF-I1b, not SF-I16. For a handle of a removed generation it is
+SF-I15.
+
+### Failure classes
+
+Each class panics from a `#[cold] #[inline(never)]` function named after it, and the message
+starts with the same `[class]` tag, as in `storage_differential`. The first violating operation
+decides the class. The class depends only on which check fired, never on data. The message gives
+the invariant id, the session, the operation index, the operation with its fault, the observation
+and the model state of the blob.
+
+| Class | Meaning | Invariants |
+|---|---|---|
+| `read_bytes` | A read returned bytes that differ from the view | SF-I1a |
+| `read_len` | A read succeeded past the view length, failed inside it, or returned the wrong length | SF-I1b |
+| `read_many` | `read_many` or `start_read_many` did not yield each range exactly once | SF-I2b, SF-I2c |
+| `buffer_layout` | `read_at_buf` did not return the caller's buffers | SF-I2a |
+| `open_error` | An open did not return the error the model names | SF-I3a to SF-I3c |
+| `partition_name` | A remove or scan on an invalid partition succeeded | SF-I3d, SF-I3e |
+| `create` | A new blob had a version outside the requested range, or was not empty | SF-I3f, SF-I3h |
+| `open_version` | An existing blob opened with a version other than the recorded one | SF-I3g |
+| `open_size` | An open returned a size above `MAX_SIZE`, or a size that is not the blob's length | SF-I18 |
+| `scan` | A scan inside a session returned names that differ from the model | SF-I14a |
+| `removed_read` | A read through a handle of a removed blob disagreed with its view | SF-I15 |
+| `failed_write` | An injected failed write broke SF-I4 | SF-I4 |
+| `failed_resize` | An injected failed resize broke SF-I5 | SF-I5 |
+| `failed_op_effect` | An injected failure that must change nothing changed something | SF-I6 |
+| `reopen_image` | A reopen showed an image outside `Reach_reopen` | SF-I12 |
+| `crash_image` | After a crash a blob had an image outside `Reach_crash` | SF-I7 to SF-I11, SF-I13 |
+| `crash_namespace` | After a crash a scan returned names that differ from the model | SF-I14b |
+| `unexpected_error` | An unarmed operation that must succeed failed | SF-I16 |
+
+### Expected findings
+
+Written from reading `runtime/src/storage/faulty.rs`, `runtime/src/storage/memory/mod.rs`,
+`runtime/src/storage/memory/open.rs` and the storage part of `runtime/src/deterministic.rs`,
+before the target exists.
+
+No in-scope finding is expected. The reading found no place where the deterministic backend
+breaks one of the invariants above. Three things look like findings and are not:
+
+- RF-2 (#5752). Known and open, and left out of this target by SF-X5 [17].
+- The planted fault of SF-R27. Deliberate, and never in the repository.
+- A reopen that drops the intermediate length of a failed resize. Allowed by SF-C4.
+
+If the target finds something, the most intricate code is the most likely place, though nothing
+there is suspected: the bookkeeping of durable ranges over pending writes and resizes
+(`faulty.rs:665-771`, `record_durable_range`), the crash replay order (`faulty.rs:520-569`), and
+the retirement of pending outcomes at remove and reopen (`faulty.rs:470-518`).
+
+### API coverage and its exceptions
+
+Covered [5]: `Storage::open`, `open_versioned`, `remove` by name and by partition, `scan`;
+`Blob::read_at`, `read_at_buf`, `read_many`, `start_read_many` (handle awaited and dropped),
+`write_at` (with and without `SYNC` and `DONT_CACHE`, 1 to 4 chunks, empty), `resize`, `sync`,
+`start_sync` (handle awaited and dropped) [6], dropped handles, the `Arc<B>` forwarding
+implementation, `ReadOptions::DONT_CACHE`; on the fault side all seven rates of `FaultConfig`,
+both `PartialWriteMode` values and both fields of `ResizeConfig`.
+
+| Id | Not covered | Reason |
+|---|---|---|
+| SF-X1 | `read_at_buf` with buffer capacity below `len` | Documented panic (`lib.rs:927-929`) |
+| SF-X2 | Empty version ranges | The contract forbids them: `versions` must be non-empty (`lib.rs:758-759`) |
+| SF-X3 | Partition names that differ only by letter case | The contract forbids using both (`lib.rs:716-718`) |
+| SF-X4 | Dropping the future of an operation before it completes (`Storage` "Cancellation") | A crash inside an operation is out of scope [7]. Dropped `start_sync` and `start_read_many` handles are covered: they are handles, not operation futures |
+| SF-X5 | An empty `write_at` without `SYNC` that starts past the end of the blob. Such a write is issued only at offsets inside the blob | A named coverage exception [17]. The call triggers RF-2 (#5752, open) on the deterministic backend alone, and with no allowlist every campaign would stop on it within seconds. `storage_differential` keeps covering it under its RF-2 entry |
+| SF-X6 | `write_at` and `resize` past `MAX_SIZE`, overflow-edge offsets included | The memory backend allocates up to `offset + len` before any check, so the process would abort (Future work 7 and 8) |
+| SF-X7 | A crash in the middle of an accepted `start_sync` | Not reachable: the memory backend finishes the sync before `start_sync` returns its handle (`runtime/src/storage/memory/mod.rs:514-516`). A recorded limit [6] |
+| SF-X8 | The results of mutations through a handle of a removed blob | The calls are issued, for SF-I17. Their results are unspecified by the contract (`lib.rs:794-795`) |
+| SF-X9 | `Context::logical_blob` and the raw-image accessors of the memory storage | Test utilities, not part of `Storage` or `Blob`. The oracle must see only what a caller of the public contract sees |
+
+### What the recovery targets of `storage/fuzz` do, and what this target adds
+
+The ten targets, all in `storage/fuzz/fuzz_targets`: `archive_immutable_recovery`,
+`archive_prunable_recovery`, `freezer_recovery`, `journal_contiguous_recovery`,
+`journal_oversized_recovery`, `journal_segmented_variable_recovery`, `merkle_full_recovery`,
+`metadata_recovery`, `qmdb_current_recovery`, `queue_recovery` [3]. Each runs one storage consumer
+(an archive, a freezer, a journal, a Merkle tree, the metadata store, a QMDB, a queue) under
+faults, crashes it, and checks the consumer's own recovery guarantees.
+
+Reused from them:
+
+- the crash recipe: `start_and_recover`, then `deterministic::Runner::from(checkpoint)`;
+- arming at run time through `Context::storage_fault_config()`, and resetting it to
+  `FaultConfig::default()` before every crash and before every check
+  (`storage/fuzz/src/lib.rs:135-169`);
+- a bounded chain of crash and recovery cycles (their chain is 1 to 4; ours is 1 to 4 crashes);
+- a clean final check after the last crash.
+
+Not reused: `faulted_recovery` and `recovery_fault_config` themselves. They draw the faults from
+the runtime's RNG for a whole recovery attempt. This target takes each fault from the input and
+arms it around one operation [9].
+
+Checked here and by none of the ten:
+
+- a byte-level model of raw `Storage` and `Blob` results. The ten judge decoded consumer records;
+- the result of a failed write and of a failed resize, byte by byte (SF-I4, SF-I5);
+- a reopen as a durability cut at the blob level (SF-I11);
+- `write_at`, `resize`, `sync`, `start_sync`, `Storage::remove`, `read_many` and `read_at_buf`
+  called directly. The ten reach them only through a consumer;
+- `open_rate`, `read_rate` and `scan_rate`, which none of the ten ever sets.
+
+### Shared model
+
+- **SF-R21.** The operation vocabulary and the backend-neutral model MUST move from
+  `runtime/fuzz/fuzz_targets/storage_differential.rs` into a new library module
+  `runtime/fuzz/src/storage_model.rs` [19]. The boundary:
+
+  | Moves to `storage_model` | Stays in `storage_differential.rs` |
+  |---|---|
+  | The operation types and their decoding: the size and count constants, `PartitionName`, `BlobName`, `Offset`, `Layouts`, `Op`, the samplers, `impl Arbitrary for Op`, `FuzzInput` and its `Arbitrary`, `value` | The fuzz entry: `fuzz` and `fuzz_target!` |
+  | The model: the byte flags, `BlobModel` and its transitions (write, resize, sync, reopen, expected read), `Model` and its namespace transitions (create, close, unlink), `Kind`, `Documented`, `Expect`, `read_expect`, `runs`, `valid_partition` and the display helpers | The allowlist: `Allowed`, `RF1` to `RF3`, `ALLOWLIST`, the RF-3 helpers, and every rule that reads them. Where a moved item reads the allowlist today, the caller passes the answer in |
+  | | Execution and judgement: `Backend`, `Value`, `Outcome`, `Compare`, `Record`, the failure classes, the cross-backend comparison, the report, the tokio directory handling |
+
+  `storage_faults` MUST use the moved model with `Kind::Deterministic` for the namespace and the
+  view. It has its own operation type and decoding, because its operations carry faults and its sizes
+  are smaller, and it adds the base, the log and the reach sets.
+- **SF-R21a.** The move MUST NOT change `storage_differential`: the same input bytes decode to
+  the same operations and give the same run, so its corpus keeps its meaning [19]. Five checks,
+  all required:
+  1. Decoding. For the fixed inputs of [Run time](#run-time), the `Debug` text of the decoded
+     `FuzzInput` is the same before and after the move. The values from before the move are taken
+     once, in a disposable worktree at the commit before the move, and pinned in a test of the
+     library.
+  2. An order-preserving move. After normalization (leading white space, visibility keywords,
+     `use` lines, comments and blank lines removed), the old file MUST be an exact interleaving
+     of the new `storage_differential.rs` and the new `storage_model.rs`: every old line has its
+     place in one of the two, and each of the two keeps the old order of its lines. So a moved
+     item cannot lose, gain or reorder a statement. The check is the script of V6. It reads both
+     new files from the work tree, so it does not depend on staging. A line that had to change
+     (one that reads the allowlist and now takes the answer from the caller) is listed, in its
+     old and its new form, in a file the script takes; the build report holds the same list, and
+     the review reads every line of it.
+  3. The same model behaviour. For fixed sequences of model transitions, the text the model
+     prints for its state (`BlobModel::summary`, `Model::partition_summary`) and the result of
+     every query (`allowed_sizes`, `expected`, `read_expect`) after every step is the same before
+     and after the move. The values from before the move are taken once, in the same disposable
+     worktree, by a throwaway test added there to the old target file, and pinned in a test of
+     the library. The sequences MUST together use every moved transition and query at least
+     once, and MUST include: a resize followed by a reopen at each allowed size and at one size
+     outside the range; a write, a sync, a `SYNC` write and an unsynced write followed by a
+     reopen and by expected reads; and the creation of two names, a close, an unlink of one
+     name, a second creation of that name, and an unlink of the partition.
+  4. The same target results. The old binary, built in the disposable worktree, and the new
+     binary run the fixed inputs of [Run time](#run-time). For every input both MUST end the
+     same way: both pass, or both fail with the same `[class]` tag.
+  5. A 10-minute smoke run of `storage_differential` from an empty corpus after the move: no
+     failure class that the target did not report before.
+
+### Library entry points and the seam
+
+The target file `runtime/fuzz/fuzz_targets/storage_faults.rs` holds only the typed entry
+`fuzz_target!(|input: FuzzInput| { fuzz(input); });`. Everything else is in the library module
+`runtime/fuzz/src/storage_faults.rs` (crate `commonware-runtime-fuzz`), so that tests can call it.
+
+- **SF-R19.** The module MUST export these items with these contracts:
+
+  | Item | Contract |
+  |---|---|
+  | `FuzzInput { ops: Vec<Op>, entropy: Entropy }` | Public fields. Its hand-written `Arbitrary` uses the shared `decode`, never fails on any input length, and keeps the default `size_hint`, so the typed entry rejects no short input. For an input with no bytes, `ops` is empty and `entropy` is what the shared decoder gives for no bytes (SF-R5) |
+  | `Op` and the fault types | Public, with public fields, so a test can write a run by hand. A hand-written `ops` list is taken as it is; values past the bounds of Sizes are a test error |
+  | `fuzz(input: FuzzInput)` | Runs `run` with the identity seam and `Verify::Once`, and on a violation panics through the class function |
+  | `run(input: &FuzzInput, seam: impl Fn(deterministic::Context) -> S, verify: Verify) -> Outcome` with `S: Storage` | Runs the whole run. It does not panic on a violation: it stops at the first one and returns it. A panic raised by the storage passes through |
+  | `Outcome { trace: Trace, violation: Option<Violation>, measured: BTreeSet<Invariant> }` | `Invariant` has one value per row of the Invariants table. `Violation` holds the invariant that failed, its class, the session and the operation index. `measured` holds the invariants that count as measured by SF-R32 |
+  | `Trace` | `PartialEq` and `Debug`. One record per storage call the harness made, in call order: the session, the origin (baseline, input, verification), the call with its resolved parameters, the fault written to the configuration for it, and the result (`Ok` with the size and version of an open, the bytes of a read, the sorted names of a scan; or the error variant) |
+  | `Verify::{Once, Twice}` | `Twice` issues every verification operation twice in a row. It exists for SF-R25 |
+  | `Entry`, `Rule::{Crash, Reopen}`, `reachable(base: &[u8], log: &[Entry], rule: Rule, image: &[u8]) -> bool` | The membership test of SF-R13 |
+  | `sample_armed`, `sample_write_fails` | The two decoding samplers of SF-R8 |
+
+- **SF-R20.** The seam. `run` MUST call `seam` once per session with that session's
+  `deterministic::Context`, after it has taken the fault configuration handle from the context,
+  and MUST issue every storage call of the session through the returned `Storage`. `fuzz` MUST
+  pass the identity. A negative control passes a wrapper that deviates from the contract at one
+  point. A wrapper MAY read and write the fault configuration for its own extra calls. `run` promises
+  nothing about a seam that keeps state from one call of `run` to the next (SF-R24).
+
+### Determinism
+
+- **SF-R24.** For every input, two calls of `run` with the identity seam and the same `Verify`
+  value MUST return equal `Outcome` values: the same operation trace, injected results, crash images
+  and oracle result [20]. The same holds for a test seam when each call of `run` gets a new seam
+  value, built the same way, that carries no state from an earlier call. A seam that keeps state
+  from one call of `run` to the next is outside this requirement.
+- **SF-R25.** Verification operations MUST NOT change the fault schedule: for every input, with
+  the identity seam, `run(.., Verify::Once)` and `run(.., Verify::Twice)` MUST give the same
+  records of
+  baseline and input operations and the same images at every recovery verification [20]. This
+  holds because verification runs under `FaultConfig::default()`, and a rate of 0 draws nothing
+  from the RNG (`runtime/src/storage/faulty.rs:1857`).
+- **SF-R26.** The harness MUST NOT read the wall clock or OS randomness, and no result MAY depend
+  on the iteration order of a hash map or on task timing [20, 21].
+
+### Regression suite
+
+- **SF-R23.** The suite MUST be a set of `#[test]` functions in the `runtime/fuzz` crate, outside
+  the fuzz target file. It is written from this spec, not from the target's code [23]. It MUST hold:
+  1. The empty input and the 8-byte inputs of [Run time](#run-time) decode and run with no
+     violation. The empty input decodes to no input operation, and its trace holds exactly these
+     storage calls, in this order, every one under `FaultConfig::default()` (SF-R5). Session 0:
+     the open of `p0`/`a` returning size 0 and version 0, a 1-byte read at 0 that fails, the write
+     of 64 bytes at 0, the read of 64 bytes at 0, the sync. Session 1: the scan of `p0` returning
+     the name `a`, the scan of `p1`, the open of `p0`/`a` with `0..=2` returning size 64 and
+     version 0, a 1-byte read at 64 that fails, a 1-byte read at 63 that succeeds, and the read of
+     64 bytes at 0 that returns the bytes of the baseline write.
+  2. A set of fixed-input scenarios with the identity seam that return no violation and together
+     list every invariant except SF-I17 in `measured`. By SF-R32 a scenario lists a row only when
+     it ran the row's condition: for SF-I7 a sync after a write, for SF-I8 a successful `SYNC`
+     write, for SF-I9 a failed write that kept at least one byte, for SF-I10 a failed resize with
+     an intermediate length, for SF-I11 a reopen, for SF-I13 an unsynced write or resize, each
+     followed by a crash. The suite MUST also check that the empty input lists none of SF-I8 to
+     SF-I13 in `measured`.
+  3. For every invariant, the negative control of the table below: the run returns a violation
+     whose invariant is the row's id and whose class is the class of that invariant (for SF-I17:
+     the panic passes through).
+  4. Determinism: SF-R24 and SF-R25 over the fixed inputs and over the scenarios of item 2. For
+     SF-R24 with a test seam, the test builds a new seam value for each of the two calls.
+  5. The fault window: with a seam that records the fault configuration at every call, each
+     record of a verification or baseline call saw `FaultConfig::default()`, and each record of
+     an input call saw exactly the fault of that operation (SF-R6, SF-R9).
+  6. The membership test (SF-R13), against a brute-force enumeration of all choices, for both
+     rules, over two explicit finite domains. Images judged: every image of length 0 to 4 over
+     the bytes 0, 1, 2, 3 and 9 (781 images). Bases: every image of length 0 to 2 over the bytes
+     0 and 9 (7 bases). The entry at place `i` of a log (1, 2 or 3) writes the byte `i` at each
+     of its positions.
+     - Domain A: every log of 0, 1 or 2 entries from this set of 28: `Torn` with offset 0, 1 or 2
+       and length 1 or 2; `Kept` with the same offsets and lengths and every non-empty mask;
+       `MaybeResize` and `ForcedResize` with length 0, 1, 2, 3 or 4. That is 813 logs.
+     - Domain B: every log of exactly 3 entries from this set of 14: `Torn` with offset 0 or 2
+       and length 2; `Kept` with the same offsets and length and every non-empty mask;
+       `MaybeResize` and `ForcedResize` with length 0, 1 or 3. That is 2744 logs.
+
+     For every base, log and rule (11382 cases in A, 38416 in B), `reachable` MUST return true
+     for exactly the images the enumeration gives, out of the 781. The domains are small on
+     purpose and cover every replay rule: each entry kind; none, some and all bytes of a `Torn`;
+     a partial mask; growth with a zero gap; a cut and a later extension; the order of two and of
+     three entries; a forced resize under both rules.
+  7. The pinned decoding and the pinned model behaviour of SF-R21a (items 1 and 3).
+  8. The plant input of SF-R28 runs with no violation in the repository tree.
+  9. The bytes of a failing write (SF-R30): in a scenario where `value(index, position)` of a
+     failing write equals the view's byte at a position below the view length (the test finds
+     such a pair of operation indexes by search), the trace shows a submitted byte that differs
+     from the view's byte at every such position, and with a retention of 100 percent the model
+     logs the whole write as `Kept`.
+  10. Bounded reads (SF-R11): no record of any trace of this suite holds a read longer than
+      `MAX_SIZE` or a read that starts past `MAX_SIZE`, the overflow-edge reads of input
+      operations excepted.
+  11. The samplers of SF-R8, on the fixed bytes that SF-R8 names: every selector value of both
+      samplers, and the empty input.
+
+Negative controls. "Baseline" means the state after the baseline operations: slot 0 holds `p0`/`a`
+with 64 synced bytes and version 0. Each control uses the shortest input that reaches its point;
+"any" means the control fires on the baseline or the final check, whatever the input operations
+are. "Disarmed" means the wrapper sets `FaultConfig::default()` for its own call and restores the
+configuration after. "Returns the error" means the wrapper returns the `Error::Io` of the injected
+failure. A differing byte is a byte other than the one at that position.
+
+| Invariant | Input operations after the baseline | Fault planted at the seam |
+|---|---|---|
+| SF-I1a | any | Every successful read result has the lowest bit of its first byte flipped |
+| SF-I1b | any | Every read of 64 bytes at offset 0 returns `Error::Closed` without calling the storage |
+| SF-I2a | `ReadAtBuf` slot 0, offset 0, 16 bytes, one chunk | The wrapper returns a new buffer that holds the same bytes |
+| SF-I2b | `ReadMany` slot 0, ranges `(0, 8)` and `(8, 8)` | `read_many` yields range 0 twice |
+| SF-I2c | `StartReadMany` slot 0, ranges `(0, 8)` and `(8, 8)`, handle awaited | The handle returns only the first buffer |
+| SF-I3a | `Open` slot 1, `p0`/`a`, `0..=0` | `BlobAlreadyOpen` is replaced by `Error::Closed` |
+| SF-I3b | `Open` slot 0, `p0`/`a`, `1..=2` | `BlobVersionMismatch` is replaced by `Error::Closed` |
+| SF-I3c | `Open` slot 1, partition `a/b`, name `a`, `0..=0` | The wrapper opens `p1`/`a` instead and returns that blob |
+| SF-I3d | `Remove` partition `a/b`, no name | The wrapper returns `Ok` without calling the storage |
+| SF-I3e | `Scan` partition `a/b` | The wrapper returns `Ok` with no name without calling the storage |
+| SF-I3f | `Open` slot 1, `p0`/`b`, `1..=2` | The returned version is replaced by 0 |
+| SF-I3g | `Open` slot 0, `p0`/`a`, `0..=2` (a reopen) | The returned version is replaced by 1 |
+| SF-I3h | `Remove` `p0`/`a`; `Open` slot 1, `p0`/`a`, `0..=0` | On that open the wrapper writes 4 bytes at offset 0 without `SYNC` and returns size 4 |
+| SF-I4a | `Write` slot 0, offset 8, 8 bytes, write fault (fail, 100, `Prefix`) | After the injected failure the wrapper writes one differing byte at offset 32, disarmed, and returns the error |
+| SF-I4b | `Write` slot 0, offset 8, 8 bytes, write fault (fail, 0, `Prefix`) | After the injected failure the wrapper writes at offset 8, disarmed, one byte that is neither the old byte nor the submitted byte, and returns the error |
+| SF-I4c | `Write` slot 0, offset 100, 8 bytes, write fault (fail, 0, `Prefix`) | After the injected failure the wrapper resizes to 80, disarmed, and returns the error |
+| SF-I4d | `Write` slot 0, offset 0, 8 bytes, `SYNC`, sync fault | The wrapper does not call the storage and returns `Error::Io` |
+| SF-I5a | `Resize` slot 0 to 128, resize fault (100, partial 0) | After the injected failure the wrapper resizes to 200, disarmed, and returns the error |
+| SF-I5b | `Resize` slot 0 to 128, resize fault (100, partial 0) | After the injected failure the wrapper writes one differing byte at offset 0, disarmed, and returns the error |
+| SF-I5c | `Resize` slot 0 to 128, resize fault (100, partial 100) | After the injected failure the wrapper writes one nonzero byte at offset 64, disarmed, and returns the error |
+| SF-I6a | `Open` slot 1, `p0`/`b`, `0..=0`, open fault | The wrapper performs the open, disarmed, drops the blob, and returns `Error::Io` |
+| SF-I6b | `ReadAt` slot 0, offset 0, 16 bytes, read fault | After the injected failure the wrapper writes one differing byte at offset 0, disarmed, and returns the error |
+| SF-I6c | `Sync` slot 0, sync fault | After the injected failure the wrapper resizes to 10, disarmed, and returns the error |
+| SF-I6d | `Remove` `p0`/`a`, remove fault | The wrapper performs the remove, disarmed, and returns `Error::Io` |
+| SF-I6e | `Scan` `p0`, scan fault | After the injected failure the wrapper removes `p0`/`a`, disarmed, and returns the error |
+| SF-I7 | any | Every `sync` returns `Ok` without calling the storage |
+| SF-I8 | `Write` slot 0, offset 0, 8 bytes, `SYNC` | The wrapper clears `SYNC` before it forwards the write |
+| SF-I9 | `Write` slot 0, offset 0, 8 bytes, write fault (fail, 100, `Prefix`) | The wrapper does not forward the call. Disarmed, it writes the same bytes without `SYNC`, and returns `Error::Io` |
+| SF-I10 | `Resize` slot 0 to 128, resize fault (100, partial 100) | The wrapper does not forward the call. Disarmed, it resizes to 96, and returns `Error::Io` |
+| SF-I11 | `Write` slot 0, offset 0, 8 bytes, no fault; `Open` slot 0, `p0`/`a`, `0..=0` | On that reopen the wrapper, disarmed, writes the 8 bytes of the earlier write again without `SYNC` before it returns the handle |
+| SF-I12 | `Write` slot 0, offset 0, 8 bytes, no fault; `Open` slot 0, `p0`/`a`, `0..=0` | On that reopen the wrapper, disarmed, overwrites byte 20 with a differing byte without `SYNC` before it returns the handle |
+| SF-I13 | `Write` slot 0, offset 0, 8 bytes, write fault (no fail, 50, `Subset`) | In the session after the crash, the whole-blob read of `p0`/`a` has byte 40 changed |
+| SF-I14a | `Scan` `p0`, no fault | The wrapper adds the name `zz` to the result |
+| SF-I14b | `Remove` `p0`/`a`, no fault | The wrapper returns `Ok` without calling the storage |
+| SF-I15 | `Remove` `p0`/`a`, no fault; `ReadAt` slot 0, offset 0, 16 bytes | After a successful remove, every read through an older handle returns `Error::Closed` |
+| SF-I16a | any | Every open returns `Error::Closed` without calling the storage |
+| SF-I16b | any | Every `write_at` returns `Error::Closed` without calling the storage |
+| SF-I16c | `Resize` slot 0 to 32, no fault | Every `resize` returns `Error::Closed` without calling the storage |
+| SF-I16d | any | Every `sync` returns `Error::Closed` without calling the storage |
+| SF-I16e | `StartSync` slot 0, handle awaited, no fault | The handle returns `Error::Closed` |
+| SF-I16f | `Remove` `p0`/`a`, no fault | The wrapper returns `Error::Closed` without calling the storage |
+| SF-I16g | `Scan` `p0`, no fault | The wrapper returns `Error::Closed` without calling the storage |
+| SF-I17 | `Scan` `p0` | `scan` panics. The panic passes through `run` |
+| SF-I18a | any | In the session after the crash, the open of `p0`/`a` returns the size `u64::MAX`. The trace holds no read after that open |
+| SF-I18b | `Open` slot 0, `p0`/`a`, `0..=0` (a reopen) | The returned size is 63 instead of 64 |
+
+### The planted runtime fault
+
+- **SF-R27.** One fault MUST be planted in a copy of `runtime/src` (SF-R28) to show that the target finds a bug in the
+  runtime itself and not only at the seam [25]. The patch is
+  `scratchpad/storage-faults-plant.patch`. It removes the retirement of pending crash outcomes
+  from `Context::open_versioned` (`runtime/src/deterministic.rs:1580` and `1582`, the `admit`
+  call), so a successful reopen is no longer a durability cut: a write that was unsynced before
+  the reopen can still land at the next crash and change bytes the reopen had shown. It breaks
+  SF-I11 and looks like a real omission. None of the ten recovery targets checks this rule at the
+  blob level. The removed call is the only caller of the faulty storage's `admit`
+  (`runtime/src/storage/faulty.rs:506`), and the workspace denies warnings (`Cargo.toml:90`), so
+  without more the plant build stops on `dead_code` before the target runs. The patch MUST
+  therefore also add one line, `#[allow(dead_code)]`, directly above that method, and MUST NOT
+  add any other line. The attribute changes no behaviour. It is part of the plant, so SF-R28
+  keeps it out of the repository tree and of the delivered diff. The plant build MUST NOT relax lints
+  in any other way: no `RUSTFLAGS`, no `--cap-lints`.
+- **SF-R28.** The patch MUST be applied only in a disposable git worktree, the target MUST fail
+  there with `[crash_image]` and invariant SF-I11, and the worktree MUST then be removed. The
+  repository tree and the delivered diff MUST NOT hold the plant [25]. The shortest failing run is the baseline plus two input operations:
+  a `Write` on slot 0 without `SYNC` that carries a write fault with `failure_rate` 0 and
+  `retention_rate` 100, then `Open` slot 0 on `p0`/`a`. The same input must pass in the repository
+  tree. The steps are in [Validation](#validation-after-implementation).
+
+### Run time
+
+- **SF-R29.** 50 ms per input is a performance target, measured on a named host over fixed
+  inputs. The harness MUST meet it with the count and size bounds of Sizes only, and MUST NOT
+  measure time itself [21].
+
+How the bounds follow from the target. The work of one run is bounded by counts, all from Sizes:
+
+- Storage calls. An input operation makes 1 call of its own and at most 14 verification reads
+  (SF-R11 item 2: the read at the bound, a binary search of at most 12 reads, one whole-blob
+  read). The baseline makes 5 calls. A recovery verification makes 2 scans and, for each of at
+  most 6 blobs, 1 open and 3 reads. So a run makes at most 48 x 15 + 5 + 4 x 26 = 829 storage
+  calls, in at most 5 runner starts.
+- Bytes. At most 48 writes of 256 bytes, and at most 48 + 4 x 6 whole-blob reads of at most 2304
+  bytes each: below 180 KiB of copies and audit hashing.
+- Log size. A write or a resize adds at most one entry (a failed write is one `Kept` entry with
+  a mask, SF-R16), so all logs of a run together hold at most 49 entries.
+- Membership tests. At most one per successful reopen and one per blob per recovery
+  verification: at most 48 + 4 x 6 = 72 calls, each over at most 49 entries, 2305 lengths and
+  2304 positions. The cost of one call depends on the algorithm, which SF-R13 leaves to the
+  builder. It is the one term this derivation does not fix.
+
+The storage part is small: about 830 in-memory calls and 180 KiB. The membership test is the open
+term, so the heavy inputs of rule M2 load it, and each verification path, to the bounds. All of
+this is an estimate from reading the code: nothing was built for this spec. If a measurement
+below fails, the bounds are lowered in this spec first, `MAX_OPS` before `MAX_SIZE`.
+
+The measurement:
+
+- Acceptance host: a macOS build host, Apple M4 Max (`Mac16,5`), 16 cores, 48 GB, macOS
+  26. Every smoke run of this spec is done there. A result from another host is reported with the
+  host's name and is not the acceptance result.
+- Fixed inputs: the empty input, and the 256 inputs of 8 bytes that hold `i` as a little-endian
+  `u64`, for `i` from 0 to 255. Each seeds a whole run through the shared decoder.
+- Rule M1, on the fuzz binary: each fixed input file is run 100 times in one libFuzzer process
+  (`-runs=100` with the file as argument). The line `Executed <file> in <T> ms` must show `T` at
+  or below 5000 for every file, which is a mean of 50 ms per run.
+- Rule M2, on five heavy inputs. Each is a hand-written `FuzzInput` of `MAX_OPS` operations on
+  top of the baseline. "A torn write" below is a `Write` of `MAX_WRITE` bytes without `SYNC`
+  that carries a write fault with `failure_rate` 0, `retention_rate` 50 and `Subset`, at an
+  offset that alternates between 0 and `MAX_OFFSET`.
+  - H1, the longest log: 48 torn writes on slot 0 and no `Crash`. The final check runs one
+    membership test over 49 entries.
+  - H2, fragmented failed writes: 48 `Write` operations on slot 0 of `MAX_WRITE` bytes at
+    `MAX_OFFSET` that carry a write fault with `failure_rate` 1, `retention_rate` 50 and
+    `Subset`. Each runs the length search, a whole-blob read, and adds a `Kept` entry with a
+    broken-up mask.
+  - H3, failed resizes: 48 `Resize` operations on slot 0 whose target alternates between 0 and
+    `MAX_SIZE`, with a resize fault of 100 percent and `partial_rate` 100. Each runs the length
+    search with the bound `MAX_SIZE` and a whole-blob read, and adds a `ForcedResize`.
+  - H4, a reopen over the longest log: 47 torn writes on slot 0, then `Open` slot 0 on
+    `p0`/`a`. The reopen runs one membership test under `Rule::Reopen` over 48 entries.
+  - H5, many blobs and crashes: 3 `Crash` operations at even distances; each session opens the
+    four slots on `p0`/`a`, `p0`/`b`, `p0`/`c` and `p1`/`a` (slot 0 is open already in session
+    0) and fills the rest with torn writes over the four slots in turn.
+
+  An ignored test runs each of the five 11 times in a release build and prints each time. The
+  median of each MUST be at or below 50 ms.
+- The measured numbers and the host go into the build report.
+
+### Choices made
+
+Choices the intents file leaves to the spec writer, each stated as it is.
+
+| Id | Choice | Reason | What it costs |
+|---|---|---|---|
+| SF-C1 | Failure rates are 0 or 1, except the resize fault at 50 percent. Retention rates are 0, 25, 50, 75, 100 | The input, not the RNG, decides which operation fails, so the fuzzer steers failures directly. The resize needs 50 percent, because the backend keeps a successful resize at a crash only by the same rate (`faulty.rs:352-363`) | Whether a resize armed at 50 percent fails is decided by the runtime RNG, which the input also sets |
+| SF-C2 | An unarmed `start_sync` whose handle is dropped counts as a completed sync | The memory backend finishes the sync before it returns the handle (`memory/mod.rs:514-516`; `faulty.rs:1443`). This asserts implementation behaviour: the contract only says the sync continues | On a backend with a delayed sync this rule would have to wait for the completion |
+| SF-C3 | An injected failure of an open, a read, a scan or a sync changes nothing | The injector fails these before it touches the storage (`faulty.rs:586-588`, `604-606`, `781-783`, `905-907`). Intent [16] says it for remove; this extends it | A future injector that fails after a partial effect would be reported, and this spec would then change first |
+| SF-C4 | A reopen may drop the intermediate length of a failed resize; a crash may not | The backend replays it only at a crash (`faulty.rs:883-895`, `503-518`). Intent [14] speaks of the crash only | None for a crash. A reopen that loses it is accepted |
+| SF-C5 | The image a reopen shows must be in `Reach_reopen` | The contract lets a drop discard unsynced changes and promises nothing else (`lib.rs:905-907`). The intents fix what a reopen makes durable [12], not what it may show | None |
+| SF-C6 | The mandatory crash is the last crash, after all input operations. Extra crashes come from `Crash` operations, at most 3 | Every run ends with a crash check of whatever the input left unsynced, and the empty input still runs the full cycle [8, 10]. The chain of 1 to 4 matches the recovery targets | None |
+| SF-C7 | An armed operation that does not fail is judged as unarmed. The target does not assert that the injector injects | The target tests the storage contract, not the dice of the injector. Some armed calls must not fail, for example an empty `SYNC` write | An injector that stops injecting is not reported. The lineage coverage of `faulty.rs` shows it |
+| SF-C8 | The target is behind the feature `storage-faults` and runs on FuzzCorp only | The rule this spec already has for `storage_differential` and `iobuf` [26] | It does not run in `slow.yml` |
+| SF-C9 | Small sizes: blobs up to 2304 bytes | The 50 ms target and whole-blob checks after every reopen, failure and crash | Large blobs under faults are not explored (Future work 26) |
+| SF-C10 | The planted fault is the missing reopen cut (SF-R27) | It needs three steps in order that only a fuzzer-chosen sequence gives, it is not caught by the empty input, and the ten recovery targets cannot see it | One plant proves one path. The negative controls cover the other invariants |
+| SF-C11 | The two draws of SF-R8 are public samplers with a fixed selector, not pinned input bytes | A sampler that takes an `Unstructured` is the existing decoding style (`storage_differential` samples every field this way), and a test can call it with one byte. Pinned bytes for a whole input would fix the order of every draw of the decoder, which the spec leaves to the builder. The selectors are chosen so that exhausted input arms nothing | That the decoder calls the samplers, and decides these two points nowhere else, is read in the build review, not shown by a fixed-input test |
+
+### Limits of the proof
+
+The definition of done [22 to 26] shows the deterministic fault model only. It does not show a
+real disk, tokio under faults, or the absence of every bug. In addition:
+
+- A crash falls between two operations, never inside one, and never inside an accepted
+  `start_sync` (SF-X4, SF-X7).
+- The images seen are the ones the injector produces. The contract allows more: for example the
+  injector tears only writes issued under a write fault, and drops every other unsynced write
+  whole.
+- A fuzz run measures an invariant only when its measurement point occurs. The regression suite,
+  not the smoke run, proves that each invariant can fire.
+- The oracle can show that data which must survive was lost. It cannot show that data which may
+  be lost was made durable too early: every such image is inside the reach set. So three
+  failures are not detected: an injected failed `Sync` or `StartSync` that performs the sync and
+  then returns the error, an injected failed open that takes its reopen cut, and a fused write
+  with a sync fault that makes its bytes durable (SF-R15, SF-R17). Seeing them needs a view of
+  the durable image without a crash, which the public contract does not give (Future work 32).
+
 ## Target `iobuf`
 
 ### Execution
@@ -517,13 +1430,100 @@ check, never on data:
 
 ## Validation after implementation
 
+For every target:
+
 1. Build with and without `--features runtime-all` using the pinned nightly. The build without
    features must list only the three existing targets.
 2. Smoke-run each new target on macOS for about 10 minutes with `-timeout=60`.
 3. Triage every failure. Harness bugs are fixed in the harness. A real divergence is written up in
    `runtime/fuzz/FINDINGS.md` and reported to the maintainer, who decides whether it gets an
-   allowlist entry.
+   allowlist entry. `storage_faults` has no allowlist (SF-R22).
 4. No commits unless asked.
+
+### End-to-end verification of `storage_faults`
+
+All steps below make acceptance [22 to 26]. `N` stands for the pinned nightly, currently
+`nightly-2026-11-12`. Commands run from the repo root.
+
+| # | Command or check | Result to see | Proves |
+|---|---|---|---|
+| V1 | `git status --short runtime/src`, and `git diff --stat <commit before the build> -- runtime/src` | No change under `runtime/src` | SF-R1 |
+| V2 | Read `runtime/fuzz/fuzz_targets/storage_faults.rs` | Only imports and the typed `fuzz_target!` entry | SF-R19 |
+| V3 | `cargo +N fuzz build --fuzz-dir runtime/fuzz --features runtime-all`, then the same without `--features` | Both succeed. The second builds only `buffer`, `blob_integrity` and `blob_creation` | SF-C8, [26] |
+| V4 | Clippy with `-D warnings` on `runtime/fuzz/Cargo.toml` with `--all-targets --features runtime-all`, and `rustfmt --check` on the changed files, both with the pins of `.github/toolchains.toml` | Clean | fuzzing guide |
+| V5 | `cargo +N test --manifest-path runtime/fuzz/Cargo.toml` | The regression suite of SF-R23 passes, with one negative control per invariant, each naming its invariant | every invariant SF-I1a to SF-I18b, SF-R5, SF-R6, SF-R9, SF-R11, SF-R13, SF-R13a, SF-R24, SF-R25, SF-R30, SF-R31, SF-R32, [23] |
+| V6 | The five checks of SF-R21a: the pinned decoding and model behaviour (in V5); the move check below; the old and the new binary over the fixed inputs of V8; `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_differential "$(mktemp -d)" -- -max_total_time=600 -timeout=60` | The pinned values match. The move check prints `MOVE OK`, and the review has read the list of changed lines. Both binaries end the same way on every fixed input. The smoke run shows no failure class that is new | SF-R21, SF-R21a |
+| V7 | `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults "$(mktemp -d)" -- -max_total_time=600 -timeout=60` | From an empty corpus: no crash, no hang, no out-of-memory, no invariant fires. The executions per second are reported | [24], SF-R5, SF-I17 |
+| V8 | Rule M1: write the 257 fixed inputs to files, then for each file `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults <file> -- -runs=100`. Rule M2: `cargo +N test --release --manifest-path runtime/fuzz/Cargo.toml -- --ignored run_time` | M1: every `Executed <file> in <T> ms` line has `T` at or below 5000. M2: the median of each of the five heavy inputs is at or below 50 ms. On the acceptance host | SF-R29, SF-G4 |
+| V9 | The plant, steps below | In the worktree the plant input fails with `[crash_image]` and a fuzz run from an empty corpus fails with `[crash_image]` within 300 seconds. The artifact passes in the repository tree. The worktree is removed | SF-R27, SF-R28, SF-I11, [25] |
+| V10 | V3 passed and `storage_faults` is in `runtime-all` | The target is ready for the next FuzzCorp bundle. Uploading is a separate, manual step | [26] |
+
+The fixed inputs of V8:
+
+```bash
+D="$(mktemp -d)"; : > "$D/empty"
+python3 -c 'import sys,struct
+for i in range(256): open(f"{sys.argv[1]}/seed{i:03}","wb").write(struct.pack("<Q",i))' "$D"
+```
+
+The move check of V6 (SF-R21a item 2). `HEAD` is the commit before the move. Both new files are
+read from the work tree, tracked or not. `changed.txt` holds the lines that had to change, old
+and new form, one per line; it may be empty. The script prints `MOVE OK` and exits 0 exactly
+when the old file is an interleaving of the two new files:
+
+```bash
+T="$(mktemp -d)"; : > "$T/changed.txt"        # or the list from the build report
+git show HEAD:runtime/fuzz/fuzz_targets/storage_differential.rs > "$T/old.rs"
+cat > "$T/move_check.py" <<'EOF'
+import re, sys
+
+def norm(path, drop):
+    out = []
+    for line in open(path):
+        line = re.sub(r'^pub(\([a-z]+\))? ', '', line.strip())
+        if line and not line.startswith(('use ', '//')) and line not in drop:
+            out.append(line)
+    return out
+
+old_path, stay_path, moved_path, *rest = sys.argv[1:]
+drop = set(l.strip() for p in rest for l in open(p) if l.strip())
+old, a, b = norm(old_path, drop), norm(stay_path, drop), norm(moved_path, drop)
+ok = len(old) == len(a) + len(b)
+if ok:
+    reach = {0}
+    for i, line in enumerate(old):
+        reach = {j + 1 for j in reach if j < len(a) and a[j] == line} | \
+                {j for j in reach if i - j < len(b) and b[i - j] == line}
+        if not reach:
+            print(f'first old line with no place: {i + 1}: {line}')
+            break
+    ok = bool(reach)
+print('MOVE OK' if ok else f'MOVE BROKEN: old {len(old)} lines, stay {len(a)}, moved {len(b)}')
+sys.exit(0 if ok else 1)
+EOF
+python3 -I "$T/move_check.py" "$T/old.rs" runtime/fuzz/fuzz_targets/storage_differential.rs \
+    runtime/fuzz/src/storage_model.rs "$T/changed.txt"
+```
+
+The plant of V9:
+
+```bash
+W="$(mktemp -d)/plant"
+P="$PWD/scratchpad/storage-faults-plant.patch"
+# SF-R27: the one line the patch adds is `#[allow(dead_code)]` on `admit`. No RUSTFLAGS, no --cap-lints.
+test "$(grep -c '^+[^+]' "$P")" = 1 && grep -qx '+    #\[allow(dead_code)\]' "$P" && echo "PATCH OK"   # must print PATCH OK
+git worktree add --detach "$W" HEAD
+rsync -a --exclude target --exclude corpus --exclude artifacts runtime/fuzz/ "$W/runtime/fuzz/"
+git -C "$W" apply "$P"
+(cd "$W" && cargo +N test --manifest-path runtime/fuzz/Cargo.toml plant)          # must fail: [crash_image]
+(cd "$W" && cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults \
+    "$(mktemp -d)" -- -max_total_time=300 -artifact_prefix="$W/")                 # must fail: [crash_image]
+cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults "$W"/crash-*   # must pass
+git worktree remove --force "$W"
+git status --short runtime/src                                                    # must print nothing: no plant, no annotation
+```
+
+What these steps do not show is in [Limits of the proof](#limits-of-the-proof).
 
 ## Future work
 
@@ -535,8 +1535,8 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 2 | Public API only (`runtime/src` off limits) | io_uring internals (`Waiters`, `TimeoutWheel`, `ReadAtRequest` against the simulated kernel in `iouring/request.rs`, `WriteBuffers`) are unreachable, and tokio storage needs a full `Runner::start` | Add `cfg(fuzzing)` entry points one by one with approval, then fuzz those modules directly |
 | 3 | Fresh tokio runner per input | Low exec/s. On Linux every start runs `syncfs` over the whole filesystem | Use a persistent runtime thread with a fresh partition per input and forwarded panics, or a standalone storage hook (see 2) |
 | 4 | Sequential operations only | No concurrency: the AIO context pool, blocking-pool contention, `Pending`/`Tracker` races, reads overlapping writes, syncs in flight with writes | Start with concurrent read-only groups on stable ranges and a sync in flight. Then allow concurrent mutations with an oracle relaxed for overlapping ranges. Reproduce failures with a fixed worker count and `rr` |
-| 5 | Faults off | Recovery after failed, partial or torn writes is never exercised | Add a deterministic-only fault mode (`with_storage_fault_config`, `PartialWriteMode`) judged by the model only (synced data survives later failures). For tokio, inject faults below the runtime (dm-flakey, FUSE, `LD_PRELOAD`) |
-| 6 | tokio restarts are clean | The page cache survives a tokio restart, so real crash tearing never happens on tokio | Simulate crashes with block-level write logging (dm-log-writes, CrashMonkey style), or kill a child process in the middle of an operation |
+| 5 | Faults off in `storage_differential`; no faults on tokio | Partly lifted: `storage_faults` exercises failed, partial and torn writes on the deterministic runtime, judged by the model only. On tokio, recovery after a failed or torn write is still never exercised | For tokio, inject faults below the runtime (dm-flakey, FUSE, `LD_PRELOAD`) |
+| 6 | tokio restarts are clean | Partly lifted: `storage_faults` simulates crashes with tearing on the deterministic runtime. The page cache survives a tokio restart, so real crash tearing never happens on tokio | Simulate crashes with block-level write logging (dm-log-writes, CrashMonkey style), or kill a child process in the middle of an operation |
 | 7 | Size caps (1 MiB offsets, 64 KiB lengths) | Large-file paths are missed: offsets past 4 GiB, `EFBIG` at ext4's 16 TiB limit on the fused `SYNC` write, which poisons the blob across opens | Add a tokio-only large-offset mode on sparse files, judged by the model, with the memory side skipped |
 | 8 | Overflow-edge offsets on reads only | Overflow handling in `write_at` and `resize` is not explored | Same tokio-only mode as 7 |
 | 9 | Only documented error variants asserted | Variant inconsistencies (`Io(UnexpectedEof)` against `BlobInsufficientLength`) go unreported | Add a strict mode behind a feature, and propose tightening the trait docs upstream |
@@ -554,3 +1554,12 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 21 | No coverage target | Nothing shows when the targets plateau | Track per-file line coverage for `storage/tokio/*`, `storage/memory/*` and `iobuf/*` from fuzzcorp lineage coverage, and act on the gaps |
 | 22 | No sweep of leftover tokio directories | A timeout, out-of-memory kill or backend panic leaves a `commonware_runtime_fuzz_<pid>_<n>` directory that later processes never remove, because their pid differs | Remove stale `commonware_runtime_fuzz_*` directories of dead processes at startup |
 | 23 | Linux-only tokio paths checked by reading only | Native AIO `read_many`, O_DIRECT reads, `RWF_DONTCACHE` and the startup `syncfs` have not been executed under the harness; all smoke runs were on macOS | Run a short Docker-Linux smoke run of `storage_differential` before the first fuzzcorp deployment |
+| 24 | `storage_faults`: a crash only between two sequential operations (SF-R4, SF-X4) | A crash inside a write, resize or sync, a dropped operation future, and faults under concurrent operations are not explored | Park an operation and crash while it is pending, as `DelayedSyncContext` and `poll_interrupted` do in `storage/fuzz`; then add concurrency as in row 4 |
+| 25 | `storage_faults`: no crash inside an accepted `start_sync` (SF-X7) | The pending-sync marker path of the fault injection (`runtime/src/storage/faulty.rs:220-235`, `525-531`) never sees a sync that is still running at the crash | A backend whose `start_sync` returns before the sync completes: with the parked-sync adapter of row 24, or on tokio with row 6 |
+| 26 | `storage_faults`: small sizes (blobs up to 2304 bytes, writes up to 256 bytes) and a small name pool | Large blobs, long logs and unusual names under faults are not explored | Raise `MAX_SIZE` and `MAX_WRITE` once the 50 ms measurement shows the room; names as in row 12 |
+| 27 | `storage_faults`: the trigger of RF-2 is not issued (SF-X5) | An empty write past the end is never combined with faults or crashes | Remove the clamp when #5752 is fixed, together with the RF-2 entry of `storage_differential` |
+| 28 | `storage_faults`: the oracle accepts any subset of an unsynced write and ignores the armed retention rate and mode (SF-R12) | An injector that keeps bytes outside its own policy, for example a non-prefix under `Prefix`, is not reported | Add a strict injector check behind a feature that also holds each write to its armed mode and to the 0 and 100 percent endpoints |
+| 29 | `storage_faults`: an armed operation that does not fail is accepted (SF-C7) | An injector that stops injecting is silent | Track the count of injected failures per kind in a campaign, or check the lineage coverage of `runtime/src/storage/faulty.rs` |
+| 30 | `storage_faults`: the images seen are the ones the deterministic injector produces | Images the contract allows but the injector never makes are not seen: it tears only writes issued under a write fault and drops every other unsynced write whole | Extend the injector upstream (a default tearing policy), or lift rows 5 and 6 for tokio |
+| 31 | `storage_faults`: one planted runtime fault (SF-R27) | The end-to-end proof on `runtime/src` covers the reopen cut only; the other invariants are proven at the seam | Keep a small set of plant patches in `scratchpad/`, one per durability rule, and run them in the same disposable worktree |
+| 32 | `storage_faults`: durability is seen only at a crash or a reopen (SF-R15, SF-R17) | A failure that makes data durable too early is not detected: a failed sync that syncs, a failed open that takes its reopen cut, a fused write with a sync fault that persists its bytes | Compare the durable image after every operation through a test accessor such as `Context::logical_blob` (`runtime/src/deterministic.rs:1086-1094`). This leaves the public contract (SF-X9), so it needs a separate decision |
