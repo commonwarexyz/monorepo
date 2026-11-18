@@ -540,38 +540,6 @@ impl Additive for GT {
     }
 }
 
-// Square-and-multiply over the scalar's bits, so this runs in variable time. No caller
-// multiplies a `GT` element by a secret scalar.
-impl<'a> MulAssign<&'a Scalar> for GT {
-    fn mul_assign(&mut self, rhs: &'a Scalar) {
-        let bytes = rhs.as_blst_scalar().b;
-        let limbs: [u64; 4] = core::array::from_fn(|i| {
-            u64::from_le_bytes(bytes[8 * i..8 * (i + 1)].try_into().expect("8 bytes"))
-        });
-        *self = self.scale(&limbs);
-    }
-}
-
-impl<'a> Mul<&'a Scalar> for GT {
-    type Output = Self;
-
-    fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
-        self *= rhs;
-        self
-    }
-}
-
-impl Space<Scalar> for GT {}
-
-impl CryptoGroup for GT {
-    type Scalar = Scalar;
-
-    /// Returns `e(G1::generator(), G2::generator())`, which costs a pairing.
-    fn generator() -> Self {
-        G1::generator().pairing(&G2::generator())
-    }
-}
-
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for GT {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -2103,8 +2071,20 @@ mod tests {
     }
 
     #[test]
-    fn test_gt_as_space() {
-        minifuzz::test(test_suites::fuzz_space_ring::<Scalar, GT>);
+    fn test_gt_as_additive() {
+        minifuzz::test(test_suites::fuzz_additive::<GT>);
+    }
+
+    // `fuzz_additive` does not check `double`, which `GT` overrides with a cyclotomic square.
+    #[test]
+    fn test_gt_double_matches_add() {
+        minifuzz::test(|u| {
+            let x: GT = u.arbitrary()?;
+            let mut doubled = x;
+            doubled.double();
+            assert_eq!(doubled, x + &x);
+            Ok(())
+        });
     }
 
     #[test]
@@ -2133,15 +2113,6 @@ mod tests {
             Twin::<G1>::multi_pairing(&twins, &lefts, &Sequential),
             expected
         );
-    }
-
-    #[test]
-    fn test_gt_generator_and_inverse() {
-        let g = GT::generator();
-        assert_ne!(g, GT::zero());
-        assert_eq!(g - &g, GT::zero());
-        // The scalar field has order r, so r * g = (r - 1) * g + g = 0.
-        assert_eq!(g * &-Scalar::one() + &g, GT::zero());
     }
 
     #[test]
