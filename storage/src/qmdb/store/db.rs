@@ -933,6 +933,33 @@ mod test {
     }
 
     #[test_traced]
+    fn test_store_prune_updates_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut cfg = test_config();
+            cfg.log.items_per_section = NZU64!(2);
+            let db = TestStore::init(ctx.child("db"), cfg, None).await.unwrap();
+            let key = Blake3::hash(&[b"key"]);
+            let (db, _) = apply_entries(db, [(key, Some(vec![7; 8]))]).await;
+
+            let assert_gauges = |expected: [&str; 2]| {
+                let metrics = ctx.encode();
+                for sample in expected {
+                    assert!(
+                        metrics.lines().any(|line| line == sample),
+                        "missing {sample}\n{metrics}"
+                    );
+                }
+            };
+            assert_gauges(["db_pruning_boundary 0", "db_retained 4"]);
+
+            let floor = db.inactivity_floor();
+            let db = db.prune(floor).await.unwrap();
+            assert_eq!(db.bounds().start, Location::new(2));
+            assert_gauges(["db_pruning_boundary 2", "db_retained 2"]);
+        });
+    }
+
+    #[test_traced]
     fn test_store_bounded_initialization_commit_selection() {
         for cap_case in 0..4 {
             deterministic::Runner::default().start(move |context| async move {
