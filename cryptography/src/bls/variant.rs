@@ -41,8 +41,9 @@ pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
 
     /// The random scalars that batch verification multiplies by.
     ///
-    /// Uniformly sampled values must give a soundness error of at most `N * 2^-128` in random
-    /// linear-combination checks.
+    /// Each random linear-combination check must have a soundness error of at most `2^-128`: for
+    /// any fixed false statement, the check accepts with probability at most `2^-128` when its
+    /// challenges are sampled independently with [Random::random].
     type Challenge: Random + Send + Sync;
 
     /// The domain separator tag (DST) for a proof of possession.
