@@ -33,7 +33,7 @@ use crate::{
 use commonware_codec::{Copying, DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, buffer::paged::CacheRef};
+use commonware_runtime::{Handle, Removal, buffer::paged::CacheRef};
 use commonware_utils::{futures::try_join_all, range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -319,19 +319,36 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         cfg: Config<S>,
         retain: Retain<F>,
     ) -> Result<Recovery<F, E, D, S>, Error<F>> {
+        let metadata = Self::open_metadata(&context, &cfg).await?;
+        Self::prepare_with(context, hasher, cfg, metadata, retain).await
+    }
+
+    /// Open the metadata that holds the persisted pruning boundary and its pins.
+    pub(crate) async fn open_metadata(
+        context: &E,
+        cfg: &Config<S>,
+    ) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
+        let cfg = MConfig {
+            partition: cfg.metadata_partition.clone(),
+            codec_config: ((0..).into(), ()),
+        };
+        Ok(Metadata::init(context.child("metadata"), cfg).await?)
+    }
+
+    /// [Self::prepare] over `metadata` from [Self::open_metadata], for a caller that chooses
+    /// `retain` from [Self::persisted_pruned_to].
+    pub(crate) async fn prepare_with(
+        context: E,
+        hasher: &impl Hasher<F, Digest = D>,
+        cfg: Config<S>,
+        mut metadata: Metadata<E, U64, Vec<u8>>,
+        retain: Retain<F>,
+    ) -> Result<Recovery<F, E, D, S>, Error<F>> {
         let (max_leaves, discard) = match retain {
             Retain::All => (None, false),
             Retain::AtMost(leaves) => (Some(leaves), false),
             Retain::Nothing => (Some(Location::new(0)), true),
         };
-        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.child("metadata"),
-            MConfig {
-                partition: cfg.metadata_partition,
-                codec_config: ((0..).into(), ()),
-            },
-        )
-        .await?;
 
         // One metadata commit drops the boundary together with its pins.
         if discard && metadata.keys().next().is_some() {
@@ -342,16 +359,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
         // opening the node journal.
-        let key = U64::new(PRUNED_TO_PREFIX, 0);
-        let persisted_pruned_to = match metadata.get(&key) {
-            Some(bytes) => Some(Location::<F>::new(u64::from_be_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::DataCorrupted("invalid Merkle pruning boundary"))?,
-            ))),
-            None => None,
-        };
+        let persisted_pruned_to = Self::persisted_pruned_to(&metadata)?;
         let metadata_pruned_to = persisted_pruned_to.unwrap_or(Location::new(0));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
         if let Some(cap) = max_leaves
@@ -432,6 +440,20 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             effective_prune_pos,
             strategy: cfg.strategy,
         })
+    }
+
+    /// The leaf pruning boundary recorded in `metadata`, if any.
+    pub(crate) fn persisted_pruned_to(
+        metadata: &Metadata<E, U64, Vec<u8>>,
+    ) -> Result<Option<Location<F>>, Error<F>> {
+        let Some(bytes) = metadata.get(&U64::new(PRUNED_TO_PREFIX, 0)) else {
+            return Ok(None);
+        };
+        let boundary = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::DataCorrupted("invalid Merkle pruning boundary"))?;
+        Ok(Some(Location::new(u64::from_be_bytes(boundary))))
     }
 
     /// Read a pinned node from metadata or initialization-owned journal storage.
@@ -731,6 +753,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
     /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
     pub async fn flush(self) -> Result<Self, Error<F>> {
+        // Observe a node deletion failure that has already finished, since a clean flush reaches
+        // no journal operation that would.
+        self.journal.check_removals()?;
         self.flush_internal().await
     }
 
@@ -738,7 +763,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
 
-        // Observe pending sync failures and persist nodes from this or earlier flushes.
+        // Observe pending sync and node deletion failures, and persist nodes from this or earlier
+        // flushes. A clean journal is not synced, so its finished deletions are checked here.
+        self.journal.check_removals()?;
         if self.journal_dirty {
             self.journal = self.journal.sync().await?;
             self.journal_dirty = false;
@@ -811,19 +838,30 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
-    /// Returns whether any node blob was removed.
+    /// Returns whether any node blob was released.
     ///
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
     /// state, requiring it sync the structure to write any potential unsynced updates.
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
-    pub async fn prune(mut self, loc: Location<F>) -> Result<(Self, bool), Error<F>> {
+    pub async fn prune(self, loc: Location<F>) -> Result<(Self, bool), Error<F>> {
+        self.prune_after(loc, None).await
+    }
+
+    /// Like [Self::prune], with the released node blobs deleted only once `after` has completed
+    /// successfully.
+    pub(crate) async fn prune_after(
+        mut self,
+        loc: Location<F>,
+        after: Option<Removal>,
+    ) -> Result<(Self, bool), Error<F>> {
         let pos = Position::try_from(loc)?;
         if loc > self.mem.leaves() {
             return Err(Error::LeafOutOfBounds(loc));
         }
         if pos <= self.pruned_to_pos {
+            self.journal.check_removals()?;
             return Ok((self, false));
         }
 
@@ -836,7 +874,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         (self, pinned_nodes) = self.update_metadata(pos).await?;
 
         let pruned;
-        (self.journal, pruned) = self.journal.prune(*pos).await?;
+        (self.journal, pruned) = self.journal.prune_after(*pos, after).await?;
         Arc::make_mut(&mut self.mem).replace_extra_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
@@ -895,6 +933,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         Ok(())
     }
 
+    /// A [Removal] that completes once every node blob released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.journal.removals()
+    }
+
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.
     pub fn root(
         &self,
@@ -925,6 +968,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// An interrupted destroy leaves a store that reopens as the tree a crash would recover or
     /// empty, and that a retried destroy empties.
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        // Report a failed node deletion before changing anything.
+        self.journal.wait_for_removals().await?;
+
         // A failed node journal sync must surface before the metadata is removed.
         let merkle = self.wait_for_sync().await?;
 
