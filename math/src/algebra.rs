@@ -572,7 +572,8 @@ pub trait PairingGroup: CryptoGroup {
     }
 
     /// Returns the sum of `scalars[i] * (lefts[i] o rights[i])` over each index
-    /// `i`, or zero if the slices are empty.
+    /// `i` that has a scalar, plus `lefts[i] o rights[i]` over each index that
+    /// does not, or zero if the slices are empty.
     ///
     /// With a random scalar for each pairing equation, the sum checks all the
     /// equations at once, as batch verification does. Callers must not pass
@@ -581,12 +582,16 @@ pub trait PairingGroup: CryptoGroup {
     ///
     /// # Panics
     ///
-    /// Panics if `lefts`, `rights`, and `scalars` differ in length.
+    /// Panics if `lefts` and `rights` differ in length, or if `scalars` is longer
+    /// than `lefts`.
     //
     // The default multiplies `lefts` by the scalars with `Space::mul_each`, then
     // calls `multi_pairing`. Bilinearity lets the scalars multiply either side
     // of each pairing, and `lefts` is the cheaper side when the trait is
     // implemented on the group whose scalar multiplication is cheaper.
+    //
+    // Pairs without a scalar are not multiplied, so a caller can append a pair
+    // that it has already weighted without paying for a multiplication by one.
     //
     // Implementations should not need to override this method. Its cost lies in
     // the scalar multiplications and the multi-pairing, which implementations
@@ -610,13 +615,12 @@ pub trait PairingGroup: CryptoGroup {
             rights.len(),
             "lefts and rights must have the same length"
         );
-        assert_eq!(
-            lefts.len(),
-            scalars.len(),
-            "lefts and scalars must have the same length"
+        assert!(
+            scalars.len() <= lefts.len(),
+            "scalars must not be longer than lefts"
         );
         let mut scaled = lefts.to_vec();
-        Self::mul_each(&mut scaled, scalars, strategy);
+        Self::mul_each(&mut scaled[..scalars.len()], scalars, strategy);
         Self::multi_pairing(&scaled, rights, strategy)
     }
 }
@@ -821,13 +825,12 @@ impl<G: PairingGroup> PairingGroup for Twin<G> {
             rights.len(),
             "lefts and rights must have the same length"
         );
-        assert_eq!(
-            lefts.len(),
-            scalars.len(),
-            "lefts and scalars must have the same length"
+        assert!(
+            scalars.len() <= lefts.len(),
+            "scalars must not be longer than lefts"
         );
         let mut scaled = rights.to_vec();
-        G::mul_each(&mut scaled, scalars, strategy);
+        G::mul_each(&mut scaled[..scalars.len()], scalars, strategy);
         G::multi_pairing(&scaled, Self::as_inner_slice(lefts), strategy)
     }
 }
@@ -1269,10 +1272,11 @@ pub mod test_suites {
     ) {
         use commonware_parallel::Sequential;
         // Bilinearity lets the scalars multiply either side, so the expected sum
-        // multiplies the left elements.
+        // multiplies the left elements. Pairs without a scalar add unscaled.
         let mut expected = G::Target::zero();
-        for ((a, x), s) in lefts.iter().zip(rights).zip(scalars) {
-            expected += &(a.clone() * s).pairing(x);
+        for (i, (a, x)) in lefts.iter().zip(rights).enumerate() {
+            let a = scalars.get(i).map_or_else(|| a.clone(), |s| a.clone() * s);
+            expected += &a.pairing(x);
         }
         assert_eq!(
             G::scaled_multi_pairing(lefts, rights, scalars, &Sequential),
@@ -1319,7 +1323,9 @@ pub mod test_suites {
                 let rights = (0..len)
                     .map(|_| u.arbitrary())
                     .collect::<arbitrary::Result<Vec<G::Twin>>>()?;
-                let scalars = (0..len)
+                // Scale a prefix of the pairs, from none of them to all of them.
+                let scaled = u.int_in_range(0..=len)?;
+                let scalars = (0..scaled)
                     .map(|_| u.arbitrary())
                     .collect::<arbitrary::Result<Vec<G::Scalar>>>()?;
                 check_scaled_multi_pairing_eq_naive(&lefts, &rights, &scalars);
