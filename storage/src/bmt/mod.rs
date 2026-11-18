@@ -2969,7 +2969,7 @@ mod tests {
 
                 // Remove a sibling hash and ensure the proof fails
                 if !proof.siblings.is_empty() {
-                    let mut remove_tamper = proof.clone();
+                    let mut remove_tamper = proof;
                     remove_tamper.siblings.pop();
                     assert!(
                         remove_tamper

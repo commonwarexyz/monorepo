@@ -10,7 +10,6 @@ use crate::{
     merkle::{
         self, Graftable, Location, Position, Readable,
         batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
-        storage::Storage as MerkleStorage,
     },
     qmdb::{
         Error,
@@ -183,21 +182,6 @@ impl<R: Readable> Readable for Layered<'_, R> {
             return Some(d);
         }
         self.mem.get_node(pos)
-    }
-}
-
-impl<R: Readable> MerkleStorage<R::Family> for Layered<'_, R> {
-    type Digest = R::Digest;
-
-    fn size(&self) -> Position<R::Family> {
-        Readable::size(self)
-    }
-
-    async fn get_node(
-        &self,
-        pos: Position<R::Family>,
-    ) -> Result<Option<R::Digest>, merkle::Error<R::Family>> {
-        Ok(Readable::get_node(self, pos))
     }
 }
 
@@ -1002,8 +986,7 @@ where
         &grafted_storage,
         overlay_ops_leaves,
         inner.bounds.inactivity_floor,
-    )
-    .await?;
+    )?;
     let canonical_root = ops_root_witness.root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
@@ -1412,14 +1395,9 @@ where
 {
     type Family = F;
     type Digest = D;
-    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, U, N, S>;
 
     fn root(&self) -> D {
         self.root()
-    }
-
-    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N, S> {
-        self.new_batch::<H>()
     }
 
     /// The root is the ops root, which the sync engine verifies against.

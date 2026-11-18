@@ -1180,8 +1180,10 @@ where
         // registered for later local availability.
         //
         // Round-based fetching is for notarized proposal lookups whose height is
-        // not known before the request. Height-based fetching is only for callers
-        // that have a validated block height for resolver retention.
+        // not known before the request. Commitment-based fetching is for callers
+        // that read the block's height from the block above it. That height bounds
+        // the request only once the block above has been checked against its own
+        // parent. A round the caller supplies bounds it regardless.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
                 // Fetch the notarized proposal for this round. The response
@@ -1194,7 +1196,7 @@ where
                     .ignore();
                 debug!(?round, ?digest, "notarized block unavailable");
             }
-            CommitmentFallback::FetchByCommitment { height } => {
+            CommitmentFallback::FetchByCommitment { height, round } => {
                 let commitment = match key {
                     SubscriptionKey::Commitment(commitment) => commitment,
                     SubscriptionKey::Digest(_) => {
@@ -1203,14 +1205,21 @@ where
                 };
 
                 // Ancestry may be only notarized, so skipping commitment recomputation
-                // requires certification evidence
+                // requires certification evidence. That evidence also fixes the block's
+                // height, so only a request without it needs the round as a bound.
                 let request = if self.certified.contains(height, &commitment) {
                     Request::certified(commitment, height)
                 } else {
-                    Request::untrusted(commitment, height)
+                    Request::untrusted(commitment, height, round)
                 };
                 self.floor.fetch_if_permitted(resolver, request).ignore();
-                debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
+                debug!(
+                    %height,
+                    ?round,
+                    ?commitment,
+                    ?digest,
+                    "certified ancestry block unavailable"
+                );
             }
             CommitmentFallback::Wait => {}
         }
@@ -1562,7 +1571,7 @@ where
                     matches!(
                         annotation,
                         Annotation::Certified { height: bound }
-                        | Annotation::Untrusted { height: bound } if height <= *bound
+                        | Annotation::Untrusted { height: bound, .. } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)

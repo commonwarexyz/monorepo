@@ -630,6 +630,11 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// - When `reached_target` is `Some`, report each reached target on it at most once, in the
     ///   order reached. Reports never wait, so an observer that falls behind skips intermediate
     ///   reports.
+    ///
+    /// A target the database cannot reach, such as a compact target covering more than its last
+    /// commit, fails the sync whether it is `target` or arrives on `tip_updates`. Targets come
+    /// from [`Application::sync_targets`](super::Application::sync_targets), so a malformed one is
+    /// a caller bug.
     #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,

@@ -957,14 +957,9 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> crate::qmdb::sync::Merk
 {
     type Family = F;
     type Digest = D;
-    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, O, S>;
 
     fn root(&self) -> D {
         self.root()
-    }
-
-    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, O, S> {
-        self.new_batch::<H>()
     }
 
     /// The range covers only the last commit, the one operation a compact db holds.

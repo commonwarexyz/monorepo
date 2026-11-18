@@ -2,7 +2,7 @@
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use crate::native::{NativeArmV9, NativeNeon};
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 use crate::native::{NativeX86V3, NativeX86V4C};
 use crate::{Operation, Simd, emulated::EmulatedScalar};
 
@@ -90,12 +90,12 @@ macro_rules! dispatch {
     };
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 dispatch!(NativeX86V4C, NativeX86V3);
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 dispatch!(NativeArmV9, NativeNeon);
 #[cfg(not(any(
-    target_arch = "x86_64",
+    all(target_arch = "x86_64", target_feature = "sse2"),
     all(target_arch = "aarch64", target_feature = "neon")
 )))]
 dispatch!();

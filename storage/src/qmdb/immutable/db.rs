@@ -182,7 +182,7 @@ where
         // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
         // the snapshot replay starts, so keys set before the floor are not loaded.
         let size = journal.size();
-        let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at(&journal, size)
+        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&journal, size)
             .await?
             .ok_or(Error::UnexpectedData(size - 1))?;
 
@@ -241,16 +241,17 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
-    /// has been pruned.
+    /// Get the value of `key` in the db, or None if no operation at or above the inactivity floor
+    /// sets it.
     ///
-    /// Unlike batch reads, this may return a value written below the inactivity floor, until the
-    /// database prunes that operation or rebuilds its index from the floor on restart or sync.
+    /// Every database at the same commitment answers alike, however far it has pruned and
+    /// whether or not it has been reopened. None does not mean `key` may be set: a key the floor
+    /// has retired was still set once.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        self.get_from(key, Location::new(0)).await
+        self.get_from(key, self.inactivity_floor_loc).await
     }
 
-    /// Like [`Self::get`], but also ignores operations below `floor`.
+    /// Get the value of `key` in the db, ignoring operations below `floor`.
     pub(crate) async fn get_from(
         &self,
         key: &K,
@@ -273,16 +274,15 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys. Like [`Self::get`], this may return
-    /// values written below the inactivity floor.
+    /// Returns results in the same order as the input keys, matching [`Self::get`] for each key.
     pub async fn get_many(
         &self,
         keys: &[impl Borrow<K> + Sync],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        self.get_many_from(keys, Location::new(0)).await
+        self.get_many_from(keys, self.inactivity_floor_loc).await
     }
 
-    /// Like [`Self::get_many`], but also ignores operations below `floor`.
+    /// Batch read multiple keys, ignoring operations below `floor`.
     pub(crate) async fn get_many_from(
         &self,
         keys: &[impl Borrow<K> + Sync],
@@ -457,8 +457,9 @@ where
             .await
     }
 
-    /// Prune operations prior to `prune_loc` without changing the db's root. Keys whose operations
-    /// are no longer retained cannot be retrieved.
+    /// Prune operations prior to `prune_loc` without changing the db's root. Pruning leaves
+    /// [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location still require
+    /// the requested operations and Merkle nodes to be retained.
     ///
     /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///

@@ -293,6 +293,10 @@ where
         self.new_batch()
     }
 
+    fn new_child(parent: &Arc<Self::MerkleizedBatch>) -> Self::Batch {
+        parent.new_batch::<H>()
+    }
+
     async fn merkleize(&self, batch: Self::Batch) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
         batch.merkleize(self).await
     }
@@ -304,9 +308,42 @@ where
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
     }
+}
 
-    async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
-        self.prune(target.range.start()).await
+impl<F, E, C, I, H, K, V, S> Qmdb for AnyDb<F, E, C, I, H, ordered::Update<K, V>, S>
+where
+    Self: sync::Database<Family = F, Context = E, Digest = H::Digest, Hasher = H, Config: Send>,
+    F: Family,
+    E: Context,
+    K: Key,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
+    I: OrderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, ordered::Update<K, V>>: Codec,
+{
+    type Batch = UnmerkleizedBatch<F, H, ordered::Update<K, V>, S>;
+    type MerkleizedBatch = MerkleizedBatch<F, H::Digest, ordered::Update<K, V>, S>;
+
+    fn new_batch(&self) -> Self::Batch {
+        self.new_batch()
+    }
+
+    fn new_child(parent: &Arc<Self::MerkleizedBatch>) -> Self::Batch {
+        parent.new_batch::<H>()
+    }
+
+    async fn merkleize(&self, batch: Self::Batch) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
+        batch.merkleize(self).await
+    }
+
+    async fn apply_batch(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+        self.apply_batch(batch).await
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 }
 
@@ -330,6 +367,23 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
+
+    /// Ordered databases get the same [`Qmdb`] support as unordered ones.
+    #[test]
+    fn ordered_any_is_qmdb() {
+        fn assert_qmdb<D: Qmdb>() {}
+        assert_qmdb::<
+            qmdb::any::ordered::fixed::Db<
+                mmr::Family,
+                deterministic::Context,
+                Digest,
+                Digest,
+                Sha256,
+                TwoCap,
+                Sequential,
+            >,
+        >();
+    }
 
     type UnorderedFixedDb =
         fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;

@@ -42,7 +42,7 @@ use commonware_macros::select;
 use commonware_p2p::simulated::{self, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock, Quota, Runner, Supervisor as _,
+    Clock, Metrics as _, Quota, Runner, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     telemetry::metrics::{
@@ -231,6 +231,32 @@ where
     .await;
     network.start();
     oracle
+}
+
+/// Epochs whose cache archives are open under the metrics context `root`. Each open epoch's
+/// finalizations archive registers an `items_tracked` gauge labeled with the epoch.
+pub fn opened_cache_epochs(context: &deterministic::Context, root: &str) -> Vec<u64> {
+    let needle = format!("{root}_cache_finalizations_items_tracked{{");
+    let mut epochs: Vec<u64> = context
+        .encode()
+        .lines()
+        .filter(|line| line.starts_with(&needle))
+        .map(|line| {
+            let start = line
+                .find("epoch=\"")
+                .expect("gauge must have an epoch label")
+                + "epoch=\"".len();
+            let end = start
+                + line[start..]
+                    .find('"')
+                    .expect("epoch label must have a closing quote");
+            line[start..end]
+                .parse()
+                .expect("epoch label must be an integer")
+        })
+        .collect();
+    epochs.sort_unstable();
+    epochs
 }
 
 /// Setup network links between peers.
@@ -1037,7 +1063,6 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let block = block.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
@@ -1139,7 +1164,6 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let block = block.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
@@ -1256,7 +1280,6 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let block = block.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
                     context.child("network"),
@@ -1773,8 +1796,6 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
             let participants = participants.clone();
             let me = me.clone();
             let provider = provider.clone();
-            let application = application.clone();
-            let block = block.clone();
             let finalization = finalization.clone();
             move |context| async move {
                 let mut oracle = setup_network_with_participants(
@@ -4193,6 +4214,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             commitment,
             CommitmentFallback::FetchByCommitment {
                 height: expected_height,
+                round: None,
             },
         );
 
@@ -4219,7 +4241,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
         assert_eq!(cached.height(), actual_height);
 
         let expected_height = Height::new(7);
-        let actual_height = Height::new(1_000_000);
+        let actual_height = Height::new(8);
         let block = H::make_test_block(
             Sha256::hash(&[b"commitment-fetch-height-above-hint"]),
             H::genesis_parent_commitment(NUM_VALIDATORS as u16),
@@ -4239,6 +4261,7 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
             commitment,
             CommitmentFallback::FetchByCommitment {
                 height: expected_height,
+                round: None,
             },
         );
         let received = select! {

@@ -4,6 +4,7 @@ use commonware_consensus::types::Round;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::Link;
 use commonware_runtime::deterministic;
+use commonware_utils::vec::NonEmptyVec;
 use std::{ops::RangeInclusive, time::Duration};
 
 /// Crash strategy for a simulation run.
@@ -28,14 +29,22 @@ pub enum Crash<P: PublicKey> {
         round: Round,
     },
 
-    /// Crash a validator when its application enters a processed-height window,
-    /// then restart it after the configured downtime.
+    /// Crash validators together once all of them are running and report a
+    /// processed height inside the window, then restart them after the
+    /// configured downtime. The run fails if a reported height is past the
+    /// window or the crash never happens.
+    ///
+    /// Heights are read one validator at a time, and a read can suspend. A
+    /// validator can therefore process further between its read and the crash.
+    ///
+    /// Validators that stop independently of each other take one entry each.
     ProcessedHeight {
-        /// Validator to crash.
-        participant: P,
-        /// Processed-height window in which the crash must occur.
+        /// Validators to crash.
+        participants: NonEmptyVec<P>,
+        /// Window that every participant's reported processed height must be
+        /// inside for the crash to fire.
         heights: RangeInclusive<u64>,
-        /// How long the validator remains offline.
+        /// How long the validators remain offline.
         downtime: Duration,
     },
 

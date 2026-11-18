@@ -292,6 +292,10 @@ where
         self.new_batch()
     }
 
+    fn new_child(parent: &Arc<Self::MerkleizedBatch>) -> Self::Batch {
+        parent.new_batch::<H>()
+    }
+
     async fn merkleize(&self, batch: Self::Batch) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
         batch.merkleize(self).await
     }
@@ -302,10 +306,6 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
-    }
-
-    async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
-        self.prune(target.range.start()).await
     }
 }
 
@@ -329,6 +329,10 @@ where
         self.new_batch()
     }
 
+    fn new_child(parent: &Arc<Self::MerkleizedBatch>) -> Self::Batch {
+        parent.new_batch::<H>()
+    }
+
     async fn merkleize(&self, batch: Self::Batch) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
         batch.merkleize(self).await
     }
@@ -339,10 +343,6 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
-    }
-
-    async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
-        self.prune(target.range.start()).await
     }
 }
 

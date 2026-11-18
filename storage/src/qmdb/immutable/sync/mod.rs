@@ -107,9 +107,7 @@ where
             return Err(Error::HistoricalFloorPruned(size));
         }
         let inactivity_floor_loc =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size)
-                .await?
-                .ok_or(crate::qmdb::Error::HistoricalFloorPruned(size))?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
         // Replay the log from the inactivity floor to build the snapshot.
         let snapshot = immutable::db::build_snapshot(
@@ -161,9 +159,8 @@ where
 
         // The inactivity floor is carried by the last commit operation rather than being
         // the target range's start.
-        let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end())
-            .await?
-            .ok_or(qmdb::Error::HistoricalFloorPruned(target.range.end()))?;
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
         sync::local_pinned_nodes::<F, _, H, S>(
             context,
@@ -179,6 +176,13 @@ where
             root: self.root(),
             range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
         }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
     }
 }
 

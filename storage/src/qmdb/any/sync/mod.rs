@@ -180,9 +180,8 @@ where
 
         // The inactivity floor is carried by the last commit operation rather than being
         // the target range's start.
-        let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end())
-            .await?
-            .ok_or(qmdb::Error::HistoricalFloorPruned(target.range.end()))?;
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
@@ -198,5 +197,12 @@ where
             root: Self::root(self),
             range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
         }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
     }
 }

@@ -923,6 +923,13 @@ pub(crate) mod tests {
                 range: non_empty_range!(Location::new(0), Location::new(1)),
             }
         }
+
+        async fn prune_to_target(
+            self,
+            _target: &Target<MmrFamily, sha256::Digest>,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(self)
+        }
     }
 
     #[derive(Clone)]

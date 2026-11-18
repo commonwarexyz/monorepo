@@ -98,6 +98,13 @@ where
         self.target()
     }
 
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, Self::Digest>,
+    ) -> Result<Self, Error<F>> {
+        self.prune(target.range.end()).await
+    }
+
     /// Reject a target that covers more than the last commit.
     fn validate_target(
         target: &sync::Target<F, Self::Digest>,

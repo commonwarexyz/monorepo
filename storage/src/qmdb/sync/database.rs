@@ -13,7 +13,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_range, range::NonEmptyRange};
-use std::{future::Future, num::NonZeroU64, sync::Arc};
+use std::{future::Future, num::NonZeroU64};
 
 /// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
@@ -152,8 +152,15 @@ pub trait Database: Sized + Send {
     /// the canonical database root.
     fn target(&self) -> Target<Self::Family, Self::Digest>;
 
+    /// Prune history that a previously reached `target` no longer needs.
+    fn prune_to_target(
+        self,
+        target: &Target<Self::Family, Self::Digest>,
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
+
     /// Reject a target this database cannot sync to. The engine checks the initial target and
-    /// every adopted update. The default accepts any target.
+    /// every adopted update, and a rejected target fails the sync, since a malformed target is a
+    /// caller bug. The default accepts any target.
     fn validate_target(
         _target: &Target<Self::Family, Self::Digest>,
     ) -> Result<(), EngineError<Self::Family, Self::Digest>> {
@@ -169,14 +176,8 @@ pub trait MerkleizedBatch {
     /// The digest type of the batch's root.
     type Digest: Digest;
 
-    /// A batch rooted at this one, before merkleization.
-    type Unmerkleized<H: Hasher<Digest = Self::Digest>>;
-
     /// The root of the database once this batch is applied.
     fn root(&self) -> Self::Digest;
-
-    /// Create a batch rooted at this one.
-    fn new_batch<H: Hasher<Digest = Self::Digest>>(self: &Arc<Self>) -> Self::Unmerkleized<H>;
 
     /// Sync target reached once this batch is applied.
     fn target(&self) -> Target<Self::Family, Self::Digest>;

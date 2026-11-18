@@ -271,14 +271,15 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 }
 
 /// Look up the inactivity floor declared by the commit at `size - 1`, or `None` if that
-/// operation is not a commit.
+/// operation is not a commit. [`find_inactivity_floor_at`] is the variant for callers that
+/// require a commit.
 ///
 /// # Errors
 ///
 /// - [`Error::HistoricalFloorPruned`] if `size` is zero (no preceding commit exists).
 /// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
 /// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
-pub(crate) async fn find_inactivity_floor_at<F, R>(
+pub(crate) async fn commit_floor_at<F, R>(
     reader: &R,
     size: Location<F>,
 ) -> Result<Option<Location<F>>, Error<F>>
@@ -307,6 +308,28 @@ where
     Ok(Some(floor))
 }
 
+/// Look up the inactivity floor declared by the commit at `size - 1`.
+///
+/// # Errors
+///
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero, or if the operation at `size - 1` is
+///   retained but is not a commit (the caller passed a non-commit-boundary size, or pruning
+///   removed the commit that would have governed it).
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
+pub(crate) async fn find_inactivity_floor_at<F, R>(
+    reader: &R,
+    size: Location<F>,
+) -> Result<Location<F>, Error<F>>
+where
+    F: Family,
+    R: Contiguous<Item: Committable<F>>,
+{
+    commit_floor_at(reader, size)
+        .await?
+        .ok_or(Error::HistoricalFloorPruned(size))
+}
+
 /// Compute the inactive peak count for a historical `size`.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
@@ -320,9 +343,7 @@ where
         return Ok(0);
     }
 
-    let floor = find_inactivity_floor_at::<F, _>(reader, size)
-        .await?
-        .ok_or(Error::HistoricalFloorPruned(size))?;
+    let floor = find_inactivity_floor_at::<F, _>(reader, size).await?;
     Ok(F::inactive_peaks(size, floor))
 }
 

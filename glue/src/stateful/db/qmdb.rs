@@ -1,5 +1,19 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB databases.
 //!
+//! Every database that implements [`Qmdb`] gets both traits. Batches add family-specific methods
+//! to [`Unmerkleized`] and [`Merkleized`]:
+//!
+//! - [`any`](commonware_storage::qmdb::any) and [`current`](commonware_storage::qmdb::current)
+//!   batches upsert and delete keys (`write`), read them (`get`, `get_many`), and stage reads
+//!   (`stage`).
+//! - [`immutable`](commonware_storage::qmdb::immutable) batches accept new keyed values (`set`)
+//!   but no updates or deletions.
+//! - [`keyless`](commonware_storage::qmdb::keyless) batches are append-only (`append`) and read
+//!   operations by location rather than by key.
+//! - [`compact`](commonware_storage::qmdb::compact) databases retain only the current Merkle
+//!   peaks. Their batches `append` (keyless operations) or `set` (immutable operations) and
+//!   merkleize, but support no historical reads.
+//!
 //! Batch reads consult the database at the time of the read for data their batch chain does not
 //! hold, and return a `StaleRead` error once the database is at no state of that chain.
 
@@ -21,15 +35,15 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     type Batch: Send;
 
     /// Storage batch after merkleization.
-    type MerkleizedBatch: sync::MerkleizedBatch<
-            Family = Self::Family,
-            Digest = Self::Digest,
-            Unmerkleized<Self::Hasher> = Self::Batch,
-        > + Send
+    type MerkleizedBatch: sync::MerkleizedBatch<Family = Self::Family, Digest = Self::Digest>
+        + Send
         + Sync;
 
     /// Batch rooted at the applied state.
     fn new_batch(&self) -> Self::Batch;
+
+    /// Batch rooted at `parent`.
+    fn new_child(parent: &Arc<Self::MerkleizedBatch>) -> Self::Batch;
 
     /// Merkleize `batch` against the applied state.
     fn merkleize(
@@ -47,12 +61,6 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     fn start_sync(
         self,
     ) -> impl Future<Output = Result<(Self, Handle<()>), Error<Self::Family>>> + Send;
-
-    /// Prune history `target` no longer needs.
-    fn prune(
-        self,
-        target: &sync::Target<Self::Family, Self::Digest>,
-    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 }
 
 /// A [`Qmdb`] batch before merkleization, reading through to its database's applied state.
@@ -123,7 +131,7 @@ impl<D: Qmdb> MerkleizedTrait for Merkleized<D> {
 
     fn new_batch(&self) -> Unmerkleized<D> {
         Unmerkleized {
-            batch: self.inner.new_batch::<D::Hasher>(),
+            batch: D::new_child(&self.inner),
             db: self.db.clone(),
         }
     }
@@ -176,7 +184,7 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<D::Family>> {
-        Qmdb::prune(self, target).await
+        sync::Database::prune_to_target(self, target).await
     }
 
     fn sync_target(&self) -> Self::SyncTarget {

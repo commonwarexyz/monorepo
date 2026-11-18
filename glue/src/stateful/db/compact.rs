@@ -60,6 +60,10 @@ where
         self.new_batch()
     }
 
+    fn new_child(parent: &Arc<Self::MerkleizedBatch>) -> Self::Batch {
+        parent.new_batch::<H>()
+    }
+
     async fn merkleize(&self, batch: Self::Batch) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
         batch.merkleize(self).await
     }
@@ -70,10 +74,6 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
-    }
-
-    async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
-        self.prune(target.range.end()).await
     }
 }
 
@@ -89,7 +89,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
+        buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::{
@@ -739,7 +739,7 @@ mod tests {
             let wrong_size = Target {
                 root: merkleized.root(),
                 range: non_empty_range!(
-                    merkleized.bounds().tip.size - 1 - 1,
+                    merkleized.bounds().tip.size - 2,
                     merkleized.bounds().tip.size - 1
                 ),
             };
@@ -806,40 +806,15 @@ mod tests {
         });
     }
 
-    fn state_sync_stops_compact_update_forwarder_after_completion<O: AdapterOperation>() {
-        deterministic::Runner::default().start(|context| async move {
-            let (source, targets) = compact_source::<O>(context.child("source"), &[7]).await;
-
-            let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
-            let synced = <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
-                context.child("target"),
-                compact_config("target"),
-                source,
-                targets[0].clone(),
-                update_rx,
-                None,
-                None,
-                sync_config(),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(
-                count_running_tasks(&context, "target_compact_updates"),
-                0,
-                "compact target forwarder outlived the completed sync",
-            );
-            drop(synced);
-        });
-    }
-
-    fn state_sync_drains_queued_target_before_reporting_reached<O: AdapterOperation>() {
+    /// A queued update is adopted before the initial target is reached, so only the update is
+    /// reported.
+    fn state_sync_adopts_queued_target_before_reaching_initial<O: AdapterOperation>() {
         deterministic::Runner::default().start(|context| async move {
             let (source, targets) = O::full_source(context.child("source"), &[7, 8]).await;
 
             let (update_tx, update_rx) = ring::channel(NZUsize!(1));
             assert!(update_tx.send_lossy(targets[1].clone()));
-            let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
+            let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(2));
             let synced = <AdapterDb<O> as StateSyncDb<_, _>>::sync_db(
                 context.child("target"),
                 compact_config("target"),
@@ -854,6 +829,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(reached_rx.recv().await, Some(targets[1].clone()));
+            assert_eq!(reached_rx.recv().await, None);
             assert_eq!(synced.target(), targets[1]);
             assert_eq!(synced.get_metadata(), Some(O::commit_metadata(8)));
         });
@@ -871,7 +847,7 @@ mod tests {
         // hangs so the test can observe the gauges while they diverge.
         let unservable_target = Target {
             root: Sha256::hash(&[&[0xFF]]),
-            range: non_empty_range!(target.range.end() + 1 - 1, target.range.end() + 1),
+            range: non_empty_range!(target.range.end(), target.range.end() + 1),
         };
         let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
         let superseding_source = SupersedingSource {
@@ -1162,16 +1138,8 @@ mod tests {
                 }
 
                 #[test]
-                fn state_sync_stops_compact_update_forwarder_after_completion() {
-                    super::state_sync_stops_compact_update_forwarder_after_completion::<
-                        $operation,
-                    >();
-                }
-
-                #[test]
-                fn state_sync_drains_queued_target_before_reporting_reached() {
-                    super::state_sync_drains_queued_target_before_reporting_reached::<$operation>(
-                    );
+                fn state_sync_adopts_queued_target_before_reaching_initial() {
+                    super::state_sync_adopts_queued_target_before_reaching_initial::<$operation>();
                 }
 
                 #[test]

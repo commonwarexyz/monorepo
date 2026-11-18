@@ -636,6 +636,7 @@ where
         })
     }
 }
+
 impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> crate::qmdb::sync::MerkleizedBatch
     for MerkleizedBatch<F, D, V, S>
 where
@@ -643,14 +644,9 @@ where
 {
     type Family = F;
     type Digest = D;
-    type Unmerkleized<H: Hasher<Digest = D>> = UnmerkleizedBatch<F, H, V, S>;
 
     fn root(&self) -> D {
         self.root()
-    }
-
-    fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S> {
-        self.new_batch::<H>()
     }
 
     fn target(&self) -> crate::qmdb::sync::Target<F, D> {

@@ -126,7 +126,7 @@ where
         }
 
         let size = journal.size();
-        let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at(&journal, size)
+        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&journal, size)
             .await?
             .ok_or(Error::UnexpectedData(size - 1))?;
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
