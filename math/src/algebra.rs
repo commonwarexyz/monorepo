@@ -479,21 +479,25 @@ pub trait HashToGroup: CryptoGroup {
 ///   - `(A + B) o X = A o X + B o X`,
 ///   - `A o (X + Y) = A o X + A o Y`.
 ///
+/// Scaling either side gives the same pairing. For each type `R` that both
+/// `Self` and [`Self::Twin`] are a [`Space`] over, and that is used with this
+/// pairing, `(A * r) o X = A o (X * r)` for every `r` of type `R`.
+///
 /// [`Self::pairing`] computes one pairing. [`Self::pairings`] computes several,
 /// and [`Self::multi_pairing`] computes their sum. Both have default
 /// implementations, which an implementation can override to share work across
 /// pairs, such as the single final exponentiation that a sum of Tate pairings
 /// needs.
 ///
-/// [`Self::scaled_multi_pairing`] computes a sum of pairings, each multiplied by
-/// its own scalar. It runs faster when this trait is implemented on the group
-/// whose scalar multiplication is cheaper.
+/// [`Self::scaled_multi_pairing`] computes a sum of pairings, each with one side
+/// multiplied by its own scalar. It runs faster when this trait is implemented on
+/// the group whose scalar multiplication is cheaper.
 pub trait PairingGroup: CryptoGroup {
     /// The group that this group pairs with.
     type Twin: CryptoGroup<Scalar = Self::Scalar>;
 
     /// The target group `GT` of the pairing.
-    type Target: CryptoGroup<Scalar = Self::Scalar>;
+    type Target: Additive;
 
     /// Returns `self o other`.
     fn pairing(&self, other: &Self::Twin) -> Self::Target;
@@ -571,7 +575,7 @@ pub trait PairingGroup: CryptoGroup {
         )
     }
 
-    /// Returns the sum of `scalars[i] * (lefts[i] o rights[i])` over each index
+    /// Returns the sum of `(lefts[i] * scalars[i]) o rights[i]` over each index
     /// `i` that has a scalar, plus `lefts[i] o rights[i]` over each index that
     /// does not, or zero if the slices are empty.
     ///
@@ -586,9 +590,9 @@ pub trait PairingGroup: CryptoGroup {
     /// than `lefts`.
     //
     // The default multiplies `lefts` by the scalars with `Space::mul_each`, then
-    // calls `multi_pairing`. Bilinearity lets the scalars multiply either side
-    // of each pairing, and `lefts` is the cheaper side when the trait is
-    // implemented on the group whose scalar multiplication is cheaper.
+    // calls `multi_pairing`. The scaling law in the trait docs lets the scalars
+    // multiply either side of each pairing, and `lefts` is the cheaper side when
+    // the trait is implemented on the group whose scalar multiplication is cheaper.
     //
     // Pairs without a scalar are not multiplied, so a caller can append a pair
     // that it has already weighted without paying for a multiplication by one.
@@ -1228,23 +1232,24 @@ pub mod test_suites {
     }
 
     fn check_pairing_scalar<G: PairingGroup>(a: G, x: G::Twin, s: G::Scalar) {
-        let expected = a.pairing(&x) * &s;
         assert_eq!(
             (a.clone() * &s).pairing(&x),
-            expected,
-            "(A * s) o X != (A o X) * s"
+            a.pairing(&(x * &s)),
+            "(A * s) o X != A o (X * s)"
         );
-        assert_eq!(a.pairing(&(x * &s)), expected, "A o (X * s) != (A o X) * s");
     }
 
     fn check_pairings_eq_naive<G: PairingGroup>(lefts: &[G], rights: &[G::Twin]) {
         use commonware_parallel::Sequential;
-        // Start each output one generator away from its expected value, so the check
-        // below catches any output that `pairings` leaves unwritten.
+        // Start each output one pairing of the generators away from its expected
+        // value, so the check below catches any output that `pairings` leaves
+        // unwritten. A degenerate pairing makes that offset zero, but then every
+        // expected value is zero too.
+        let offset = G::generator().pairing(&G::Twin::generator());
         let mut outputs: Vec<G::Target> = lefts
             .iter()
             .zip(rights)
-            .map(|(a, x)| a.pairing(x) + &G::Target::generator())
+            .map(|(a, x)| a.pairing(x) + &offset)
             .collect();
         G::pairings(lefts, rights, &mut outputs, &Sequential);
         for ((a, x), out) in lefts.iter().zip(rights).zip(&outputs) {
@@ -1271,7 +1276,7 @@ pub mod test_suites {
         scalars: &[G::Scalar],
     ) {
         use commonware_parallel::Sequential;
-        // Bilinearity lets the scalars multiply either side, so the expected sum
+        // Scaling either side gives the same pairing, so the expected sum
         // multiplies the left elements. Pairs without a scalar add unscaled.
         let mut expected = G::Target::zero();
         for (i, (a, x)) in lefts.iter().zip(rights).enumerate() {
@@ -1288,12 +1293,14 @@ pub mod test_suites {
     /// Checks the [`PairingGroup`] laws on arbitrary inputs.
     ///
     /// Each call runs one check, since pairings are expensive: that the pairing is
-    /// bilinear, or that [`PairingGroup::pairings`],
+    /// bilinear, that scaling either side by a [`CryptoGroup::Scalar`] gives the
+    /// same pairing, or that [`PairingGroup::pairings`],
     /// [`PairingGroup::multi_pairing`], or [`PairingGroup::scaled_multi_pairing`]
     /// agrees with [`PairingGroup::pairing`].
     ///
     /// It does not check that the pairing is non-degenerate. The [`Space`] suites
-    /// cover [`PairingGroup::Twin`] and [`PairingGroup::Target`] as groups.
+    /// cover [`PairingGroup::Twin`] as a group, and [`fuzz_additive`] covers
+    /// [`PairingGroup::Target`].
     pub fn fuzz_pairing_group<G>(u: &mut Unstructured<'_>) -> arbitrary::Result<()>
     where
         G: PairingGroup + for<'a> Arbitrary<'a>,
