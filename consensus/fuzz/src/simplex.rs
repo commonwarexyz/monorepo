@@ -163,16 +163,17 @@ mod tests {
         FuzzInput, HANDOFF_DECISIONS, N4F1C3, Standard, fuzz, strategy::StrategyChoice,
         utils::Partition,
     };
+    use arbitrary::{Arbitrary, Unstructured};
     use commonware_consensus::{
         Handoff,
         types::{TermLength, ViewDelta},
     };
+    use commonware_invariants::minifuzz;
     use commonware_macros::{test_group, test_traced};
     use commonware_utils::NZU32;
-    use proptest::prelude::*;
 
     const TEST_CONTAINERS: u64 = 1000;
-    const PROPERTY_TEST_CONTAINERS: u64 = 30;
+    const SHORT_TEST_CONTAINERS: u64 = 30;
     const TERM_LENGTH_BOUNDARIES: [TermLength; 2] = [TermLength::ONE, TermLength::new(NZU32!(5))];
     const SEED: u64 = 0;
 
@@ -247,55 +248,111 @@ mod tests {
         fuzz::<SimplexBls12381MinSig, Standard>(test_input(SEED, TEST_CONTAINERS, TermLength::ONE));
     }
 
-    fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
-        (
-            any::<u64>(),
-            prop::sample::select(TERM_LENGTH_BOUNDARIES.as_slice()),
-            prop::sample::select(HANDOFF_DECISIONS.as_slice()),
-        )
-            .prop_map(move |(seed, term_length, handoff)| FuzzInput {
-                handoff,
-                ..test_input(seed, PROPERTY_TEST_CONTAINERS, term_length)
-            })
+    #[derive(Clone, Copy)]
+    struct ConnectedPlan {
+        seed: u64,
+        term_length: TermLength,
+        handoff: Handoff<()>,
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(100))]
+    impl Arbitrary<'_> for ConnectedPlan {
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            let term_length = *u.choose(&TERM_LENGTH_BOUNDARIES)?;
+            let handoff = *u.choose(&HANDOFF_DECISIONS)?;
+            let seed = u64::from_be_bytes(u.bytes(size_of::<u64>())?.try_into().unwrap());
+            Ok(Self {
+                seed,
+                term_length,
+                handoff,
+            })
+        }
+    }
 
-        #[test_group("slow")]
-        #[test]
-        fn property_test_ed25519_connected(input in property_test_strategy()) {
-            fuzz::<SimplexEd25519, Standard>(input);
+    impl ConnectedPlan {
+        fn run<P: Simplex>(self) {
+            fuzz::<P, Standard>(FuzzInput {
+                handoff: self.handoff,
+                ..test_input(self.seed, SHORT_TEST_CONTAINERS, self.term_length)
+            });
+        }
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn test_connected_boundaries() {
+        let run_all = |plan: ConnectedPlan| {
+            plan.run::<SimplexEd25519>();
+            plan.run::<SimplexSecp256r1>();
+            plan.run::<SimplexBls12381MultisigMinPk>();
+            plan.run::<SimplexBls12381MultisigMinSig>();
+            plan.run::<SimplexBls12381MinPk>();
+            plan.run::<SimplexBls12381MinSig>();
+        };
+
+        // Replay the historical failure at both single-view and multi-view term lengths.
+        for term_length in TERM_LENGTH_BOUNDARIES {
+            run_all(ConnectedPlan {
+                seed: 11_990_182_099_415_019_554,
+                term_length,
+                handoff: Handoff::Wait,
+            });
         }
 
-        #[test_group("slow")]
-        #[test]
-        fn property_test_secp256r1_connected(input in property_test_strategy()) {
-            fuzz::<SimplexSecp256r1, Standard>(input);
+        // The regression shrank to eight zero bytes. Exercise every term
+        // length and handoff on that seed, including its original single-view case.
+        for term_length in TERM_LENGTH_BOUNDARIES {
+            for handoff in HANDOFF_DECISIONS {
+                run_all(ConnectedPlan {
+                    seed: SEED,
+                    term_length,
+                    handoff,
+                });
+            }
         }
+    }
 
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_multisig_minpk_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MultisigMinPk, Standard>(input);
-        }
+    fn minifuzz_connected<P: Simplex>() {
+        minifuzz::Builder::default()
+            .with_search_limit(100)
+            .test(|u| {
+                u.arbitrary::<ConnectedPlan>()?.run::<P>();
+                Ok(())
+            });
+    }
 
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_multisig_minsig_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MultisigMinSig, Standard>(input);
-        }
+    #[test_group("slow")]
+    #[test]
+    fn minifuzz_ed25519_connected() {
+        minifuzz_connected::<SimplexEd25519>();
+    }
 
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_threshold_minpk_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MinPk, Standard>(input);
-        }
+    #[test_group("slow")]
+    #[test]
+    fn minifuzz_secp256r1_connected() {
+        minifuzz_connected::<SimplexSecp256r1>();
+    }
 
-        #[test_group("slow")]
-        #[test]
-        fn property_test_bls12381_threshold_minsig_connected(input in property_test_strategy()) {
-            fuzz::<SimplexBls12381MinSig, Standard>(input);
-        }
+    #[test_group("slow")]
+    #[test]
+    fn minifuzz_bls12381_multisig_minpk_connected() {
+        minifuzz_connected::<SimplexBls12381MultisigMinPk>();
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn minifuzz_bls12381_multisig_minsig_connected() {
+        minifuzz_connected::<SimplexBls12381MultisigMinSig>();
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn minifuzz_bls12381_threshold_minpk_connected() {
+        minifuzz_connected::<SimplexBls12381MinPk>();
+    }
+
+    #[test_group("slow")]
+    #[test]
+    fn minifuzz_bls12381_threshold_minsig_connected() {
+        minifuzz_connected::<SimplexBls12381MinSig>();
     }
 }

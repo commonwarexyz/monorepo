@@ -38,21 +38,21 @@ This ensures protocol safety properties are maintained despite a byzantine node.
 
 #### Unit Tests
 
-Run deterministic tests with a fixed seed:
+Run deterministic tests, including the fixed seed regression and handoff boundaries:
 ```bash
 cargo test -p commonware-consensus-fuzz test_
 ```
 
 #### Property-Based Tests
 
-Run proptest-based tests that explore many seeds:
+Run minifuzz tests that explore 100 cases per signature scheme:
 ```bash
-cargo test -p commonware-consensus-fuzz property_test
+cargo test -p commonware-consensus-fuzz minifuzz_
 ```
 
-Reproduce a failure with a specific seed:
+Reproduce a failure by passing the reported `MINIFUZZ_BRANCH` token to the same test:
 ```bash
-PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p commonware-consensus-fuzz property_test_ed25519 -- --nocapture
+MINIFUZZ_BRANCH=0x... cargo test -p commonware-consensus-fuzz minifuzz_ed25519_connected -- --nocapture
 ```
 
 #### Continuous Fuzzing

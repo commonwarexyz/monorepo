@@ -2361,13 +2361,14 @@ mod test {
         mocks::Explorer,
         rayon::{self, Placement, ThreadPoolBuilder},
     };
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_invariants::minifuzz;
     use commonware_utils::{
         NZUsize, Widen,
         sync::{Condvar, Mutex},
     };
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
-    use proptest::prelude::*;
     use std::{
         panic::{self, AssertUnwindSafe, Location},
         rc::Rc,
@@ -5277,9 +5278,38 @@ mod test {
         let _: () = futures::executor::block_on(Sequential.spawn(1, |_| panic!("boom")));
     }
 
-    proptest! {
-        #[test]
-        fn parallel_fold_init_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    const MAX_FOLD_INPUT_LEN: usize = 499;
+
+    struct FoldPlan(Vec<i32>);
+
+    impl Arbitrary<'_> for FoldPlan {
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            let len = u.int_in_range(0..=MAX_FOLD_INPUT_LEN)?;
+            // Ask minifuzz for more bytes rather than padding the vector with zeros.
+            let (words, _) = u.bytes(len * size_of::<i32>())?.as_chunks();
+            let data = words.iter().copied().map(i32::from_le_bytes).collect();
+            Ok(Self(data))
+        }
+    }
+
+    fn check_fold_inputs(mut check: impl FnMut(Vec<i32>)) {
+        // Exercise both length boundaries and wrapping arithmetic on every run.
+        check(Vec::new());
+        check(vec![i32::MAX, i32::MAX, i32::MIN]);
+        check((1..=MAX_FOLD_INPUT_LEN as i32).collect());
+
+        minifuzz::Builder::default()
+            .with_search_limit(256)
+            .test(|u| {
+                let FoldPlan(data) = u.arbitrary()?;
+                check(data);
+                Ok(())
+            });
+    }
+
+    #[test]
+    fn parallel_fold_init_matches_sequential() {
+        check_fold_inputs(|data| {
             let sequential = Sequential;
             let parallel = parallel_strategy();
 
@@ -5287,45 +5317,73 @@ mod test {
                 &data,
                 || (),
                 Vec::new,
-                |mut acc, _, &x| { acc.push(x.wrapping_mul(2)); acc },
-                |mut a, b| { a.extend(b); a },
+                |mut acc, _, &x| {
+                    acc.push(x.wrapping_mul(2));
+                    acc
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
             );
 
             let par_result: Vec<i32> = parallel.fold_init(
                 &data,
                 || (),
                 Vec::new,
-                |mut acc, _, &x| { acc.push(x.wrapping_mul(2)); acc },
-                |mut a, b| { a.extend(b); a },
+                |mut acc, _, &x| {
+                    acc.push(x.wrapping_mul(2));
+                    acc
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
             );
 
-            prop_assert_eq!(seq_result, par_result);
-        }
+            assert_eq!(seq_result, par_result);
+        });
+    }
 
-        #[test]
-        fn fold_equals_fold_init(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    #[test]
+    fn fold_equals_fold_init() {
+        check_fold_inputs(|data| {
             let s = Sequential;
 
             let via_fold: Vec<i32> = s.fold(
                 &data,
                 Vec::new,
-                |mut acc, &x| { acc.push(x); acc },
-                |mut a, b| { a.extend(b); a },
+                |mut acc, &x| {
+                    acc.push(x);
+                    acc
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
             );
 
             let via_fold_init: Vec<i32> = s.fold_init(
                 &data,
                 || (),
                 Vec::new,
-                |mut acc, _, &x| { acc.push(x); acc },
-                |mut a, b| { a.extend(b); a },
+                |mut acc, _, &x| {
+                    acc.push(x);
+                    acc
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
             );
 
-            prop_assert_eq!(via_fold, via_fold_init);
-        }
+            assert_eq!(via_fold, via_fold_init);
+        });
+    }
 
-        #[test]
-        fn parallel_try_fold_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    #[test]
+    fn parallel_try_fold_matches_sequential() {
+        check_fold_inputs(|data| {
             let sequential: Result<i32, ()> = Sequential.try_fold(
                 &data,
                 || 0i32,
@@ -5339,11 +5397,13 @@ mod test {
                 |a, b| a.wrapping_add(b),
             );
 
-            prop_assert_eq!(sequential, parallel);
-        }
+            assert_eq!(sequential, parallel);
+        });
+    }
 
-        #[test]
-        fn map_collect_vec_equals_fold(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    #[test]
+    fn map_collect_vec_equals_fold() {
+        check_fold_inputs(|data| {
             let s = Sequential;
             let map_op = |&x: &i32| x.wrapping_mul(3);
 
@@ -5352,52 +5412,63 @@ mod test {
             let via_fold: Vec<i32> = s.fold(
                 &data,
                 Vec::new,
-                |mut acc, item| { acc.push(map_op(item)); acc },
-                |mut a, b| { a.extend(b); a },
+                |mut acc, item| {
+                    acc.push(map_op(item));
+                    acc
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
             );
 
-            prop_assert_eq!(via_map, via_fold);
-        }
+            assert_eq!(via_map, via_fold);
+        });
+    }
 
-        #[test]
-        fn try_map_collect_vec_collects_successes(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    #[test]
+    fn try_map_collect_vec_collects_successes() {
+        check_fold_inputs(|data| {
             let expected: Vec<i32> = data.iter().map(|x| x.wrapping_mul(5)).collect();
 
             let sequential: Result<Vec<i32>, ()> =
                 Sequential.try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
-            prop_assert_eq!(sequential, Ok(expected.clone()));
+            assert_eq!(sequential, Ok(expected.clone()));
 
             let parallel: Result<Vec<i32>, ()> =
                 parallel_strategy().try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
-            prop_assert_eq!(parallel, Ok(expected));
-        }
+            assert_eq!(parallel, Ok(expected));
+        });
+    }
 
-        #[test]
-        fn try_map_collect_vec_returns_first_error(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    #[test]
+    fn try_map_collect_vec_returns_first_error() {
+        check_fold_inputs(|data| {
             let expected_error = data.iter().position(|x| x % 7 == 0);
             let result: Result<Vec<i32>, usize> =
                 Sequential.try_map_collect_vec(data.iter().enumerate(), |(i, &x)| {
-                    if x % 7 == 0 {
-                        Err(i)
-                    } else {
-                        Ok(x)
-                    }
+                    if x % 7 == 0 { Err(i) } else { Ok(x) }
                 });
 
             match expected_error {
-                Some(i) => prop_assert_eq!(result, Err(i)),
-                None => prop_assert_eq!(result, Ok(data)),
+                Some(i) => assert_eq!(result, Err(i)),
+                None => assert_eq!(result, Ok(data)),
             }
-        }
+        });
+    }
 
-        #[test]
-        fn map_init_collect_vec_equals_fold_init(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    #[test]
+    fn map_init_collect_vec_equals_fold_init() {
+        check_fold_inputs(|data| {
             let s = Sequential;
 
             let via_map: Vec<i32> = s.map_init_collect_vec(
                 &data,
                 || 0i32,
-                |counter, &x| { *counter += 1; x.wrapping_add(*counter) },
+                |counter, &x| {
+                    *counter += 1;
+                    x.wrapping_add(*counter)
+                },
             );
 
             let via_fold_init: Vec<i32> = s.fold_init(
@@ -5409,31 +5480,45 @@ mod test {
                     acc.push(x.wrapping_add(*counter));
                     acc
                 },
-                |mut a, b| { a.extend(b); a },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
             );
 
-            prop_assert_eq!(via_map, via_fold_init);
-        }
+            assert_eq!(via_map, via_fold_init);
+        });
+    }
 
-        #[test]
-        fn map_partition_collect_vec_returns_valid_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
+    #[test]
+    fn map_partition_collect_vec_returns_valid_results() {
+        check_fold_inputs(|data| {
             let s = Sequential;
 
             let map_op = |&x: &i32| {
-                let value = if x % 2 == 0 { Some(x.wrapping_mul(2)) } else { None };
+                let value = if x % 2 == 0 {
+                    Some(x.wrapping_mul(2))
+                } else {
+                    None
+                };
                 (x, value)
             };
 
             let (results, filtered) = s.map_partition_collect_vec(data.iter(), map_op);
 
             // Verify results contains doubled even numbers
-            let expected_results: Vec<i32> = data.iter().filter(|&&x| x % 2 == 0).map(|&x| x.wrapping_mul(2)).collect();
-            prop_assert_eq!(results, expected_results);
+            let expected_results: Vec<i32> = data
+                .iter()
+                .filter(|&&x| x % 2 == 0)
+                .map(|&x| x.wrapping_mul(2))
+                .collect();
+            assert_eq!(results, expected_results);
 
             // Verify filtered contains odd numbers
-            let expected_filtered: Vec<i32> = data.iter().filter(|&&x| x % 2 != 0).copied().collect();
-            prop_assert_eq!(filtered, expected_filtered);
-        }
+            let expected_filtered: Vec<i32> =
+                data.iter().filter(|&&x| x % 2 != 0).copied().collect();
+            assert_eq!(filtered, expected_filtered);
+        });
     }
 
     #[test]

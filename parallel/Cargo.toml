@@ -30,12 +30,13 @@ libc = { workspace = true, optional = true }
 libc.workspace = true
 
 [dev-dependencies]
+arbitrary.workspace = true
+commonware-invariants.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
 crossbeam-deque.workspace = true
 crossbeam-utils.workspace = true
 dashmap.workspace = true
 futures.workspace = true
-proptest.workspace = true
 rand.workspace = true
 
 [features]

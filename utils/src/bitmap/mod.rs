@@ -1193,6 +1193,7 @@ mod tests {
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
     use commonware_formatting::hex;
+    use commonware_invariants::minifuzz;
     use rand::RngExt as _;
 
     #[test]
@@ -2902,28 +2903,22 @@ mod tests {
         assert_eq!(prunable.get_chunk_containing(0), &chunk);
     }
 
-    mod proptests {
-        use super::*;
-        use proptest::prelude::*;
-
-        proptest! {
-            #[test]
-            fn is_unset_matches_naive(
-                bits in prop::collection::vec(any::<bool>(), 1..=512usize),
-                start in 0u64..=512,
-                end in 0u64..=512,
-            ) {
+    #[test]
+    fn is_unset_matches_naive() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                let len = u.int_in_range(1..=512usize)?;
+                let start = u.int_in_range(0..=512u64)?.min(len as u64);
+                let end = u.int_in_range(0..=512u64)?.max(start).min(len as u64);
+                let bits: Vec<_> = u.bytes(len)?.iter().map(|byte| byte & 1 == 1).collect();
                 let bitmap: BitMap = BitMap::from(bits.as_slice());
-                let len = bitmap.len();
-                let start = start.min(len);
-                let end = end.max(start).min(len);
                 let range = start..end;
 
-                let expected = range.clone().all(|i| !bitmap.get(i));
-
-                prop_assert_eq!(bitmap.is_unset(range), expected);
-            }
-        }
+                let expected = bits[start as usize..end as usize].iter().all(|bit| !bit);
+                assert_eq!(bitmap.is_unset(range), expected);
+                Ok(())
+            });
     }
 
     #[test]

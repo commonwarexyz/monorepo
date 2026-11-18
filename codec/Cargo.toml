@@ -46,9 +46,10 @@ ruint.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+arbitrary.workspace = true
 commonware-allocator = { workspace = true, features = ["mimalloc"] }
+commonware-invariants.workspace = true
 criterion.workspace = true
-proptest.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }
 
 [lib]

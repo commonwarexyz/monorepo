@@ -1125,8 +1125,9 @@ impl<K: Hash + Eq> GhostQueue<K> {
 mod tests {
     use super::*;
     use crate::NZUsize;
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_invariants::minifuzz;
     use core::cell::{Cell, RefCell};
-    use proptest::{prelude::*, test_runner::TestCaseResult};
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         rc::Rc,
@@ -1520,21 +1521,58 @@ mod tests {
         Clear,
     }
 
-    fn op_strategy(keys: u8) -> impl Strategy<Value = Op> {
-        prop_oneof![
-            8 => (0..keys).prop_map(Op::Get),
-            8 => (0..keys).prop_map(Op::Peek),
-            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::Put(k, v)),
-            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsert(k, v)),
-            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMut(k, v)),
-            8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
-            8 => (0..keys).prop_map(Op::Remove),
-            8 => (0..keys).prop_map(Op::Retain),
-            1 => Just(Op::Clear),
-        ]
+    impl Op {
+        fn arbitrary(u: &mut Unstructured<'_>, keys: u8) -> arbitrary::Result<Self> {
+            let [tag, key, low, high] = u.bytes(4)?.try_into().unwrap();
+            let key = key % keys;
+            let value = u16::from_le_bytes([low, high]);
+            // Keep clears rare so most sequences can build up cache state.
+            Ok(match tag % 65 {
+                0..=7 => Self::Get(key),
+                8..=15 => Self::Peek(key),
+                16..=23 => Self::Put(key, value),
+                24..=31 => Self::GetOrInsert(key, value),
+                32..=39 => Self::GetOrInsertMut(key, value),
+                40..=47 => Self::GetMut(key, value),
+                48..=55 => Self::Remove(key),
+                56..=63 => Self::Retain(key),
+                _ => Self::Clear,
+            })
+        }
     }
 
-    fn exercise_cache(capacity: usize, keys: u8, prefill: bool, ops: Vec<Op>) -> TestCaseResult {
+    struct CachePlan<const WIDE: bool> {
+        capacity: usize,
+        prefill: bool,
+        ops: Vec<Op>,
+    }
+
+    impl<const WIDE: bool> CachePlan<WIDE> {
+        const KEYS: u8 = if WIDE { 64 } else { 16 };
+
+        fn run(self) {
+            exercise_cache(self.capacity, Self::KEYS, self.prefill, self.ops);
+        }
+    }
+
+    impl<const WIDE: bool> Arbitrary<'_> for CachePlan<WIDE> {
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            let (capacities, max_ops) = if WIDE { (20..=47, 511) } else { (1..=7, 255) };
+            let capacity = u.int_in_range(capacities)?;
+            let prefill = u.arbitrary()?;
+            let len = u.int_in_range(0..=max_ops)?;
+            let ops = (0..len)
+                .map(|_| Op::arbitrary(u, Self::KEYS))
+                .collect::<arbitrary::Result<_>>()?;
+            Ok(Self {
+                capacity,
+                prefill,
+                ops,
+            })
+        }
+    }
+
+    fn exercise_cache(capacity: usize, keys: u8, prefill: bool, ops: Vec<Op>) {
         let mut cache = Cache::<u8, u16>::new(NonZeroUsize::new(capacity).unwrap());
         if prefill {
             cache.prefill(|| 0u16);
@@ -1547,7 +1585,7 @@ mod tests {
             match op {
                 Op::Get(key) => {
                     let value = cache.get(&key).copied();
-                    prop_assert_eq!(value, cache.peek(&key).copied());
+                    assert_eq!(value, cache.peek(&key).copied());
                 }
                 Op::Peek(key) => {
                     let _ = cache.peek(&key);
@@ -1555,17 +1593,17 @@ mod tests {
                 Op::Put(key, value) => {
                     cache.put(key, value);
                     model.insert(key, value);
-                    prop_assert_eq!(cache.peek(&key).copied(), Some(value));
+                    assert_eq!(cache.peek(&key).copied(), Some(value));
                 }
                 Op::GetOrInsert(key, value) => {
                     let stored = *cache.get_or_insert_with(key, || value);
                     model.insert(key, stored);
-                    prop_assert_eq!(cache.peek(&key).copied(), Some(stored));
+                    assert_eq!(cache.peek(&key).copied(), Some(stored));
                 }
                 Op::GetOrInsertMut(key, value) => {
                     *cache.get_or_insert_mut(key, || value).1 = value;
                     model.insert(key, value);
-                    prop_assert_eq!(cache.peek(&key).copied(), Some(value));
+                    assert_eq!(cache.peek(&key).copied(), Some(value));
                 }
                 Op::GetMut(key, value) => {
                     if let Some(stored) = cache.get_mut(&key) {
@@ -1575,61 +1613,60 @@ mod tests {
                 }
                 Op::Remove(key) => {
                     let present = cache.contains(&key);
-                    prop_assert_eq!(cache.remove(&key), present);
+                    assert_eq!(cache.remove(&key), present);
                     model.remove(&key);
-                    prop_assert!(!cache.contains(&key));
+                    assert!(!cache.contains(&key));
                 }
                 Op::Retain(key) => {
                     cache.retain(|resident, _| *resident < key);
                     model.retain(|resident, _| *resident < key);
-                    prop_assert!(cache.len() <= usize::from(key).min(capacity));
+                    assert!(cache.len() <= usize::from(key).min(capacity));
                 }
                 Op::Clear => {
                     cache.clear();
                     model.clear();
-                    prop_assert!(cache.is_empty());
+                    assert!(cache.is_empty());
                 }
             }
 
-            prop_assert!(cache.len() <= capacity);
+            assert!(cache.len() <= capacity);
             // The slot vector never exceeds capacity, proving reuse.
-            prop_assert!(cache.slots.len() <= capacity);
+            assert!(cache.slots.len() <= capacity);
             // Every present key holds its last-written value and was logically
             // inserted. Absent keys are an allowed (evicted) state.
             for key in 0..keys {
                 let present = cache.contains(&key);
-                prop_assert_eq!(present, cache.peek(&key).is_some());
+                assert_eq!(present, cache.peek(&key).is_some());
                 if present {
-                    prop_assert_eq!(cache.peek(&key).copied(), model.get(&key).copied());
+                    assert_eq!(cache.peek(&key).copied(), model.get(&key).copied());
                 }
             }
             cache.check_invariants();
         }
-
-        Ok(())
     }
 
-    proptest! {
-        #[test]
-        fn cache_invariants_hold(
-            capacity in 1usize..8,
-            prefill in any::<bool>(),
-            ops in proptest::collection::vec(op_strategy(16), 0..256),
-        ) {
-            exercise_cache(capacity, 16, prefill, ops)?;
-        }
-
-        // Small needs at least two slots to exercise demotion, promotion, and
-        // correlation-boundary repair.
-        #[test]
-        fn cache_invariants_hold_with_wide_small(
-            capacity in 20usize..48,
-            prefill in any::<bool>(),
-            ops in proptest::collection::vec(op_strategy(64), 0..512),
-        ) {
-            exercise_cache(capacity, 64, prefill, ops)?;
-        }
+    #[test]
+    fn cache_invariants_hold() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                u.arbitrary::<CachePlan<false>>()?.run();
+                Ok(())
+            });
     }
+
+    // Small needs at least two slots to exercise demotion, promotion, and
+    // correlation-boundary repair.
+    #[test]
+    fn cache_invariants_hold_with_wide_small() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                u.arbitrary::<CachePlan<true>>()?.run();
+                Ok(())
+            });
+    }
+
     impl<K> GhostQueue<K> {
         fn check_free_slots(&self) -> HashSet<usize> {
             let mut free = HashSet::new();
