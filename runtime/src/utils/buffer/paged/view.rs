@@ -6,7 +6,7 @@
 //! back to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
 //! exactly one place.
 
-use super::{CacheRef, tip::Buffer};
+use super::{cache::PageLease, tip::Buffer};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use commonware_utils::Widen;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -105,10 +105,8 @@ impl<'a, I: Iterator<Item = &'a [u8]>> Cursor<'a, I> {
 pub struct View<'a, B: Blob> {
     /// Underlying blob, used for bytes below `tail_offset` not resident in the cache.
     pub(super) blob: &'a Arc<B>,
-    /// Page cache used for bytes below `tail_offset`.
-    pub(super) cache_ref: &'a CacheRef,
-    /// Page-cache id of the originating blob.
-    pub(super) id: u64,
+    /// Page-cache identity of the originating blob, used for bytes below `tail_offset`.
+    pub(super) lease: &'a PageLease,
     /// Size of the blob, in bytes.
     pub(super) size: u64,
     /// Offset at which the in-memory `tail` bytes begin.
@@ -151,7 +149,7 @@ impl<B: Blob> View<'_, B> {
         }
 
         if end_offset <= self.tail_offset {
-            return self.cache_ref.read_cached(self.id, buf, offset) == buf.len();
+            return self.lease.read_cached(buf, offset) == buf.len();
         }
 
         // Copy the suffix overlapping the tail, then serve any prefix below `tail_offset` from the
@@ -162,9 +160,7 @@ impl<B: Blob> View<'_, B> {
             return true;
         }
 
-        self.cache_ref
-            .read_cached(self.id, &mut buf[..dst_start], offset)
-            == dst_start
+        self.lease.read_cached(&mut buf[..dst_start], offset) == dst_start
     }
 
     /// Reads bytes starting at `offset` into `buf`.
@@ -188,19 +184,16 @@ impl<B: Blob> View<'_, B> {
             return Ok(());
         }
 
-        let cached = self
-            .cache_ref
-            .read_cached(self.id, &mut buf[..remaining], offset);
+        let cached = self.lease.read_cached(&mut buf[..remaining], offset);
         if cached == remaining {
             return Ok(());
         }
 
         let uncached_offset = offset + cached as u64;
         let uncached_len = remaining - cached;
-        self.cache_ref
+        self.lease
             .read_after_miss(
                 self.blob,
-                self.id,
                 &mut buf[cached..cached + uncached_len],
                 uncached_offset,
             )
@@ -292,7 +285,7 @@ impl<B: Blob> View<'_, B> {
         let mut cache_ranges = split_read_ranges(buf, ranges, self.tail_offset, self.tail);
 
         // Fast path: try the page cache for all ranges in a single lock acquisition.
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        self.lease.read_cached_many(&mut cache_ranges);
         let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
             return Ok(count);
@@ -300,8 +293,8 @@ impl<B: Blob> View<'_, B> {
 
         // Read the pages the misses need, batching those no other reader is fetching, and serve
         // the misses from them.
-        self.cache_ref
-            .read_after_misses(self.blob, self.id, cache_ranges)
+        self.lease
+            .read_after_misses(self.blob, cache_ranges)
             .await?;
         Ok(count - blob_reads)
     }
@@ -329,7 +322,7 @@ impl<B: Blob> View<'_, B> {
         if cache_ranges.is_empty() {
             return Vec::new();
         }
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        self.lease.read_cached_many(&mut cache_ranges);
         map_misses(cache_ranges, |idx| (offsets[idx], item_size.get()))
     }
 
@@ -350,7 +343,7 @@ impl<B: Blob> View<'_, B> {
         if cache_ranges.is_empty() {
             return Vec::new();
         }
-        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        self.lease.read_cached_many(&mut cache_ranges);
         map_misses(cache_ranges, |idx| ranges[idx])
     }
 }
@@ -426,7 +419,11 @@ fn map_misses(
 #[cfg(test)]
 mod tests {
     use super::map_misses;
-    use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
+    use crate::{
+        Runner as _, Storage as _,
+        buffer::paged::{CacheRef, Writer},
+        deterministic,
+    };
     use commonware_utils::{NZU16, NZUsize};
     use std::num::NonZeroU16;
 
@@ -436,7 +433,7 @@ mod tests {
     #[test]
     fn test_reads_cross_buffer_chunks_and_cache() {
         deterministic::Runner::default().start(|context| async move {
-            let cache = super::CacheRef::new(PAGE_SIZE, NZUsize!(4));
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(4));
             let (blob, size) = context
                 .open("test_partition", b"chunk_reads")
                 .await
@@ -545,7 +542,7 @@ mod tests {
     #[test]
     fn test_read_ranges_into_mixed_lengths_and_tail() {
         deterministic::Runner::default().start(|context| async move {
-            let cache = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(1));
             let (blob, size) = context.open("test_partition", b"ranges").await.unwrap();
             let page = PAGE_SIZE.get() as usize;
             let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache.clone())
@@ -618,7 +615,7 @@ mod tests {
     fn test_view_try_read_sync_straddles_cache_and_tail() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let (blob, blob_size) = context
                 .open("test_partition", b"view_straddle")
                 .await
