@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use commonware_utils::acknowledgement::{Acknowledgement, Exact};
 use libfuzzer_sys::fuzz_target;
 
@@ -76,8 +76,6 @@ fn fuzz(input: FuzzInput) {
     }
 }
 
-fuzz_target!(|data: &[u8]| {
-    if let Ok(input) = FuzzInput::arbitrary(&mut Unstructured::new(data)) {
-        fuzz(input);
-    }
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });
