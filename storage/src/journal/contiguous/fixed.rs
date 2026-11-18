@@ -1665,6 +1665,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(self)
     }
 
+    /// Ensure recovery reaches this exclusive item end, including when pruning kept the tail.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn sync_through(mut self, end: u64) -> Result<Self, Error> {
+        debug_assert!(end <= self.size());
+        if self.0.barrier.boundary() < end {
+            return self.sync().await;
+        }
+        Ok(self)
+    }
+
     /// Durably persists the current state of the structure.
     ///
     /// Does not advance the recovery watermark, so reopen may replay entries above it. Use

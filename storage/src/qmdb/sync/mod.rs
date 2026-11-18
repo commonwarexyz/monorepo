@@ -5,9 +5,10 @@
 //! Sources are untrusted, and their responses are verified against the requested target. The
 //! target itself is a trusted input chosen by the caller: sync does not select or authenticate it.
 //!
-//! Target updates form a forward-only sequence. Sync adopts only strictly advancing targets and
-//! discards the rest. Selecting a single target before this boundary lets sync focus on fetching
-//! and verifying its data instead of reconciling competing targets.
+//! Local operations and all targets share one append-only history. Target updates form a
+//! forward-only sequence. Sync adopts only strictly advancing targets and discards the rest.
+//! Selecting a single target before this boundary lets sync focus on fetching and verifying
+//! its data instead of reconciling competing targets.
 
 use commonware_macros::boxed;
 

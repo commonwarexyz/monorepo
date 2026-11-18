@@ -2423,6 +2423,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(self)
     }
 
+    /// Ensure recovery reaches this exclusive item end, including when pruning kept the tail.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn sync_through(mut self, end: u64) -> Result<Self, Error> {
+        debug_assert!(end <= self.size());
+        if self.0.barrier.boundary() < end {
+            return self.sync().await;
+        }
+        Ok(self)
+    }
+
     /// Append a new item to the journal, returning its position.
     ///
     /// The position returned is a stable, consecutively increasing value starting from 0.

@@ -19,23 +19,19 @@ pub trait Journal<F: Family>: Sized + Send {
     /// The error type returned by the journal
     type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error<F>>;
 
-    /// Create/open a journal for syncing the given range.
-    ///
-    /// The implementation must:
-    /// - Discard/ignore any data outside the range.
-    /// - Report `size()` equal to the next location to be filled.
-    ///
-    /// On-disk data whose logical locations lie within the range may be reused or discarded.
+    /// Open a journal for the given range. Its next append position must lie between the
+    /// range start and end, inclusive. A contiguous prefix of the range may be reused.
+    /// Pruning may leave earlier operations in the first retained storage section.
     fn new(
         context: Self::Context,
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Discard all operations before the given location.
-    ///
-    /// If current `size() < start`, initialize as empty at the given location.
-    /// Otherwise prune data before the given location.
+    /// Advance the lower sync bound. A journal ending before `start` becomes empty there.
+    /// Otherwise, keep the append position and prune toward `start`. Earlier operations may
+    /// remain in the first retained section. A persistent journal must recover through at
+    /// least `start` after this call succeeds so a retry can reuse that section.
     fn resize(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Persist the journal.
@@ -73,7 +69,7 @@ where
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
-            Ok(journal)
+            journal.sync_through(*start).await
         }
     }
 
@@ -116,7 +112,7 @@ where
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
-            Ok(journal)
+            journal.sync_through(*start).await
         }
     }
 
@@ -199,7 +195,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::{fixed, variable};
+    use crate::journal::contiguous::{Mutable, fixed, variable};
     use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -558,108 +554,87 @@ mod tests {
         });
     }
 
-    /// Operations ending exactly at the sync start are kept, both when the sync opens the journal
-    /// and when the start moves to its end, since synced operations append right after them.
-    /// Pruning to the start removes only whole blobs below it, so a blob-aligned start keeps none.
-    #[rstest]
-    #[case::mid_blob(27, 29, 25..27, 25..29)]
-    #[case::blob_aligned(25, 30, 25..25, 30..30)]
-    #[test_traced]
-    fn test_fixed_sync_journal_keeps_operations_ending_at_start(
-        #[case] start: u64,
-        #[case] new_start: u64,
-        #[case] opened: Range<u64>,
-        #[case] resized: Range<u64>,
-    ) {
-        deterministic::Runner::default().start(|context| async move {
-            // Each item's value is its position.
-            let item = |pos: u64| Digest([pos as u8; 32]);
-            let cfg = test_cfg();
-            let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
-                .await
-                .unwrap();
-            for pos in 0..start {
-                (journal, _) = journal.append(&item(pos)).await.unwrap();
-            }
-            let journal = journal.sync().await.unwrap();
-            drop(journal);
+    // Seed a durable prefix, open for sync at its end, then advance the target while the
+    // appended suffix is still buffered. Crash before fetching anything for the new target.
+    fn check_resize_recovery<J>(
+        config: fn() -> J::Config,
+        buffered: Range<u64>,
+        new_start: u64,
+        opened_start: u64,
+        resized: Range<u64>,
+    ) where
+        J: Journal<F, Context = deterministic::Context, Op = u64> + Mutable<Item = u64>,
+    {
+        let range = |start| non_empty_range!(Location::<F>::new(start), Location::new(40));
+        let start = buffered.start;
+        let retained = resized.clone();
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let journal = J::new(context.child("setup"), config(), range(0))
+                    .await
+                    .unwrap();
+                let journal = Journal::append(journal, (0..start).collect())
+                    .await
+                    .unwrap();
+                drop(Journal::sync(journal).await.unwrap());
 
-            let range = non_empty_range!(Location::<F>::new(start), Location::<F>::new(40));
-            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), opened);
-            for pos in opened {
-                assert_eq!(journal.read(pos).await.unwrap(), item(pos));
-            }
+                let journal = J::new(context.child("sync"), config(), range(start))
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), opened_start..start);
+                for pos in opened_start..start {
+                    assert_eq!(journal.read(pos).await.unwrap(), pos);
+                }
+                let journal = Journal::append(journal, buffered.collect()).await.unwrap();
+                let journal = journal.resize(Location::new(new_start)).await.unwrap();
+                assert_eq!(journal.bounds(), resized);
+            });
 
-            let ops = (start..new_start).map(item).collect();
-            let journal = <FixedJournal as Journal<F>>::append(journal, ops)
-                .await
-                .unwrap();
-            let journal = <FixedJournal as Journal<F>>::resize(journal, Location::new(new_start))
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), resized);
-            let journal = <FixedJournal as Journal<F>>::append(journal, vec![item(new_start)])
-                .await
-                .unwrap();
-            for pos in resized.start..=new_start {
-                assert_eq!(journal.read(pos).await.unwrap(), item(pos));
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let journal = J::new(context, config(), range(new_start)).await.unwrap();
+            let recovered = journal.bounds();
+            assert_eq!(recovered.start, retained.start);
+            assert!((new_start..=retained.end).contains(&recovered.end));
+            let journal = Journal::append(journal, vec![recovered.end]).await.unwrap();
+            for pos in recovered.start..=recovered.end {
+                assert_eq!(journal.read(pos).await.unwrap(), pos);
             }
             journal.destroy().await.unwrap();
         });
     }
 
-    /// Like [test_fixed_sync_journal_keeps_operations_ending_at_start], for a variable journal.
     #[rstest]
-    #[case::mid_blob(27, 29, 25..27, 25..29)]
-    #[case::blob_aligned(25, 30, 25..25, 30..30)]
+    #[case::mid_blob(27..29, 29, 25, 25..29)]
+    #[case::inside_buffered_tail(27..29, 28, 25, 25..29)]
+    #[case::blob_aligned(25..30, 30, 25, 30..30)]
+    #[case::crosses_blob(27..32, 32, 25, 30..32)]
+    #[case::durable_start(27..29, 27, 25, 25..29)]
+    #[case::gap(27..29, 31, 25, 31..31)]
     #[test_traced]
-    fn test_variable_sync_journal_keeps_operations_ending_at_start(
-        #[case] start: u64,
+    fn test_sync_journal_resize_recovery(
+        #[case] buffered: Range<u64>,
         #[case] new_start: u64,
-        #[case] opened: Range<u64>,
+        #[case] opened_start: u64,
         #[case] resized: Range<u64>,
+        #[values(false, true)] variable: bool,
     ) {
-        deterministic::Runner::default().start(|context| async move {
-            // Each item's value is its position.
-            let cfg = variable_test_cfg();
-            let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
-                .await
-                .unwrap();
-            for pos in 0..start {
-                (journal, _) = journal.append(&pos).await.unwrap();
-            }
-            let journal = journal.sync().await.unwrap();
-            drop(journal);
-
-            let range = non_empty_range!(Location::<F>::new(start), Location::<F>::new(40));
-            let journal = <VariableJournal as Journal<F>>::new(context.child("sync"), cfg, range)
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), opened);
-            for pos in opened {
-                assert_eq!(journal.read(pos).await.unwrap(), pos);
-            }
-
-            let ops = (start..new_start).collect();
-            let journal = <VariableJournal as Journal<F>>::append(journal, ops)
-                .await
-                .unwrap();
-            let journal =
-                <VariableJournal as Journal<F>>::resize(journal, Location::new(new_start))
-                    .await
-                    .unwrap();
-            assert_eq!(journal.bounds(), resized);
-            let journal = <VariableJournal as Journal<F>>::append(journal, vec![new_start])
-                .await
-                .unwrap();
-            for pos in resized.start..=new_start {
-                assert_eq!(journal.read(pos).await.unwrap(), pos);
-            }
-            journal.destroy().await.unwrap();
-        });
+        if variable {
+            check_resize_recovery::<VariableJournal>(
+                variable_test_cfg,
+                buffered,
+                new_start,
+                opened_start,
+                resized,
+            );
+        } else {
+            check_resize_recovery::<fixed::Journal<_, u64>>(
+                test_cfg,
+                buffered,
+                new_start,
+                opened_start,
+                resized,
+            );
+        }
     }
 
     /// Tear the tail page of `blob` so its next open must truncate it.
