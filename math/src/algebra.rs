@@ -1174,11 +1174,11 @@ pub mod test_suites {
         Ok(())
     }
 
-    fn check_hash_to_field<F: HashToField>(data: [[u8; 4]; 4]) {
-        let (dst0, m0, dst1, m1) = (&data[0], &data[1], &data[2], &data[3]);
+    fn check_hash_to_field<F: HashToField>(domain_separator: &[u8], message: &[u8]) {
         assert_eq!(
-            (dst0, m0) == (dst1, m1),
-            F::hash_to_field(dst0, m0) == F::hash_to_field(dst1, m1)
+            F::hash_to_field(domain_separator, message),
+            F::hash_to_field(domain_separator, message),
+            "hash_to_field is not deterministic"
         );
     }
 
@@ -1187,8 +1187,9 @@ pub mod test_suites {
     /// Takes arbitrary data and checks that the hash function is deterministic.
     /// This doesn't check any properties related to [`Field`].
     pub fn fuzz_hash_to_field<F: HashToField>(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-        let data: [[u8; 4]; 4] = u.arbitrary()?;
-        check_hash_to_field::<F>(data);
+        let domain_separator: Vec<u8> = u.arbitrary()?;
+        let message: Vec<u8> = u.arbitrary()?;
+        check_hash_to_field::<F>(&domain_separator, &message);
         Ok(())
     }
 
