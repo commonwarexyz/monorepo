@@ -7079,6 +7079,195 @@ pub(crate) mod test {
         });
     }
 
+    /// A prune persists the Merkle boundary at the log's retained start, and the operations in the
+    /// blobs it releases are pruned history from then on. A bounded reopen at a commit whose
+    /// inactivity floor lies in the released region is rejected while storage still holds the
+    /// released blobs, as it is once they are deleted. The deterministic storage deletes inline,
+    /// so a remove fault leaves the released blobs in place as a crash before their deletion
+    /// does.
+    #[test_traced("INFO")]
+    fn test_any_bounded_reopen_rejects_floor_in_released_blobs() {
+        deterministic::Runner::default().start(|context| async move {
+            const KEYS: u64 = 64;
+
+            let ctx = context.child("db");
+            let cfg = || variable_db_config::<OneCap>("floor-in-released-blobs");
+            let db = UnorderedVariable::init(ctx.child("storage"), cfg(), None)
+                .await
+                .unwrap();
+            let db = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+            let mut db =
+                commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
+
+            // Pick a retained commit whose floor will lie inside the released region, then commit
+            // until the inactivity floor reaches the prune position.
+            let initialization_bound = db.bounds().end;
+            let floor = db.inactivity_floor();
+            let prune_loc = floor + (KEYS / 2);
+            assert!(initialization_bound > *prune_loc);
+            let mut round = 0u64;
+            while db.inactivity_floor() < prune_loc {
+                round += 1;
+                assert!(round <= 8, "floor must pass the prune position");
+                db = commit_writes(
+                    db,
+                    (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
+                    None,
+                )
+                .await;
+            }
+            let root = db.root();
+            let size = db.bounds().end;
+
+            // Every released blob survives the prune.
+            let partition = format!("{}_data", cfg().log.partition);
+            let blobs_before = commonware_runtime::Storage::scan(&context, &partition)
+                .await
+                .unwrap();
+            context.storage_fault_config().write().remove_rate =
+                Some(commonware_utils::probability!(1.0));
+            let db = db.prune(prune_loc).await.unwrap();
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(db.wait_for_removals().await.is_err());
+            assert_eq!(db.bounds().start, prune_loc);
+            assert!(floor < db.log.retained_start());
+            let blobs_after = commonware_runtime::Storage::scan(&context, &partition)
+                .await
+                .unwrap();
+            assert_eq!(blobs_before, blobs_after);
+            drop(db);
+
+            // The bounded reopen is rejected with the released blobs on disk, and again once a
+            // later prune has deleted them. An unbounded reopen recovers the latest state both
+            // times, with the log starting at its oldest surviving blob.
+            for (bounded, unbounded, start) in [
+                ("bounded_present", "unbounded_present", Location::new(0)),
+                ("bounded_deleted", "unbounded_deleted", prune_loc),
+            ] {
+                let rejected =
+                    UnorderedVariable::init(ctx.child(bounded), cfg(), Some(initialization_bound))
+                        .await;
+                assert!(
+                    matches!(rejected, Err(Error::HistoricalFloorPruned(_))),
+                    "{bounded}"
+                );
+                let db = UnorderedVariable::init(ctx.child(unbounded), cfg(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(db.bounds().end, size);
+                assert_eq!(db.root(), root);
+                assert!(db.bounds().start <= start);
+                let db = db.prune(prune_loc).await.unwrap();
+                db.wait_for_removals().await.unwrap();
+                assert_ne!(
+                    commonware_runtime::Storage::scan(&context, &partition)
+                        .await
+                        .unwrap(),
+                    blobs_before
+                );
+                drop(db);
+            }
+        });
+    }
+
+    /// A prune persists the Merkle boundary at the log's retained start, here exactly where a
+    /// commit ends. Bounded reopens below the boundary, at it and above it return the same result
+    /// whether storage still holds the released blobs or has deleted them. The reopen at the
+    /// boundary would end at the released commit, so it is rejected and the database keeps every
+    /// later commit.
+    #[test_traced("INFO")]
+    fn test_any_bounded_reopens_ignore_released_blobs() {
+        deterministic::Runner::default().start(|context| async move {
+            const KEYS: u64 = 64;
+
+            let mut outcomes = Vec::new();
+            for (suffix, blobs, fail_removal) in [
+                ("released-blobs-present", "present", true),
+                ("released-blobs-deleted", "deleted", false),
+            ] {
+                let ctx = context.child("db").with_attribute("blobs", blobs);
+                let cfg = || variable_db_config::<OneCap>(suffix);
+                let per_section = cfg().log.items_per_section.get();
+                let mut db = UnorderedVariable::init(ctx.child("storage"), cfg(), None)
+                    .await
+                    .unwrap();
+
+                // Commit one write at a time until a commit ends on a section boundary.
+                let mut writes = 0u64;
+                while writes == 0 || *db.bounds().end % per_section != 0 {
+                    assert!(writes < 4 * KEYS, "a commit must end on a section boundary");
+                    db = commit_writes(db, [(key(writes % KEYS), Some(val(writes)))], None).await;
+                    writes += 1;
+                }
+                let boundary = db.bounds().end;
+
+                // Commit until the inactivity floor reaches that boundary, remember the commit
+                // that got it there, and commit once more.
+                let mut round = 0u64;
+                while db.inactivity_floor() < boundary {
+                    round += 1;
+                    assert!(round <= 64, "floor must reach the section boundary");
+                    db = commit_writes(
+                        db,
+                        (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
+                        None,
+                    )
+                    .await;
+                }
+                let rewind_bound = db.bounds().end;
+                let rewind_root = db.root();
+                db = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+                let size = db.bounds().end;
+                let root = db.root();
+
+                // Prune to the boundary. A remove fault leaves the released blobs in place as a
+                // crash before their deletion does.
+                if fail_removal {
+                    context.storage_fault_config().write().remove_rate =
+                        Some(commonware_utils::probability!(1.0));
+                }
+                let db = db.prune(boundary).await.unwrap();
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                assert_eq!(db.wait_for_removals().await.is_err(), fail_removal);
+                assert_eq!(db.log.retained_start(), boundary);
+                drop(db);
+
+                // Below the boundary and at it, the reopen is rejected and changes nothing.
+                for (child, bound) in [("below", *boundary - 1), ("at", *boundary)] {
+                    let rejected = UnorderedVariable::init(
+                        ctx.child(child),
+                        cfg(),
+                        Some(Location::new(bound)),
+                    )
+                    .await;
+                    assert!(
+                        matches!(
+                            rejected,
+                            Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
+                        ),
+                        "{blobs} {child}"
+                    );
+                }
+                let db = UnorderedVariable::init(ctx.child("unbounded"), cfg(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(db.bounds().end, size);
+                assert_eq!(db.root(), root);
+                drop(db);
+
+                // Above the boundary, the reopen rewinds to a commit whose floor is retained.
+                let db = UnorderedVariable::init(ctx.child("above"), cfg(), Some(rewind_bound))
+                    .await
+                    .unwrap();
+                assert_eq!(db.bounds().end, rewind_bound);
+                assert_eq!(db.root(), rewind_root);
+                db.destroy().await.unwrap();
+                outcomes.push((boundary, rewind_bound, rewind_root, size, root));
+            }
+            assert_eq!(outcomes[0], outcomes[1]);
+        });
+    }
+
     /// Valid children of an applied parent retain their state across bitmap pruning,
     /// including children merkleized before pruning and children constructed afterward.
     #[test_traced("INFO")]

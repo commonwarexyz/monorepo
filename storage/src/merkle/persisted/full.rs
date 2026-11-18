@@ -1242,12 +1242,12 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Blob as _, Runner, Storage as _, Supervisor as _,
+        Blob as _, Clock as _, Runner, Spawner as _, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
-            fail_pending_syncs, next_pending_sync,
+            DeferredRemoveContext, DelayedSyncContext, PendingSyncs, RecordingContext,
+            drive_pending_syncs, fail_pending_syncs, next_pending_sync,
         },
     };
     use commonware_utils::{
@@ -1259,6 +1259,7 @@ mod tests {
         future::{Future as _, poll_fn},
         num::{NonZeroU16, NonZeroUsize},
         task::Poll,
+        time::Duration,
     };
 
     fn test_digest(v: usize) -> Digest {
@@ -1422,6 +1423,55 @@ mod tests {
     #[test]
     fn test_interrupted_destroy_reopens_bounded_mmb() {
         deterministic::Runner::default().start(interrupted_destroy_reopens_bounded::<mmb::Family>);
+    }
+
+    /// A destroy waiting on a node deletion that fails reports it before changing anything, so
+    /// the store reopens as it was.
+    async fn destroy_reports_pending_removal_failure<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config();
+        let (deferred, removes) = DeferredRemoveContext::new(context.child("deferred"));
+        let mut merkle = Merkle::<F, _, Digest, Sequential>::init(deferred, &hasher, cfg.clone())
+            .await
+            .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..100 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let (merkle, _) = merkle.prune(Location::new(60)).await.unwrap();
+        assert_eq!(removes.len(), 1);
+        let root = merkle.root(&hasher, 0).unwrap();
+        let bounds = merkle.bounds();
+        let destroy = context.child("destroy").spawn(move |_| merkle.destroy());
+
+        // Fail the deletion once the destroy waits on it.
+        context.sleep(Duration::from_millis(10)).await;
+        context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+        removes.release(&context).await;
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        assert!(destroy.await.unwrap().is_err());
+
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(merkle.bounds(), bounds);
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure_mmr() {
+        deterministic::Runner::default()
+            .start(destroy_reports_pending_removal_failure::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure_mmb() {
+        deterministic::Runner::default()
+            .start(destroy_reports_pending_removal_failure::<mmb::Family>);
     }
 
     fn interrupted_destroy_reopens_all_seeds<F: Family>() {
