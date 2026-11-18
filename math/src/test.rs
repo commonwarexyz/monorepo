@@ -550,6 +550,17 @@ mod test {
         G::mul_each(&mut elements, &[F::one()], &commonware_parallel::Sequential);
     }
 
+    #[test]
+    #[should_panic(expected = "scalars must not be longer than lefts")]
+    fn test_scaled_multi_pairing_panics_on_extra_scalars() {
+        G::scaled_multi_pairing(
+            &[G::generator()],
+            &[G2::generator()],
+            &[F::one(); 2],
+            &commonware_parallel::Sequential,
+        );
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::super::*;
@@ -613,5 +624,16 @@ mod twin {
     fn test_twin_mul_each_panics_on_length_mismatch() {
         let mut elements = [Twin::<G>::generator(); 2];
         Twin::<G>::mul_each(&mut elements, &[F::one()], &Sequential);
+    }
+
+    #[test]
+    #[should_panic(expected = "scalars must not be longer than lefts")]
+    fn test_twin_scaled_multi_pairing_panics_on_extra_scalars() {
+        Twin::<G>::scaled_multi_pairing(
+            &[Twin::generator()],
+            &[G::generator()],
+            &[F::one(); 2],
+            &Sequential,
+        );
     }
 }
