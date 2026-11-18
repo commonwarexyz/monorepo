@@ -379,6 +379,11 @@ stability_scope!(BETA {
         /// Return a [`Spawner`] whose next task performs blocking storage reads on its own thread
         /// instead of handing them to a blocking pool.
         ///
+        /// The hint covers the reads a task waits on in place, [`Blob::read_at`] and
+        /// [`Blob::read_at_buf`]. A batched read ([`Blob::read_many`] or
+        /// [`Blob::start_read_many`]) may still be handed to the pool, where it can wait behind
+        /// the pool's other users.
+        ///
         /// Only meaningful together with [`Spawner::dedicated`]: an inline read holds the thread
         /// for the duration of the syscall, which a dedicated task owns but a shared executor does
         /// not, so runtimes apply the hint to dedicated tasks only. While a read is in flight the
