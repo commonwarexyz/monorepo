@@ -1402,15 +1402,15 @@ mod tests {
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
-            DeferredRemoveContext, DeferredRemoves, DelayedSyncContext, MutationFaultContext,
-            MutationFaults, PendingSyncs, RecordingContext, drive_pending_syncs,
-            fail_pending_syncs, next_pending_sync,
+            DeferredOpenContext, DeferredRemoveContext, DeferredRemoves, DelayedSyncContext,
+            MutationFaultContext, MutationFaults, PendingSyncs, RecordingContext,
+            drive_pending_syncs, fail_pending_syncs, next_pending_sync,
         },
         reschedule,
         telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability};
-    use futures::StreamExt as _;
+    use futures::{FutureExt as _, StreamExt as _};
     use std::{
         collections::BTreeSet,
         future::Future,
@@ -2803,6 +2803,100 @@ mod tests {
     #[test_traced("INFO")]
     fn test_crash_with_pending_removals_recovers_mmb() {
         test_crash_with_pending_removals_recovers::<mmb::Family>();
+    }
+
+    /// A crash can leave the item journal and the Merkle node journal each with a sealed blob and
+    /// no successor, since a rollover seals the full blob before its successor is created.
+    /// Whichever successors exist at the crash, the reopened journal holds every synced operation
+    /// and the same root.
+    #[test_traced]
+    fn test_crash_before_successor_exists() {
+        let suffix = "pending_successor";
+        let partitions = [
+            format!("journal-{suffix}-blobs"),
+            format!("mmr-journal-{suffix}-blobs"),
+        ];
+        for created in 0..1usize << partitions.len() {
+            let executor = deterministic::Runner::default();
+            let (root, checkpoint) = executor.start_and_recover({
+                let partitions = partitions.clone();
+                move |context| async move {
+                    let (item_context, opens) = DeferredOpenContext::new(context.child("items"));
+                    let node_context = DeferredOpenContext {
+                        inner: context.child("nodes"),
+                        opens: opens.clone(),
+                    };
+                    let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                    let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                        node_context,
+                        &hasher,
+                        merkle_config(suffix),
+                    )
+                    .await
+                    .unwrap();
+                    let items = ContiguousJournal::<_, TestOp<mmr::Family>>::init(
+                        item_context,
+                        journal_config(suffix),
+                    )
+                    .await
+                    .unwrap();
+                    let mut journal = Journal {
+                        journal: items,
+                        merkle,
+                        hasher,
+                    };
+
+                    // Seven operations fill the first item blob, and their eleven nodes fill the
+                    // first node blob. Polling the sync handle makes both durable and starts
+                    // their successors' creations. Both creations stay parked.
+                    for partition in &partitions {
+                        opens.defer(partition);
+                    }
+                    for i in 0..6 {
+                        (journal, _) = journal.append(&create_operation(i)).await.unwrap();
+                    }
+                    (journal, _) = journal
+                        .append(&TestOp::Commit(None, Location::new(0)))
+                        .await
+                        .unwrap();
+                    let mut handle;
+                    (journal, handle) = journal.start_sync().await.unwrap();
+                    assert!((&mut handle).now_or_never().is_none());
+                    let root = journal.root(0).unwrap();
+
+                    // The creations selected by `created` finish before the crash.
+                    for (index, partition) in partitions.iter().enumerate() {
+                        assert_eq!(opens.parked(partition), 1);
+                        let exists = created & (1 << index) != 0;
+                        if exists {
+                            let name = 1u64.to_be_bytes();
+                            drop(context.open(partition, &name).await.unwrap());
+                        }
+                        let blobs = context.scan(partition).await.unwrap();
+                        assert_eq!(blobs.len(), 1 + usize::from(exists));
+                    }
+                    drop(journal);
+                    root
+                }
+            });
+
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                let mut journal =
+                    create_empty_journal::<mmr::Family>(context.child("second"), suffix).await;
+                assert_eq!(journal.bounds(), 0..7, "{created:#b}");
+                assert_eq!(journal.root(0).unwrap(), root, "{created:#b}");
+                for i in 0..6 {
+                    assert_eq!(journal.read(i.into()).await.unwrap(), create_operation(i));
+                }
+
+                // The reopened journal appends into the successors and stays durable.
+                let location;
+                (journal, location) = journal.append(&create_operation(7)).await.unwrap();
+                assert_eq!(location, Location::new(7));
+                journal = journal.sync().await.unwrap();
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 
     /// Item and node deletions both follow the caller's `after`, including when only the Merkle
@@ -6769,5 +6863,101 @@ mod tests {
         retained_start_at_follows_stored_blobs::<VariableJournal<Context, TestOp<mmr::Family>>>(
             variable_journal_config,
         );
+    }
+
+    /// An append that fills a blob leaves the blob's successor to be created later, so the newest
+    /// stored blob can be full while the persisted Merkle boundary sits at its end. The newest
+    /// blob is never pruned history, so the journal retains its first item. An open that selects
+    /// no item empties it, and an open that selects its commit keeps every operation.
+    fn opens_retain_full_newest_blob_below_merkle_boundary<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "full-newest-blob";
+        let commit: fn(&TestOp<F>) -> bool = |op| op.is_commit();
+        let cases: [OpenCase<F>; 3] = [
+            ("unbounded, any commit", None, commit, Expected::End(7)),
+            ("unbounded, no item", None, no_op::<F>, Expected::End(0)),
+            ("cap 0, no item", Some(0), no_op::<F>, Expected::End(0)),
+        ];
+        for (label, max_size, predicate, expected) in cases {
+            let executor = deterministic::Runner::default();
+            let ((), checkpoint) = executor.start_and_recover({
+                let journal_cfg = journal_cfg.clone();
+                move |context| async move {
+                    // Seven operations fill the only blob, and only the Merkle structure is
+                    // pruned, to 7. Nothing waits for the journal's durability, so nothing
+                    // creates the blob's successor before the crash.
+                    let (context, _) = ParkedContext::new(context);
+                    let ops = tagged_ops::<F>(7, &[(6, 0)]);
+                    let (merkle, journal, hasher) = components_with_merkle_pruned::<F, C>(
+                        &context,
+                        suffix,
+                        journal_cfg,
+                        &ops,
+                        7,
+                    )
+                    .await;
+                    let journal =
+                        Journal::from_components(merkle, journal, hasher, APPLY_BATCH_SIZE)
+                            .await
+                            .unwrap();
+                    assert_eq!(journal.bounds(), 0..7);
+                }
+            });
+            let journal_cfg = journal_cfg.clone();
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                let (context, _) = ParkedContext::new(context);
+                let recovery = C::recover(context.child("recover"), journal_cfg.clone(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(recovery.bounds(), 0..7);
+                assert_eq!(recovery.retained_start_at(7), 0);
+                drop(recovery);
+
+                let opened = open_outcome::<F, C>(
+                    context.child("open"),
+                    suffix,
+                    journal_cfg,
+                    max_size,
+                    predicate,
+                )
+                .await;
+                assert!(expected.matches(&opened), "{label}: {opened:?}");
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_opens_retain_full_newest_blob_below_merkle_boundary_fixed_mmr() {
+        opens_retain_full_newest_blob_below_merkle_boundary::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(journal_config("full-newest-blob"));
+    }
+
+    #[test_traced]
+    fn test_opens_retain_full_newest_blob_below_merkle_boundary_fixed_mmb() {
+        opens_retain_full_newest_blob_below_merkle_boundary::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(journal_config("full-newest-blob"));
+    }
+
+    #[test_traced]
+    fn test_opens_retain_full_newest_blob_below_merkle_boundary_variable_mmr() {
+        opens_retain_full_newest_blob_below_merkle_boundary::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(variable_journal_config("full-newest-blob"));
+    }
+
+    #[test_traced]
+    fn test_opens_retain_full_newest_blob_below_merkle_boundary_variable_mmb() {
+        opens_retain_full_newest_blob_below_merkle_boundary::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(variable_journal_config("full-newest-blob"));
     }
 }
