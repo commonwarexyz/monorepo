@@ -138,8 +138,7 @@ where
         return Ok(results);
     }
 
-    // Read each distinct missed position once. The journal validates these positions together.
-    // Hits from separate shard probes have already been consumed independently.
+    // Fetch each distinct position missed by the shard probes once.
     misses.sort_unstable_by_key(|&(_, pos)| pos);
     let positions = dedup_positions(&misses);
     let ops = reader.read_many(&positions).await?;
