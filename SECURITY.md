@@ -1,5 +1,125 @@
 # Security Policy
 
+## How to Read This File
+
+### Purpose and Readers
+
+This file has two goals: fewer false positives and more true positives in
+security review by LLM agents. Safer code changes by coding agents are not a
+goal of this file and not a measure of its success.
+
+`AGENTS.md` names the readers, and this file does not change that: coding
+agents read it before making changes, and review agents read it before a
+secure code review. The guidance under "Automatic Secure Code Review" is
+written for reviewers.
+
+### Reading Table
+
+Every agent reads the mandatory core. The sections are named by their
+headings.
+
+| Mandatory core | Why |
+|---|---|
+| How to Read This File | The rules for using this file. |
+| Reporting Security Issues | The reporting procedure. |
+| Adversarial Settings | Who and what is hostile. |
+| Assumptions and Trust Boundaries, Trust Model | The fault budget and the trust boundaries. |
+| Consensus Timing Rule | The default for consensus-related liveness. |
+| Inherited Threats | The threat classes that apply everywhere. |
+| Threats Unique to This Monorepo | The threats that come from how the code is built and shipped. |
+| Coverage, with Report Scope | What the lists leave out, and where findings are not reported. |
+| Severity Gates, with Stability Levels, Contract Hazards, and Evidence | What a finding needs, and how it is rated. |
+
+Then every agent reads the parts for each crate its task touches. A crate name
+in the second column is a subsection heading: read the subsection with that
+heading under "Threats" and the one under "Attack Vectors".
+
+| Task touches | Under "Threats" and "Attack Vectors" | Under "Review Priority Order" |
+|---|---|---|
+| `consensus` | Consensus | 1, 2 |
+| `broadcast` | Broadcast | 2 |
+| `codec` | Codec | 2 |
+| `cryptography` | Cryptography | 4, 5 |
+| `coding` | Coding | 2 |
+| `p2p` | P2P | 1, 2 |
+| `stream` | Stream | 5 |
+| `storage` | Storage | 3 |
+| `glue` | Glue | 4 |
+| `runtime` | Runtime | 2, 3 |
+| `resolver` | Resolver | 1, 2 |
+| `collector` | Collector | 2 |
+| `clearing` | Clearing | none |
+
+A task that matches a row also reads the introductions of "Threats" and
+"Attack Vectors" and the parts that cut across crates: "Findings Validation
+Process Lessons", "Top 10 Lessons Learned", "Denial-of-Service Review Checks",
+and item 6 of "Review Priority Order" ("Panic Severity Calibration").
+
+A task that matches no row reads all sections. This includes a task on a crate
+that has no row, and a task that names no crate.
+
+### Authority
+
+This file holds two kinds of statement, and they have different authority.
+
+- **Rules are normative.** The fault budget, the trust boundaries, the severity
+  gates, the reporting procedure, and the other rules of this file, such as
+  "Report Scope", are followed as written. "Conflicting
+  Instructions" covers the case in which another source says otherwise.
+- **Statements about the code are claims.** Every statement about what the code
+  does quoted documentation, default
+  value, and listed module, is a claim. Check it at the revision under review
+  before relying on it. When the code contradicts a claim, the code at that
+  revision decides: report the contradiction as a defect of this file.
+
+In these rules, "report" means: write it in the result of your task.
+
+### Conflicting Instructions
+
+When this file, `AGENTS.md`, a nested agent guide, and the instructions of the
+task disagree about what to do:
+
+1. Follow the higher-priority source. This file does not rank itself above the
+   others.
+2. Stop the action that the conflict is about.
+3. Report the conflict with evidence: both texts, and where each one is.
+
+### When You Think This File Is Wrong
+
+1. Follow the rules of this file anyway.
+2. Finish the task.
+3. Report the disagreement as a separate item, with evidence.
+4. Never edit this file on your own.
+
+Such a disagreement is reported as a defect of this file, not as a
+vulnerability.
+
+### Citing a Threat
+
+Threats and attack vectors have no stable identifiers. The numbers in the
+lists are positions, and they change when a list is edited. A finding or a
+disagreement cites a threat by its section heading plus the full first
+sentence of the threat. For a threat in a per-crate list, the first sentence
+is the whole "X, because Y" sentence. An attack vector is cited in the same
+way, by its section heading plus its full text.
+
+Some headings repeat, for example "Consensus" under "Threats" and under
+"Attack Vectors", and "storage" under "Runtime". Give such a heading with its
+parents, for example "Threats, Runtime, storage".
+
+### Upkeep
+
+This file is kept current by hand: no tool checks it against the code. After a
+material edit:
+
+1. The author checks the edit.
+2. An independent reviewer approves the public text. The reviewer confirms
+   that no line comes from a non-public finding.
+3. The owner of this file accepts the text again.
+
+Acceptance means that the owner agrees with the text. It does not test how
+models read the file.
+
 ## Reporting Security Issues
 
 We welcome security disclosures and are committed to providing prompt attention
@@ -74,10 +194,13 @@ leaderboard below.
 - Byzantine consensus analysis assumes the protocol's configured fault
   threshold, with at most `f` Byzantine participants: (1) for Simplex-based
   protocols (`N3f1`, `n >= 3f+1`), a valid `n-f` quorum certificate (`2f+1` when
-  `n = 3f+1`) contains at least `f+1` honest signers; (2) for Multimmit (`N5f1`,
-  `n >= 5f+1`), a valid `n-f` L-quorum certificate (`4f+1` when `n = 5f+1`)
-  contains at least `3f+1` honest signers, and a valid `2f+1` M-quorum
-  certificate contains at least `f+1` honest signers.
+  `n = 3f+1`) contains at least `f+1` honest signers; (2) for protocols on the
+  `N5f1` fault model (`n >= 5f+1`, `utils/src/faults.rs`), a valid `n-f`
+  L-quorum certificate (`4f+1` when `n = 5f+1`) contains at least `3f+1` honest
+  signers, and a valid `2f+1` M-quorum certificate contains at least `f+1`
+  honest signers. No engine under `consensus/src` uses `N5f1` at this revision
+  (the engines are `simplex`, `marshal`, and `aggregation`). Do not
+  report against an `N5f1` engine unless its code is in the reviewed tree.
 - If honest signer code enforces the protocol's signing preconditions, receivers
   may treat a valid quorum certificate as quorum-backed evidence for those
   preconditions unless the component's documented contract separately requires
@@ -110,6 +233,273 @@ are hostile. Local configuration, setup files, and imported threshold state are
 trusted unless explicitly documented otherwise. Findings are invalid when they
 exceed the shared `f` budget.
 
+### Consensus Timing Rule
+
+This rule is a review default for consensus-related liveness in the consensus
+protocols implemented in this repository. It is not a guarantee of any
+component, and it does not apply to other primitives.
+
+1. Safety is expected under asynchrony: a safety finding may use any message
+   delay and any message order, within the fault budget.
+2. Liveness is expected only after the network is synchronous.
+3. Each component's documented contract overrides this default, and the
+   components document different assumptions. `simplex` states a "partially
+   synchronous setting". `aggregation`
+   recovers certificates "over an externally synchronized sequencer of items".
+   The module documentation of
+   `marshal` promises delivery of finalized blocks in height order and at
+   least once, and states no synchrony assumption.
+4. Bounded clock skew is assumed only where a component documents it.
+5. A liveness finding names the synchrony assumption it uses.
+
+### Inherited Threats
+
+Commonware is a constructor of blockchains: a library of primitives that an
+integrator composes into a network. It therefore inherits every general threat
+and attack vector of the systems those primitives build. The per-crate lists
+below do not repeat them. A reviewer must assume all of them apply wherever the
+named crates are used, and must check the well-known attacks of a class before
+looking for new ones.
+
+- **Blockchains** (the composed system; `glue`, `consensus`, `storage`,
+  `clearing`, `examples`, `sol`): double spend and reversal of finality, forks
+  and long-range history rewrites, leader front-running and censorship,
+  transaction replay across chains or forks, state growth and spam, validator
+  set and key rotation attacks, non-deterministic execution, upgrade
+  divergence, and forged proofs to light clients and bridges.
+- **Authenticated databases** (`storage/src/qmdb`, `merkle`, `bmt`, `bitmap`,
+  `journal`, and the hashes in `cryptography`; the Solidity verifiers in
+  `sol`): forged inclusion, exclusion, and range proofs, leaf and inner node
+  confusion, proof malleability, proofs replayed against a stale root, equal
+  size with different history, rollback after a crash, torn writes, unsound
+  pruning, poisoned state sync, oversized proofs, and key grinding against
+  indexes.
+- **Consensus protocols** (`consensus/src/simplex`, `marshal`, `aggregation`;
+  `broadcast`, `coding`, `resolver`, `collector`: equivocation, 
+  quorum-intersection errors, amnesia
+  after a crash, replay across views and epochs, view-change and timeout
+  attacks on liveness, leader withholding and data unavailability, violated
+  synchrony assumptions, reconfiguration attacks, biased or predictable
+  randomness, and forged or missing accountability evidence.
+- **P2P networks** (`p2p`, `resolver`, `broadcast`, `collector`): Sybil and
+  eclipse attacks, discovery poisoning, partitioning, connection and handshake
+  exhaustion, amplification, message floods and replay, abuse of peer scoring
+  and blocking against honest peers, address spoofing, and exposure of
+  validator addresses.
+- **Secure transport protocols** (`stream/src/sake`, `stream/src/cups`,
+  `cryptography/src/handshake`, `cryptography/src/chacha20_poly1305`):
+  man-in-the-middle, identity misbinding and unknown key share, key-compromise
+  impersonation, reflection, replay, downgrade, nonce reuse, record reordering
+  and truncation, missing forward secrecy, length leakage, timing side
+  channels, and work done before authentication.
+- **DKG and threshold protocols** (`cryptography/src/bls12381/dkg`,
+  `glue/src/dkg`, `examples/dkg`): rogue keys, biased output keys, dealer
+  equivocation, invalid or withheld shares, false complaints, share leakage
+  past the threshold, a mobile adversary across epochs, replay of dealings
+  across rounds, wrong threshold parameters, and ceremonies that never
+  terminate.
+- **Payment channels** (`clearing/src/bajillion` on `main`, with
+  `utils/src/amount.rs` and `codec/src/uint.rs`): publication of a stale state,
+  double spend of an off-chain balance, operator censorship and withholding,
+  griefing and forced exits, missed challenge windows, replay of a signed
+  state in another epoch, mass exit, arithmetic that mints or destroys value,
+  and a ledger reorganized after the off-chain parties read it.
+- **Runtimes** (`runtime`, `actor`, `allocator`, `parallel`, `utils`,
+  `macros`): scheduler starvation, blocking inside async tasks, cancellation
+  that leaves partial effects, unbounded tasks and queues, clock steps and
+  timer errors, descriptor and memory exhaustion, `fsync` semantics weaker
+  than assumed, lost or swallowed panics, non-determinism, and memory unsafety
+  in buffers and I/O.
+
+The general threats of serialization formats (`codec`), of cryptographic
+primitives (`cryptography`, `math`, `simd`), and of the software supply chain
+(dependencies, build scripts, CI) apply in the same way.
+
+### Threats Unique to This Monorepo
+
+These threats come from how Commonware is built and shipped. A single-product
+blockchain node does not have them, or has them in a much weaker form. Each
+entry names the peculiarity, the threat, why it is specific to this
+repository, and its source.
+
+1. **The integrator owns half of every security argument.** Each primitive
+   states its guarantees for a caller that meets documented obligations, and
+   many obligations cannot be checked by types or at run time.
+   The threat is a composed system that loses a property every primitive's
+   own tests demonstrate, because the caller broke an unchecked precondition.
+   It is specific here because every public trait and constructor is an
+   external boundary with an unknown caller. In a single-product node one team
+   owns both sides of each internal interface.
+2. **Security depends on the instantiation the integrator picks.** Primitives
+   are generic over the signature scheme, certificate scheme, hasher, cipher,
+   translator, elector, and execution strategy. 
+   A property shown for one instantiation can fail for another.
+   A documented case: SAKE `Version::V0` authenticates the dialer
+   only if the signature scheme admits no key substitution, and with a scheme
+   "like ECDSA" a dialer can complete the handshake under a key that is not
+   its own . The threat is a valid but unsafe
+   combination of generic parameters reaching production. It is specific here
+   because a single-product node ships one instantiation and tests only that
+   one.
+3. **Settings that peers must share are configured, not negotiated.** The
+   application namespace and the SAKE version are not negotiated
+   (`stream/src/sake/mod.rs`, section "Configuration"). The CUPS version and
+   cipher are set out of band, and the handshake contract does not
+   authenticate them. Decode limits, quorum
+   fault model, coding parameters, and timeouts are local configuration as
+   well. The threat is two honest nodes that differ in one of these settings:
+   each sees the other's valid traffic as invalid and blocks it, or a node
+   keeps accepting a weaker version that its peers believe is retired. It is
+   specific here because the library defines no network-wide parameter set;
+   the integrator must distribute one.
+4. **Decode bounds are caller configuration, not part of the wire format.**
+   The threats are: a call site at
+   an untrusted boundary that passes an unbounded or oversized limit; limits
+   for nested values that are swapped, since two limits of the same type
+   type-check in either order; limits that do not nest across layers (stream
+   message size, p2p channel size, codec maximum of every representation); a
+   stored record that no longer decodes after a limit is lowered; and two
+   honest nodes with different limits. It is specific here because
+   most wire formats fix their limits in the schema, and one team sets them
+   once.
+5. **One crate holds code at several stability levels, selected by `cfg`.**
+   The threats are: an integrator who runs ALPHA code in production and 
+   loses stored state or
+   peer compatibility on upgrade; a build at a higher level that compiles a
+   different set of items than the default build that CI tested; a
+   mis-scoped item that lets stable code depend on unstable behavior; and a
+   reviewer who rates a format break without checking the item's level. It is
+   specific here because stability is a per-item compile-time property, not a
+   property of a release.
+6. **Tests run on a runtime that does not ship.** Async protocol tests must
+   use the deterministic runtime, while production uses the
+   `tokio` runtime or, on Linux, the `iouring` runtime.
+   The `iouring` cases run only on Linux.
+   The `external` feature lets real latency into
+   the deterministic runtime and makes it non-deterministic. Primitives are runtime-agnostic,
+   so an integrator may also supply its own runtime. The
+   threats are: a scheduling, cancellation, or durability bug that exists only
+   on a shipped runtime and that no deterministic test can show; a passing
+   deterministic test read as evidence about `tokio` or `iouring`; and a
+   custom runtime whose clock, `sync`, or cancellation is weaker than the
+   primitives assume. It is specific here because the runtime is a
+   replaceable parameter of every protocol. See also Runtime threats.
+7. **Namespaces are split between the library and the integrator.** Library
+   namespaces follow `_COMMONWARE_<CRATE>_<OPERATION>` and changing one is a
+   breaking change (`AGENTS.md`); the integrator supplies the application
+   namespace that is combined with them. The threats are: two deployments, or
+   a test network and a main network, that share a key and an application
+   namespace, so a signature from one verifies in the other; a new primitive
+   that reuses an existing library namespace; and a renamed namespace that
+   silently splits a network during a rolling upgrade. It is specific here
+   because no single party sees all the namespaces that share a key.
+8. **Glue code is where the assumptions of separate crates meet.** `glue`
+   offers "default constructions that span multiple primitives".
+   Limits, the order of persist, acknowledge, and broadcast,
+   epoch handoff, and pruning floors are only consistent or inconsistent once
+   crates are joined. The threat is a composition in which every primitive
+   behaves as documented and the whole still violates safety or liveness. It
+   is specific here because integrators copy or replace `glue`, so the same
+   class of defect recurs in code this repository never sees.
+9. **Storage handles are destroyed by failure, by convention.** Mutating
+    storage methods take `self` and return it on success, and a failed
+    mutable operation is fatal for that instance . The
+    threats are: an integrator that keeps using or reopens a failed instance
+    without a restart and commits from inconsistent state; and a reviewer who
+    reports the inconsistent state of a failed instance as a defect. It is
+    specific here because the rule lives in a convention and in ownership,
+    not in a process boundary as in a database server.
+10. **The Simplex engine is not the Simplex of the paper.**
+    `consensus::simplex` extends the published protocol: an
+    application `certify` step between notarization and the finalize vote,
+    leader and skip timeouts, stable leaders over multi-view terms with
+    optimistic validation and pipelined handoff, certificates fetched on
+    demand, and votes verified lazily in batches.
+    The threats are: a property proven for the paper or checked in the model
+    that is taken as shown for the code; an added rule, alone or combined
+    with another, that lets two conflicting blocks finalize or stalls every
+    view; `certify` verdicts that differ between honest validators, so that
+    part of the committee refuses to build on a block the rest builds on and
+    consensus halts; and quorum arithmetic of one fault model applied to the
+    rules of the other. It is specific here because the deviations are this
+    repository's own: the paper's proof does not cover them, and the
+    argument for each is the module documentation.
+11. **Simplex agrees on digests, and Marshal turns them into the blocks the
+    application executes.** `consensus::simplex` votes on payload digests by
+    view. `consensus::marshal` collects blocks from the broadcast buffer or
+    from coded shards, takes notarizations and finalizations from Simplex,
+    fetches what is missing through the resolver, rebuilds the order by
+    height, and delivers each finalized block at least once against the
+    application's acknowledgement. A restart or a floor installation can
+    redeliver blocks that were already reported. The vote journal of
+    Simplex, the archives of Marshal, and the application's database are
+    separate stores with separate durable points. The threats are: an
+    application that executes a block, an order, or a height that no quorum
+    finalized although Simplex itself stayed safe; a crash between two of
+    the three durable points that leaves a combination no component
+    expects, such as an acknowledged block the application did not persist;
+    and a redelivered block that the application applies twice. It is
+    specific here because Commonware exposes agreement, block delivery, and
+    execution as three separately durable components behind public
+    boundaries, which an integrator wires together and may replace, and
+    because the at-least-once acknowledgement contract of Marshal leaves
+    the handling of duplicates to the application.
+12. **A QMDB root commits to the log of operations, not to the key-value
+    state.** In `storage::qmdb` the state is derived from an append-only
+    log, and the root authenticates that log. Commit operations, their
+    metadata, and the updates that a `floor::Policy` rewrites at the tip
+    when it advances the inactivity floor are log entries as well. The
+    threats are: two honest nodes that hold the same keys and values but
+    reached them through different batch boundaries, commit metadata, or
+    floor policies, so their roots differ and they disagree on every state
+    root; a floor policy whose decisions depend on node-local state; and a
+    reviewer or integrator who treats equal content, or equal log size, as
+    equal roots. It is specific here because in a state trie the root is a
+    function of the current content alone, and here it is a function of the
+    path taken, including maintenance that the caller configures.
+13. **Each QMDB variant proves a different statement under its root.** The
+    variants share one batch API. An `any` database proves that a key had a
+    value at some point, not that the value is still current. A `current`
+    database grafts an activity bitmap onto the same tree to prove that, and
+    only its ordered form proves that a key is absent. The threats are: a
+    verifier, such as a light client or a bridge, that accepts an `any`
+    proof of a superseded or deleted value as the present state; a proof
+    checked against the root of another variant; and an integrator who
+    picks a variant for speed and loses the statement its verifiers need.
+    It is specific here because the meaning of a valid proof depends on the
+    database variant and its verification algorithm, with separate proof
+    structures and verification interfaces for `any` and `current`, while a
+    root is a plain digest that does not identify that choice. A protocol
+    that publishes a root must bind it to the variant and the verifier.
+
+### Coverage
+
+The per-crate threat lists and attack-vector lists below are open. Their
+entries are examples, and the lists are not complete. The absence of a threat,
+a vector, a module, or a crate means nothing: it does not show that the code
+is safe, that a behavior is intended, or that the code is out of scope. 
+
+Code and behavior that no list names fall back to the inherited threat
+classes. For unmodeled code, apply the inherited threats of its class, the
+unique threats above, and the review checks at the end of this file.
+
+#### Report Scope
+
+Findings are not reported in the paths below, unless the code there changes
+what a production build contains:
+
+- `examples`, `docs`, `docker`, and `pipeline`;
+- benches;
+- `*/fuzz`;
+- test modules and mock modules.
+
+One case of the exception may be mock or test code that a Cargo feature compiles
+into a production binary.
+
+These paths stay in this file as evidence and as misuse warnings. They show
+how a primitive is used, tested, and misused. Rules 3 and 5 under "Never
+Assume" limit what they prove.
+
 ### Threats
 
 Each threat is written as "X, because Y", which reads as "X is a threat,
@@ -117,6 +507,10 @@ because Y". X is something bad that can happen at a primitive's public
 boundary. Y is why it is bad: the consequence for the protocol, its operators,
 or its users, never the cause of X. The attack vectors below list the paths
 that lead to X.
+
+The lists are open (see "Coverage"): each entry is an example, and a missing
+entry means nothing. The item numbers are not identifiers. Cite a threat by
+its section heading plus its full first sentence (see "Citing a Threat").
 
 #### Consensus
 
@@ -143,11 +537,16 @@ that lead to X.
    stalls.
 7. An honest validator is blocked by its peers, because its votes no longer
    reach the nodes that blocked it, they stop counting toward quorum there, and
-   it is treated as faulty with no way to clear the block except peer restarts.
+   it is treated as faulty until the block expires after the configured
+   `block_duration` (hours by default) or the blocking peers restart.
 8. A notarized block treated as speculatively final is later excluded from the
    chain, because applications that acted on two-hop finality have already
    released goods, revealed outcomes, or sent cross-chain messages, and that
-   exposure becomes a double-spend.
+   exposure becomes a double-spend. The simplex documentation states when
+   exclusion is possible, including a Byzantine leader that revokes its own
+   notarized proposal ("Optimistic Finality" in
+   `consensus/src/simplex/mod.rs`); only exclusion outside those conditions
+   is a defect.
 9. A Byzantine participant learns the round randomness or next leader before
    the round resolves, because it can front-run lotteries, timelocked data, and
    leader-dependent ordering, and steer leader selection toward itself over
@@ -233,7 +632,9 @@ that lead to X.
    loads the same artifact stops at the same point so the committee cannot
    form.
 7. More than `f` players' shares are publicly known after a DKG or reshare round
-   completes, because a coalition holding those shares plus its own can recover
+   completes (the interactive DKG bounds reveals from honest dealers by `f`
+   only under synchrony, `cryptography/src/bls12381/dkg/feldman_desmedt.rs`),
+   because a coalition holding those shares plus its own can recover
    threshold certificates for a second conflicting block, so the threshold the
    dependent consensus relies on for safety no longer holds and the epoch's key
    must be abandoned.
@@ -275,7 +676,7 @@ that lead to X.
    signing work for a replayed Syn message, because an attacker who captured
    one valid Syn spends only bandwidth to burn the listener's CPU for the whole
    acceptance window, and the dialer named in the Syn fills the listener's
-   per-peer connection slots so the genuine dialer is refused.
+   single per-peer connection slot so the genuine dialer is refused.
 3. A handshake completes with a shared secret that a third party can compute,
    because every record on the connection is readable and forgeable by that
    party, so votes, dealings, and blocks exchanged with the peer are observed
@@ -337,8 +738,9 @@ that lead to X.
    because a node that uses it to skip already seen messages drops everything,
    or if it uses it to admit unseen messages floods itself, so gossip for that
    node stalls.
-2. A golden DKG dealing is accepted although its masked shares were not derived
-   from the dealer's eVRF key, because the dealer can give different players
+2. A golden DKG dealing (`bls12381/dkg/golden`, proved with `zk/bulletproofs`)
+   is accepted although its masked shares were not derived from the dealer's
+   eVRF key, because the dealer can give different players
    inconsistent shares in a protocol whose only defense is public
    verifiability, so players finish with shares of different polynomials and
    the committee cannot certify until a reshare.
@@ -366,8 +768,9 @@ that lead to X.
 5. An honest node re-encodes a block and obtains a commitment different from
    the one the honest proposer published, because the proposer's block fails
    validation at every peer, the honest leader is treated as faulty and its view
-   is nullified, and a committee whose members run different strategies or
-   builds never agrees on any block.
+   is nullified, and a committee whose members run different execution
+   strategies (`commonware_parallel::Strategy`) or builds never agrees on any
+   block.
 6. An honest validator crashes while checking or reconstructing a block from
    peer shards, because a leader or relayer can send the same shards to every
    honest validator, so more than `f` validators are down at once and consensus
@@ -376,7 +779,9 @@ that lead to X.
    reconstruction needs `minimum_shards` correct shards and only the honest
    holders are sure to serve theirs, so a threshold above the honest share lets
    `f` withholding validators turn a notarized block into one that no honest
-   node can ever certify or execute.
+   node can ever certify or execute. Coding marshal derives `f+1`
+   (`consensus/src/marshal/coding/types.rs`); a custom configuration can
+   exceed it.
 
 #### P2P
 
@@ -404,12 +809,13 @@ that lead to X.
    that link late or not at all until the dial shuffle happens to win, a node
    behind a firewall that cannot dial out is isolated outright, and the
    attacker renews the claim each time its record is marked stale.
-3. Two honest peers that disagree on the membership of a peer set disconnect
-   each other whenever one of them gossips the disputed set, because no
-   application message crosses that link before it is torn down, the reconnect
-   cooldown keeps them apart for most of each minute, and a membership change
-   applied at different times on different validators looks like a network
-   partition until the application resynchronizes.
+3. Two honest peers that hold peer sets of different sizes under the same
+   index disconnect each other whenever one of them gossips that index,
+   because no application message crosses that link before it is torn down,
+   the reconnect cooldown (60 seconds in the recommended configuration) keeps
+   them apart for most of each minute, and a membership change applied at
+   different times on different validators looks like a network partition
+   until the application resynchronizes.
 4. Any peer admitted to any tracked set, including a follower-tier secondary
    peer, learns the ingress address of every validator the responder is
    connected to, because validators can then be targeted one by one with
@@ -425,11 +831,11 @@ that lead to X.
    carried, the view times out and must be nullified, and an attacker needs
    only enough admitted identities and a consumer slower than its drain rate to
    make honest traffic disappear.
-2. The application is told a message was sent to a peer that will never receive
-   it, because the voter or broadcaster does not retry, the peer has to recover
-   the proposal or certificate through backfill, and a leader with several slow
-   links sees its views time out while its own accounting shows every message
-   as delivered.
+2. The application is given a recipient list that includes a peer that will
+   never receive the message, because the voter or broadcaster does not retry,
+   the peer has to recover the proposal or certificate through backfill, and a
+   leader with several slow links sees its views time out while its own
+   accounting shows every message as delivered.
 3. A validator's own vote is refused at submission while it answers a burst of
    backfill or broadcast requests, because the vote is never transmitted, the
    validator misses a view although it is honest and online, and the peers that
@@ -438,8 +844,8 @@ that lead to X.
    its quota on any single channel, because its votes on the consensus channel
    arrive late or after the view has moved on, a burst that is normal under
    load on one channel costs it participation on the others, and if the backlog
-   outlasts the write timeout the connection drops and a reconnect cooldown
-   follows.
+   outlasts the runtime's read/write timeout (60 seconds by default) the
+   connection drops and a reconnect cooldown follows.
 5. Honest peers running an older or newer message format are blocked for hours
    by the peers that cannot parse them, because the two halves of a rolling
    upgrade stop exchanging votes and blocks, the committee can sit below quorum
@@ -471,11 +877,13 @@ that lead to X.
    never authenticate, because honest validators' dials are rejected by the
    concurrency limiter and their votes never reach this node, while the
    attacker needs no key of its own.
-6. Two nodes configured for different applications, networks, or protocol
-   versions complete a handshake with each other, because every record they
-   exchange is framed for the other deployment and fails to decode, each side
-   blocks the other as malicious, and a validator that reuses its key on a test
-   network is cut off from the network it meant to join.
+6. Two nodes configured for different applications or networks complete a
+   handshake with each other, or two nodes that differ only in record version
+   or cipher, which the handshake does not authenticate, go on to exchange
+   records, because every record then fails to authenticate or decode on the
+   other side, no application message crosses the link, and a validator that
+   reuses its key on a test network is cut off from the network it meant to
+   join.
 
 #### Storage
 
@@ -540,6 +948,12 @@ that lead to X.
 
 ##### qmdb/sync
 
+Sync sources are untrusted and their responses are verified against the
+requested target. The target is a trusted input chosen by the caller: sync
+does not select or authenticate it (`storage/src/qmdb/sync/mod.rs`, "Trust
+Model"). A threat that needs an attacker-chosen target belongs to the caller
+that picks the target, such as `glue/src/stateful`.
+
 1. A state sync completes and persists a database whose history is not the one
    the target root commits to, because the node joins the committee holding
    state the network never agreed on, executes and votes on blocks from it,
@@ -598,6 +1012,10 @@ that lead to X.
    bandwidth.
 
 ##### bmt
+
+On `main` the same tree also commits Bajillion payment maps and matrices
+(`clearing/src/bajillion`), so the threats below apply to those commitments
+as well as to shards.
 
 1. A shard proof verifies against a commitment for shard data the encoder never
    placed at that index, because honest nodes decoding the same certified
@@ -681,18 +1099,20 @@ that lead to X.
 ##### freezer
 
 1. Lookups for keys that share a table slot with attacker-chosen keys take one
-   disk read per colliding key, because a Byzantine proposer can grind block
-   digests into the slot of an honest block in a few thousand hash tries, and
-   every honest validator's lookups for blocks in that slot stay slow for as
-   long as the archive is retained.
+   disk read per colliding key, because the slot is the CRC32 of the key
+   masked to the table size, a Byzantine proposer can grind a block digest
+   into the slot of an honest block in about as many hash tries as the table
+   has entries, and every honest validator's lookups for blocks in that slot
+   stay slow for as long as the archive is retained.
 
 ##### metadata
 
 1. The store comes back holding the previous version's values after a restart
    that followed a successful sync, because the archives and marshal caches that
    use it as their commit record rewind to an older checkpoint and delete data
-   written since, and a DKG state-sync plan that was already consumed and
-   removed is applied again at the next startup.
+   written since, and a stale DKG state-sync plan that was already removed is
+   present again at the next startup and is used again if the recovered epoch
+   does not exceed the plan's floor epoch.
 2. Metadata initialization fails with a corruption error, because every store
    built on it panics at startup, the node stays down, and the only operator
    remedy is to delete the metadata, which then wipes the archives that depend
@@ -730,8 +1150,10 @@ that lead to X.
 1. Keys chosen by an attacker collide in the translated key space, because every
    structure keyed through the translator degrades to a linear scan over the
    colliding records, and with the marshal cache keyed by the first two bytes of
-   block digests a Byzantine proposer can grind digests cheaply to slow the
-   lookups every honest validator performs on each view.
+   block digests, without the seeded collision-resistant wrapper that
+   `storage/src/translator.rs` provides, a Byzantine proposer can grind
+   digests cheaply to slow the lookups every honest validator performs on each
+   view.
 
 #### Glue
 
@@ -972,10 +1394,72 @@ that lead to X.
    a systematic decode failure such as a version skew cuts the originator off
    from every handler at once.
 
+#### Clearing
+
+Modeled from `clearing/src/bajillion` on `main`: the module documentation,
+including the obligations of each role (S1-S6, O1-O8, R1-R3, V1-V7, L1-L11),
+`namespace.rs`, and the arithmetic in `settlement.rs`. The crate is ALPHA and
+provides helper functions, not roles: storage, scheduling, persistence, and
+recovery of every role belong to the deployment, and so does the ledger.
+
+1. A summary is certified and posted that debits a sender beyond what it signed
+   for the epoch, credits the wrong account, or pays a withdrawal its account
+   did not request, because a post is final at once, a later challenge halts
+   the ledger but reverts no post, and the ledger pays out against it.
+2. A posted close credits a receiver less than a receipt it holds promises,
+   because the operator preconfirmed that payment by countersigning it, the
+   receiver's only remedy is a challenge, and a valid challenge halts the
+   ledger for every account.
+3. The ledger halts although the operator and the validators were honest,
+   because after a halt the ledger posts nothing and takes no deposit or
+   forced withdrawal, every account must exit through claims, and the
+   deployment stops settling payments.
+4. The same batch of payments settles twice, because both states carry the
+   sender's own signature, validators accept both, the sender is debited twice
+   for one intent, and no post is reverted.
+5. A certified summary credits funds the ledger does not hold, because
+   validators read ledger queues that the ledger's chain later reorders or a
+   deposit was queued before the ledger took custody of it, the summary posts
+   against other requests, and the accounts that withdraw last find the ledger
+   short.
+6. An honest validator's balances or payouts root differs from the posted
+   roots, because it then refuses every later close or attests a summary that
+   matches no honest validator's, it counts toward `f` until it reopens at a
+   posted commit, replays the posted closes, or state syncs, and enough such
+   validators leave the next close without a quorum.
+7. No validator can open a posted matrix, serve a posted close, or prove a
+   posted payout or balance, because a payout stays owed until its account
+   withdraws it with a proof from a validator, so receivers cannot challenge,
+   senders cannot resolve which of their states settled, other validators
+   cannot apply the close, and accounts cannot withdraw or claim.
+8. The ledger pays a payout or a claim twice, pays a balance the account does
+   not have, or pays to a destination the caller chose, because the funds
+   leave custody for good, and after a halt validators may serve proofs to
+   anyone, so any holder of a balance proof could claim another account's
+   balance.
+9. The operator stops closing epochs or refuses an account's payments and soft
+   withdrawals, because the account can leave only through a forced withdrawal
+   that the next closes must process, or through claims once the deployment's
+   own policy halts the ledger, and until then its funds are locked.
+10. A posted payout is never paid although its account holds a valid proof,
+    because the ledger kept only the latest payouts root, each post discards
+    the root of every proof validators have served, and the operator can keep
+    posting.
+11. No close that validators accept exists for an epoch, because the
+    countersigned rows or the deposits a close must process would take a
+    balance below zero or past the largest amount, validators reject such a
+    close instead of wrapping, the operator can only omit a countersigned row
+    and be challenged or stop closing, and the ledger ends in a halt.
+12. A forced withdrawal is queued that its account did not authenticate,
+    because the account's balance is forced out of the system and the amount
+    is revealed.
+
 ### Attack Vectors
 
 The paths by which a peer, a Byzantine participant, an application callback, or
-damaged storage reaches a threat above.
+damaged storage reaches a threat above. These lists are open in the same way
+as the threat lists: each entry is an example, and a missing entry means
+nothing.
 
 #### Consensus
 
@@ -1060,13 +1544,15 @@ damaged storage reaches a threat above.
 - Missing zeroization or forward secrecy.
 - Unknown-key-share, key-compromise impersonation, MITM, reflection, and selfie
   attacks.
-- Invalid-curve and parameter-confusion attacks.
+- Small-order (non-contributory) X25519 public keys and parameter confusion.
 - Ephemeral key reuse.
 - Cross-protocol attacks.
-- Bleichenbacher-style signature forgery.
+- Signature key substitution under a scheme without exclusive ownership
+  (SAKE `Version::V0`).
 - Plaintext or length exposure before authentication.
 - Record reordering, replay, or injection on an established connection.
-- Key rotation and transcript-hash binding bugs.
+- Transcript binding gaps, and cipher exhaustion that is not followed by a
+  new connection.
 - Nonce overflow or reuse.
 - KDF misuse for transport keys.
 - Handshake replay and per-stage size bounds.
@@ -1114,13 +1600,33 @@ damaged storage reaches a threat above.
 - Peer scoring shared across keys and unchanged by partial answers.
 - Targeted fetches with no fallback to other peers.
 - Consumer verdicts that block peers for locally stale reasons.
-- Serving every request from storage without a per-peer budget.
+- Serving every request from storage without a per-peer budget beyond the
+  channel rate limit.
 
 #### Collector
 
 - Response counting without validation.
 - Handlers invoked for requests from any connected peer.
 - Blocking on decode failures between honest peers.
+
+#### Clearing
+
+- Obligations of a role that the crate cannot check and a deployment breaks.
+- Records persisted after, not before, a signature or attestation is released.
+- Admission of one sender's states in more than one place at a time.
+- A request signed again before the posts of its epochs are resolved.
+- Ledger state read before it is final, or queues that change other than at
+  their tail.
+- Closes applied twice, out of order, or to databases at the wrong roots.
+- Limits that differ between the operator and the validators.
+- A deployment namespace shared by two deployments.
+- Challenges, payout proofs, and claims verified against the wrong post, or
+  posted matrix and payouts roots that the ledger did not keep.
+- Deposits queued before custody, forced withdrawals queued without the
+  account's authentication, and required counts set too low.
+- Transfers made inside a post, and destinations chosen by the caller.
+- Ledger checks that depend on anything but ledger state and call inputs.
+- Amounts at the edge of the integer type.
 
 ## Automatic Secure Code Review
 
@@ -1136,6 +1642,43 @@ damaged storage reaches a threat above.
   misuse are normally capped at low.
 - Remaining material uncertainty must lower confidence or severity; it must
   never be resolved by assuming the worst case.
+
+#### Stability Levels
+
+A stability level changes severity only for compatibility.
+
+- A wire or storage break in an item below BETA is not itself a finding:
+  ALPHA allows breaking wire and storage changes, and BETA and above require
+  a migration path.
+- A separate, reachable safety, fund-loss, or remote-crash impact is rated
+  normally, whatever the level of the item.
+
+#### Contract Hazards
+
+A contract hazard is a class of finding separate from vulnerabilities. A
+precondition is a contract hazard when all three hold:
+
+1. It is unchecked: neither the types nor a run-time check enforce it.
+2. It is easy to break in a supported integration.
+3. Its breach causes safety loss, fund loss, or broad unavailability.
+
+Report it under the label "contract hazard", not as a vulnerability. A
+precondition that misses one of the three is not a contract hazard. The gates
+above and "Panic Severity Calibration" still rate a vulnerability claim that
+needs a broken precondition; this class does not raise that rating.
+
+#### Evidence
+
+No failing test, no finding.
+
+- A finding of either class, a vulnerability or a contract hazard, carries a
+  failing test that shows it. A traced path without a failing test is not
+  reported as a finding.
+- A failing test is necessary, not sufficient: rules 1 and 3 under "Never
+  Assume" apply to it.
+- A disagreement with this file needs no failing test. It is reported under
+  "When You Think This File Is Wrong", as a defect of the file, not as a
+  vulnerability.
 
 ### Findings Validation Process Lessons
 
@@ -1223,7 +1766,7 @@ damaged storage reaches a threat above.
    Findings depended on explicitly disabled merge-train states, incompatible roots, non-compliant custom electors, unsafe transports, or reporter compositions different from the shipped integration.
    Lesson: establish that the exact configuration is documented or constructible by supported APIs.
 9. Pin and recheck the exact revision.
-   Several reports described earlier code, code absent from the recorded PR head, or implementations present only in closed unmerged PRs.
+   Several reports described earlier code, code absent from the recorded PR head.
    Lesson: verify every cited function and defense at the recorded revision before triage.
 10. Quantify resource exhaustion against enforced bounds.
     Allocation or retention was often bounded by a trusted codec cap, peer-set size, handshake reservation, resolver coalescing, or concurrency limit.
