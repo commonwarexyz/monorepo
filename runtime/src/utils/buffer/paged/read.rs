@@ -410,8 +410,14 @@ impl ReplayBuf {
         } else {
             0
         };
+
+        // A recoverable replay can end a page before the seek offset. Such a fill holds nothing
+        // at or past the offset, so it is not kept.
+        if logical_bytes <= skip {
+            return;
+        }
         self.buffers.push_back(state);
-        self.remaining += logical_bytes.saturating_sub(skip);
+        self.remaining += logical_bytes - skip;
     }
 
     /// Returns the logical length of the given page in the given buffer.

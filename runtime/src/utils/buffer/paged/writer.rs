@@ -5433,7 +5433,8 @@ mod tests {
     }
 
     /// A recoverable replay ends after the valid bytes of an interior page that validates fewer
-    /// bytes than a page, and a seek past them fails.
+    /// bytes than a page, and a seek past them fails. A seek past them made before the replay
+    /// reaches the page leaves nothing to read.
     #[test]
     fn test_replay_recoverable_ends_after_short_interior_page() {
         let executor = deterministic::Runner::default();
@@ -5476,7 +5477,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 113);
-            let (_, mut replay) = append
+            let (append, mut replay) = append
                 .replay_recoverable(NZUsize!(1024), ReadOptions::default())
                 .await
                 .unwrap();
@@ -5492,6 +5493,18 @@ mod tests {
                 replay.seek_to(40),
                 Err(Error::BlobInsufficientLength)
             ));
+
+            // A new replay has not read the page yet, so a seek past its valid bytes succeeds.
+            let (_, mut replay) = append
+                .replay_recoverable(NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            replay.seek_to(20).unwrap();
+            assert!(!replay.ensure(1).await.unwrap());
+            assert_eq!(replay.remaining(), 0);
+            assert!(replay.chunk().is_empty());
+            assert_eq!(replay.malformed_at(), Some(10));
+            assert_eq!(replay.blob_size(), 10);
         });
     }
 
