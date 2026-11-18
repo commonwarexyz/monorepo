@@ -1,9 +1,6 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{
-        operation::{Committable, Floored},
-        value::ValueEncoding,
-    },
+    qmdb::{operation::Committable, value::ValueEncoding},
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -69,15 +66,13 @@ impl<F: Family, V: OperationCodec> Write for Operation<F, V> {
     }
 }
 
-impl<F: Family, V: ValueEncoding> Committable for Operation<F, V> {
-    fn is_commit(&self) -> bool {
-        matches!(self, Self::Commit(_, _))
-    }
-}
-
-impl<F: Family, V: ValueEncoding> Floored<F> for Operation<F, V> {
+impl<F: Family, V: ValueEncoding> Committable<F> for Operation<F, V> {
     fn inactivity_floor(&self) -> Option<Location<F>> {
         self.inactivity_floor()
+    }
+
+    fn initial_commit() -> Self {
+        Self::Commit(None, Location::new(0))
     }
 }
 

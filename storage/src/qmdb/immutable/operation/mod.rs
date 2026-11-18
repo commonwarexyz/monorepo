@@ -12,7 +12,7 @@ pub(crate) mod variable;
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        operation::{Committable, Floored, Key},
+        operation::{Committable, Key},
         value::ValueEncoding,
     },
 };
@@ -62,13 +62,15 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
     }
 }
 
-impl<F: Family, K: Key, V: ValueEncoding> Floored<F> for Operation<F, K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> Committable<F> for Operation<F, K, V> {
     fn inactivity_floor(&self) -> Option<Location<F>> {
         self.inactivity_floor()
     }
-}
 
-impl<F: Family, K: Key, V: ValueEncoding> Committable for Operation<F, K, V> {
+    fn initial_commit() -> Self {
+        Self::Commit(None, Location::new(0))
+    }
+
     fn is_commit(&self) -> bool {
         self.is_commit()
     }
@@ -162,19 +164,19 @@ mod tests {
 
         let set_op = VarOp::Set(key, value.clone());
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::inactivity_floor(&set_op),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&set_op),
             None
         );
 
         let commit_op = VarOp::Commit(Some(value), Location::new(42));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&commit_op),
             Some(Location::new(42))
         );
 
         let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op_none),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&commit_op_none),
             Some(Location::new(0))
         );
     }

@@ -511,7 +511,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let boundary = target_db.sync_boundary();
         let target_db = target_db.prune(boundary).await.unwrap();
 
-        let sync_root = SyncDatabase::ops_root(&target_db);
+        let sync_root = SyncDatabase::target(&target_db).root;
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary();
         let upper_bound = target_db.bounds().end;
@@ -541,7 +541,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         .await
         .unwrap();
 
-        assert_eq!(SyncDatabase::ops_root(&synced_db), sync_root);
+        assert_eq!(SyncDatabase::target(&synced_db).root, sync_root);
         assert_eq!(synced_db.root(), verification_root);
         assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
@@ -551,7 +551,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let reopened: Db = Db::init(context.child("reopened"), client_config, None)
             .await
             .unwrap();
-        assert_eq!(SyncDatabase::ops_root(&reopened), sync_root);
+        assert_eq!(SyncDatabase::target(&reopened).root, sync_root);
         assert_eq!(reopened.root(), verification_root);
         assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
@@ -604,7 +604,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let bounds = db.bounds();
         let local_start = bounds.start;
         let local_end = bounds.end;
-        let sync_root = SyncDatabase::ops_root(&db);
+        let sync_root = SyncDatabase::target(&db).root;
 
         assert!(local_start > crate::merkle::Location::new(0));
 
@@ -699,7 +699,7 @@ fn test_current_sync_persist_failure_reopens_at_target() {
         let local_config = fixed_config::<crate::translator::TwoCap>("local");
         let local = populate("local", local_config.clone()).await;
         let target = crate::qmdb::sync::Target {
-            root: SyncDatabase::ops_root(&source),
+            root: SyncDatabase::target(&source).root,
             range: non_empty_range!(source.sync_boundary(), source.bounds().end),
         };
         let canonical_root = source.root();
@@ -734,7 +734,7 @@ fn test_current_sync_persist_failure_reopens_at_target() {
         let reopened: Db = Db::init(context.child("reopened"), local_config, None)
             .await
             .unwrap();
-        assert_eq!(SyncDatabase::ops_root(&reopened), target.root);
+        assert_eq!(SyncDatabase::target(&reopened).root, target.root);
         assert_eq!(reopened.root(), canonical_root);
         assert_eq!(reopened.bounds().start, target.range.start());
         reopened.destroy().await.unwrap();
@@ -795,7 +795,7 @@ fn test_current_sync_interrupted_persist_is_retried() {
                     let (local, _) =
                         populate("local", rounds, Some(crate::merkle::Location::new(256))).await;
                     let target = crate::qmdb::sync::Target {
-                        root: SyncDatabase::ops_root(&source),
+                        root: SyncDatabase::target(&source).root,
                         range: non_empty_range!(source.sync_boundary(), source.bounds().end),
                     };
                     let canonical_root = source.root();
@@ -927,7 +927,7 @@ fn test_current_sync_below_boundary_interrupted_persist_is_retried() {
             drop(local);
 
             // Sync either from the source's boundary or from chunk 1, which lies below it.
-            let (root, end) = (SyncDatabase::ops_root(&source), source.bounds().end);
+            let (root, end) = (SyncDatabase::target(&source).root, source.bounds().end);
             let boundary = source.sync_boundary();
             let below = Location::new(commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS);
             assert!(

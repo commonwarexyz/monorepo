@@ -62,13 +62,13 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish codec
-      run: cargo publish --manifest-path codec/Cargo.toml
+    - name: Publish invariants
+      run: cargo publish --manifest-path invariants/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish invariants
-      run: cargo publish --manifest-path invariants/Cargo.toml
+    - name: Publish codec
+      run: cargo publish --manifest-path codec/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

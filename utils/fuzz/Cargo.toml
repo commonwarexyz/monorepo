@@ -24,6 +24,13 @@ num-bigint.workspace = true
 num-rational.workspace = true
 
 [[bin]]
+name = "utils"
+path = "fuzz_targets/utils.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "lib_functions"
 path = "fuzz_targets/lib_functions.rs"
 test = false

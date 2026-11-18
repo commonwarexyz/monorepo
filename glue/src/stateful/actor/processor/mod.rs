@@ -1541,10 +1541,7 @@ mod tests {
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
+                range: merkleized.target().range,
             };
             Some(Proposed { block, merkleized })
         }
@@ -1812,10 +1809,7 @@ mod tests {
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
+                range: merkleized.target().range,
             };
             (block, merkleized)
         }
@@ -3148,10 +3142,7 @@ mod tests {
                 parent: block1.digest(),
                 height: gap_height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
+                range: merkleized.target().range,
             };
 
             let provider = ScriptedParentProvider::default();

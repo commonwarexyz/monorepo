@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{Family, Location},
     qmdb::{
         self, Error,
@@ -15,16 +15,22 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::range::NonEmptyRange;
 use std::num::NonZeroU64;
 
 impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: sync::Journal<F, Context = E, Op = Operation<F, K, V>>
+        + authenticated::Backing<
+            E,
+            Item = Operation<F, K, V>,
+            Config = <C as sync::Journal<F>>::Config,
+        > + 'static,
     C::Item: EncodeShared,
     H: Hasher,
     T: Translator,
@@ -34,9 +40,17 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
+
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config, max_size).await
+    }
 
     /// Returns a [Db](immutable::Db) initialized from data collected in the sync process.
     ///
@@ -131,8 +145,18 @@ where
             .await
     }
 
-    fn ops_root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
     }
 }
 

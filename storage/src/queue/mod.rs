@@ -1,18 +1,18 @@
 //! A durable, at-least-once delivery queue backed by a [`variable::Journal`](crate::journal::contiguous::variable).
 //!
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
-//! Items are durably stored in a journal and will survive crashes. [Queue::init] returns the
-//! queue, which writes items, and its [Reader], which delivers committed items. The reader must
-//! explicitly acknowledge each item after processing. On restart, all non-pruned items are
-//! re-delivered (acknowledged or not).
+//! [Queue::init] returns the queue and its [Reader]. During normal operation, a commit or sync
+//! publishes new items to the reader. Committed items survive restart unless pruned. On reopen,
+//! the reader also delivers any uncommitted items that the journal recovers. The reader must acknowledge each
+//! item after processing. Items acknowledged before restart can be delivered again unless pruned.
 //!
 //! # Ownership
 //!
 //! Methods that write to storage (`append`, `enqueue`, `commit`, `sync`) take the queue by value
 //! and return it on success. If one returns an error, or its future is dropped before it finishes,
-//! the queue is gone: state that was not yet durable is discarded, but everything already on disk
-//! stays recoverable. The reader then delivers every published item and returns `None`. Reader
-//! methods borrow the reader. A failed read does not invalidate it.
+//! the queue is gone. The existing reader drains its published items and returns `None`. A new
+//! reader can receive additional items on reopen. Reader methods borrow the reader. A failed
+//! read does not invalidate it.
 //!
 //! # Concurrency
 //!
@@ -81,7 +81,7 @@
 //!         reader.ack(position).unwrap();
 //!     }
 //!
-//!     // Persist the queue and prune acknowledged items
+//!     // Persist the queue. Both items remain because they occupy only part of a section.
 //!     queue.sync().await.unwrap();
 //! });
 //! ```

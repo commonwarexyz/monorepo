@@ -635,3 +635,26 @@ where
         })
     }
 }
+
+impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> crate::qmdb::sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, V, S>
+where
+    Operation<F, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(
+                self.bounds.inactivity_floor,
+                self.bounds.tip.size
+            ),
+        }
+    }
+}

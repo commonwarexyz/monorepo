@@ -3439,6 +3439,29 @@ where
     }
 }
 
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> crate::qmdb::sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, U, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(
+                self.bounds.inactivity_floor,
+                self.bounds.tip.size
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

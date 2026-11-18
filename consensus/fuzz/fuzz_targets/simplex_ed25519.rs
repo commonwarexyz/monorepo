@@ -1,8 +1,8 @@
 #![no_main]
 
-use commonware_consensus_fuzz::{FuzzInput, SimplexEd25519, Standard, fuzz};
+use commonware_consensus::fuzz::simplex::{FuzzInput, Mode, Scheme};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz::<SimplexEd25519, Standard>(input);
+    Scheme::Ed25519.run(input, Mode::Standard);
 });

@@ -3,15 +3,17 @@ use crate::{
     journal::{authenticated, contiguous::Contiguous},
     merkle::{Family, Location},
     qmdb::{
-        operation::Floored,
-        sync::{Journal, Target},
+        Error,
+        operation::Committable,
+        single_operation_root,
+        sync::{EngineError, Journal, Target},
     },
     translator::Translator,
 };
 use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::range::NonEmptyRange;
+use commonware_utils::{non_empty_range, range::NonEmptyRange};
 use std::{future::Future, num::NonZeroU64};
 
 /// Database configuration that can produce the configuration for its sync journal.
@@ -59,8 +61,8 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
 /// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
 /// it already reaches the target. The engine fetches and verifies the remaining operations.
-/// It builds the database with [`Self::from_sync_result`], checks [`Self::ops_root`] against the
-/// target, and only then calls [`Self::persist_sync_result`].
+/// It builds the database with [`Self::from_sync_result`], checks the root of [`Self::target`]
+/// against the target, and only then calls [`Self::persist_sync_result`].
 ///
 /// [`Source`]: super::Source
 pub trait Database: Sized + Send {
@@ -68,7 +70,7 @@ pub trait Database: Sized + Send {
     type Family: Family;
 
     /// The operation type stored in the log.
-    type Op: Encode + Send + Sync;
+    type Op: Committable<Self::Family> + Encode + Send + Sync;
 
     /// The journal the engine fills with fetched operations.
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
@@ -87,6 +89,14 @@ pub trait Database: Sized + Send {
     /// The hasher producing [`Self::Digest`].
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
+    /// Initialize from the latest retained commit at or below `max_size`, or the latest retained
+    /// state when no bound is supplied. A zero bound is invalid.
+    fn init(
+        context: Self::Context,
+        config: Self::Config,
+        max_size: Option<Location<Self::Family>>,
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
+
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
         context: Self::Context,
@@ -95,16 +105,14 @@ pub trait Database: Sized + Send {
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<Self::Family>>,
         apply_batch_size: NonZeroU64,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 
     /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
     ///
-    /// The engine calls this only after [`Self::ops_root`] matches the requested target.
+    /// The engine calls this only after the root of [`Self::target`] matches the requested target.
     /// Implementations that persist everything in [`Self::from_sync_result`] must explicitly
     /// return `Ok(self)`.
-    fn persist_sync_result(
-        self,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+    fn persist_sync_result(self) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 
     /// Durably discard persisted state derived from the operations of the sync journal.
     ///
@@ -116,7 +124,7 @@ pub trait Database: Sized + Send {
     fn discard_local_state(
         context: Self::Context,
         config: &Self::Config,
-    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
+    ) -> impl Future<Output = Result<(), Error<Self::Family>>> + Send;
 
     /// Return pinned nodes for the target computed from local state, if it can provide them.
     ///
@@ -128,12 +136,51 @@ pub trait Database: Sized + Send {
         config: &Self::Config,
         target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
         journal: &Self::Journal,
-    ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send;
+    ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, Error<Self::Family>>> + Send;
 
-    /// Return the operations root the engine compares against the target.
+    /// Sync target of a freshly initialized database.
+    fn initial_target() -> Target<Self::Family, Self::Digest> {
+        Target {
+            root: single_operation_root::<Self::Family, Self::Hasher>(&Self::Op::initial_commit()),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        }
+    }
+
+    /// Sync target that reaches this database's applied state.
     ///
-    /// For [`current`](crate::qmdb::current), this differs from the canonical database root.
-    fn ops_root(&self) -> Self::Digest;
+    /// Its root is the operations root, which for [`current`](crate::qmdb::current) differs from
+    /// the canonical database root.
+    fn target(&self) -> Target<Self::Family, Self::Digest>;
+
+    /// Prune history that a previously reached `target` no longer needs.
+    fn prune_to_target(
+        self,
+        target: &Target<Self::Family, Self::Digest>,
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
+
+    /// Reject a target this database cannot sync to. The engine checks the initial target and
+    /// every adopted update, and a rejected target fails the sync, since a malformed target is a
+    /// caller bug. The default accepts any target.
+    fn validate_target(
+        _target: &Target<Self::Family, Self::Digest>,
+    ) -> Result<(), EngineError<Self::Family, Self::Digest>> {
+        Ok(())
+    }
+}
+
+/// A merkleized batch of a [`Database`].
+pub trait MerkleizedBatch {
+    /// The Merkle family of the operations log.
+    type Family: Family;
+
+    /// The digest type of the batch's root.
+    type Digest: Digest;
+
+    /// The root of the database once this batch is applied.
+    fn root(&self) -> Self::Digest;
+
+    /// Sync target reached once this batch is applied.
+    fn target(&self) -> Target<Self::Family, Self::Digest>;
 }
 
 /// Whether a completed sync journal's `bounds` cover `range`: retained data reaches back to
@@ -154,8 +201,8 @@ pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     context: E,
     config: authenticated::Config<S>,
     target: &Target<F, H::Digest>,
-    journal: &impl Contiguous<Item: EncodeShared + Floored<F>>,
-) -> Result<Option<Vec<H::Digest>>, crate::qmdb::Error<F>>
+    journal: &impl Contiguous<Item: EncodeShared + Committable<F>>,
+) -> Result<Option<Vec<H::Digest>>, Error<F>>
 where
     F: Family,
     E: Context,

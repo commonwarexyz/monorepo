@@ -6,7 +6,10 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, chain, metrics::Metrics, sync::source, value::ValueEncoding},
+    qmdb::{
+        Error, chain, metrics::Metrics, operation::Committable as _, sync::source,
+        value::ValueEncoding,
+    },
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -125,9 +128,7 @@ where
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 

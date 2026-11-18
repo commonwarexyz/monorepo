@@ -1236,7 +1236,6 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     for height in 1..=blocks {
         let height = Height::new(height);
         let merkleized = App::execute(height, batches).await;
-        let bounds = merkleized.bounds();
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::zero(), View::new(height.get())),
@@ -1246,7 +1245,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
         };
         speculative.push(merkleized);
         batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::fork_batches(
@@ -1269,7 +1268,7 @@ async fn build_multi_chain(
         initial_a.root,
         initial_a.range,
         initial_b.root,
-        non_empty_range!(mmr::Location::new(0), initial_b.size),
+        non_empty_range!(mmr::Location::new(0), initial_b.range.end()),
     );
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
@@ -1289,7 +1288,6 @@ async fn build_multi_chain(
     for height in 1..=blocks {
         let height = Height::new(height);
         let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await;
-        let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = MultiBlock {
             context: Context {
@@ -1300,7 +1298,7 @@ async fn build_multi_chain(
             parent: parent.digest(),
             height,
             root_a: merkleized_a.root(),
-            range_a: non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size),
+            range_a: merkleized_a.target().range,
             root_b: merkleized_b.root(),
             range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
         };

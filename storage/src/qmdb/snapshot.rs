@@ -11,7 +11,7 @@ use crate::{
         contiguous::Contiguous,
     },
     merkle::{self, Family, Location, hasher::Hasher as MerkleHasher},
-    qmdb::operation::{Floored, Operation},
+    qmdb::operation::{Committable, Operation},
     translator::Translator,
 };
 use commonware_codec::Encode;
@@ -91,7 +91,7 @@ where
                         cache.put(loc, op.into_key().expect("operation without key"));
                     }
                 }
-            } else if op.inactivity_floor().is_some() {
+            } else if op.is_commit() {
                 callback(loc == last_commit_loc, None);
             }
         }

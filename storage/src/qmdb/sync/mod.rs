@@ -29,14 +29,14 @@ mod metrics;
 pub use metrics::Metrics;
 
 mod database;
-pub use database::Database;
 pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
+pub use database::{Database, MerkleizedBatch};
 
 pub mod source;
 pub use source::{Feedback, Request, Response, ResponseOf, Source, max_response_size};
 
 mod target;
-pub use target::{CompactTarget, Target};
+pub use target::Target;
 
 mod requests;
 

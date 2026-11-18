@@ -456,13 +456,12 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
         let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1,
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
             payload,
         };
         Some(Proposed { block, merkleized })

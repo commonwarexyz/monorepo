@@ -263,10 +263,10 @@ where
     pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
         if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.range.start(),
-                upper_bound_pos: config.target.range.end(),
+                bounds: config.target.range.clone(),
             }));
         }
+        DB::validate_target(&config.target).map_err(SyncError::Engine)?;
 
         // Recover the operation prefix that can resume this target.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
@@ -639,6 +639,7 @@ where
                 if new_target.root == self.target.root {
                     return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
                 }
+                DB::validate_target(&new_target).map_err(SyncError::Engine)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress();
@@ -746,7 +747,7 @@ where
         )
         .await?;
 
-        let got_root = database.ops_root();
+        let got_root = database.target().root;
         let expected_root = self.target.root;
         if got_root != expected_root {
             return Err(SyncError::Engine(EngineError::RootMismatch {
@@ -778,12 +779,15 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         merkle::{Proof, mmr::Family as MmrFamily},
-        qmdb::sync::{
-            harness::{
-                DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, OpOf, SyncTestHarness,
-                interrupt_destroy, prune_to_sync_boundary,
+        qmdb::{
+            operation::Committable,
+            sync::{
+                harness::{
+                    DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, OpOf, SyncTestHarness,
+                    interrupt_destroy, prune_to_sync_boundary,
+                },
+                source::{self, tests::FailSource},
             },
-            source::{self, tests::FailSource},
         },
     };
     use commonware_cryptography::{Sha256, sha256};
@@ -810,6 +814,16 @@ pub(crate) mod tests {
 
         fn journal_config(&self) -> Self::JournalConfig {
             self.journal_size
+        }
+    }
+
+    impl Committable<MmrFamily> for i32 {
+        fn inactivity_floor(&self) -> Option<Location<MmrFamily>> {
+            None
+        }
+
+        fn initial_commit() -> Self {
+            0
         }
     }
 
@@ -861,6 +875,14 @@ pub(crate) mod tests {
         type Journal = TestJournal;
         type Op = i32;
 
+        async fn init(
+            _context: Self::Context,
+            _config: Self::Config,
+            _max_size: Option<Location<Self::Family>>,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(Self)
+        }
+
         async fn from_sync_result(
             _context: Self::Context,
             _config: Self::Config,
@@ -894,8 +916,18 @@ pub(crate) mod tests {
             Ok(Some(vec![]))
         }
 
-        fn ops_root(&self) -> Self::Digest {
-            sha256::Digest::from([0u8; 32])
+        fn target(&self) -> Target<MmrFamily, sha256::Digest> {
+            Target {
+                root: sha256::Digest::from([0u8; 32]),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            }
+        }
+
+        async fn prune_to_target(
+            self,
+            _target: &Target<MmrFamily, sha256::Digest>,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(self)
         }
     }
 
@@ -1536,6 +1568,29 @@ pub(crate) mod tests {
                 panic!("engine should retarget instead of completing");
             };
             assert_eq!(engine.target, advancing);
+        });
+    }
+
+    #[test]
+    fn step_fails_on_same_root_advance() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            let same_root = Target {
+                root: config.target.root,
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            assert!(update_tx.send_lossy(same_root));
+
+            let engine = Engine::new(config).await.unwrap();
+            let Err(err) = engine.step().await else {
+                panic!("a same-root advance must fail the sync");
+            };
+            assert!(matches!(
+                err,
+                SyncError::Engine(EngineError::SyncTargetRootUnchanged)
+            ));
         });
     }
 
