@@ -119,7 +119,6 @@ pub mod value;
 pub mod verify;
 
 pub use snapshot::SnapshotBuild;
-pub(super) use snapshot::build_snapshot_from_log;
 pub use verify::ProofExt;
 
 /// Reject a bound that cannot retain the bootstrap commit.

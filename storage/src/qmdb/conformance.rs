@@ -360,6 +360,7 @@ mod tests {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
+            init_concurrency: (),
         }
     }
 
