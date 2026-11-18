@@ -6,7 +6,7 @@ use super::group::{
     G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, Scalar,
     SmallScalar,
 };
-use crate::bls::variant::{DST, Variant};
+use crate::{bls::variant::Variant, curve::DST};
 use commonware_math::algebra::Twin;
 use core::fmt::{Debug, Formatter};
 

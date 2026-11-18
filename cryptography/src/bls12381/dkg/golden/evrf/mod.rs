@@ -2,8 +2,8 @@ mod banderwagon;
 
 use crate::{
     Secret,
-    bls::variant::ScalarReadCfg,
     bls12381::primitives::group::{G1, Scalar},
+    curve::ScalarReadCfg,
     transcript::{Summary, Transcript, Version},
     zk::{
         bulletproofs::{

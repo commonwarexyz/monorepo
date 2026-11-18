@@ -13,9 +13,9 @@
 //! group operations can still be the identity, so an API that treats it as invalid must reject it
 //! at its own boundary.
 
-use crate::bls::{
-    key,
-    variant::{DST, ScalarReadCfg},
+use crate::{
+    bls::key,
+    curve::{DST, ScalarReadCfg},
 };
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};

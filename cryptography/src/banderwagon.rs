@@ -1,6 +1,6 @@
 use crate::{
-    bls::variant::ScalarReadCfg,
     bls12381::primitives::group::Scalar,
+    curve::ScalarReadCfg,
     zk::circuit::{BoolVar, Context, Selector, Var},
 };
 #[cfg(not(feature = "std"))]

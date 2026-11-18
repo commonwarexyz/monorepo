@@ -364,8 +364,9 @@ use crate::{
     bls::{
         key::{Private, Share},
         sharing::{Mode, ModeVersion, Sharing},
-        variant::{ScalarReadCfg, Variant},
+        variant::Variant,
     },
+    curve::ScalarReadCfg,
     transcript::{Summary, Transcript, Version},
 };
 use commonware_codec::{
