@@ -265,19 +265,16 @@ impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
     }
 }
 
-#[cfg(test)]
-mod test {
+#[cfg(any(test, feature = "fuzz"))]
+#[commonware_macros::stability(ALPHA)]
+pub(crate) mod fuzz {
     use super::Lazy;
-    use crate::{
-        Copying, Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
-    };
+    use crate::{DecodeExt, Encode, FixedSize, Read, Write};
     use arbitrary::{Arbitrary, Unstructured};
-    use bytes::Bytes;
-    use commonware_invariants::minifuzz;
 
     /// A byte that's always <= 100
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-    struct Small(u8);
+    pub(super) struct Small(pub(super) u8);
 
     impl FixedSize for Small {
         const SIZE: usize = 1;
@@ -307,7 +304,9 @@ mod test {
         }
     }
 
-    struct Plan {
+    /// Inputs for checking [`Lazy`] against direct decoding.
+    #[derive(Debug)]
+    pub struct Plan {
         a: Small,
         b: Small,
         raw: [u8; 2],
@@ -321,7 +320,9 @@ mod test {
     }
 
     impl Plan {
-        fn run(self) {
+        /// Check that lazy values preserve encoded bytes and agree with eager
+        /// decoding and comparison, including when decoding fails.
+        pub fn run(self) {
             let Self { a, b, raw } = self;
             let encoded = a.encode();
             let from_new = Lazy::new(a);
@@ -347,6 +348,17 @@ mod test {
             assert_eq!(a == b, la == lb);
         }
     }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{
+        Lazy,
+        fuzz::{Plan, Small},
+    };
+    use crate::{Copying, Decode, Encode, Write, types::tests::TrackingWriteBuf};
+    use bytes::Bytes;
+    use commonware_invariants::minifuzz;
 
     #[test]
     fn test_lazy_matches_direct() {

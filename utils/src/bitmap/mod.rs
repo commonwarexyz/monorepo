@@ -1186,6 +1186,34 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
     }
 }
 
+commonware_macros::stability_scope!(ALPHA, cfg(any(test, feature = "fuzz")) {
+    #[derive(Debug)]
+    pub(crate) struct IsUnsetPlan {
+        bits: Vec<bool>,
+        start: u64,
+        end: u64,
+    }
+
+    impl arbitrary::Arbitrary<'_> for IsUnsetPlan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let len = u.int_in_range(1..=512usize)?;
+            let start = u.int_in_range(0..=512u64)?.min(len as u64);
+            let end = u.int_in_range(0..=512u64)?.max(start).min(len as u64);
+            let bits: Vec<_> = u.bytes(len)?.iter().map(|byte| byte & 1 == 1).collect();
+            Ok(Self { bits, start, end })
+        }
+    }
+
+    impl IsUnsetPlan {
+        pub(crate) fn run(self) {
+            let Self { bits, start, end } = self;
+            let bitmap: BitMap = BitMap::from(bits.as_slice());
+            let expected = bits[start as usize..end as usize].iter().all(|bit| !bit);
+            assert_eq!(bitmap.is_unset(start..end), expected);
+        }
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2908,15 +2936,7 @@ mod tests {
         minifuzz::Builder::default()
             .with_search_limit(512)
             .test(|u| {
-                let len = u.int_in_range(1..=512usize)?;
-                let start = u.int_in_range(0..=512u64)?.min(len as u64);
-                let end = u.int_in_range(0..=512u64)?.max(start).min(len as u64);
-                let bits: Vec<_> = u.bytes(len)?.iter().map(|byte| byte & 1 == 1).collect();
-                let bitmap: BitMap = BitMap::from(bits.as_slice());
-                let range = start..end;
-
-                let expected = bits[start as usize..end as usize].iter().all(|bit| !bit);
-                assert_eq!(bitmap.is_unset(range), expected);
+                u.arbitrary::<IsUnsetPlan>()?.run();
                 Ok(())
             });
     }

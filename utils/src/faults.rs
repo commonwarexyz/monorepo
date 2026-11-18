@@ -149,6 +149,78 @@ impl N5f1 {
     }
 }
 
+commonware_macros::stability_scope!(ALPHA, cfg(any(test, feature = "fuzz")) {
+    #[derive(Debug)]
+    pub(crate) struct N5f1QuorumPlan(u32);
+
+    impl arbitrary::Arbitrary<'_> for N5f1QuorumPlan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let n = u.int_in_range(6u32..=9_999)?;
+            Ok(Self(n))
+        }
+    }
+
+    impl N5f1QuorumPlan {
+        pub(crate) fn run(self) {
+            let Self(n) = self;
+            let m = N5f1::m_quorum(n);
+            let l = N5f1::l_quorum(n);
+
+            // M-quorum must be strictly less than L-quorum
+            assert!(
+                m < l,
+                "M-quorum ({}) should be less than L-quorum ({}) for n={}",
+                m,
+                l,
+                n
+            );
+
+            // Both quorums must be achievable
+            assert!(m <= n, "M-quorum ({}) should be <= n ({})", m, n);
+            assert!(l <= n, "L-quorum ({}) should be <= n ({})", l, n);
+        }
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct QuorumSafetyPlan(u32);
+
+    impl arbitrary::Arbitrary<'_> for QuorumSafetyPlan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let n = u.int_in_range(1u32..=9_999)?;
+            Ok(Self(n))
+        }
+    }
+
+    impl QuorumSafetyPlan {
+        pub(crate) fn run(self) {
+            let Self(n) = self;
+            // N3f1 safety
+            let f_3f1 = N3f1::max_faults(n);
+            let q_3f1 = N3f1::quorum(n);
+            assert!(
+                2 * q_3f1 > n + f_3f1,
+                "N3f1 safety violated for n={}: 2*{} <= {} + {}",
+                n,
+                q_3f1,
+                n,
+                f_3f1
+            );
+
+            // N5f1 safety
+            let f_5f1 = N5f1::max_faults(n);
+            let q_5f1 = N5f1::quorum(n);
+            assert!(
+                2 * q_5f1 > n + f_5f1,
+                "N5f1 safety violated for n={}: 2*{} <= {} + {}",
+                n,
+                q_5f1,
+                n,
+                f_5f1
+            );
+        }
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,22 +397,7 @@ mod tests {
         minifuzz::Builder::default()
             .with_search_limit(512)
             .test(|u| {
-                let n = u.int_in_range(6u32..=9_999)?;
-                let m = N5f1::m_quorum(n);
-                let l = N5f1::l_quorum(n);
-
-                // M-quorum must be strictly less than L-quorum
-                assert!(
-                    m < l,
-                    "M-quorum ({}) should be less than L-quorum ({}) for n={}",
-                    m,
-                    l,
-                    n
-                );
-
-                // Both quorums must be achievable
-                assert!(m <= n, "M-quorum ({}) should be <= n ({})", m, n);
-                assert!(l <= n, "L-quorum ({}) should be <= n ({})", l, n);
+                u.arbitrary::<N5f1QuorumPlan>()?.run();
                 Ok(())
             });
     }
@@ -356,30 +413,7 @@ mod tests {
         minifuzz::Builder::default()
             .with_search_limit(512)
             .test(|u| {
-                let n = u.int_in_range(1u32..=9_999)?;
-                // N3f1 safety
-                let f_3f1 = N3f1::max_faults(n);
-                let q_3f1 = N3f1::quorum(n);
-                assert!(
-                    2 * q_3f1 > n + f_3f1,
-                    "N3f1 safety violated for n={}: 2*{} <= {} + {}",
-                    n,
-                    q_3f1,
-                    n,
-                    f_3f1
-                );
-
-                // N5f1 safety
-                let f_5f1 = N5f1::max_faults(n);
-                let q_5f1 = N5f1::quorum(n);
-                assert!(
-                    2 * q_5f1 > n + f_5f1,
-                    "N5f1 safety violated for n={}: 2*{} <= {} + {}",
-                    n,
-                    q_5f1,
-                    n,
-                    f_5f1
-                );
+                u.arbitrary::<QuorumSafetyPlan>()?.run();
                 Ok(())
             });
     }
