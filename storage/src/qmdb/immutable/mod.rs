@@ -12,15 +12,13 @@
 //! log and included in the Merkle root, so all replicas processing the same operations
 //! arrive at the same floor.
 //!
-//! The floor controls two things:
+//! - **Key lookups**: [`Db::get`] and [`Db::get_many`] return only values set at or above the floor.
 //! - **Pruning**: [`Db::prune`] only allows pruning up to the floor.
 //! - **Reconstruction**: on restart or sync, the snapshot is rebuilt from the floor
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
-//! Declaring a floor retires every key set before it. Reads return only values set at or
-//! above the floor, so every database at the same commitment answers alike, however far it has
-//! pruned and whether or not it has been restarted or synced. A retired key was still set once,
-//! and must not be set again.
+//! At the same commitment, key lookups give the same results on live, pruned, reopened, and
+//! synced databases. A retired key must not be set again.
 //!
 //! The floor must be monotonically non-decreasing across commits and must not exceed
 //! the batch's commit location. New batches inherit the database or parent batch's floor. Use
@@ -2275,15 +2273,17 @@ pub(super) mod tests {
         }
         assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
 
-        // Pruning to the set at 9 retires the set at 7 and keeps the one at the retained start
-        // indexed. The floor at 19 has retired it from reads all the same.
+        // The set at 9 stays indexed at the pruning boundary, though it is below the floor.
+        let key4 = Sha256::fill(4);
         db = db.prune(Location::new(9)).await.unwrap();
         assert_eq!(db.snapshot.len(), 6);
-        assert!(db.get(&Sha256::fill(4)).await.unwrap().is_none());
+        assert!(db.snapshot.get(&key4).eq([9]));
+        assert!(db.get(&key4).await.unwrap().is_none());
 
         // Pruning past it retires it from the index too.
         db = db.prune(Location::new(10)).await.unwrap();
         assert_eq!(db.snapshot.len(), 5);
+        assert!(db.snapshot.get(&key4).next().is_none());
 
         // Pruning to the floor keeps the set there, which stays readable.
         assert_eq!(db.inactivity_floor(), Location::new(19));
@@ -3350,6 +3350,7 @@ pub(super) mod tests {
 
         // Reopen: snapshot rebuilt from floor=second_size. Only k3 is in snapshot.
         let db = open_db(context.child("second"), None).await.unwrap();
+        assert_eq!(db.snapshot.len(), 1);
         assert!(db.get(&k1).await.unwrap().is_none());
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
@@ -3359,6 +3360,7 @@ pub(super) mod tests {
         let db = open_db(context.child("cap"), Some(second_size))
             .await
             .unwrap();
+        assert_eq!(db.snapshot.len(), 1);
         assert!(db.get(&k1).await.unwrap().is_none()); // below B's floor
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert!(db.get(&k3).await.unwrap().is_none()); // in suffix, removed

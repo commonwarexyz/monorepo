@@ -462,8 +462,9 @@ where
             .await
     }
 
-    /// Prune operations prior to `prune_loc` without changing the db's root. Reads are unaffected,
-    /// since they already ignore operations below the inactivity floor.
+    /// Prune operations prior to `prune_loc` without changing the db's root. Pruning leaves
+    /// [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location still require
+    /// the requested operations and Merkle nodes to be retained.
     ///
     /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
