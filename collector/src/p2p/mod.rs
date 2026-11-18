@@ -4,7 +4,7 @@
 //!
 //! An [Engine] runs on every peer and plays both roles. As an originator it sends the requests
 //! enqueued through its [Mailbox] and passes the responses it collects to its
-//! [Monitor](crate::Monitor). As a handler it passes each request it receives to its
+//! [Monitor](crate::Monitor). As a handler it passes each request it admits to its
 //! [Handler](crate::Handler) and returns any response to the peer that sent the request. Requests
 //! and responses travel on two p2p channels, the requests channel and the responses channel, and
 //! both are passed to [Engine::start].
@@ -90,7 +90,8 @@
 //! The engine keeps at most [Config::max_pending_requests] requests pending across all peers
 //! and at most [Config::max_pending_requests_per_peer] from one peer. When either limit is full,
 //! the engine drops the decoded request before calling [Handler::process](crate::Handler::process)
-//! and increments `serve_limited_total`. It does not block the peer or send a response.
+//! and increments `serve_limited_total` with `limit="total"` or `limit="per_peer"`. If both limits
+//! are full, it counts the total limit. It does not block the peer or send a response.
 //!
 //! An admitted request holds its slot until the engine receives the handler's answer or sees
 //! that the handler dropped the sender. A peer disconnect does not release the slot. There is
@@ -2634,8 +2635,14 @@ mod tests {
 
             // Each rejection is counted once and in no serve status.
             let encoded = context.encode();
-            let limited = format!("engine_serve_limited_total{{public_key=\"{to}\"}} 2");
-            assert!(encoded.lines().any(|line| line == limited));
+            for limit in ["per_peer", "total"] {
+                let label = format!("limit=\"{limit}\"");
+                let peer = format!("public_key=\"{to}\"");
+                assert!(encoded.lines().any(|line| line.starts_with("engine_serve_limited_total{")
+                    && line.contains(&label)
+                    && line.contains(&peer)
+                    && line.ends_with(" 1")));
+            }
             assert_eq!(engine_count(&context, "serve", Status::Success, to), 1);
             assert_eq!(engine_count(&context, "serve", Status::Failure, to), 1);
             assert_eq!(engine_count(&context, "serve", Status::Dropped, to), 0);

@@ -11,7 +11,7 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
     /// Receives each response the engine collects.
     pub monitor: M,
 
-    /// Processes each request the engine receives.
+    /// Processes each request the engine admits.
     pub handler: H,
 
     /// Capacity of the engine's inbox.
