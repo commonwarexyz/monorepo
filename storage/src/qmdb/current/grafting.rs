@@ -188,17 +188,21 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 ///
 /// Panics if `ops_pos` is below the grafting height.
 pub fn ops_to_grafted_pos<F: Graftable>(ops_pos: Position<F>, grafting_height: u32) -> Position<F> {
+    try_ops_to_grafted_pos(ops_pos, grafting_height).expect("ops position below grafting height")
+}
+
+/// Map an ops position into the grafted tree if it reaches the grafting height.
+fn try_ops_to_grafted_pos<F: Graftable>(
+    ops_pos: Position<F>,
+    grafting_height: u32,
+) -> Option<Position<F>> {
     let ops_height = F::pos_to_height(ops_pos);
-    assert!(
-        ops_height >= grafting_height,
-        "position height {ops_height} < grafting height {grafting_height}"
-    );
-    let grafted_height = ops_height - grafting_height;
+    let grafted_height = ops_height.checked_sub(grafting_height)?;
 
     let ops_leaf_loc = F::leftmost_leaf(ops_pos, ops_height);
     let chunk_idx = *ops_leaf_loc >> grafting_height;
     let grafted_leaf_loc = Location::<F>::new(chunk_idx);
-    F::subtree_root_position(grafted_leaf_loc, grafted_height)
+    Some(F::subtree_root_position(grafted_leaf_loc, grafted_height))
 }
 
 /// Convert a grafted position to the ops-family position whose subtree covers the same ops-leaf
@@ -499,10 +503,9 @@ impl<
     }
 
     fn get_node(&self, pos: Position<F>) -> Option<H::Digest> {
-        if F::pos_to_height(pos) < self.grafting_height {
+        let Some(grafted_pos) = try_ops_to_grafted_pos(pos, self.grafting_height) else {
             return self.ops_tree.get_node(pos);
-        }
-        let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
+        };
         self.reconstruct_grafted_node(grafted_pos)
     }
 }
@@ -521,11 +524,9 @@ impl<
     }
 
     async fn get_node(&self, pos: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
-        let ops_height = F::pos_to_height(pos);
-        if ops_height < self.grafting_height {
+        let Some(grafted_pos) = try_ops_to_grafted_pos(pos, self.grafting_height) else {
             return self.ops_tree.get_node(pos).await;
-        }
-        let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
+        };
         Ok(self.reconstruct_grafted_node(grafted_pos))
     }
 
@@ -537,11 +538,10 @@ impl<
         let mut ops_positions = Vec::with_capacity(positions.len());
         let mut missing = None;
         for (slot, &pos) in nodes.iter_mut().zip(positions) {
-            if F::pos_to_height(pos) < self.grafting_height {
+            let Some(grafted_pos) = try_ops_to_grafted_pos(pos, self.grafting_height) else {
                 ops_positions.push(pos);
                 continue;
-            }
-            let grafted_pos = ops_to_grafted_pos::<F>(pos, self.grafting_height);
+            };
             match self.reconstruct_grafted_node(grafted_pos) {
                 Some(node) => *slot = Some(node),
                 None => {
