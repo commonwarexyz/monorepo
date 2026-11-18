@@ -28,7 +28,8 @@
 //!
 //! A [collection](crate::Originator) starts when a commitment is sent to at least one peer and
 //! lasts until the commitment is cancelled. Sending the commitment again adds the recipients it is
-//! sent to.
+//! sent to. Requests that share a commitment may differ in content, and so may the responses to
+//! them.
 //!
 //! The engine collects the first response for the commitment from each recipient. Its event loop
 //! passes each collected response to [Monitor::collected](crate::Monitor::collected) with the
@@ -62,8 +63,8 @@
 //! ignored as                                                            duplicate
 //! ```
 //!
-//! Each arrow runs from the time X answers a send to the time its response arrives. Requests that
-//! need distinct responses must have distinct commitments.
+//! Each arrow runs from the time X answers a send to the time its response arrives. Two requests
+//! to the same peer that each need a response must have distinct commitments.
 //!
 //! # Delivery
 //!
@@ -137,7 +138,6 @@ mod engine;
 pub use engine::Engine;
 mod ingress;
 pub use ingress::Mailbox;
-mod metrics;
 
 #[cfg(test)]
 mod mocks;
@@ -1432,6 +1432,77 @@ mod tests {
             let mut expected = peers[1..].to_vec();
             expected.sort();
             assert_eq!(responders, expected);
+        });
+    }
+
+    #[test_traced]
+    fn test_requests_that_share_a_commitment_keep_their_own_contents() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // Link peer 0 to peers 1 and 2.
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1, 2]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            let mut schemes = schemes.into_iter();
+            let mut connections = connections.into_iter();
+
+            // Peer 0 originates, and peers 1 and 2 report the requests they serve.
+            let scheme = schemes.next().unwrap();
+            let (monitor, mut monitor_out) = MockMonitor::new();
+            let mut mailbox0 = setup_and_spawn_engine(
+                &context,
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.next().unwrap(),
+                monitor,
+                MockHandler::dummy(),
+            );
+            let mut served = Vec::new();
+            let mut mailboxes = Vec::new();
+            for _ in 0..2 {
+                let scheme = schemes.next().unwrap();
+                let (handler, handler_out) = MockHandler::new(true);
+                mailboxes.push(setup_and_spawn_engine(
+                    &context,
+                    oracle.control(scheme.public_key()),
+                    scheme,
+                    connections.next().unwrap(),
+                    MockMonitor::dummy(),
+                    handler,
+                ));
+                served.push(handler_out);
+            }
+
+            // Two requests share a commitment and differ in content, one for each peer.
+            let requests = [Request { id: 7, data: 10 }, Request { id: 7, data: 20 }];
+            assert_eq!(requests[0].commitment(), requests[1].commitment());
+            for (request, peer) in requests.iter().zip(&peers[1..]) {
+                assert_eq!(
+                    mailbox0.send(Recipients::One(peer.clone()), request.clone()),
+                    Feedback::Ok
+                );
+            }
+
+            // Each peer serves the request that was sent to it.
+            for (request, served) in requests.iter().zip(&mut served) {
+                let processed = served.recv().await.unwrap();
+                assert_eq!(processed.origin, peers[0]);
+                assert_eq!(&processed.request, request);
+            }
+
+            // One collection collects both responses, each with the content its peer produced.
+            let first = monitor_out.recv().await.unwrap();
+            let second = monitor_out.recv().await.unwrap();
+            assert_eq!((first.count, second.count), (1, 2));
+            for collected in [first, second] {
+                let index = peers
+                    .iter()
+                    .position(|peer| peer == &collected.handler)
+                    .unwrap();
+                let result = u64::from(requests[index - 1].data.wrapping_mul(2));
+                assert_eq!(collected.response, Response { id: 7, result });
+            }
         });
     }
 

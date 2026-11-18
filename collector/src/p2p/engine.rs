@@ -1,7 +1,6 @@
 use super::{
     Config,
     ingress::{Mailbox, Message},
-    metrics,
 };
 use crate::{Handler, Monitor};
 use commonware_actor::mailbox;
@@ -11,7 +10,10 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender, utils::codec::wrap};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::metrics::{GaugeExt, status::Status},
+    telemetry::metrics::{
+        Gauge, GaugeExt, MetricsExt as _,
+        status::{self, Status},
+    },
 };
 use commonware_utils::{channel::oneshot, futures::Pool};
 use std::collections::{HashMap, HashSet};
@@ -44,8 +46,20 @@ where
     // Collections by commitment, each with its recipients and the recipients that have responded
     tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
 
-    // Metrics
-    metrics: metrics::Metrics,
+    // Commitments being collected
+    outstanding: Gauge,
+    // Received requests being served
+    serve_processing: Gauge,
+    // Sent requests by status. A request sent to at least one peer is a success and a request
+    // sent to none is dropped.
+    send: status::Counter,
+    // Received responses by status. A collected response is a success, an ignored response is
+    // dropped, and a response that fails to decode is invalid.
+    collect: status::Counter,
+    // Received requests by status. A request is a success when its response is sent, a failure
+    // when the handler declines it, dropped when its response cannot be sent, and invalid when
+    // it fails to decode.
+    serve: status::Counter,
 }
 
 impl<E, B, Rq, Rs, P, M, H> Engine<E, B, Rq, Rs, P, M, H>
@@ -62,8 +76,18 @@ where
     ///
     /// Returns the engine and the [Mailbox] that enqueues requests and cancellations to it.
     pub fn new(context: E, cfg: Config<B, M, H, Rq::Cfg, Rs::Cfg>) -> (Self, Mailbox<P, Rq>) {
+        // Create mailbox
         let (tx, rx) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let metrics = metrics::Metrics::init(&context);
+
+        // Create metrics
+        let outstanding = context.gauge("outstanding", "Number of commitments being collected");
+        let serve_processing = context.gauge(
+            "serve_processing",
+            "Number of received requests being served",
+        );
+        let send = context.family("send", "Number of sent requests by status");
+        let collect = context.family("collect", "Number of received responses by status");
+        let serve = context.family("serve", "Number of received requests by status");
 
         (
             Self {
@@ -77,7 +101,11 @@ where
                 handler: cfg.handler,
                 mailbox: rx,
                 tracked: HashMap::new(),
-                metrics,
+                outstanding,
+                serve_processing,
+                send,
+                collect,
+                serve,
             },
             Mailbox::new(tx),
         )
@@ -115,8 +143,8 @@ where
             self.context,
             on_start => {
                 // Update metrics
-                let _ = self.metrics.outstanding.try_set(self.tracked.len());
-                let _ = self.metrics.serve_processing.try_set(processed.len());
+                let _ = self.outstanding.try_set(self.tracked.len());
+                let _ = self.serve_processing.try_set(processed.len());
             },
             on_stopped => {
                 debug!("context shutdown, stopping engine");
@@ -135,10 +163,10 @@ where
                     let recipients = req_tx.send(recipients, request, self.priority_requests);
                     if recipients.is_empty() {
                         debug!(?commitment, "request sent to no peers");
-                        self.metrics.send.inc(Status::Dropped);
+                        self.send.inc(Status::Dropped);
                         continue;
                     }
-                    self.metrics.send.inc(Status::Success);
+                    self.send.inc(Status::Success);
                     let (sent, _) = self.tracked.entry(commitment).or_default();
                     sent.extend(recipients);
                 }
@@ -153,7 +181,7 @@ where
             (peer, response) = processed.next_completed() => {
                 // A dropped responder means the handler declined the request
                 let Ok(response) = response else {
-                    self.metrics.serve.inc(Status::Failure);
+                    self.serve.inc(Status::Failure);
                     continue;
                 };
 
@@ -165,10 +193,10 @@ where
                 );
                 if sent.is_empty() {
                     debug!(?peer, "response not sent");
-                    self.metrics.serve.inc(Status::Dropped);
+                    self.serve.inc(Status::Dropped);
                     continue;
                 }
-                self.metrics.serve.inc(Status::Success);
+                self.serve.inc(Status::Success);
             },
 
             // Response from a remote handler
@@ -187,14 +215,14 @@ where
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        self.metrics.collect.inc(Status::Invalid);
+                        self.collect.inc(Status::Invalid);
                         commonware_p2p::block!(self.blocker, peer, ?err, "invalid response");
                         continue;
                     }
                 };
 
                 // Collect the first response from each peer the commitment was sent to
-                let mut status = self.metrics.collect.guard(Status::Dropped);
+                let mut status = self.collect.guard(Status::Dropped);
                 let commitment = msg.commitment();
                 let Some((sent, responded)) = self.tracked.get_mut(&commitment) else {
                     debug!(?commitment, ?peer, "response for unknown commitment");
@@ -227,7 +255,7 @@ where
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(err) => {
-                        self.metrics.serve.inc(Status::Invalid);
+                        self.serve.inc(Status::Invalid);
                         commonware_p2p::block!(self.blocker, peer, ?err, "invalid request");
                         continue;
                     }
