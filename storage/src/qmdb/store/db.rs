@@ -2136,7 +2136,6 @@ mod test {
         });
     }
 
-    /// A [Db] keyed by variable-length byte keys.
     /// A key whose bytes leave out part of it, which [Key] forbids: keys with the same bytes and
     /// different tags are unequal.
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2228,6 +2227,7 @@ mod test {
         });
     }
 
+    /// A [Db] keyed by variable-length byte keys.
     type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap>;
 
     #[test_traced("DEBUG")]

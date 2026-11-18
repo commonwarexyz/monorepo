@@ -11,9 +11,11 @@ use core::{fmt::Debug, hash::Hash, ops::Deref};
 /// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys
 /// (`Array` types) and variable-length keys (`Vec<u8>`).
 ///
-/// A key's bytes identify it: two keys must be equal exactly when their bytes are equal. A
-/// database indexes keys by their bytes and rebuilds its index from them, so two unequal keys
-/// with the same bytes would be taken for one key.
+/// A key's bytes identify it. `AsRef<[u8]>` and `Deref<Target = [u8]>` must return the same
+/// bytes, and two keys must be equal exactly when those bytes are equal. A database indexes
+/// keys by their bytes and rebuilds its index from them, so two unequal keys with the same
+/// bytes would be taken for one key, and a key with two views of its bytes could be indexed
+/// under one and looked up under the other.
 pub trait Key:
     CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
 {

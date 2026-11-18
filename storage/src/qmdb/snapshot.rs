@@ -734,7 +734,9 @@ where
         while let Some(batch) = stream.next().await {
             for (loc, op) in batch? {
                 let Some(key) = op.key() else { continue };
-                let key = key.as_ref();
+
+                // The bytes a lookup probes the index with.
+                let key: &[u8] = key;
                 let bucket = (layout.partition_of)(key) / layout.per_bucket;
                 let staged = &mut staged[bucket];
                 layout.encode(staged, key, layout.tag(loc, op.is_delete()));
