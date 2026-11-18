@@ -1866,7 +1866,7 @@ pub mod fuzz {
     use crate::transcript::Version;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::{
-        algebra::{Additive, Ring},
+        algebra::{Additive, One},
         test::{F, G},
     };
     use commonware_parallel::Sequential;
@@ -2113,7 +2113,7 @@ mod test {
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
-        algebra::{Additive, CryptoGroup, Ring},
+        algebra::{Additive, CryptoGroup, One},
         test::{F, G},
     };
     use commonware_parallel::Sequential;

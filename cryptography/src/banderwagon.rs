@@ -8,7 +8,7 @@ use blst::blst_fr;
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
+    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, One, Random, Ring, Space,
     msm_naive,
 };
 use commonware_parallel::Strategy;
@@ -189,13 +189,15 @@ impl Additive for F {
 
 impl Multiplicative for F {}
 
-impl Ring for F {
+impl One for F {
     fn one() -> Self {
         Self {
             limbs: [1, 0, 0, 0],
         }
     }
 }
+
+impl Ring for F {}
 
 impl Field for F {
     fn inv(&self) -> Self {

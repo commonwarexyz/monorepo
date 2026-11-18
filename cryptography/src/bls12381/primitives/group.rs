@@ -40,7 +40,7 @@ use commonware_codec::{
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, Random, Ring,
+    Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, One, Random, Ring,
     Space,
 };
 use commonware_parallel::{Grid, Strategy};
@@ -885,11 +885,13 @@ impl<'a> Mul<&'a Self> for Scalar {
 
 impl Multiplicative for Scalar {}
 
-impl Ring for Scalar {
+impl One for Scalar {
     fn one() -> Self {
         BLST_FR_ONE
     }
 }
+
+impl Ring for Scalar {}
 
 impl Field for Scalar {
     fn inv(&self) -> Self {

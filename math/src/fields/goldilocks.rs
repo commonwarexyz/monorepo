@@ -1,4 +1,4 @@
-use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, Random, Ring};
+use crate::algebra::{Additive, Field, FieldNTT, Multiplicative, Object, One, Random, Ring};
 use commonware_codec::{Buf, FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use rand_core::CryptoRng;
@@ -379,11 +379,13 @@ impl From<u64> for F {
     }
 }
 
-impl Ring for F {
+impl One for F {
     fn one() -> Self {
         Self::ONE
     }
 }
+
+impl Ring for F {}
 
 impl Field for F {
     fn inv(&self) -> Self {

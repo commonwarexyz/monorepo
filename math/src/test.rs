@@ -1,4 +1,6 @@
-use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space};
+use crate::algebra::{
+    Additive, CryptoGroup, Field, Multiplicative, Object, One, Random, Ring, Space,
+};
 use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
 use core::{
     fmt::Debug,
@@ -124,11 +126,13 @@ impl<'a> MulAssign<&'a Self> for F {
 
 impl Multiplicative for F {}
 
-impl Ring for F {
+impl One for F {
     fn one() -> Self {
         Self(1)
     }
 }
+
+impl Ring for F {}
 
 impl Field for F {
     fn inv(&self) -> Self {
