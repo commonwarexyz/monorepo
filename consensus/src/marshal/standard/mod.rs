@@ -811,16 +811,11 @@ mod tests {
             .expect("failed to sync seeded application metadata");
     }
 
-    // Writes a block directly into the cache's per-epoch notarized storage,
-    // simulating a block that was notarized but never finalized before a crash.
-    async fn seed_cache_block(
+    async fn init_seed_cache(
         context: deterministic::Context,
         partition_prefix: &str,
-        epoch: Epoch,
-        view: View,
-        block: &B,
-    ) {
-        let cache = cache::Manager::<_, Standard<B>, S>::init(
+    ) -> cache::Manager<deterministic::Context, Standard<B>, S> {
+        cache::Manager::init(
             context.child("seed_cache"),
             cache::Config {
                 partition_prefix: format!("{partition_prefix}-cache"),
@@ -832,7 +827,19 @@ mod tests {
             },
             (),
         )
-        .await;
+        .await
+    }
+
+    // Writes a block directly into the cache's per-epoch notarized storage,
+    // simulating a block that was notarized but never finalized before a crash.
+    async fn seed_cache_block(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        epoch: Epoch,
+        view: View,
+        block: &B,
+    ) {
+        let cache = init_seed_cache(context, partition_prefix).await;
         let (_cache, synced) = cache
             .put_notarized(
                 Round::new(epoch, view),
@@ -1156,6 +1163,68 @@ mod tests {
                 let h = recovering.application.acknowledged().await;
                 assert_eq!(h, Height::new(expected_height));
             }
+        });
+    }
+
+    /// If a crash interrupts the sync of the height archives, replay can recover the finalization
+    /// from the digest cache when the block was stored by height without its certificate.
+    #[test_traced("WARN")]
+    fn test_standard_restart_dispatches_cached_finalization() {
+        const PARTITION_PREFIX: &str = "restart-dispatches-cached-finalization";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let height = Height::new(1);
+            let block = make_raw_block(genesis.digest(), height, 100);
+            let digest = block.digest();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+
+            // The digest cache sync and the block archive sync completed before the crash.
+            let storage = context.child("storage");
+            let cache = init_seed_cache(storage.child("cache"), PARTITION_PREFIX).await;
+            drop(cache.put_finalization(round, digest, &finalization).await);
+            seed_inconsistent_restart_state(
+                storage,
+                PARTITION_PREFIX,
+                &[genesis.inner().clone(), block],
+                &[],
+            )
+            .await;
+
+            let (updates, mut application_mailbox) = mpsc::unbounded_channel();
+            let (mailbox, _, _, _handle) = start_standard_actor(
+                context.child("restart"),
+                PARTITION_PREFIX,
+                ConstantProvider::new(schemes[0].clone()),
+                ApplicationReporter { updates },
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis),
+            )
+            .await;
+
+            let Some(Update::Block(genesis, _, ack)) = application_mailbox.recv().await else {
+                panic!("expected genesis delivery");
+            };
+            assert_eq!(genesis.height(), Height::zero());
+            assert!(mailbox.get_finalization(height).await.is_none());
+            ack.acknowledge();
+
+            let Some(Update::Block(delivered, finality, ack)) = application_mailbox.recv().await
+            else {
+                panic!("expected archived block delivery");
+            };
+            assert_eq!(delivered.height(), height);
+            assert_eq!(delivered.digest(), digest);
+            assert_eq!(finality.commitment, digest);
+            assert_eq!(finality.finalization, Some(finalization));
+            ack.acknowledge();
         });
     }
 

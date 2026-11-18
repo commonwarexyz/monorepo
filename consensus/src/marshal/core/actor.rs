@@ -1953,17 +1953,22 @@ where
                 return self;
             }
 
-            // Prefer the staged block and fall back to the archive. A staged block carries its
-            // finalization, but the archive can hold a block that was stored without one.
+            // Prefer the staged block, which already carries its finalization.
             let (block, finalization) = match self.staged.remove(next_height) {
                 Some((block, finalization)) => (block, Some(finalization)),
-                None => match self.get_finalized_block(next_height).await {
-                    Some(stored) => (
-                        V::restore_across(stored, &self.strategy).await,
-                        self.get_finalization_by_height(next_height).await,
-                    ),
-                    None => return self,
-                },
+                None => {
+                    let Some(stored) = self.get_finalized_block(next_height).await else {
+                        return self;
+                    };
+                    let block = V::restore_across(stored, &self.strategy).await;
+                    let finalization = match self.get_finalization_by_height(next_height).await {
+                        Some(finalization) => Some(finalization),
+                        // A crash can interrupt the height archive syncs after the
+                        // certificate is durable in the digest cache.
+                        None => self.cache.get_finalization_for(block.digest()).await,
+                    };
+                    (block, finalization)
+                }
             };
             let height = block.height();
             assert_eq!(height, next_height, "finalized block height mismatch");

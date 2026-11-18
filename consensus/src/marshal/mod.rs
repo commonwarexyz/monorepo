@@ -259,7 +259,7 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 pub struct Finality<S: Scheme<D>, D: Digest> {
     /// The payload consensus finalized for the block.
     pub commitment: D,
-    /// The finalization certifying `commitment`, if marshal stored one with the block.
+    /// The finalization certifying `commitment`, if available to marshal at delivery.
     pub finalization: Option<Finalization<S, D>>,
 }
 
