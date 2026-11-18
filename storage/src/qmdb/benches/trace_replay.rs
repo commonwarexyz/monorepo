@@ -76,7 +76,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{full, mmb},
-    qmdb::{any::batch::Slot, current::VariableConfig, floor::Proportional},
+    qmdb::{any::batch::Slot, current::Config as CurrentConfig},
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -128,7 +128,8 @@ type Db = commonware_storage::qmdb::current::ordered::variable::partitioned::Db<
     Rayon,
 >;
 
-type ReplayConfig = VariableConfig<EightCap, ((), (RangeCfg<usize>, ())), Rayon, NonZeroUsize>;
+type ReplayConfig =
+    CurrentConfig<EightCap, VConfig<((), (RangeCfg<usize>, ()))>, Rayon, NonZeroUsize>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072); // 512 MiB
@@ -366,9 +367,9 @@ fn main() {
             .and_then(|v| v.parse::<usize>().ok())
             .and_then(NonZeroUsize::new)
             .unwrap_or(threads);
-        let cfg: ReplayConfig = VariableConfig {
-                merkle_config,
-                journal_config: VConfig {
+        let cfg: ReplayConfig = CurrentConfig {
+                merkle: merkle_config,
+                log: VConfig {
                     partition: "eth-var-log".into(),
                     items_per_section: ITEMS_PER_BLOB,
                     compression: None,
@@ -481,7 +482,7 @@ fn main() {
                         total_writes += 1;
                     }
                     let mt = Instant::now();
-                    let m = wb.merkleize(&db, None, &mut Proportional).await.unwrap();
+                    let m = wb.merkleize(&db).await.unwrap();
                     merkleize_ns += mt.elapsed().as_nanos();
                     let at = Instant::now();
                     db = db.apply_batch(m).await.unwrap();
@@ -498,7 +499,7 @@ fn main() {
                         let _ = db.new_batch().get_many(&read_only, &db).await.unwrap();
                     }
                     let key_refs: Vec<&Key> = write_keys.iter().collect();
-                    let (vals, staged) = db.new_batch().stage(&key_refs, &db).await.unwrap();
+                    let (staged, vals) = db.new_batch().stage(&key_refs, &db).await.unwrap();
                     read_ns += rt.elapsed().as_nanos();
                     let wt = Instant::now();
                     let mut slots: Vec<Slot<Value>> = Vec::with_capacity(write_keys.len());
@@ -512,7 +513,7 @@ fn main() {
                         total_writes += 1;
                     }
                     let mt = Instant::now();
-                    let m = staged.merkleize(slots, Vec::new(), None, &db, &mut Proportional).await.unwrap();
+                    let m = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
                     merkleize_ns += mt.elapsed().as_nanos();
                     let at = Instant::now();
                     db = db.apply_batch(m).await.unwrap();
