@@ -1892,6 +1892,7 @@ dependencies = [
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
+ "rstest",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1910,8 +1911,6 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
- "rand 0.10.2",
- "thiserror 2.0.18",
 ]
 
 [[package]]

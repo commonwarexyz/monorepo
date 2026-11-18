@@ -4,59 +4,82 @@ use commonware_actor::{
     mailbox::{self, Policy},
 };
 use commonware_codec::Codec;
-use commonware_cryptography::{Committable, Digestible, PublicKey};
+use commonware_cryptography::{Committable, PublicKey};
 use commonware_p2p::Recipients;
 use std::collections::VecDeque;
 
 /// Messages that can be sent to a [Mailbox].
-pub enum Message<P: PublicKey, R: Committable + Digestible + Codec> {
+pub(crate) enum Message<P: PublicKey, R: Committable + Codec> {
+    /// Sends `request` to `recipients`. `commitment` is computed when the request is enqueued so
+    /// the overflow policy can skip recomputing the commitments of queued requests.
     Send {
+        commitment: R::Commitment,
         request: R,
         recipients: Recipients<P>,
     },
-    Cancel {
-        commitment: R::Commitment,
-    },
+    /// Cancels the collection for `commitment`.
+    Cancel { commitment: R::Commitment },
 }
 
-impl<P: PublicKey, R: Committable + Digestible + Codec> Policy for Message<P, R> {
+impl<P: PublicKey, R: Committable + Codec> Policy for Message<P, R> {
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         match message {
-            Self::Send {
-                request,
-                recipients,
-            } => {
+            Self::Send { .. } => {
                 // Commitment identifies the collection, not necessarily the encoded request.
                 // Keep payloads separate so peers never receive bytes intended for another send.
-                overflow.push_back(Self::Send {
-                    request,
-                    recipients,
-                });
+                overflow.push_back(message);
             }
             Self::Cancel { commitment } => {
-                // Drop queued sends that this cancel supersedes and coalesce any queued cancels
-                // for the same commitment. Keep one cancel because the actor may already have
-                // in-flight state for the commitment.
+                // Drop queued sends that this cancel supersedes, and queue this cancel unless one
+                // for the same commitment already waits. A cancel must stay queued because the
+                // engine may already track a collection for the commitment.
                 let mut canceled = false;
                 overflow.retain(|message| match message {
-                    Self::Send { request, .. } => request.commitment() != commitment,
-                    Self::Cancel { commitment: queued } if queued == &commitment => {
-                        if canceled {
-                            false
-                        } else {
-                            canceled = true;
-                            true
-                        }
+                    Self::Send {
+                        commitment: queued, ..
+                    } => queued != &commitment,
+                    Self::Cancel { commitment: queued } => {
+                        canceled |= queued == &commitment;
+                        true
                     }
-                    Self::Cancel { .. } => true,
                 });
                 if !canceled {
                     overflow.push_back(Self::Cancel { commitment });
                 }
             }
         }
+    }
+}
+
+/// Enqueues requests and cancellations for an [Engine](super::Engine).
+#[derive(Clone)]
+pub struct Mailbox<P: PublicKey, R: Committable + Codec> {
+    sender: mailbox::Sender<Message<P, R>>,
+}
+
+impl<P: PublicKey, R: Committable + Codec> Mailbox<P, R> {
+    /// Creates a new [Mailbox] with the given [mailbox::Sender].
+    pub(super) const fn new(sender: mailbox::Sender<Message<P, R>>) -> Self {
+        Self { sender }
+    }
+}
+
+impl<P: PublicKey, R: Committable + Codec> Originator for Mailbox<P, R> {
+    type Request = R;
+    type PublicKey = P;
+
+    fn send(&mut self, recipients: Recipients<P>, request: R) -> Feedback {
+        self.sender.enqueue(Message::Send {
+            commitment: request.commitment(),
+            request,
+            recipients,
+        })
+    }
+
+    fn cancel(&mut self, commitment: R::Commitment) -> Feedback {
+        self.sender.enqueue(Message::Cancel { commitment })
     }
 }
 
@@ -75,6 +98,15 @@ mod tests {
         PrivateKey::from_seed(seed).public_key()
     }
 
+    /// Returns the message a [super::Mailbox] enqueues to send `request` to `recipients`.
+    fn send(request: Request, recipients: Recipients<PublicKey>) -> Message<PublicKey, Request> {
+        Message::Send {
+            commitment: request.commitment(),
+            request,
+            recipients,
+        }
+    }
+
     fn handle(
         overflow: &mut VecDeque<Message<PublicKey, Request>>,
         message: Message<PublicKey, Request>,
@@ -89,19 +121,10 @@ mod tests {
         let commitment1 = request1.commitment();
         let mut overflow = VecDeque::new();
 
+        handle(&mut overflow, send(request1, Recipients::One(peer(1))));
         handle(
             &mut overflow,
-            Message::Send {
-                request: request1,
-                recipients: Recipients::One(peer(1)),
-            },
-        );
-        handle(
-            &mut overflow,
-            Message::Send {
-                request: request2.clone(),
-                recipients: Recipients::One(peer(2)),
-            },
+            send(request2.clone(), Recipients::One(peer(2))),
         );
         handle(
             &mut overflow,
@@ -113,7 +136,7 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
-            Message::Send { request, .. } if request.commitment() == request2.commitment()
+            Message::Send { request, .. } if request == &request2
         ));
         assert!(matches!(
             &overflow[1],
@@ -141,13 +164,7 @@ mod tests {
                 commitment: commitment2,
             },
         );
-        handle(
-            &mut overflow,
-            Message::Send {
-                request: request1,
-                recipients: Recipients::One(peer(1)),
-            },
-        );
+        handle(&mut overflow, send(request1, Recipients::One(peer(1))));
         handle(
             &mut overflow,
             Message::Cancel {
@@ -175,17 +192,11 @@ mod tests {
 
         handle(
             &mut overflow,
-            Message::Send {
-                request: request.clone(),
-                recipients: Recipients::One(peer1.clone()),
-            },
+            send(request.clone(), Recipients::One(peer1.clone())),
         );
         handle(
             &mut overflow,
-            Message::Send {
-                request: request.clone(),
-                recipients: Recipients::One(peer2.clone()),
-            },
+            send(request.clone(), Recipients::One(peer2.clone())),
         );
 
         assert_eq!(overflow.len(), 2);
@@ -202,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn send_same_commitment_different_digest_keeps_payloads_separate() {
+    fn send_same_commitment_different_payload_keeps_payloads_separate() {
         let request1 = Request { id: 1, data: 10 };
         let request2 = Request { id: 1, data: 20 };
         let peer1 = peer(1);
@@ -211,17 +222,11 @@ mod tests {
 
         handle(
             &mut overflow,
-            Message::Send {
-                request: request1.clone(),
-                recipients: Recipients::One(peer1.clone()),
-            },
+            send(request1.clone(), Recipients::One(peer1.clone())),
         );
         handle(
             &mut overflow,
-            Message::Send {
-                request: request2.clone(),
-                recipients: Recipients::One(peer2.clone()),
-            },
+            send(request2.clone(), Recipients::One(peer2.clone())),
         );
 
         assert_eq!(overflow.len(), 2);
@@ -244,18 +249,9 @@ mod tests {
 
         handle(
             &mut overflow,
-            Message::Send {
-                request: request.clone(),
-                recipients: Recipients::One(peer(1)),
-            },
+            send(request.clone(), Recipients::One(peer(1))),
         );
-        handle(
-            &mut overflow,
-            Message::Send {
-                request,
-                recipients: Recipients::All,
-            },
-        );
+        handle(&mut overflow, send(request, Recipients::All));
 
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
@@ -273,33 +269,25 @@ mod tests {
             }
         ));
     }
-}
 
-/// A mailbox that can be used to send and receive [Message]s.
-#[derive(Clone)]
-pub struct Mailbox<P: PublicKey, R: Committable + Digestible + Codec> {
-    sender: mailbox::Sender<Message<P, R>>,
-}
+    #[test]
+    fn cancel_prunes_every_queued_send_for_the_commitment() {
+        // Same commitment, different payloads and recipients.
+        let request1 = Request { id: 1, data: 10 };
+        let request2 = Request { id: 1, data: 20 };
+        let commitment = request1.commitment();
+        let mut overflow = VecDeque::new();
 
-impl<P: PublicKey, R: Committable + Digestible + Codec> Mailbox<P, R> {
-    /// Creates a new [Mailbox] with the given [mailbox::Sender].
-    pub const fn new(sender: mailbox::Sender<Message<P, R>>) -> Self {
-        Self { sender }
-    }
-}
+        // Queue both sends, then the cancel.
+        handle(&mut overflow, send(request1, Recipients::One(peer(1))));
+        handle(&mut overflow, send(request2, Recipients::One(peer(2))));
+        handle(&mut overflow, Message::Cancel { commitment });
 
-impl<P: PublicKey, R: Committable + Digestible + Codec> Originator for Mailbox<P, R> {
-    type Request = R;
-    type PublicKey = P;
-
-    fn send(&mut self, recipients: Recipients<P>, request: R) -> Feedback {
-        self.sender.enqueue(Message::Send {
-            request,
-            recipients,
-        })
-    }
-
-    fn cancel(&mut self, commitment: R::Commitment) -> Feedback {
-        self.sender.enqueue(Message::Cancel { commitment })
+        // Only the cancel remains.
+        assert_eq!(overflow.len(), 1);
+        assert!(matches!(
+            &overflow[0],
+            Message::Cancel { commitment: queued } if queued == &commitment
+        ));
     }
 }
