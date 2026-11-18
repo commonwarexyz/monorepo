@@ -558,10 +558,12 @@ mod tests {
     // appended suffix is still buffered. Crash before fetching anything for the new target.
     fn check_resize_recovery<J>(
         config: fn() -> J::Config,
+        init: impl AsyncFnOnce(deterministic::Context, J::Config) -> Result<J, J::Error>,
         buffered: Range<u64>,
         new_start: u64,
         opened_start: u64,
         resized: Range<u64>,
+        sync_retry: bool,
     ) where
         J: Journal<F, Context = deterministic::Context, Op = u64> + Mutable<Item = u64>,
     {
@@ -591,7 +593,13 @@ mod tests {
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let journal = J::new(context, config(), range(new_start)).await.unwrap();
+            // A sync retry can reset a short journal to the requested start. An ordinary
+            // reopen has no target and must recover the durable bounds on its own.
+            let journal = if sync_retry {
+                J::new(context, config(), range(new_start)).await.unwrap()
+            } else {
+                init(context, config()).await.unwrap()
+            };
             let recovered = journal.bounds();
             assert_eq!(recovered.start, retained.start);
             assert!((new_start..=retained.end).contains(&recovered.end));
@@ -617,22 +625,27 @@ mod tests {
         #[case] opened_start: u64,
         #[case] resized: Range<u64>,
         #[values(false, true)] variable: bool,
+        #[values(false, true)] sync_retry: bool,
     ) {
         if variable {
             check_resize_recovery::<VariableJournal>(
                 variable_test_cfg,
+                VariableJournal::init,
                 buffered,
                 new_start,
                 opened_start,
                 resized,
+                sync_retry,
             );
         } else {
             check_resize_recovery::<fixed::Journal<_, u64>>(
                 test_cfg,
+                fixed::Journal::init,
                 buffered,
                 new_start,
                 opened_start,
                 resized,
+                sync_retry,
             );
         }
     }
@@ -1022,9 +1035,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::stale_below_start_leaves_blobs_unopened(30, 50, 70, false)]
-    #[case::start_at_newest_blob_capacity_leaves_blobs_unopened(27, 30, 50, false)]
-    #[case::start_inside_newest_blob_opens_it(27, 28, 40, true)]
+    #[case::start_past_every_blob_skips_tail_repair(30, 50, 70, false)]
+    #[case::start_at_newest_blob_capacity_skips_tail_repair(27, 30, 50, false)]
+    #[case::start_inside_newest_blob_repairs_tail(27, 28, 40, true)]
     #[test_traced]
     fn test_fixed_sync_journal_committed_tail_below_start(
         #[case] initial_end: u8,
@@ -1110,8 +1123,7 @@ mod tests {
                 // and a torn tail there is repaired before the reset.
                 assert!(calls[1] > calls[0]);
             } else {
-                // Every stored item lies below the range start, so the journal is reset without
-                // opening any blob: a torn tail costs no repair.
+                // No blob reaches past the range start, so a torn tail costs no repair.
                 assert_eq!(calls[0], calls[1]);
             }
         });
@@ -1121,7 +1133,7 @@ mod tests {
     #[case::start_past_every_blob(30, 50)]
     #[case::start_at_newest_blob_capacity(27, 30)]
     #[test_traced]
-    fn test_variable_sync_journal_stale_below_start_leaves_blobs_unopened(
+    fn test_variable_sync_journal_stale_below_start_skips_tail_repair(
         #[case] initial_end: u64,
         #[case] range_start: u64,
     ) {
@@ -1208,8 +1220,7 @@ mod tests {
                 journal.destroy().await.unwrap();
             }
 
-            // Every stored item lies below the range start, so the journal is reset without
-            // opening any blob: a torn tail costs no repair.
+            // No blob reaches past the range start, so a torn tail costs no repair.
             assert_eq!(calls[0], calls[1]);
         });
     }
