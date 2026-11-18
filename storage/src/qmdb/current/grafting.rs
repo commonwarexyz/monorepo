@@ -188,7 +188,8 @@ pub(super) fn chunk_aligned_inactive_peaks<F: Family>(
 ///
 /// Panics if `ops_pos` is below the grafting height.
 pub fn ops_to_grafted_pos<F: Graftable>(ops_pos: Position<F>, grafting_height: u32) -> Position<F> {
-    try_ops_to_grafted_pos(ops_pos, grafting_height).expect("ops position below grafting height")
+    try_ops_to_grafted_pos(ops_pos, grafting_height)
+        .expect("ops node must be at or above the grafting height")
 }
 
 /// Map an ops position into the grafted tree if it reaches the grafting height.
