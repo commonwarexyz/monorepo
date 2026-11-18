@@ -2041,50 +2041,6 @@ impl HashToGroup for G2 {
     }
 }
 
-// Forwards to G1's implementation with the arguments swapped, as `Twin<G1>` would. `Twin<G1>`
-// cannot be used directly because `G2` needs its codec, `Hash`, and `Copy` impls.
-impl PairingGroup for G2 {
-    type Twin = G1;
-    type Target = GT;
-
-    fn pairing(&self, other: &G1) -> GT {
-        other.pairing(self)
-    }
-
-    fn pairings(lefts: &[Self], rights: &[G1], outputs: &mut [GT], strategy: &impl Strategy) {
-        G1::pairings(rights, lefts, outputs, strategy);
-    }
-
-    fn multi_pairing(lefts: &[Self], rights: &[G1], strategy: &impl Strategy) -> GT {
-        G1::multi_pairing(rights, lefts, strategy)
-    }
-
-    // G1 has the cheaper scalar multiplication, so this override multiplies `rights`.
-    fn scaled_multi_pairing<R: Sync>(
-        lefts: &[Self],
-        rights: &[G1],
-        scalars: &[R],
-        strategy: &impl Strategy,
-    ) -> GT
-    where
-        Self: Space<R>,
-        G1: Space<R>,
-    {
-        assert_eq!(
-            lefts.len(),
-            rights.len(),
-            "lefts and rights must have the same length"
-        );
-        assert!(
-            scalars.len() <= lefts.len(),
-            "scalars must not be longer than lefts"
-        );
-        let mut scaled = rights.to_vec();
-        G1::mul_each(&mut scaled[..scalars.len()], scalars, strategy);
-        G1::multi_pairing(&scaled, lefts, strategy)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2092,7 +2048,7 @@ mod tests {
     use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
-    use commonware_math::algebra::{Random, test_suites};
+    use commonware_math::algebra::{Random, Twin, test_suites};
     use commonware_parallel::{
         Rayon, Sequential,
         mocks::{Explorer, explore, pooled},
@@ -2142,8 +2098,8 @@ mod tests {
     }
 
     #[test]
-    fn test_g2_as_pairing_group() {
-        minifuzz::test(test_suites::fuzz_pairing_group::<G2>);
+    fn test_twin_g1_as_pairing_group() {
+        minifuzz::test(test_suites::fuzz_pairing_group::<Twin<G1>>);
     }
 
     #[test]
@@ -2172,7 +2128,11 @@ mod tests {
         assert!(explore(|strategy| G1::multi_pairing(
             &lefts, &rights, strategy
         ) == expected));
-        assert_eq!(G2::multi_pairing(&rights, &lefts, &Sequential), expected);
+        let twins: Vec<Twin<G1>> = rights.iter().copied().map(Twin::new).collect();
+        assert_eq!(
+            Twin::<G1>::multi_pairing(&twins, &lefts, &Sequential),
+            expected
+        );
     }
 
     #[test]

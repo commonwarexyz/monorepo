@@ -4,7 +4,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::primitives::{
     group::{G1, G2},
     ops::aggregate,
-    variant::{MinPk, MinSig},
+    variant::{MinPk, MinSig, Variant},
 };
 use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, iter::NonEmpty, non_empty};
@@ -12,8 +12,8 @@ use libfuzzer_sys::fuzz_target;
 
 mod common;
 use common::{
-    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_vec_g1,
-    arbitrary_vec_g2,
+    arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_minsig_public,
+    arbitrary_vec_g1, arbitrary_vec_g2, arbitrary_vec_minsig_public,
 };
 
 #[derive(Debug)]
@@ -22,7 +22,7 @@ enum FuzzOperation {
         public_keys: Vec<G1>,
     },
     CombinePublicKeysMinSig {
-        public_keys: Vec<G2>,
+        public_keys: Vec<<MinSig as Variant>::Public>,
     },
     CombineSignaturesMinPk {
         signatures: Vec<G2>,
@@ -37,7 +37,7 @@ enum FuzzOperation {
         signature: G2,
     },
     VerifySameMessageMinSig {
-        public_keys: Vec<G2>,
+        public_keys: Vec<<MinSig as Variant>::Public>,
         namespace: Vec<u8>,
         message: Vec<u8>,
         signature: G1,
@@ -49,7 +49,7 @@ enum FuzzOperation {
         concurrency: usize,
     },
     VerifySameSignerMinSig {
-        public_key: G2,
+        public_key: <MinSig as Variant>::Public,
         messages: Vec<(Vec<u8>, Vec<u8>)>,
         signature: G1,
         concurrency: usize,
@@ -65,7 +65,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 public_keys: arbitrary_vec_g1(u, 0, 20)?,
             }),
             1 => Ok(FuzzOperation::CombinePublicKeysMinSig {
-                public_keys: arbitrary_vec_g2(u, 0, 20)?,
+                public_keys: arbitrary_vec_minsig_public(u, 0, 20)?,
             }),
             2 => Ok(FuzzOperation::CombineSignaturesMinPk {
                 signatures: arbitrary_vec_g2(u, 0, 20)?,
@@ -80,7 +80,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 signature: arbitrary_g2(u)?,
             }),
             5 => Ok(FuzzOperation::VerifySameMessageMinSig {
-                public_keys: arbitrary_vec_g2(u, 0, 20)?,
+                public_keys: arbitrary_vec_minsig_public(u, 0, 20)?,
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
@@ -92,7 +92,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 concurrency: u.int_in_range(1..=8)?,
             }),
             7 => Ok(FuzzOperation::VerifySameSignerMinSig {
-                public_key: arbitrary_g2(u)?,
+                public_key: arbitrary_minsig_public(u)?,
                 messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g1(u)?,
                 concurrency: u.int_in_range(1..=8)?,

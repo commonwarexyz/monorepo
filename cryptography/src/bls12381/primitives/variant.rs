@@ -1,7 +1,8 @@
 //! Different variants of the BLS signature scheme.
 //!
 //! A [Variant] names the group that holds public keys and its [PairingGroup::Twin], which holds
-//! signatures and hashed messages. [MinPk] puts public keys in [G1] and [MinSig] puts them in [G2].
+//! signatures and hashed messages. [MinPk] puts public keys in [G1] and [MinSig] puts them in [G2],
+//! as [Twin]<[G1]>.
 
 use super::group::{
     DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, Scalar,
@@ -11,7 +12,7 @@ use bytes::BufMut;
 use commonware_codec::{
     Buf, CodecFixed, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_math::algebra::{HashToGroup, PairingGroup, Random, Space};
+use commonware_math::algebra::{HashToGroup, PairingGroup, Random, Space, Twin};
 use commonware_utils::Participant;
 use core::{
     fmt::{Debug, Formatter},
@@ -67,12 +68,12 @@ impl Debug for MinPk {
     }
 }
 
-/// A [Variant] with a public key of type [G2] and a signature of type [G1].
+/// A [Variant] with a public key in [G2], held as [Twin]<[G1]>, and a signature of type [G1].
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinSig {}
 
 impl Variant for MinSig {
-    type Public = G2;
+    type Public = Twin<G1>;
     type Signature = G1;
     type Challenge = SmallScalar;
 

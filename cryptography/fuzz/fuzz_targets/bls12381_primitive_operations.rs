@@ -8,7 +8,7 @@ use commonware_cryptography::bls12381::primitives::{
     variant::{MinPk, MinSig, Variant},
 };
 use commonware_math::{
-    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space},
+    algebra::{Additive, CryptoGroup, Field, HashToGroup, Ring, Space, Twin},
     poly::Poly,
 };
 use commonware_parallel::Sequential;
@@ -118,13 +118,13 @@ enum FuzzOperation {
         message: Vec<u8>,
     },
     VerifyMinSig {
-        public: G2,
+        public: <MinSig as Variant>::Public,
         namespace: Vec<u8>,
         message: Vec<u8>,
         signature: G1,
     },
     VerifyMinSigLowLevel {
-        public: G2,
+        public: <MinSig as Variant>::Public,
         message: Vec<u8>,
         signature: G1,
     },
@@ -144,7 +144,7 @@ enum FuzzOperation {
         namespace: Vec<u8>,
     },
     VerifyProofOfPossessionMinSig {
-        public: G2,
+        public: <MinSig as Variant>::Public,
         namespace: Vec<u8>,
         signature: G1,
     },
@@ -264,13 +264,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 message: arbitrary_bytes(u, 0, 100)?,
             }),
             22 => Ok(FuzzOperation::VerifyMinSig {
-                public: arbitrary_g2(u)?,
+                public: Twin::new(arbitrary_g2(u)?),
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
             23 => Ok(FuzzOperation::VerifyMinSigLowLevel {
-                public: arbitrary_g2(u)?,
+                public: Twin::new(arbitrary_g2(u)?),
                 message: arbitrary_bytes(u, 0, 100)?,
                 signature: arbitrary_g1(u)?,
             }),
@@ -288,7 +288,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 namespace: arbitrary_bytes(u, 0, 50)?,
             }),
             27 => Ok(FuzzOperation::VerifyProofOfPossessionMinSig {
-                public: arbitrary_g2(u)?,
+                public: Twin::new(arbitrary_g2(u)?),
                 namespace: arbitrary_bytes(u, 0, 50)?,
                 signature: arbitrary_g1(u)?,
             }),
@@ -460,14 +460,14 @@ fn fuzz(op: FuzzOperation) {
 
         FuzzOperation::ComputePublicKey { private } => {
             let _pub_pk: G1 = ops::compute_public::<MinPk>(&private);
-            let _pub_sig: G2 = ops::compute_public::<MinSig>(&private);
+            let _pub_sig: <MinSig as Variant>::Public = ops::compute_public::<MinSig>(&private);
         }
 
         FuzzOperation::SharePublicKey { share, use_minpk } => {
             if use_minpk {
                 let _: G1 = share.public::<MinPk>();
             } else {
-                let _: G2 = share.public::<MinSig>();
+                let _: <MinSig as Variant>::Public = share.public::<MinSig>();
             }
         }
 
