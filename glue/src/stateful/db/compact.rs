@@ -246,7 +246,7 @@ mod tests {
                     Some(first)
                 )
                 .await,
-                Err(InitError::Database(Error::HistoricalFloorPruned(_)))
+                Err(InitError::Database(Error::NoRetainedCommit(_)))
             ));
             let db =
                 <TestDb<F, O> as ManagedDb<_>>::init(context.child("latest"), cfg, Some(latest))
@@ -1040,7 +1040,7 @@ mod tests {
                     Some(targets[0].clone())
                 )
                 .await,
-                Err(InitError::Database(Error::HistoricalFloorPruned(_)))
+                Err(InitError::Database(Error::NoRetainedCommit(_)))
             ));
         });
     }

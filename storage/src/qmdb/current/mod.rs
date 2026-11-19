@@ -331,6 +331,7 @@ use crate::{
     journal::authenticated,
     merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
+        Error,
         any::{
             self, Config as AnyConfig,
             operation::{
@@ -428,15 +429,14 @@ where
     ///
     /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
     /// the latest retained commit with at most `max_size` operations, while `None` selects the
-    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// latest retained state. Initialization fails with [Error::HistoricalFloorPruned]
     /// if the log or bitmap has pruned the commit's inactivity floor, and with
-    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
+    /// [Error::NoRetainedCommit] if no retained commit fits under the bound.
     pub async fn init(
         context: E,
         cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
         max_size: Option<Location<F>>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, Error<F>> {
         init_db(context, cfg, max_size).await
     }
 }
@@ -457,15 +457,14 @@ where
     ///
     /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
     /// the latest retained commit with at most `max_size` operations, while `None` selects the
-    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// latest retained state. Initialization fails with [Error::HistoricalFloorPruned]
     /// if the log or bitmap has pruned the commit's inactivity floor, and with
-    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
+    /// [Error::NoRetainedCommit] if no retained commit fits under the bound.
     pub async fn init(
         context: E,
         cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
         max_size: Option<Location<F>>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, Error<F>> {
         init_db(context, cfg, max_size).await
     }
 }
@@ -476,7 +475,7 @@ pub(crate) async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
-) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
+) -> Result<db::Db<F, E, J, I, H, U, N, S>, Error<F>>
 where
     F: merkle::Graftable,
     E: Context + Spawner,
@@ -520,7 +519,7 @@ where
 
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
+        .map_err(|_| Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
@@ -3813,7 +3812,7 @@ pub mod tests {
             assert!(
                 matches!(
                     boundary_err,
-                    Error::Journal(crate::journal::Error::ItemPruned(_))
+                    Error::NoRetainedCommit(cap) if cap == oldest_retained
                 ),
                 "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
             );
@@ -3824,7 +3823,6 @@ pub mod tests {
             )
             .await
             .unwrap();
-            let expected_pruned_loc = *first_start;
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
@@ -3837,8 +3835,7 @@ pub mod tests {
             assert!(
                 matches!(
                     err,
-                    Error::Journal(crate::journal::Error::ItemPruned(loc))
-                    if loc == expected_pruned_loc
+                    Error::NoRetainedCommit(cap) if cap == first_start
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
@@ -3986,8 +3983,7 @@ pub mod tests {
             assert!(
                 matches!(
                     err,
-                    Error::Journal(crate::journal::Error::ItemPruned(loc))
-                    if loc == *history[0].size
+                    Error::NoRetainedCommit(cap) if cap == history[0].size
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
