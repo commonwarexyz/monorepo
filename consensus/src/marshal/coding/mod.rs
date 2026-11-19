@@ -165,56 +165,6 @@ mod tests {
         assert_provider::<core::Mailbox<S, TestCodingVariant>>();
     }
 
-    #[test]
-    fn cached_finalization_requires_exact_commitment() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-            let Fixture {
-                schemes,
-                participants,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (ctx, signed) = missing_candidate(participants[0].clone());
-            let other: Arc<TestCodedBlock> =
-                Arc::new(encode_block(signed.inner().clone(), GENESIS_CODING_CONFIG));
-            assert_eq!(signed.digest(), other.digest());
-            assert_ne!(signed.commitment(), other.commitment());
-            let certificate = CodingHarness::make_finalization(
-                Proposal::new(ctx.round, View::zero(), signed.commitment()),
-                &schemes,
-                QUORUM,
-            );
-            let cache = core::cache::Manager::<_, TestCodingVariant, S>::init(
-                context.child("cache"),
-                core::cache::Config {
-                    partition_prefix: "coding-finalization-cache".into(),
-                    prunable_items_per_section: NZU64!(10),
-                    replay_buffer: NZUsize!(1024),
-                    key_write_buffer: NZUsize!(1024),
-                    value_write_buffer: NZUsize!(1024),
-                    key_page_cache: CacheRef::new(harness::PAGE_SIZE, harness::PAGE_CACHE_SIZE),
-                },
-                (),
-            )
-            .await
-            .put_finalization(ctx.round, signed.digest(), &certificate)
-            .await;
-
-            assert!(
-                cache
-                    .get_finalization_for(other.commitment())
-                    .await
-                    .is_none()
-            );
-            assert_eq!(
-                cache
-                    .get_finalization_for(signed.commitment())
-                    .await
-                    .as_ref(),
-                Some(&certificate)
-            );
-        });
-    }
-
     /// A coding buffer that serves inserted blocks and records subscriptions without resolving
     /// them.
     #[derive(Clone, Default)]

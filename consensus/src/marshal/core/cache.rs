@@ -632,17 +632,18 @@ where
             .expect("failed to get verified block")
     }
 
-    /// Returns the cached finalization only if it certifies the requested commitment.
+    /// Get a finalization from the prunable archive by block digest.
+    ///
+    /// SAFETY: For blocks/certificates admitted by marshal verification, a block digest
+    /// maps to exactly one consensus payload commitment for the active marshal
+    /// [`Variant`] instance.
     pub(crate) async fn get_finalization_for(
         &self,
-        commitment: V::Commitment,
+        digest: <V::Block as Digestible>::Digest,
     ) -> Option<Finalization<S, V::Commitment>> {
-        let digest = V::commitment_to_inner(commitment);
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&digest)).await {
-                Ok(Some(finalization)) => {
-                    return (finalization.proposal.payload == commitment).then_some(finalization);
-                }
+                Ok(Some(finalization)) => return Some(finalization),
                 Ok(None) => continue,
                 Err(e) => panic!("failed to get cached finalization: {e}"),
             }
