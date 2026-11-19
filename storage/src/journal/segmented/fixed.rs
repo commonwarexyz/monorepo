@@ -23,22 +23,19 @@
 use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
-use crate::journal::Error;
+use crate::journal::{Error, decode_sync};
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
-use commonware_utils::{Cached, NZUsize};
+use commonware_utils::NZUsize;
 use std::{
     collections::{BTreeMap, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
-
-// Reusable scratch for [`Inner::try_get_sync`], sized to one item
-commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -71,8 +68,12 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
-    /// Size of each entry.
-    const CHUNK_SIZE: usize = A::SIZE;
+    /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
+    /// time, which would otherwise divide by zero in the chunk math.
+    const CHUNK_SIZE: usize = {
+        assert!(A::SIZE > 0, "journal item size must be nonzero");
+        A::SIZE
+    };
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Return canonical section names in numeric order without opening writers.
@@ -345,16 +346,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut scratch =
-            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < Self::CHUNK_SIZE {
-            scratch.resize(Self::CHUNK_SIZE, 0);
-        }
-        let buf = &mut scratch[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(buf, offset) {
-            return None;
-        }
-        A::decode(Copying(buf)).ok()
+        decode_sync::<A>(|buf| blob.try_read_sync_into(buf, offset))
     }
 
     /// See [Journal::last].
@@ -495,13 +487,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> std::fmt::Debug for Journal<E, A
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
-    /// Size of each entry.
+    /// Size of each entry in bytes.
     pub const CHUNK_SIZE: usize = Inner::<E, A>::CHUNK_SIZE;
 
     /// Open through `(section, logical byte end)` and remove later sections.
     ///
-    /// An end inside an item rounds down. All retained data is validated before returning. Payload
-    /// reads stop at the bound, but every section name is validated, including names above it.
+    /// An end inside an item rounds down. All retained data is validated before returning.
+    /// Nothing above the page containing the bound is read, and later sections are removed
+    /// without being opened. Every blob name in the partition must still decode as a section
+    /// number, including those above the bound.
     pub async fn init_at_most(
         context: E,
         cfg: Config,
@@ -555,12 +549,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// [Recovery] that replays every section.
     ///
     /// `minimum_items` maps a section to the number of items its durable marker protects. An
-    /// empty map opens every section with no floor.
+    /// empty map opens every section with no floor. Every section it names must exist, even with
+    /// a count of zero: a floor for a missing section fails with [Error::Corruption].
     ///
     /// The caller must drain the recovery and call [Recovery::finish] to obtain the journal. Each
     /// section is replayed from position zero with a buffer of [Config::replay_buffer] bytes,
     /// allocated lazily as the recovery advances. Every backing blob read performed by the replay
-    /// uses `read_options`, including reads after advancing to another section.
+    /// uses `read_options`, including reads after advancing to another section. Opening the
+    /// writers on the first [Recovery::next] reads each section's last page with the default
+    /// options.
     pub async fn preflight_floors(
         context: E,
         cfg: Config,
@@ -573,7 +570,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
     /// page prefixes, or `end` itself when the section does not exist. Reads only pages that
     /// intersect the prefix below `end`.
-    pub(crate) async fn recoverable_prefix_len_at_most(
+    async fn recoverable_prefix_len_at_most(
         &self,
         section: u64,
         end: u64,
@@ -595,7 +592,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// `size` is the logical byte size of `section` and must be a multiple of
     /// [Self::CHUNK_SIZE]. The checkpoint proves the retained items, so the recovery replays
     /// nothing: [Recovery::finish] durably truncates `section` to `size` bytes and removes every
-    /// later section.
+    /// later section without opening it. Every blob name in the partition must still decode as a
+    /// section number, including those of later sections.
     pub async fn preflight_restore(
         context: E,
         cfg: Config,
@@ -1076,8 +1074,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
     /// Returns the journal.
     ///
     /// A recovery from [Journal::preflight_floors] fails with [Error::ReplayFailed] when it was
-    /// not fully drained, yielded an error, or was interrupted. The journal is then destroyed and
-    /// the owner must initialize again. Storage without any section has nothing to drain.
+    /// not fully drained, yielded an error, or was interrupted. Storage without any section has
+    /// nothing to drain.
     ///
     /// A recovery from [Journal::preflight_restore] opens the sections through its checkpoint,
     /// truncates the checkpoint section, and removes every later section unread. The truncation
@@ -1116,8 +1114,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Recovery<E, A> {
 mod tests {
     use super::*;
     use crate::{
-        journal::segmented::manager::tests::{
-            BoundedOpen, FaultedContext, check_interrupted_bounded_open,
+        journal::{
+            SYNC_READ_STACK_SIZE,
+            segmented::manager::tests::{
+                BoundedOpen, FaultedContext, check_interrupted_bounded_open,
+            },
         },
         utils::codec::View,
     };
@@ -1290,6 +1291,25 @@ mod tests {
             let decoded = journal.try_get_sync(1, 0).unwrap();
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+        });
+    }
+
+    /// Append two `SIZE`-byte items and read both back through the synchronous path.
+    async fn check_cached_get<const SIZE: usize>(context: deterministic::Context) {
+        let cfg = test_cfg();
+        let mut journal = init_journal::<_, [u8; SIZE]>(context, cfg).await.unwrap();
+        (journal, _) = journal.append(1, &[7u8; SIZE]).await.unwrap();
+        (journal, _) = journal.append(1, &[8u8; SIZE]).await.unwrap();
+        assert_eq!(journal.try_get_sync(1, 0), Some([7u8; SIZE]));
+        assert_eq!(journal.try_get_sync(1, 1), Some([8u8; SIZE]));
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_get_at_stack_buffer_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            check_cached_get::<SYNC_READ_STACK_SIZE>(context.child("stack")).await;
+            check_cached_get::<{ SYNC_READ_STACK_SIZE + 1 }>(context.child("scratch")).await;
         });
     }
 
@@ -1798,7 +1818,7 @@ mod tests {
             seed(&context, &cfg, 1..=1).await;
 
             // A durable floor proves its prefix. Preflight reads only the page containing the
-            // terminal entry and leaves the ordinary replay pass to inspect the suffix.
+            // terminal entry and leaves the rest of the section to the replay.
             recordings.clear();
             let floors = BTreeMap::from([(1, 16)]);
             let preflight = Journal::<_, u64>::preflight_floors(

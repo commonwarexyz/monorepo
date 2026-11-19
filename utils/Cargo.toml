@@ -1,6 +1,7 @@
 [package]
 name = "commonware-utils"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -61,7 +62,6 @@ commonware-invariants.workspace = true
 commonware-macros.workspace = true
 criterion.workspace = true
 num-bigint = { workspace = true, default-features = false }
-proptest.workspace = true
 rand = { workspace = true, features = ["std_rng", "sys_rng"] }
 roaring = "0.11.4"
 rstest.workspace = true
@@ -102,9 +102,8 @@ arbitrary = [
 # Enables analytical helpers used by roaring analysis benchmarks.
 # Off by default; tests turn it on automatically via `cfg(test)`.
 analysis = []
-# Exposes the `pub mod fuzz` Plan + run harness used by both `cargo fuzz` and the
-# in-test `minifuzz`-driven property test. Off by default. Tests pick it up via the
-# `arbitrary` dev-dependency path; the `cargo-fuzz` target opts in via `--features fuzz`.
+# Exposes the crate's fuzz plan. Unit tests use the same property checks through
+# the `arbitrary` dev-dependency.
 fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [lib]

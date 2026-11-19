@@ -26,7 +26,10 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
-use std::collections::VecDeque;
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    time::SystemTime,
+};
 use tracing::{debug, warn};
 
 struct Candidate<S, V>
@@ -45,8 +48,77 @@ where
 {
     height: Height,
     floor: Finalization<S, V::Commitment>,
-    in_flight: Option<Candidate<S, V>>,
+    retry_at: SystemTime,
+    in_flight: Option<S::PublicKey>,
     candidates: VecDeque<Candidate<S, V>>,
+    // A peer can enter the queue only once per pass.
+    seen: BTreeSet<S::PublicKey>,
+    // Keep the certificates for requests from previous passes so late blocks still match.
+    requested: BTreeMap<S::PublicKey, Finalization<S, V::Commitment>>,
+}
+
+impl<S, V> Pending<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
+    fn epoch(&self) -> Epoch {
+        self.floor.epoch()
+    }
+
+    /// Starts another pass if the current one has no remaining candidates.
+    /// Returns whether it started a pass.
+    fn retry(
+        &mut self,
+        retry_at: SystemTime,
+        sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        self.in_flight = None;
+        if self.request_next_block(retry_at, sender) {
+            return false;
+        }
+
+        self.seen.clear();
+        self.request_boundary(retry_at, sender);
+        true
+    }
+
+    fn request_boundary(
+        &mut self,
+        retry_at: SystemTime,
+        sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) {
+        let epoch = self.epoch();
+        debug!(%epoch, "requesting boundary finalizations");
+        sender.send(
+            Recipients::All,
+            wire::Message::<S, V>::BoundaryRequest(epoch).encode(),
+            false,
+        );
+        self.retry_at = retry_at;
+    }
+
+    fn request_next_block(
+        &mut self,
+        retry_at: SystemTime,
+        sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let Some(Candidate { peer, finalization }) = self.candidates.pop_front() else {
+            return false;
+        };
+        let epoch = self.epoch();
+        // Keep the first proof so a retry can still accept a reply to an earlier request.
+        let finalization = self.requested.entry(peer.clone()).or_insert(finalization);
+        debug!(%epoch, commitment = ?finalization.proposal.payload, "requesting boundary block");
+        sender.send(
+            Recipients::One(peer.clone()),
+            wire::Message::<S, V>::BlockRequest(epoch).encode(),
+            false,
+        );
+        self.in_flight = Some(peer);
+        self.retry_at = retry_at;
+        true
+    }
 }
 
 /// Discovery phase of the probe actor (see the
@@ -83,6 +155,7 @@ where
     pub(super) sample: Sample<S, V::Commitment>,
     pub(super) subscribers: Vec<oneshot::Sender<ActorArtifact<S, V>>>,
     pub(super) pending: Option<Pending<S, V>>,
+    pub(super) fallback: Option<Pending<S, V>>,
 }
 
 impl<E, M, S, V, T, B> Discovery<E, M, S, V, T, B>
@@ -107,20 +180,24 @@ where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
-        let mut marshal = None;
-        let mut deadline = self.context.current() + self.retry_timeout.get();
+        let mut attached = None;
+        let mut sample_retry_at = self.context.current() + self.retry_timeout.get();
 
         select_loop! {
             self.context,
             on_start => {
                 self.subscribers
                     .retain(|subscriber| !subscriber.is_closed());
-                if marshal.is_some() && self.subscribers.is_empty() {
+                if attached.is_some() && self.subscribers.is_empty() {
                     break;
                 }
 
                 // Arm the retry timer only while actively discovering.
                 let retry = if self.artifact.is_none() && !self.subscribers.is_empty() {
+                    let deadline = self.pending.iter().chain(&self.fallback)
+                        .map(|pending| pending.retry_at)
+                        .min()
+                        .unwrap_or(sample_retry_at);
                     Either::Left(self.context.sleep_until(deadline))
                 } else {
                     Either::Right(future::pending())
@@ -130,6 +207,25 @@ where
                 debug!("shutdown signal received");
                 return;
             },
+            _ = retry => {
+                let now = self.context.current();
+                let retry_at = now + self.retry_timeout.get();
+                if let Some(pending) = &mut self.pending {
+                    if now >= pending.retry_at && pending.retry(retry_at, &mut boundary_sender) {
+                        debug!(epoch = %pending.epoch(), "responder pass exhausted, re-soliciting latest finalizations");
+                        self.request_latest(&mut boundary_sender);
+                    }
+                } else if self.sample.floor().is_none() {
+                    debug!(reason = "deadline elapsed", "re-soliciting latest finalizations");
+                    self.request_latest(&mut boundary_sender);
+                    sample_retry_at = retry_at;
+                }
+                if let Some(fallback) = &mut self.fallback
+                    && now >= fallback.retry_at
+                {
+                    fallback.retry(retry_at, &mut boundary_sender);
+                }
+            },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 return;
@@ -137,7 +233,7 @@ where
                 Message::Subscribe { response } => {
                     match self.subscribe(response, &mut boundary_sender) {
                         Ok(true) => {
-                            deadline = self.context.current() + self.retry_timeout.get();
+                            sample_retry_at = self.context.current() + self.retry_timeout.get();
                         }
                         Ok(false) => {}
                         Err(error) => {
@@ -150,35 +246,25 @@ where
                         }
                     }
                 }
-                Message::Attach { marshal: attached } => {
-                    marshal = Some(attached);
+                Message::Attach { marshal: attached_marshal, plan: attached_plan } => {
+                    attached = Some((attached_marshal, attached_plan));
                 }
             },
             Ok((peer, message)) = boundary_receiver.recv() else {
                 debug!("boundary receiver closed, shutting down");
                 return;
             } => {
-                if self.handle_boundary_response(peer, message, &mut boundary_sender).await {
-                    deadline = self.context.current() + self.retry_timeout.get();
-                }
-            },
-            _ = retry => {
-                if self.pending.is_some() {
-                    self.retry_boundary(&mut boundary_sender);
-                } else if self.sample.floor().is_none() {
-                    debug!(reason = "deadline elapsed", "re-soliciting latest finalizations");
-                    self.request_latest(&mut boundary_sender);
-                }
-                deadline = self.context.current() + self.retry_timeout.get();
+                self.handle_boundary_response(peer, message, &mut boundary_sender).await;
             },
         }
 
+        let (marshal, plan) = attached.expect("marshal and plan must be attached before serving");
         Service {
             context: self.context,
             mailbox: self.mailbox,
-            marshal: marshal.expect("serving requires attached marshal"),
+            marshal,
+            plan,
             blocker: self.blocker,
-            epocher: self.epocher,
             artifact: self.artifact,
         }
         .run(boundary_sender, boundary_receiver)
@@ -198,7 +284,7 @@ where
             response.send_lossy(artifact.clone());
             return Ok(false);
         }
-        let solicit = self.subscribers.is_empty() && self.sample.floor().is_none();
+        let solicit = self.subscribers.is_empty() && self.pending.is_none();
         self.subscribers.push(response);
         if solicit {
             // Activate the snapshot only when soliciting: a node that never
@@ -233,31 +319,19 @@ where
         );
     }
 
-    /// Requests the boundary finalization of `epoch` from all peers.
-    fn request_boundary_finalization(
-        epoch: Epoch,
-        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) {
-        boundary_sender.send(
-            Recipients::All,
-            wire::Message::<S, V>::BoundaryRequest(epoch).encode(),
-            false,
-        );
-    }
-
-    /// Handles a probe response and returns whether it sent a new request.
+    /// Handles a probe response.
     async fn handle_boundary_response(
         &mut self,
         peer: S::PublicKey,
         message: impl Buf,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) -> bool {
+    ) {
         let response = match wire::read_response::<S, V, _>(
             message,
             &self.verifier.certificate_codec_config(),
         ) {
             Ok(Some(response)) => response,
-            Ok(None) => return false,
+            Ok(None) => return,
             Err(err) => {
                 commonware_p2p::block!(
                     self.blocker,
@@ -265,7 +339,7 @@ where
                     ?err,
                     "invalid bootstrap boundary response"
                 );
-                return false;
+                return;
             }
         };
 
@@ -274,15 +348,9 @@ where
                 self.handle_latest(peer, finalization, boundary_sender)
             }
             wire::Response::Boundary(finalization) => {
-                if self.pending.is_none() {
-                    return false;
-                }
                 self.handle_boundary_finalization(peer, finalization, boundary_sender)
             }
             wire::Response::Block { epoch, body } => {
-                if self.pending.is_none() {
-                    return false;
-                }
                 self.handle_boundary_block(peer, epoch, body, boundary_sender)
                     .await
             }
@@ -290,18 +358,17 @@ where
     }
 
     /// Records a latest-finalization reply that passes the discovery rules (see
-    /// the [module docs](crate::dkg::probe#protocol)) and returns whether a
-    /// boundary request was sent.
+    /// the [module docs](crate::dkg::probe#protocol)).
     fn handle_latest(
         &mut self,
         peer: S::PublicKey,
         finalization: Finalization<S, V::Commitment>,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) -> bool {
+    ) {
         // Once the floor is selected or the peer has contributed this request
         // round, further replies are ignored without verification.
-        if !self.sample.awaits(&peer) {
-            return false;
+        if self.subscribers.is_empty() || !self.sample.awaits(&peer) {
+            return;
         }
         if self
             .bootstrap
@@ -311,7 +378,7 @@ where
             .is_none()
         {
             commonware_p2p::block!(self.blocker, peer, "latest finalization from non-member");
-            return false;
+            return;
         }
         if finalization.epoch() < self.sample.minimum_epoch() {
             debug!(
@@ -319,7 +386,7 @@ where
                 minimum_epoch = %self.sample.minimum_epoch(),
                 "ignoring latest finalization below minimum epoch"
             );
-            return false;
+            return;
         }
         if !finalization.verify(
             self.context.as_present_mut(),
@@ -327,29 +394,35 @@ where
             &self.strategy,
         ) {
             commonware_p2p::block!(self.blocker, peer, "invalid latest finalization");
-            return false;
-        }
-        if self.subscribers.is_empty() {
-            self.sample.reset();
-            return false;
+            return;
         }
         self.sample.record(peer, finalization);
-        self.select(boundary_sender)
+        self.select(boundary_sender);
     }
 
     /// Selects the highest finalization once `f + 1` distinct dealers have
-    /// replied, then begins the boundary fetch for the floor's epoch.
-    ///
-    /// Returns whether a boundary request was sent.
-    fn select(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) -> bool {
+    /// replied and starts a boundary fetch if the epoch is new.
+    fn select(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
         // Every recorded reply was verified under the all-epoch verifier.
         let Some(floor) = self
             .sample
             .select(self.bootstrap.participants.dealers.len(), |_| true)
         else {
-            return false;
+            return;
         };
         let target = floor.epoch();
+        if let Some(pending) = &mut self.pending
+            && target <= pending.epoch()
+        {
+            // A newer round in the same epoch uses the same boundary fetch.
+            for fetch in std::iter::once(pending).chain(self.fallback.iter_mut()) {
+                if target == fetch.epoch() && floor.round() > fetch.floor.round() {
+                    fetch.floor = floor;
+                    break;
+                }
+            }
+            return;
+        }
 
         if target.is_zero() {
             // Epoch zero is anchored by genesis and has no boundary block.
@@ -358,23 +431,28 @@ where
                 info: self.genesis.clone(),
                 floor,
             });
-            return false;
+            return;
         }
 
         let Some(height) = target.previous().and_then(|epoch| self.epocher.last(epoch)) else {
             // Unreachable without a forged quorum: re-sample rather than wedge.
             warn!(epoch = %target, "sampled floor epoch has no boundary height");
             self.sample.reset();
-            return false;
+            return;
         };
-        Self::request_boundary_finalization(target, boundary_sender);
-        self.pending = Some(Pending {
+        let retry_at = self.context.current() + self.retry_timeout.get();
+        let mut pending = Pending {
             height,
             floor,
+            retry_at,
             in_flight: None,
             candidates: VecDeque::new(),
-        });
-        true
+            seen: BTreeSet::new(),
+            requested: BTreeMap::new(),
+        };
+        pending.request_boundary(retry_at, boundary_sender);
+        // A newer finalization does not mean a reachable peer can serve its checkpoint.
+        self.fallback = self.pending.replace(pending);
     }
 
     fn handle_boundary_finalization(
@@ -382,43 +460,27 @@ where
         peer: S::PublicKey,
         finalization: Finalization<S, V::Commitment>,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) -> bool {
-        let mut pending = self.pending.take().expect("pending checked by caller");
-
-        let Some(expected_finalization_epoch) = pending.floor.epoch().previous() else {
-            commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
-            self.pending = Some(pending);
-            return false;
+    ) {
+        let Some(primary) = &mut self.pending else {
+            return;
         };
-
         let response_finalization_epoch = finalization.epoch();
-        if response_finalization_epoch < expected_finalization_epoch {
-            debug!(
-                response_finalization_epoch = %response_finalization_epoch,
-                pending_epoch = %pending.floor.epoch(),
-                "ignoring stale bootstrap boundary response"
-            );
-            self.pending = Some(pending);
-            return false;
-        }
-
-        if response_finalization_epoch != expected_finalization_epoch {
-            commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
-            self.pending = Some(pending);
-            return false;
-        }
-
-        let duplicate = pending
-            .in_flight
-            .as_ref()
-            .is_some_and(|candidate| candidate.peer == peer)
-            || pending
-                .candidates
-                .iter()
-                .any(|candidate| candidate.peer == peer);
-        if duplicate {
-            self.pending = Some(pending);
-            return false;
+        let primary_boundary_epoch = primary.epoch().previous().expect("non-genesis fetch");
+        let pending = if response_finalization_epoch == primary_boundary_epoch {
+            primary
+        } else if let Some(fallback) = &mut self.fallback
+            && fallback.epoch().previous() == Some(response_finalization_epoch)
+        {
+            fallback
+        } else {
+            // A delayed response for a retired epoch is harmless.
+            if response_finalization_epoch > primary_boundary_epoch {
+                commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
+            }
+            return;
+        };
+        if pending.seen.contains(&peer) {
+            return;
         }
 
         if !finalization.verify(
@@ -427,19 +489,17 @@ where
             &self.strategy,
         ) {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
-            self.pending = Some(pending);
-            return false;
+            return;
         }
 
+        pending.seen.insert(peer.clone());
         pending
             .candidates
             .push_back(Candidate { peer, finalization });
-        let requested = pending.in_flight.is_none();
-        if requested {
-            Self::request_next_block(&mut pending, boundary_sender);
+        if pending.in_flight.is_none() {
+            let retry_at = self.context.current() + self.retry_timeout.get();
+            pending.request_next_block(retry_at, boundary_sender);
         }
-        self.pending = Some(pending);
-        requested
     }
 
     async fn handle_boundary_block(
@@ -448,80 +508,50 @@ where
         epoch: Epoch,
         body: impl Buf,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) -> bool {
-        let mut pending = self.pending.take().expect("pending checked by caller");
-        let Some(candidate) = pending.in_flight.take() else {
-            self.pending = Some(pending);
-            return false;
+    ) {
+        let Some(pending) = self
+            .pending
+            .iter_mut()
+            .chain(&mut self.fallback)
+            .find(|pending| pending.epoch() == epoch)
+        else {
+            return;
         };
-        if candidate.peer != peer || pending.floor.epoch() != epoch {
-            pending.in_flight = Some(candidate);
-            self.pending = Some(pending);
-            return false;
-        }
-
-        let commitment = candidate.finalization.proposal.payload;
-        let block =
+        let Some(finalization) = pending.requested.get(&peer) else {
+            return;
+        };
+        let commitment = finalization.proposal.payload;
+        let artifact =
             match wire::read_block::<V>(body, commitment, &self.block_codec_config, &self.strategy)
                 .await
             {
-                Ok(block) => block,
+                Ok(block) => Self::artifact_from_block(pending, finalization, block),
                 Err(err) => {
-                    commonware_p2p::block!(
-                        self.blocker,
-                        peer,
-                        ?err,
-                        "invalid bootstrap boundary block"
-                    );
-                    Self::request_next_block(&mut pending, boundary_sender);
-                    self.pending = Some(pending);
-                    return true;
+                    debug!(?err, %epoch, "failed to decode bootstrap boundary block");
+                    None
                 }
             };
-
-        let Some(artifact) = Self::artifact_from_block(&pending, candidate.finalization, block)
-        else {
-            commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
-            Self::request_next_block(&mut pending, boundary_sender);
-            self.pending = Some(pending);
-            return true;
-        };
-        self.resolve(artifact);
-        false
-    }
-
-    fn retry_boundary(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
-        let pending = self
-            .pending
-            .as_mut()
-            .expect("retry requires pending boundary");
-        pending.in_flight = None;
-        Self::request_next_block(pending, boundary_sender);
-    }
-
-    fn request_next_block(
-        pending: &mut Pending<S, V>,
-        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) {
-        let Some(candidate) = pending.candidates.pop_front() else {
-            debug!(epoch = %pending.floor.epoch(), "requesting boundary finalizations");
-            Self::request_boundary_finalization(pending.floor.epoch(), boundary_sender);
+        if let Some(artifact) = artifact {
+            self.resolve(artifact);
             return;
-        };
+        }
 
-        let commitment = candidate.finalization.proposal.payload;
-        debug!(epoch = %pending.floor.epoch(), ?commitment, "requesting boundary block");
-        boundary_sender.send(
-            Recipients::One(candidate.peer.clone()),
-            wire::Message::<S, V>::BlockRequest(pending.floor.epoch()).encode(),
-            false,
-        );
-        pending.in_flight = Some(candidate);
+        pending.requested.remove(&peer);
+        pending
+            .candidates
+            .retain(|candidate| candidate.peer != peer);
+        let was_in_flight = pending.in_flight.as_ref() == Some(&peer);
+        commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
+        if was_in_flight {
+            pending.in_flight = None;
+            let retry_at = self.context.current() + self.retry_timeout.get();
+            pending.request_next_block(retry_at, boundary_sender);
+        }
     }
 
     fn artifact_from_block(
         pending: &Pending<S, V>,
-        finalization: Finalization<S, V::Commitment>,
+        finalization: &Finalization<S, V::Commitment>,
         block: V::Block,
     ) -> Option<ActorArtifact<S, V>> {
         if block.height() != pending.height {
@@ -537,7 +567,7 @@ where
         }
 
         Some(Artifact {
-            finalization: Some(finalization),
+            finalization: Some(finalization.clone()),
             info,
             floor: pending.floor.clone(),
         })
@@ -545,6 +575,7 @@ where
 
     fn resolve(&mut self, artifact: ActorArtifact<S, V>) {
         self.pending = None;
+        self.fallback = None;
         self.subscribers.drain(..).for_each(|subscriber| {
             subscriber.send_lossy(artifact.clone());
         });

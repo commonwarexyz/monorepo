@@ -62,7 +62,12 @@ use std::sync::OnceLock;
 /// and [`EncodeSize`], based on the underlying implementation of `T`.
 ///
 /// Furthermore, we implement [`Eq`], [`Ord`], [`Hash`] based on the implementation
-/// of `T` as well. These methods will force deserialization of the value.
+/// of `T` as well. These methods will force deserialization of the value, except that
+/// two deferred values with identical bytes are equal without decoding (so compare only
+/// values deferred with the same [`Read::Cfg`]).
+///
+/// A deferred value must not be changed through interior mutability in a way that
+/// affects its equality, ordering, or hash.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
@@ -222,15 +227,21 @@ impl<T: Read + FixedSize> Read for Lazy<T> {
 // We want to provide some convenience functions which might exist on the underlying
 // value in a Lazy. To do so, we really on `get` to access that value.
 
-impl<T: Read + PartialEq> PartialEq for Lazy<T> {
+impl<T: Read + Eq> PartialEq for Lazy<T> {
     fn eq(&self, other: &Self) -> bool {
+        // Eq makes every value equal to itself, so identical bytes decode to equal values.
+        if let (Some(a), Some(b)) = (&self.pending, &other.pending)
+            && a.bytes == b.bytes
+        {
+            return true;
+        }
         self.get() == other.get()
     }
 }
 
 impl<T: Read + Eq> Eq for Lazy<T> {}
 
-impl<T: Read + PartialOrd> PartialOrd for Lazy<T> {
+impl<T: Read + PartialOrd + Eq> PartialOrd for Lazy<T> {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         self.get().partial_cmp(&other.get())
     }
@@ -254,18 +265,16 @@ impl<T: Read + core::fmt::Debug> core::fmt::Debug for Lazy<T> {
     }
 }
 
-#[cfg(test)]
-mod test {
+#[cfg(any(test, feature = "fuzz"))]
+#[commonware_macros::stability(ALPHA)]
+pub(crate) mod fuzz {
     use super::Lazy;
-    use crate::{
-        Copying, Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
-    };
-    use bytes::Bytes;
-    use proptest::prelude::*;
+    use crate::{DecodeExt, Encode, FixedSize, Read, Write};
+    use arbitrary::{Arbitrary, Unstructured};
 
     /// A byte that's always <= 100
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-    struct Small(u8);
+    pub(super) struct Small(pub(super) u8);
 
     impl FixedSize for Small {
         const SIZE: usize = 1;
@@ -289,55 +298,92 @@ mod test {
         }
     }
 
-    impl Arbitrary for Small {
-        type Parameters = ();
-        type Strategy = BoxedStrategy<Self>;
-
-        fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            (0..=100u8).prop_map(Small).boxed()
+    impl<'a> Arbitrary<'a> for Small {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            Ok(Self(u.int_in_range(0..=100)?))
         }
     }
 
-    proptest! {
-        #[test]
-        fn test_lazy_new_eq_deferred(x: Small) {
-            let from_new = Lazy::new(x);
-            let from_deferred = Lazy::deferred(&mut x.encode(), ());
-            prop_assert_eq!(from_new, from_deferred);
-        }
+    /// Inputs for checking [`Lazy`] against direct decoding.
+    #[derive(Debug)]
+    pub struct Plan {
+        a: Small,
+        b: Small,
+        raw: [u8; 2],
+    }
 
-        #[test]
-        fn test_lazy_write_eq_direct(x: Small) {
-            let direct = x.encode();
-            let via_lazy = Lazy::new(x).encode();
-            prop_assert_eq!(direct, via_lazy);
+    impl<'a> Arbitrary<'a> for Plan {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            let (a, b, raw) = u.arbitrary()?;
+            Ok(Self { a, b, raw })
         }
+    }
 
-        #[test]
-        fn test_lazy_encode_consistent_across_construction(x: Small) {
-            let direct = x.encode();
-            let via_new = Lazy::new(x).encode();
-            let via_deferred = Lazy::<Small>::deferred(&mut x.encode(), ()).encode();
-            prop_assert_eq!(&direct, &via_new);
-            prop_assert_eq!(&direct, &via_deferred);
-        }
+    impl Plan {
+        /// Check that lazy values preserve encoded bytes and agree with eager
+        /// decoding and comparison, including when decoding fails.
+        pub fn run(self) {
+            let Self { a, b, raw } = self;
+            let encoded = a.encode();
+            let from_new = Lazy::new(a);
+            let from_deferred = Lazy::<Small>::deferred(&mut encoded.clone(), ());
+            assert_eq!(from_new.encode(), encoded);
+            assert_eq!(from_deferred.encode(), encoded);
+            assert_eq!(from_new, from_deferred);
 
-        #[test]
-        fn test_lazy_read_eq_direct(byte: u8) {
-            let direct: Option<Small> = Small::decode(byte.encode()).ok();
-            let via_lazy: Option<Small> =
-                Lazy::<Small>::decode(byte.encode()).ok().and_then(|l| l.get().copied());
-            prop_assert_eq!(direct, via_lazy);
-        }
+            let other = Lazy::new(b);
+            assert_eq!(a == b, from_new == other);
+            assert_eq!(a < b, from_new < other);
+            assert_eq!(a >= b, from_new >= other);
 
-        #[test]
-        fn test_lazy_cmp_eq_direct(a: Small, b: Small) {
-            let la = Lazy::new(a);
-            let lb = Lazy::new(b);
-            prop_assert_eq!(a == b, la == lb);
-            prop_assert_eq!(a < b, la < lb);
-            prop_assert_eq!(a >= b, la >= lb);
+            let raw = raw.map(|byte| byte.encode());
+            let [a, b] = raw.clone().map(|bytes| Small::decode(bytes).ok());
+            let [la, lb] = raw.clone().map(|bytes| {
+                Lazy::<Small>::decode(bytes)
+                    .ok()
+                    .and_then(|value| value.get().copied())
+            });
+            assert_eq!((a, b), (la, lb));
+            let [la, lb] = raw.map(|mut bytes| Lazy::<Small>::deferred(&mut bytes, ()));
+            assert_eq!(a == b, la == lb);
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{
+        Lazy,
+        fuzz::{Plan, Small},
+    };
+    use crate::{Copying, Decode, Encode, Write, types::tests::TrackingWriteBuf};
+    use bytes::Bytes;
+    use commonware_invariants::minifuzz;
+
+    #[test]
+    fn test_lazy_matches_direct() {
+        minifuzz::Builder::default()
+            .with_search_limit(1024)
+            .test(|u| {
+                u.arbitrary::<Plan>()?.run();
+                Ok(())
+            });
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_lazy_eq_equal_bytes_skips_decode() {
+        let a = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
+        let b = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
+        assert!(a == b);
+        assert!(a.value.get().is_none());
+        assert!(b.value.get().is_none());
+
+        // Differing bytes fall back to comparing decoded values.
+        let c = Lazy::<Small>::deferred(&mut Small(8).encode(), ());
+        assert!(a != c);
+        assert!(a.value.get().is_some());
+        assert!(c.value.get().is_some());
     }
 
     #[test]

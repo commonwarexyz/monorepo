@@ -10,7 +10,6 @@ use crate::{
     merkle::{
         self, Graftable, Location, Position, Readable,
         batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
-        storage::Storage as MerkleStorage,
     },
     qmdb::{
         Error,
@@ -39,7 +38,7 @@ use core::{borrow::Borrow, ops::Range};
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay: materialized bytes for every chunk that differs from
-/// the parent bitmap, which grafted MMR leaf computation reads directly.
+/// the parent bitmap, which grafted leaf computation reads directly.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChunkOverlay<const N: usize> {
     /// Dirty chunks: chunk_idx -> materialized chunk bytes.
@@ -186,21 +185,6 @@ impl<R: Readable> Readable for Layered<'_, R> {
     }
 }
 
-impl<R: Readable> MerkleStorage<R::Family> for Layered<'_, R> {
-    type Digest = R::Digest;
-
-    fn size(&self) -> Position<R::Family> {
-        Readable::size(self)
-    }
-
-    async fn get_node(
-        &self,
-        pos: Position<R::Family>,
-    ) -> Result<Option<R::Digest>, merkle::Error<R::Family>> {
-        Ok(Readable::get_node(self, pos))
-    }
-}
-
 /// Result of merkleizing a batch.
 type MerkleizeResult<F, D, U, const N: usize, S> =
     Result<Arc<MerkleizedBatch<F, D, U, N, S>>, Error<F>>;
@@ -208,7 +192,7 @@ type MerkleizeResult<F, D, U, const N: usize, S> =
 /// A speculative batch of mutations whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 ///
-/// Wraps a [`any::batch::UnmerkleizedBatch`] and adds bitmap and grafted MMR parent state
+/// Wraps a [`any::batch::UnmerkleizedBatch`] and adds bitmap and grafted tree parent state
 /// needed to compute the current layer during [`merkleize`](Self::merkleize).
 pub struct UnmerkleizedBatch<F, H, U, const N: usize, S: Strategy>
 where
@@ -220,7 +204,7 @@ where
     /// The inner any-layer batch that handles mutations, journal, and floor walk.
     inner: any::batch::UnmerkleizedBatch<F, H, U, S>,
 
-    /// Parent's grafted MMR state.
+    /// Parent's grafted tree state.
     grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
 
     /// Parent's bitmap state (COW, Arc-based).
@@ -243,7 +227,7 @@ where
 /// A speculative batch of operations whose root digest has been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 ///
-/// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted MMR state needed to
+/// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted tree state needed to
 /// compute the canonical root.
 ///
 /// # Batch validity
@@ -258,10 +242,10 @@ where
 /// database (see [`crate::qmdb::chain`]).
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
-    /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
+    /// Inner any-layer batch (ops tree, diff, floor, commit loc, sizes).
     pub(crate) inner: Arc<any::batch::MerkleizedBatch<F, D, U, S>>,
 
-    /// Grafted MMR state.
+    /// Grafted tree state.
     pub(crate) grafted: Arc<merkle::batch::MerkleizedBatch<F, D, S>>,
 
     /// COW bitmap state (for use as a parent in speculative batches).
@@ -861,12 +845,12 @@ where
         .await
 }
 
-/// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized any
+/// Compute the current layer (bitmap + grafted tree + canonical root) on top of a merkleized any
 /// batch.
 ///
 /// The any batch must have been prepared and merkleized against `db`.
 ///
-/// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
+/// Builds a chunk overlay from the diff, computes grafted leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
 ///
 /// `_retained_ancestors` is held only to keep ancestor batches alive while grafting and root
@@ -1002,8 +986,7 @@ where
         &grafted_storage,
         overlay_ops_leaves,
         inner.bounds.inactivity_floor,
-    )
-    .await?;
+    )?;
     let canonical_root = ops_root_witness.root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
@@ -1402,6 +1385,27 @@ where
             ops_root_witness: self.ops_root_witness.clone(),
             pruned_chunks: Widen::widen(self.any.bitmap.pruned_chunks()),
         })
+    }
+}
+
+impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
+    crate::qmdb::sync::MerkleizedBatch for MerkleizedBatch<F, D, U, N, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    /// The root is the ops root, which the sync engine verifies against.
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.ops_root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().tip.size),
+        }
     }
 }
 

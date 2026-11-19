@@ -12,7 +12,7 @@ no_std_packages=(
 )
 
 target="riscv32imac-unknown-none-elf"
-image="ghcr.io/commonwarexyz/monorepo/rust-riscv32imac-cross@sha256:652f5ff21c943935bc1caf7cf0c65b38127381c66b423f70f86dc7785d93ce85"
+image="ghcr.io/commonwarexyz/monorepo/rust-riscv32imac-cross@sha256:41e68788e362c24f5398e321cf701e709d14ddf2f7b419cfcb90216afa292ab8"
 base_rustflags="${RUSTFLAGS:-}"
 
 for package in "${no_std_packages[@]}"; do
@@ -20,7 +20,7 @@ for package in "${no_std_packages[@]}"; do
     --rm \
     -v `pwd`:/workdir \
     -w="/workdir" \
-    "$image" cargo +nightly build -p "$package" -Zbuild-std=core,alloc --no-default-features --target "$target" --release)
+    "$image" cargo +nightly build -p "$package" -Zbuild-std=core,alloc --no-default-features --target "$target" --release --message-format=json-render-diagnostics)
   pretty_cmd="${build_cmd[*]}"
   if [ -n "$CI" ]; then
     echo "::group::${pretty_cmd}"
@@ -28,8 +28,16 @@ for package in "${no_std_packages[@]}"; do
     printf "\n%s:\n  %s\n" "$package" "$pretty_cmd"
   fi
 
-  RUSTFLAGS="${base_rustflags} -D warnings" "${build_cmd[@]}"
-  du -h "target/${target}/release/lib${package//-/_}.rlib"
+  RUSTFLAGS="${base_rustflags} -D warnings" "${build_cmd[@]}" |
+    jq -r --arg name "${package//-/_}" '
+      select(.reason == "compiler-artifact" and .target.name == $name)
+      | .filenames[]
+      | select(endswith(".rlib"))
+      | sub("^/workdir/"; "")
+    ' |
+    while IFS= read -r artifact; do
+      du -h "$artifact"
+    done
 
   if [ -n "$CI" ]; then
     echo "::endgroup::"

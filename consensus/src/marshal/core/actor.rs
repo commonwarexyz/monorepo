@@ -892,7 +892,7 @@ where
             Message::GetFinalization {
                 height, response, ..
             } => {
-                let finalization = self.get_finalization_by_height(height).await;
+                let finalization = self.find_finalization(height).await;
                 response.send_lossy(finalization);
             }
             Message::GetProcessed { response, .. } => {
@@ -1180,8 +1180,10 @@ where
         // registered for later local availability.
         //
         // Round-based fetching is for notarized proposal lookups whose height is
-        // not known before the request. Height-based fetching is only for callers
-        // that have a validated block height for resolver retention.
+        // not known before the request. Commitment-based fetching is for callers
+        // that read the block's height from the block above it. That height bounds
+        // the request only once the block above has been checked against its own
+        // parent. A round the caller supplies bounds it regardless.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
                 // Fetch the notarized proposal for this round. The response
@@ -1194,7 +1196,7 @@ where
                     .ignore();
                 debug!(?round, ?digest, "notarized block unavailable");
             }
-            CommitmentFallback::FetchByCommitment { height } => {
+            CommitmentFallback::FetchByCommitment { height, round } => {
                 let commitment = match key {
                     SubscriptionKey::Commitment(commitment) => commitment,
                     SubscriptionKey::Digest(_) => {
@@ -1203,14 +1205,21 @@ where
                 };
 
                 // Ancestry may be only notarized, so skipping commitment recomputation
-                // requires certification evidence
+                // requires certification evidence. That evidence also fixes the block's
+                // height, so only a request without it needs the round as a bound.
                 let request = if self.certified.contains(height, &commitment) {
                     Request::certified(commitment, height)
                 } else {
-                    Request::untrusted(commitment, height)
+                    Request::untrusted(commitment, height, round)
                 };
                 self.floor.fetch_if_permitted(resolver, request).ignore();
-                debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
+                debug!(
+                    %height,
+                    ?round,
+                    ?commitment,
+                    ?digest,
+                    "certified ancestry block unavailable"
+                );
             }
             CommitmentFallback::Wait => {}
         }
@@ -1562,7 +1571,7 @@ where
                     matches!(
                         annotation,
                         Annotation::Certified { height: bound }
-                        | Annotation::Untrusted { height: bound } if height <= *bound
+                        | Annotation::Untrusted { height: bound, .. } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
@@ -2076,6 +2085,24 @@ where
             Ok(has) => has,
             Err(e) => panic!("failed to check finalization: {e}"),
         }
+    }
+
+    /// Finds the finalization for `height` in the height archive or the digest cache.
+    async fn find_finalization(
+        &self,
+        height: Height,
+    ) -> Option<Finalization<P::Scheme, V::Commitment>> {
+        if let Some(proof) = self.get_finalization_by_height(height).await {
+            return Some(proof);
+        }
+
+        // A crash can leave the block archived by height and its proof only in the digest cache.
+        let stored = self.get_finalized_block(height).await?;
+        let block = V::restore_across(stored, &self.strategy).await;
+        self.cache
+            .get_finalization_for(block.digest())
+            .await
+            .filter(|proof| proof.proposal.payload == V::commitment(&block))
     }
 
     /// Get finalized block information from either the finalization archive or

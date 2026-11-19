@@ -1418,9 +1418,9 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 }
 
 /// Controls a [MutationFaultContext]: after a set number of mutating operations succeed, every
-/// later one fails with an injected error.
+/// later one fails with an injected error or never completes.
 ///
-/// A mutating operation is a write, resize, sync, started sync, or removal.
+/// A mutating operation is a blob creation, write, resize, sync, started sync, or removal.
 #[derive(Clone, Default)]
 pub struct MutationFaults {
     state: Arc<Mutex<MutationFaultState>>,
@@ -1429,7 +1429,8 @@ pub struct MutationFaults {
 #[derive(Default)]
 struct MutationFaultState {
     allowed: Option<u64>,
-    failed: bool,
+    park: bool,
+    refused: bool,
 }
 
 impl MutationFaults {
@@ -1437,40 +1438,67 @@ impl MutationFaults {
     pub fn allow(&self, operations: u64) {
         *self.state.lock() = MutationFaultState {
             allowed: Some(operations),
-            failed: false,
+            park: false,
+            refused: false,
         };
     }
 
-    /// Stop failing operations.
+    /// Let `operations` more mutating operations succeed, then never complete any later one.
+    ///
+    /// This stops an owner that treats a storage failure as fatal: poll its operation until
+    /// [Self::parked], then drop it.
+    pub fn park_after(&self, operations: u64) {
+        *self.state.lock() = MutationFaultState {
+            allowed: Some(operations),
+            park: true,
+            refused: false,
+        };
+    }
+
+    /// Stop failing and parking operations.
     pub fn disarm(&self) {
         self.state.lock().allowed = None;
     }
 
     /// Whether an operation has failed since the last [Self::allow].
     pub fn failed(&self) -> bool {
-        self.state.lock().failed
+        let state = self.state.lock();
+        state.refused && !state.park
     }
 
-    fn check(&self) -> Result<(), Error> {
-        let mut state = self.state.lock();
-        match &mut state.allowed {
-            None => Ok(()),
-            Some(0) => {
-                state.failed = true;
-                Err(Error::Io(
-                    std::io::Error::other("injected mutation failure").into(),
-                ))
+    /// Whether an operation has been parked since the last [Self::park_after].
+    pub fn parked(&self) -> bool {
+        let state = self.state.lock();
+        state.refused && state.park
+    }
+
+    async fn check(&self) -> Result<(), Error> {
+        let park = {
+            let mut state = self.state.lock();
+            match &mut state.allowed {
+                None => return Ok(()),
+                Some(0) => {
+                    state.refused = true;
+                    state.park
+                }
+                Some(allowed) => {
+                    *allowed -= 1;
+                    return Ok(());
+                }
             }
-            Some(allowed) => {
-                *allowed -= 1;
-                Ok(())
-            }
+        };
+        if park {
+            std::future::pending::<()>().await;
         }
+        Err(Error::Io(
+            std::io::Error::other("injected mutation failure").into(),
+        ))
     }
 }
 
-/// Context wrapper whose mutating storage operations fail once the shared [MutationFaults] has
-/// let its allowed number succeed. A failed operation never reaches the wrapped storage.
+/// Context wrapper whose mutating storage operations fail or park once the shared
+/// [MutationFaults] has let its allowed number succeed. Such an operation never reaches the
+/// wrapped storage.
 #[derive(Clone)]
 pub struct MutationFaultContext<E> {
     pub inner: E,
@@ -1478,6 +1506,36 @@ pub struct MutationFaultContext<E> {
 }
 
 forward_context!(MutationFaultContext, faults);
+
+impl<E: Spawner> Spawner for MutationFaultContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let faults = self.faults;
+        self.inner.spawn(move |inner| f(Self { inner, faults }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
 
 impl<E: crate::Storage> crate::Storage for MutationFaultContext<E> {
     type Blob = MutationFaultBlob<E::Blob>;
@@ -1488,6 +1546,15 @@ impl<E: crate::Storage> crate::Storage for MutationFaultContext<E> {
         name: &[u8],
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        // Opening a blob that is not stored creates it. Creation is a mutation.
+        let stored = match self.inner.scan(partition).await {
+            Ok(names) => names.iter().any(|stored| stored == name),
+            Err(Error::PartitionMissing(_)) => false,
+            Err(err) => return Err(err),
+        };
+        if !stored {
+            self.faults.check().await?;
+        }
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             MutationFaultBlob {
@@ -1500,7 +1567,7 @@ impl<E: crate::Storage> crate::Storage for MutationFaultContext<E> {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.faults.check()?;
+        self.faults.check().await?;
         self.inner.remove(partition, name).await
     }
 
@@ -1541,22 +1608,22 @@ impl<B: Blob> Blob for MutationFaultBlob<B> {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.faults.check()?;
+        self.faults.check().await?;
         self.inner.write_at(offset, bufs, options).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        self.faults.check()?;
+        self.faults.check().await?;
         self.inner.resize(len).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.faults.check()?;
+        self.faults.check().await?;
         self.inner.sync().await
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        if let Err(err) = self.faults.check() {
+        if let Err(err) = self.faults.check().await {
             return Handle::ready(Err(err));
         }
         self.inner.start_sync().await
@@ -1597,8 +1664,46 @@ mod tests {
             assert!(blob.sync().await.is_err());
             assert!(blob.start_sync().await.await.is_err());
             assert!(context.remove("mutation", Some(b"blob")).await.is_err());
+            assert!(context.open("mutation", b"created").await.is_err());
 
             // Reads still succeed, and no failed mutation reached storage.
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            assert_eq!(context.scan("mutation").await.unwrap(), [b"blob".to_vec()]);
+
+            // Opening a stored blob is not a mutation.
+            drop(blob);
+            let (blob, _) = context.open("mutation", b"blob").await.unwrap();
+
+            // Disarming lets mutations through again.
+            faults.disarm();
+            blob.resize(2).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn mutation_faults_park_after_allowed_operations() {
+        deterministic::Runner::default().start(|context| async move {
+            let faults = MutationFaults::default();
+            let context = MutationFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let (blob, _) = context.open("mutation", b"blob").await.unwrap();
+
+            // One mutation succeeds, then the next never completes.
+            faults.park_after(1);
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(!faults.parked());
+            let mut resize = Box::pin(blob.resize(2));
+            assert!(poll!(resize.as_mut()).is_pending());
+            assert!(faults.parked() && !faults.failed());
+            assert!(poll!(resize.as_mut()).is_pending());
+            drop(resize);
+
+            // The parked mutation never reached storage.
             let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
             assert_eq!(read.coalesce(), b"data");
 
