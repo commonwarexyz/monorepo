@@ -170,6 +170,20 @@ where
 // are built on `UnsafePinned` (rust-lang/rust#125735).
 struct FutureCell<F>(UnsafeCell<F>);
 
+impl<F: Send> FutureCell<F> {
+    /// Wraps a future already proven [`Send`], which the cell's [`Send`] impl relies on.
+    const fn new(future: F) -> Self {
+        Self(UnsafeCell::new(future))
+    }
+}
+
+// SAFETY: Cells are only built by `FutureCell::new`, which requires `F: Send`, so every cell holds
+// a `Send` future. Implementing `Send` for any `F` ends a proof that a spawned task is `Send` at
+// its cell. Otherwise each crate that instantiates a spawn proves it again over the whole future
+// when it erases the task to `dyn Future + Send`, and a deep future exceeds the recursion limit
+// (rust-lang/rust#159228).
+unsafe impl<F> Send for FutureCell<F> {}
+
 impl<F: Future> Future for FutureCell<F> {
     type Output = std::thread::Result<F::Output>;
 
@@ -213,6 +227,10 @@ where
             metric: metric.clone(),
         };
 
+        // Build the cell before the task captures it, so the task holds the cell rather than `f`
+        // and a proof that the task is `Send` stops at the cell.
+        let cell = FutureCell::new(f);
+
         // Wrap the future with panic catching, abort support, and cleanup.
         //
         // Everything is done in a single async block (and the function is marked
@@ -224,9 +242,9 @@ where
             let _guard = guard;
 
             // Only this task's wakers poll this block, so the wrapper can skip re-registering
-            // an unchanged one. `f` is dropped at the end of this statement, before its result
-            // is sent.
-            let result = Abortable::task(FutureCell(UnsafeCell::new(f)), abort_registration).await;
+            // an unchanged one. The future is dropped at the end of this statement, before its
+            // result is sent.
+            let result = Abortable::task(cell, abort_registration).await;
 
             // Handle result
             match result {
