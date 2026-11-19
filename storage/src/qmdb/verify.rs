@@ -12,7 +12,9 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 pub type ExtractedDigests<F, H> = Vec<(Position<F>, DigestOf<H>)>;
 
 mod sealed {
-    pub trait Sealed {}
+    /// Carries [`super::ProofExt`]'s parameters, so a proof cannot be given an implementation for
+    /// another family or digest.
+    pub trait Sealed<F, D> {}
 }
 
 /// Verification of [Proof]s over QMDB operations.
@@ -21,8 +23,8 @@ mod sealed {
 /// operations and a [Hasher] type, and encode and hash them the same way QMDB databases do. A
 /// proof from a database therefore verifies against that database's root.
 ///
-/// Sealed: implemented by [Proof].
-pub trait ProofExt<F: Family, D: Digest>: sealed::Sealed {
+/// Sealed: implemented by a [Proof] for its own family and digest.
+pub trait ProofExt<F: Family, D: Digest>: sealed::Sealed<F, D> {
     /// Return true if the proof authenticates `ops` at the locations starting at `start_loc` in
     /// the database with the provided `root`.
     ///
@@ -93,7 +95,7 @@ fn encode_ops<'a, O: Encode + 'a>(
     ops.into_iter().map(Encode::encode)
 }
 
-impl<F: Family, D: Digest> sealed::Sealed for Proof<F, D> {}
+impl<F: Family, D: Digest> sealed::Sealed<F, D> for Proof<F, D> {}
 
 impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
     fn verify<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
