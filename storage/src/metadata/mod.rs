@@ -970,6 +970,63 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_recovery_keeps_checksum_bytes_out_of_the_value() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: (),
+            };
+            let key = U64::new(42);
+            let mut metadata = Metadata::<_, U64, u8>::init(context.child("writer"), cfg.clone())
+                .await
+                .unwrap();
+            metadata.put(key.clone(), 7);
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(key.clone(), 9);
+            drop(metadata.sync().await.unwrap());
+
+            // The stored u8 plus the checksum has enough bytes for u16, but not u64.
+            assert!(matches!(
+                Metadata::<_, U64, u16>::init(context.child("u16_reader"), cfg.clone()).await,
+                Err(Error::Corruption(_))
+            ));
+            assert!(matches!(
+                Metadata::<_, U64, u64>::init(context.child("u64_reader"), cfg.clone()).await,
+                Err(Error::Corruption(_))
+            ));
+            let metadata = Metadata::<_, U64, u8>::init(context.child("reader"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&key), Some(&9));
+        });
+    }
+
+    #[test_traced]
+    fn test_recovery_rejects_duplicate_decoded_keys() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: (),
+            };
+            let mut metadata = Metadata::<_, u16, u16>::init(context.child("writer"), cfg.clone())
+                .await
+                .unwrap();
+            metadata.put(0x0102, 0x0103);
+            drop(metadata.sync().await.unwrap());
+
+            // Interpreted as (u8, u8) pairs, these bytes contain the key 1 twice.
+            assert!(matches!(
+                Metadata::<_, u8, u8>::init(context.child("narrow_reader"), cfg.clone()).await,
+                Err(Error::Corruption(_))
+            ));
+            let metadata = Metadata::<_, u16, u16>::init(context.child("reader"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&0x0102), Some(&0x0103));
+        });
+    }
+
+    #[test_traced]
     fn test_recover_corrupted_one() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
