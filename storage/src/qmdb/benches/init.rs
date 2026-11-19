@@ -4,9 +4,9 @@
 //! inside `bench_function` so criterion's name filter can skip them entirely.
 
 use crate::common::{
-    Digest, KeylessDb, StoreDb, define_fixed_variants, define_vec_variants, gen_random_kv,
-    gen_store_random_kv, keyless_cfg, make_fixed_value, make_var_value, open_keyless_db,
-    open_store_db, store_cfg,
+    Digest, KeylessDb, StoreDb, StorePartDb, THREADS, define_fixed_variants, define_vec_variants,
+    gen_random_kv, gen_store_random_kv, keyless_cfg, make_fixed_value, make_var_value,
+    open_keyless_db, open_store_db, store_cfg,
 };
 use commonware_bench::Inputs;
 use commonware_macros::boxed;
@@ -303,20 +303,26 @@ fn bench_keyless_init(c: &mut Criterion) {
     bench_keyless_family::<mmb::Family>(c, "keyless::mmb");
 }
 
-/// Benchmark reopening a populated unauthenticated store at each init cache size.
+/// Benchmark reopening a populated unauthenticated store at each init cache size, over the plain
+/// index and over a partitioned index that builds its snapshot on [THREADS] tasks.
 fn bench_store_init(c: &mut Criterion) {
     let cfg = Config::default();
     for &(elements, operations) in cases() {
-        // Populated lazily on the first sample of the first matched cache size, then reused by
-        // every cache size (all read the same on-disk database).
+        // Populated lazily on the first matched sample, then reused by every variant and cache
+        // size. All read the same on-disk database, which does not depend on the index it is
+        // reopened with.
         let mut initialized = false;
-        for &cache_size in &CACHE_SIZES {
+        for (partitioned, &cache_size) in [false, true]
+            .into_iter()
+            .flat_map(|partitioned| CACHE_SIZES.iter().map(move |cache| (partitioned, cache)))
+        {
             let cache = cache_size.map_or(0, NonZeroUsize::get);
             let runner = tokio::Runner::new(cfg.clone());
             c.bench_function(
                 &format!(
-                    "{}/variant=store::variable cache={cache} elements={elements}",
+                    "{}/variant=store::variable{} cache={cache} elements={elements}",
                     module_path!(),
+                    if partitioned { "::partitioned" } else { "" },
                 ),
                 |b| {
                     // Populate the database once, on the first matched sample.
@@ -345,12 +351,22 @@ fn bench_store_init(c: &mut Criterion) {
                         let ctx = context::get::<Context>();
                         let mut cfg = store_cfg(&ctx);
                         cfg.init_cache = cache_size;
+                        if partitioned {
+                            cfg.init_concurrency = THREADS;
+                        }
                         let start = std::time::Instant::now();
                         for _ in 0..iters {
-                            let db = StoreDb::init(ctx.child("storage"), cfg.clone(), None)
-                                .await
-                                .unwrap();
-                            assert_ne!(db.bounds().end, 0);
+                            let (ctx, cfg) = (ctx.child("storage"), cfg.clone());
+                            let end = if partitioned {
+                                StorePartDb::init(ctx, cfg, None)
+                                    .await
+                                    .unwrap()
+                                    .bounds()
+                                    .end
+                            } else {
+                                StoreDb::init(ctx, cfg, None).await.unwrap().bounds().end
+                            };
+                            assert_ne!(end, 0);
                         }
                         start.elapsed()
                     });

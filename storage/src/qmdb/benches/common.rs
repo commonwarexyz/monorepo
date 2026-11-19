@@ -37,7 +37,7 @@ use commonware_storage::{
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
-        store::{Config as StoreConfig, Db as Store},
+        store::{Config as StoreConfig, Db as Store, partitioned::Db as StorePart},
     },
     translator::EightCap,
 };
@@ -105,6 +105,11 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
 
 /// Unauthenticated store with variable-size values.
 pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap, Rayon>;
+
+/// [StoreDb] with a partitioned snapshot index (256 partitions, P=1), which can build its snapshot
+/// on several tasks. It opens the same database as [StoreDb].
+#[allow(dead_code)]
+pub type StorePartDb = StorePart<Context, Digest, Vec<u8>, EightCap, 1, Rayon>;
 
 /// Open an unauthenticated store benchmark database using the shared benchmark configuration.
 pub async fn open_store_db(ctx: Context) -> StoreDb {
