@@ -283,6 +283,9 @@ commonware_macros::stability_scope!(ALPHA {
     #[cfg(feature = "arbitrary")]
     pub mod conformance;
 
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz;
+
     // Re-export paste for use in conformance macros
     #[cfg(feature = "arbitrary")]
     #[doc(hidden)]

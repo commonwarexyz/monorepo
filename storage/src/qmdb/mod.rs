@@ -93,7 +93,7 @@ use crate::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
-    qmdb::operation::Floored,
+    qmdb::operation::Committable,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
@@ -136,7 +136,7 @@ fn validate_initialization_commit<F: Family>(
     start: u64,
     size: u64,
     fresh: bool,
-    commit: Option<&impl Floored<F>>,
+    commit: Option<&impl Committable<F>>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>> {
     if size == 0 {
@@ -147,7 +147,7 @@ fn validate_initialization_commit<F: Family>(
         };
     }
     let floor = commit
-        .and_then(Floored::inactivity_floor)
+        .and_then(Committable::inactivity_floor)
         .ok_or(Error::DataCorrupted(
             "selected operation has no commit floor",
         ))?;
@@ -171,7 +171,10 @@ pub(crate) async fn validate_initialization<F, E, C, H, S>(
 where
     F: Family,
     E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item: Committable<F> + commonware_codec::EncodeShared,
+        >,
     H: Hasher,
     S: commonware_parallel::Strategy,
 {
@@ -200,7 +203,10 @@ pub(crate) async fn prepare_initialization<F, E, C, H, S>(
 where
     F: Family,
     E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item: Committable<F> + commonware_codec::EncodeShared,
+        >,
     H: Hasher,
     S: commonware_parallel::Strategy,
 {
@@ -228,7 +234,10 @@ pub(crate) async fn init_journal<F, E, C, H, S>(
 where
     F: Family,
     E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item: Committable<F> + commonware_codec::EncodeShared,
+        >,
     H: Hasher,
     S: commonware_parallel::Strategy,
 {
@@ -260,28 +269,25 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
         .expect("a single-leaf Merkle root is always valid")
 }
 
-/// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
-///
-/// `op_count` must be a non-zero commit-boundary historical size: the operation at `op_count - 1`
-/// must itself be a commit op (one for which `floor_of` returns `Some`).
+/// Look up the inactivity floor declared by the commit at `size - 1`, or `None` if that
+/// operation is not a commit. [`find_inactivity_floor_at`] is the variant for callers that
+/// require a commit.
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
-///   `op_count - 1` is retained but is not a commit op (either because the caller passed a
-///   non-commit-boundary size, or because pruning removed the commit that would have governed this
-///   size).
-/// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
-pub(crate) async fn find_inactivity_floor_at<F, R>(
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero (no preceding commit exists).
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
+pub(crate) async fn commit_floor_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
-) -> Result<Location<F>, Error<F>>
+    size: Location<F>,
+) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    let Some(last_op) = op_count.checked_sub(1) else {
-        return Err(Error::HistoricalFloorPruned(op_count));
+    let Some(last_op) = size.checked_sub(1) else {
+        return Err(Error::HistoricalFloorPruned(size));
     };
     let last_op = *last_op;
     let bounds = reader.bounds();
@@ -290,32 +296,54 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = op
-        .inactivity_floor()
-        .ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let Some(floor) = op.inactivity_floor() else {
+        return Ok(None);
+    };
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
         ));
     }
-    Ok(floor)
+    Ok(Some(floor))
 }
 
-/// Compute the inactive peak count for a historical operation count.
+/// Look up the inactivity floor declared by the commit at `size - 1`.
+///
+/// # Errors
+///
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero, or if the operation at `size - 1` is
+///   retained but is not a commit (the caller passed a non-commit-boundary size, or pruning
+///   removed the commit that would have governed it).
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
+pub(crate) async fn find_inactivity_floor_at<F, R>(
+    reader: &R,
+    size: Location<F>,
+) -> Result<Location<F>, Error<F>>
+where
+    F: Family,
+    R: Contiguous<Item: Committable<F>>,
+{
+    commit_floor_at(reader, size)
+        .await?
+        .ok_or(Error::HistoricalFloorPruned(size))
+}
+
+/// Compute the inactive peak count for a historical `size`.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
+    size: Location<F>,
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    if op_count == Location::new(0) {
+    if size == Location::new(0) {
         return Ok(0);
     }
 
-    let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
-    Ok(F::inactive_peaks(op_count, floor))
+    let floor = find_inactivity_floor_at::<F, _>(reader, size).await?;
+    Ok(F::inactive_peaks(size, floor))
 }
 
 /// Errors that can occur when interacting with an authenticated database.

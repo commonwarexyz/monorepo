@@ -30,6 +30,14 @@ where
     type Context = E;
     type Hasher = H;
 
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        Self::init(context, config, max_size).await
+    }
+
     /// Build a compact db from the synced log, which must hold exactly the commit operation at
     /// the start of `range`.
     async fn from_sync_result(
@@ -85,7 +93,27 @@ where
         Ok(None)
     }
 
-    fn ops_root(&self) -> Self::Digest {
-        self.root()
+    /// The range covers only the last commit, the one operation a compact db holds.
+    fn target(&self) -> sync::Target<F, Self::Digest> {
+        self.target()
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, Self::Digest>,
+    ) -> Result<Self, Error<F>> {
+        self.prune(target.range.end()).await
+    }
+
+    /// Reject a target that covers more than the last commit.
+    fn validate_target(
+        target: &sync::Target<F, Self::Digest>,
+    ) -> Result<(), sync::EngineError<F, Self::Digest>> {
+        if target.range.start() + 1 != target.range.end() {
+            return Err(sync::EngineError::InvalidTarget {
+                bounds: target.range.clone(),
+            });
+        }
+        Ok(())
     }
 }

@@ -16,7 +16,7 @@ use crate::{
         contiguous::variable,
     },
     merkle::{Family, Location, MAX_PINNED_NODES, Proof, compact},
-    qmdb::{self, Error, sync::CompactTarget},
+    qmdb::{self, Error, sync::Target},
 };
 use bytes::Bytes;
 use commonware_codec::{Buf, EncodeSize, Read, Write};
@@ -138,11 +138,12 @@ impl<F: Family, D: Digest, O: Operation<F>> VerifiedWitness<F, D, O> {
         self.witness.commit.metadata()
     }
 
-    /// The compact-sync target (root and size) this witness can serve.
-    pub(super) const fn target(&self) -> CompactTarget<F, D> {
-        CompactTarget {
+    /// The sync target this witness can serve: its root and its last commit.
+    pub(super) fn target(&self) -> Target<F, D> {
+        let size = self.size();
+        Target {
             root: self.root,
-            size: self.size(),
+            range: commonware_utils::non_empty_range!(size - 1, size),
         }
     }
 }
@@ -542,7 +543,7 @@ pub(crate) mod tests {
                 let db = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let selected = db.target();
-                assert_eq!(selected.size, Location::new(2));
+                assert_eq!(selected.range.end(), Location::new(2));
                 drop(db);
 
                 // Append a newer witness whose commit only the valid config decodes.

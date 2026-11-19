@@ -652,7 +652,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -770,7 +770,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -874,7 +874,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         .await
         .unwrap();
 
-        let stale_target = Target {
+        let stale_target = sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
@@ -890,7 +890,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             .is_none()
         );
 
-        let matching_target = Target {
+        let matching_target = sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
