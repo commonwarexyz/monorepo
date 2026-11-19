@@ -131,7 +131,7 @@ where
     // during replay.
     let snapshot_context = context.child("any_snapshot");
     let any_metrics = AnyMetrics::new(context.child("any"));
-    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
+    let any: AnyDb<F, E, J, I, H, U, S, N> = AnyDb::init_from_log(
         snapshot_context,
         index,
         log,
