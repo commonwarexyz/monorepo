@@ -781,7 +781,7 @@ pub(crate) mod tests {
     use crate::{
         merkle::{Proof, mmr::Family as MmrFamily},
         qmdb::{
-            operation::Committable,
+            operation::{Committable, sealed::Sealed},
             sync::{
                 harness::{
                     DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, OpOf, SyncTestHarness,
@@ -817,6 +817,8 @@ pub(crate) mod tests {
             self.journal_size
         }
     }
+
+    impl Sealed for i32 {}
 
     impl Committable<MmrFamily> for i32 {
         fn inactivity_floor(&self) -> Option<Location<MmrFamily>> {

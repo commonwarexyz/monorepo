@@ -1,6 +1,9 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{operation::Committable, value::ValueEncoding},
+    qmdb::{
+        operation::{Committable, sealed::Sealed},
+        value::ValueEncoding,
+    },
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -65,6 +68,8 @@ impl<F: Family, V: OperationCodec> Write for Operation<F, V> {
         V::write_operation(self, buf)
     }
 }
+
+impl<F: Family, V: ValueEncoding> Sealed for Operation<F, V> {}
 
 impl<F: Family, V: ValueEncoding> Committable<F> for Operation<F, V> {
     fn inactivity_floor(&self) -> Option<Location<F>> {

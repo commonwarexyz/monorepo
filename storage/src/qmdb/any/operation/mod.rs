@@ -1,6 +1,9 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{operation::Committable, value::ValueEncoding},
+    qmdb::{
+        operation::{Committable, sealed::Sealed},
+        value::ValueEncoding,
+    },
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -92,6 +95,8 @@ impl<F: Family, S: Update> crate::qmdb::operation::Operation<F> for Operation<F,
         matches!(self, Self::Delete(_))
     }
 }
+
+impl<F: Family, S: Update> Sealed for Operation<F, S> {}
 
 impl<F: Family, S: Update> Committable<F> for Operation<F, S> {
     fn inactivity_floor(&self) -> Option<Location<F>> {

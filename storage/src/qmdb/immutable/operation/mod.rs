@@ -12,7 +12,7 @@ pub(crate) mod variable;
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        operation::{Committable, Key},
+        operation::{Committable, Key, sealed::Sealed},
         value::ValueEncoding,
     },
 };
@@ -61,6 +61,8 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
         }
     }
 }
+
+impl<F: Family, K: Key, V: ValueEncoding> Sealed for Operation<F, K, V> {}
 
 impl<F: Family, K: Key, V: ValueEncoding> Committable<F> for Operation<F, K, V> {
     fn inactivity_floor(&self) -> Option<Location<F>> {

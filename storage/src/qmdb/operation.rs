@@ -16,8 +16,17 @@ pub trait Key: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug 
 
 impl<T> Key for T where T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}
 
+pub(in crate::qmdb) mod sealed {
+    /// Restricts [`super::Committable`], and with it [`super::Operation`], to this crate's
+    /// operation types.
+    pub trait Sealed {}
+}
+
 /// An operation that may be a commit. Commits declare an inactivity floor.
-pub trait Committable<F: Family> {
+///
+/// Sealed: implemented by [`crate::qmdb::any::operation::Operation`],
+/// [`crate::qmdb::immutable::Operation`] and [`crate::qmdb::keyless::Operation`].
+pub trait Committable<F: Family>: sealed::Sealed {
     /// The inactivity floor if this operation is a commit.
     fn inactivity_floor(&self) -> Option<Location<F>>;
 
@@ -31,6 +40,8 @@ pub trait Committable<F: Family> {
 }
 
 /// An operation that can be applied to a database.
+///
+/// Sealed: implemented by [`crate::qmdb::any::operation::Operation`].
 pub trait Operation<F: Family>: Committable<F> {
     /// The key type for this operation.
     type Key: Key;
