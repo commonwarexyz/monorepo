@@ -704,8 +704,8 @@ pub(crate) mod test {
         });
     }
 
-    /// On replay failure, a parallel build must join its workers and release their partition ranges.
-    /// Every log clone must be dropped before returning, as required by [`Rebuild`].
+    /// On replay failure, a parallel build must join its workers and release their partition
+    /// ranges. Every log clone must be dropped before returning, as required by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
