@@ -17,14 +17,16 @@
 //! - the inner future and its output are dropped exactly when it finishes or the last clone
 //!   drops, and a [WeakShared] upgrades exactly while a clone is alive.
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::{
+    FuzzRng,
     futures::{Shared, WeakShared},
     sync::Mutex,
     vec::NonEmptyVec,
 };
 use futures::task::ArcWake;
 use libfuzzer_sys::fuzz_target;
+use rand_core::Rng as _;
 use std::{
     future::Future,
     panic::{self, AssertUnwindSafe},
@@ -45,6 +47,10 @@ const MAX_CLONES: usize = 12;
 const MAX_WEAKS: usize = 4;
 /// Maximum number of actions the inner future takes per poll.
 const MAX_ACTIONS: usize = 4;
+/// Bytes of the stream an input is sampled from, several times the largest input.
+const STREAM_BYTES: usize = 1 << 12;
+/// Bytes of the input's head that seed the stream.
+const SEED_BYTES: usize = 8;
 
 /// Message of the inner future's scripted panic.
 const INNER_PANIC: &str = "inner future failed";
@@ -107,10 +113,34 @@ enum Operation {
     Forget,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     clones: u8,
     operations: NonEmptyVec<Operation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        // libFuzzer starts from inputs of a few bytes, which would run one operation. The input's
+        // head therefore seeds a fixed-size stream of [`FuzzRng`] output that the rest of the
+        // input overwrites from its start, so every input, even an empty one, samples a whole
+        // script.
+        let seed = u.bytes(u.len().min(SEED_BYTES))?.to_vec();
+        let mut stream = vec![0; STREAM_BYTES.max(u.len())];
+        FuzzRng::new(seed).fill_bytes(&mut stream);
+        let literal = u.bytes(u.len())?;
+        stream[..literal.len()].copy_from_slice(literal);
+        let u = &mut Unstructured::new(&stream);
+
+        let clones = u.arbitrary()?;
+        let operations = (0..u.int_in_range(1..=MAX_OPERATIONS)?)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        Ok(Self {
+            clones,
+            operations: NonEmptyVec::try_from(operations).expect("at least one operation"),
+        })
+    }
 }
 
 /// A waker that counts its wakes.

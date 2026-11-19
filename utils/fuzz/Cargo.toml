@@ -214,3 +214,17 @@ path = "fuzz_targets/prefetch.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "roaring_explorative"
+path = "fuzz_targets/roaring_explorative.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "thread_local_cache"
+path = "fuzz_targets/thread_local_cache.rs"
+test = false
+doc = false
+bench = false

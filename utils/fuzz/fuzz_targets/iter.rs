@@ -9,16 +9,25 @@
 //! or without an upper bound. [NonEmpty] must build exactly from non-empty sources and yield
 //! their items in order, whole or split into its first item and the rest.
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::{
+    FuzzRng,
     iter::{NonEmpty, zip_eq},
     non_empty,
 };
 use libfuzzer_sys::fuzz_target;
+use rand_core::Rng as _;
 use std::{
     panic::{self, AssertUnwindSafe},
     vec,
 };
+
+/// Bytes of the stream an input is sampled from, and of the input's head that seeds it.
+const STREAM_BYTES: usize = 1 << 12;
+const SEED_BYTES: usize = 8;
+
+/// Most checks one input runs.
+const MAX_CHECKS: usize = 32;
 
 /// How far a side's size hint strays from the items it has left.
 #[derive(Arbitrary, Clone, Copy, Debug)]
@@ -60,7 +69,7 @@ impl Iterator for Side {
 }
 
 #[derive(Arbitrary, Debug)]
-enum FuzzInput {
+enum Check {
     /// Zip sides of equal length.
     ZipEqual {
         left: Hint,
@@ -76,6 +85,30 @@ enum FuzzInput {
     },
     /// Build a [NonEmpty] from any items.
     NonEmpty { items: Vec<u8> },
+}
+
+#[derive(Debug)]
+struct FuzzInput {
+    checks: Vec<Check>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        // The input's head seeds a fixed-size stream that the rest of the input overwrites from
+        // its start, so even the empty input samples a whole list of checks.
+        let seed = u.bytes(u.len().min(SEED_BYTES))?.to_vec();
+        let mut stream = vec![0; STREAM_BYTES.max(u.len())];
+        FuzzRng::new(seed).fill_bytes(&mut stream);
+        let literal = u.bytes(u.len())?;
+        stream[..literal.len()].copy_from_slice(literal);
+        let u = &mut Unstructured::new(&stream);
+
+        Ok(Self {
+            checks: (0..u.int_in_range(1..=MAX_CHECKS)?)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?,
+        })
+    }
 }
 
 /// Whether `f` panics, without aborting.
@@ -147,20 +180,24 @@ fn check_non_empty(items: Vec<u8>) {
     assert_eq!(listed.into_iter().collect::<Vec<_>>(), [first, last]);
 }
 
-fuzz_target!(|inputs: Vec<FuzzInput>| {
-    for input in inputs {
-        match input {
-            FuzzInput::ZipEqual { left, right, pairs } => {
+fn fuzz(input: FuzzInput) {
+    for check in input.checks {
+        match check {
+            Check::ZipEqual { left, right, pairs } => {
                 let (left_items, right_items) = pairs.into_iter().unzip();
                 check_zip(left, left_items, right, right_items);
             }
-            FuzzInput::Zip {
+            Check::Zip {
                 left,
                 right,
                 left_items,
                 right_items,
             } => check_zip(left, left_items, right, right_items),
-            FuzzInput::NonEmpty { items } => check_non_empty(items),
+            Check::NonEmpty { items } => check_non_empty(items),
         }
     }
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });

@@ -15,8 +15,12 @@
 //! line cap faults, panics, or hangs.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_utils::prefetch::{Lookahead, prefetch, prefetch_lines};
+use commonware_utils::{
+    FuzzRng,
+    prefetch::{Lookahead, prefetch, prefetch_lines},
+};
 use libfuzzer_sys::fuzz_target;
+use rand_core::Rng as _;
 use std::panic::{self, AssertUnwindSafe};
 
 /// Maximum number of items a scan holds.
@@ -29,6 +33,10 @@ const MAX_STEP: usize = 8;
 const MAX_SPANS: usize = 8;
 /// Longest span hinted without a line cap, in elements, as hint sites over short spans pass.
 const MAX_UNCAPPED: usize = 1 << 12;
+/// Bytes of the stream an input is sampled from, several times the largest input.
+const STREAM_BYTES: usize = 1 << 12;
+/// Bytes of the input's head that seed the stream.
+const SEED_BYTES: usize = 8;
 
 /// The cursor's distance, near zero or near the largest distance.
 #[derive(Arbitrary, Debug)]
@@ -64,7 +72,17 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        // An exhausted input samples the lower bound, so a short input scans the most items.
+        // libFuzzer starts from inputs of a few bytes, which would script no move. The input's
+        // head therefore seeds a fixed-size stream of [`FuzzRng`] output that the rest of the
+        // input overwrites from its start, so every input, even an empty one, samples a whole
+        // scan.
+        let seed = u.bytes(u.len().min(SEED_BYTES))?.to_vec();
+        let mut stream = vec![0; STREAM_BYTES.max(u.len())];
+        FuzzRng::new(seed).fill_bytes(&mut stream);
+        let literal = u.bytes(u.len())?;
+        stream[..literal.len()].copy_from_slice(literal);
+        let u = &mut Unstructured::new(&stream);
+
         let items = MAX_ITEMS - u.int_in_range(0..=MAX_ITEMS)?;
         let distance = match u.arbitrary()? {
             Distance::Near(offset) => usize::from(offset) % (MAX_ITEMS + 2),

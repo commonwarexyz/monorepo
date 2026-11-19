@@ -39,6 +39,9 @@ const STREAM_BYTES: usize = 1 << 12;
 const SEED_BYTES: usize = 8;
 const ENTROPY_BYTES: usize = 32;
 
+/// Number of [`Width`] variants.
+const WIDTHS: usize = 8;
+
 /// Every primitive implementation and three [`Uint`] shapes: whole limbs, a partial top limb,
 /// and a width that ends inside a byte.
 #[derive(Arbitrary, Debug)]
@@ -68,14 +71,14 @@ enum Operand {
 }
 
 /// How many bytes a decode reads relative to the encoded size.
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum Len {
     Short,
     Exact,
     Long,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum Op {
     Pair(Operand, Operand),
     Credit(Operand),
@@ -352,16 +355,23 @@ fn run(plan: Plan) {
     } = plan;
     let cfg = deterministic::Config::new().with_rng(FuzzRng::from(entropy));
     let runner = deterministic::Runner::new(cfg);
+    // Every width runs the plan, starting with the sampled one, so even the two inputs libFuzzer
+    // starts from reach every implementation.
+    let first = width as usize;
     runner.start(|mut context| async move {
-        match width {
-            Width::U8 => apply::<u8>(ops, &mut context),
-            Width::U16 => apply::<u16>(ops, &mut context),
-            Width::U32 => apply::<u32>(ops, &mut context),
-            Width::U64 => apply::<u64>(ops, &mut context),
-            Width::U128 => apply::<u128>(ops, &mut context),
-            Width::U256 => apply::<U256>(ops, &mut context),
-            Width::U72 => apply::<U72>(ops, &mut context),
-            Width::U36 => apply::<U36>(ops, &mut context),
+        for offset in 0..WIDTHS {
+            let ops = ops.clone();
+            match (first + offset) % WIDTHS {
+                w if w == Width::U8 as usize => apply::<u8>(ops, &mut context),
+                w if w == Width::U16 as usize => apply::<u16>(ops, &mut context),
+                w if w == Width::U32 as usize => apply::<u32>(ops, &mut context),
+                w if w == Width::U64 as usize => apply::<u64>(ops, &mut context),
+                w if w == Width::U128 as usize => apply::<u128>(ops, &mut context),
+                w if w == Width::U256 as usize => apply::<U256>(ops, &mut context),
+                w if w == Width::U72 as usize => apply::<U72>(ops, &mut context),
+                w if w == Width::U36 as usize => apply::<U36>(ops, &mut context),
+                _ => unreachable!(),
+            }
         }
     });
 }
