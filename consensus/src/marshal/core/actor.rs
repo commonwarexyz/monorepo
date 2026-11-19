@@ -2060,23 +2060,25 @@ where
         }
     }
 
-    /// Returns the archived block in its certified encoding when a certificate is available.
+    /// Returns the archived block and its finalization, if available.
     async fn get_block_with_finalization(
         &self,
         height: Height,
     ) -> Option<(V::Block, Option<Finalization<P::Scheme, V::Commitment>>)> {
         let stored = self.get_finalized_block(height).await?;
-        let mut block = V::restore_across(stored, &self.strategy).await;
+        let block = V::restore_across(stored, &self.strategy).await;
+        let commitment = V::commitment(&block);
         let finalization = match self.get_finalization_by_height(height).await {
-            Some(proof) => Some(proof),
+            Some(proof) => {
+                assert!(
+                    commitment == proof.proposal.payload,
+                    "archived block does not match stored finalization"
+                );
+                Some(proof)
+            }
             // A crash between the two height archive syncs can leave the proof only in the cache.
-            None => self.cache.get_finalization_by_digest(block.digest()).await,
+            None => self.cache.get_finalization_for(commitment).await,
         };
-        if let Some(proof) = &finalization
-            && V::commitment(&block) != proof.proposal.payload
-        {
-            block = V::from_application_block(V::into_shared(block), proof.proposal.payload);
-        }
         Some((block, finalization))
     }
 
@@ -2599,9 +2601,8 @@ where
             return None;
         };
         let block = V::restore_across(block, strategy).await;
-        assert_eq!(
-            block.digest(),
-            V::commitment_to_inner(finalization.proposal.payload),
+        assert!(
+            V::commitment(&block) == finalization.proposal.payload,
             "successor block does not match stored finalization"
         );
         Some((successor, finalization.round()))

@@ -637,20 +637,12 @@ where
         &self,
         commitment: V::Commitment,
     ) -> Option<Finalization<S, V::Commitment>> {
-        self.get_finalization_by_digest(V::commitment_to_inner(commitment))
-            .await
-            .filter(|finalization| finalization.proposal.payload == commitment)
-    }
-
-    /// Returns the certificate for a finalized application block. Its signed payload identifies
-    /// the encoding consensus finalized.
-    pub(crate) async fn get_finalization_by_digest(
-        &self,
-        digest: <V::Block as Digestible>::Digest,
-    ) -> Option<Finalization<S, V::Commitment>> {
+        let digest = V::commitment_to_inner(commitment);
         for cache in self.caches.values().rev() {
             match cache.finalizations.get(Identifier::Key(&digest)).await {
-                Ok(Some(finalization)) => return Some(finalization),
+                Ok(Some(finalization)) => {
+                    return (finalization.proposal.payload == commitment).then_some(finalization);
+                }
                 Ok(None) => continue,
                 Err(e) => panic!("failed to get cached finalization: {e}"),
             }

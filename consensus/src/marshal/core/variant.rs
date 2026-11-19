@@ -72,8 +72,8 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Extracts the block digest from a consensus commitment.
     ///
-    /// Different encodings of an application block may share its digest. Match the full
-    /// commitment when checking which encoding a certificate authenticates.
+    /// For blocks and certificates admitted by consensus verification, the digest must
+    /// uniquely determine the commitment. An untrusted lookup key has no such guarantee.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
     /// Returns the parent commitment referenced by `block`.
