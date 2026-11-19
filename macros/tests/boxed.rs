@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use commonware_macros::boxed;
     use futures::executor::block_on;
