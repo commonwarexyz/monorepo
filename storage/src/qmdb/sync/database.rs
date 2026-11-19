@@ -67,7 +67,7 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
     private_bounds,
     reason = "the Hooks supertrait is private so only the sync engine can call its methods"
 )]
-pub trait Database: Hooks<Self> + Sized + Send {
+pub trait Database: Hooks<Self> + Sized {
     /// The Merkle family of the operations log.
     type Family: Family;
 
