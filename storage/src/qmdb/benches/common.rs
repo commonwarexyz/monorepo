@@ -101,11 +101,11 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
 }
 
 /// Unauthenticated store with variable-size values.
-pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap>;
+pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap, Rayon>;
 
 /// Open an unauthenticated store benchmark database using the shared benchmark configuration.
 pub async fn open_store_db(ctx: Context) -> StoreDb {
-    let cfg = store_cfg();
+    let cfg = store_cfg(&ctx);
     StoreDb::init(ctx, cfg, None).await.unwrap()
 }
 
@@ -341,7 +341,7 @@ pub fn keyless_cfg_with(
 
 /// Unauthenticated store config for variable-size values, using the shared page cache, journal
 /// layout, and init cache.
-pub fn store_cfg() -> StoreConfig<EightCap, VarVecCfg> {
+pub fn store_cfg(ctx: &impl Strategizer) -> StoreConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     StoreConfig {
         log: var_log_cfg(
@@ -353,6 +353,7 @@ pub fn store_cfg() -> StoreConfig<EightCap, VarVecCfg> {
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
+        strategy: ctx.strategy(THREADS),
     }
 }
 

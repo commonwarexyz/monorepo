@@ -5,6 +5,9 @@
 //! compared to [super::unordered] variants. Their translator must implement
 //! [OrderedTranslator](crate::translator::OrderedTranslator).
 //!
+//! Span lookups use the lexicographic byte order defined by [`Key`](crate::qmdb::operation::Key),
+//! including when the queried key is absent.
+//!
 //! Variants:
 //! - [fixed]: Variant optimized for values of fixed size.
 //! - [variable]: Variant for values of variable size.
@@ -438,7 +441,7 @@ pub mod tests {
                 let wrong_root = Sha256::hash(&[&[0xDD]]);
                 assert!(!proof.verify::<Sha256, V>(key, value, &wrong_root));
                 // Proof should fail with the wrong next-key.
-                let mut bad_proof = proof.clone();
+                let mut bad_proof = proof;
                 bad_proof.next_key = wrong_key;
                 assert!(!bad_proof.verify::<Sha256, V>(key, value, &root));
             }

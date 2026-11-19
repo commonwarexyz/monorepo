@@ -1498,7 +1498,7 @@ where
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         let leaves = commit_loc + 1;
-        let inactive_peaks = db.inactive_peaks(leaves, floor);
+        let inactive_peaks = F::inactive_peaks(leaves, floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
         // strategy (see `Journal::merkleize`).
@@ -1914,7 +1914,7 @@ where
             .iter()
             .map(|(key, value)| (key, value))
             .chain(&prepared.mutations)
-            .filter(|&(key, _)| db.snapshot.get(key).next().is_some())
+            .filter(|&(key, _)| db.snapshot.get(key.as_ref()).next().is_some())
             .map(|(_, value)| made_inactive(value))
             .sum();
         let Limits { entries, skips } = policy.limits(staged + existing);
@@ -2687,7 +2687,7 @@ where
                     .map(|(key, ..)| key),
             )
         {
-            let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = db.snapshot.prev_translated_key(key.as_ref()) else {
                 continue;
             };
             prev_locations.extend(iter.copied());
@@ -2944,8 +2944,8 @@ where
         // batch leaves alone.
         let mut locations = Vec::new();
         for key in &evicted {
-            locations.extend(db.snapshot.get(key).copied());
-            if let Some((bucket, _)) = db.snapshot.prev_translated_key(key) {
+            locations.extend(db.snapshot.get(key.as_ref()).copied());
+            if let Some((bucket, _)) = db.snapshot.prev_translated_key(key.as_ref()) {
                 locations.extend(bucket.copied());
             }
         }
@@ -3458,6 +3458,29 @@ where
             ancestor_base_locs: Vec::new(),
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
+    }
+}
+
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> crate::qmdb::sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, U, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(
+                self.bounds.inactivity_floor,
+                self.bounds.tip.size
+            ),
+        }
     }
 }
 

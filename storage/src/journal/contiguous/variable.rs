@@ -27,10 +27,7 @@ use crate::{
     journal::{
         Error,
         durability::Barrier,
-        frame::{
-            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
-        },
+        frame::{Limited, decode_item, decode_length_prefix, encode_frame_into, read_frame_at},
     },
 };
 use bytes::{Bytes, BytesMut};
@@ -94,6 +91,22 @@ fn read_buffer_len(lengths: impl IntoIterator<Item = usize>) -> Option<usize> {
         .into_iter()
         .try_fold(0usize, |total, len| total.checked_add(len))?;
     (total <= MAX_ALLOCATION_BYTES).then_some(total)
+}
+
+/// Read a cached frame prefix and return the frame's exclusive end and prefix length.
+fn cached_frame_header<B: RBlob>(
+    blob: &Blob<'_, B>,
+    offset: u64,
+    header: &mut [u8; MAX_U32_VARINT_SIZE],
+) -> Option<(u64, usize)> {
+    let remaining = blob.size().checked_sub(offset)?;
+    let header_len = remaining.min(MAX_U32_VARINT_SIZE as u64) as usize;
+    if header_len == 0 || !blob.try_read_sync_into(&mut header[..header_len], offset) {
+        return None;
+    }
+    let (size, prefix_len) = decode_length_prefix(&mut Copying(&header[..header_len])).ok()?;
+    let len = size.checked_add(prefix_len)? as u64;
+    (len <= remaining).then(|| (offset + len, prefix_len))
 }
 
 /// Decode an item from a `span` that holds exactly its frame, length prefix included. Returns
@@ -515,39 +528,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
-        let remaining = blob.size().checked_sub(offset)?;
-        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
-        if header_len == 0 {
-            return None;
-        }
-
-        // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_sync_into(&mut header[..header_len], offset) {
-            return None;
-        }
-        let (_, item_info) = find_frame(&header[..header_len], offset).ok()?;
-
-        let (varint_len, data_len) = match item_info {
-            FrameInfo::Complete {
-                varint_len,
-                data_len,
-            } => (varint_len, data_len),
-            FrameInfo::Incomplete {
-                varint_len,
-                total_len,
-                ..
-            } => (varint_len, total_len),
-        };
-        let item_len = varint_len.checked_add(data_len)?;
-        if item_len > usize::try_from(remaining).ok()? {
-            return None;
-        }
+        let (end, varint_len) = cached_frame_header(&blob, offset, &mut header)?;
+        let item_len = usize::try_from(end - offset).ok()?;
 
         // If the full item fits in the header read, decode directly.
-        if item_len <= header_len {
+        if item_len <= header.len() {
             return decode_item::<V>(
-                Copying(&header[varint_len..varint_len + data_len]),
+                Copying(&header[varint_len..item_len]),
                 &self.codec_config,
                 self.compressed,
             )
@@ -652,6 +640,67 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         (next < self.bounds.end && !next.is_multiple_of(self.items_per_blob.get())).then_some(next)
     }
 
+    /// Resolve ordered, disjoint frame ranges from cached offsets or length prefixes.
+    /// Unknown ranges are skipped. Inconsistent ranges leave the batch for completion.
+    fn cached_frame_extents(
+        &self,
+        positions: &[u64],
+        lookups: &[u64],
+        offsets: &[Option<u64>],
+    ) -> Vec<(usize, u64, usize)> {
+        let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
+        let mut lookup_idx = 0;
+        let mut next_blob_start = 0;
+        let mut blob = None;
+        let items_per_blob = self.items_per_blob.get();
+        let mut previous_end = 0;
+        for (idx, &position) in positions.iter().enumerate() {
+            while lookups[lookup_idx] != position {
+                lookup_idx += 1;
+            }
+            if self.validate_readable(position).is_err() {
+                continue;
+            }
+            let Some(offset) = offsets[lookup_idx] else {
+                continue;
+            };
+
+            // Each blob has its own byte offsets. Positions in a missing blob stay unserved.
+            if position >= next_blob_start {
+                let blob_num = position_to_blob(position, items_per_blob);
+                next_blob_start = (blob_num + 1).saturating_mul(items_per_blob);
+                blob = self.data.get(blob_num);
+                previous_end = 0;
+            }
+            let Some(blob) = &blob else {
+                continue;
+            };
+
+            // A same-blob successor is adjacent in `lookups`.
+            let indexed_end = match self.next_in_blob(position) {
+                Some(_) => offsets[lookup_idx + 1],
+                None => Some(blob.size()),
+            };
+            if offset < previous_end {
+                return Vec::new();
+            }
+            let Some(end) = indexed_end.or_else(|| {
+                cached_frame_header(blob, offset, &mut [0; MAX_U32_VARINT_SIZE]).map(|(end, _)| end)
+            }) else {
+                continue;
+            };
+            if end <= offset || end > blob.size() {
+                return Vec::new();
+            }
+            let Ok(len) = usize::try_from(end - offset) else {
+                continue;
+            };
+            previous_end = end;
+            extents.push((idx, offset, len));
+        }
+        extents
+    }
+
     /// Fill `out[i]` for each readable position whose offset and frame are already in the page
     /// cache or the in-memory tail and whose frame decodes. Returns a `Miss` for every other
     /// position, carrying the offsets the pass found so completion can skip those lookups.
@@ -674,61 +723,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         let offsets = self.offsets.probe_items(&lookups);
 
-        // Resolve each queried frame's extent for the batched cache read below. Frames with a
-        // cached start but no cached successor can use their length prefix instead. If any
-        // resolved extent is empty, unsorted, overlapping, or out of bounds, serve nothing
-        // from the batch so completion can validate all requested extents together.
-        let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
-        let mut singles = Vec::new();
-        let mut lookup_idx = 0;
-        let mut next_blob_start = 0;
-        let mut size = None;
-        let mut previous_end = 0;
-        for (idx, &position) in positions.iter().enumerate() {
-            while lookups[lookup_idx] != position {
-                lookup_idx += 1;
-            }
-            if self.validate_readable(position).is_err() {
-                continue;
-            }
-            let Some(offset) = offsets[lookup_idx] else {
-                continue;
-            };
-
-            // On entering a new blob, look up its size and restart the overlap check. Positions
-            // in a blob missing from the reader stay unserved.
-            if position >= next_blob_start {
-                let blob_num = position_to_blob(position, items_per_blob);
-                next_blob_start = (blob_num + 1).saturating_mul(items_per_blob);
-                size = self.data.get(blob_num).map(|blob| blob.size());
-                previous_end = 0;
-            }
-            let Some(size) = size else {
-                continue;
-            };
-
-            // A same-blob successor is adjacent in `lookups`.
-            let end = match self.next_in_blob(position) {
-                Some(_) => offsets[lookup_idx + 1],
-                None => Some(size),
-            };
-            // Checking the start needs no successor, so it covers frames served by prefix too.
-            if offset < previous_end || end.is_some_and(|end| end <= offset || end > size) {
-                extents.clear();
-                singles.clear();
-                break;
-            }
-            let Some(end) = end else {
-                singles.push((idx, offset));
-                continue;
-            };
-            let Ok(len) = usize::try_from(end - offset) else {
-                continue;
-            };
-            previous_end = end;
-            extents.push((idx, offset, len));
-        }
-
+        let extents = self.cached_frame_extents(positions, &lookups, &offsets);
         let mut buf = BytesMut::new();
         let mut hits = 0u64;
 
@@ -781,12 +776,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                     }
                 }
             });
-        }
-        for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut buf) {
-                out[idx] = Some(item);
-                hits += 1;
-            }
         }
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
@@ -2389,6 +2378,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// The discarded suffix is durably removed before success. Subsequent appends may exceed
     /// the cap. A cap below the retained start returns [Error::ItemPruned].
+    ///
+    /// Data and offsets blobs that hold only positions at or above the cap are removed without
+    /// being opened. Every blob name in their partitions must still decode as a blob index,
+    /// including those above the cap.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -2855,8 +2848,9 @@ mod tests {
         buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
-            fail_pending_syncs, next_pending_sync, release_pending_syncs,
+            DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
+            RecordingContext, drive_pending_syncs, fail_pending_syncs, next_pending_sync,
+            release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
@@ -5248,6 +5242,26 @@ mod tests {
             assert!(recorded.reads.is_empty());
             assert!(recorded.batches.is_empty());
             assert!(reader.offsets.try_read_sync(64).is_none());
+
+            // Frame 63's cached prefix bounds the next range even though offset 64 is cold.
+            let start = reader.offsets.try_read_sync(63).unwrap();
+            let len = start - reader.offsets.try_read_sync(62).unwrap();
+            let ranges = |next| {
+                reader.cached_frame_extents(
+                    &[63, 65],
+                    &[63, 64, 65, 66],
+                    &[Some(start), None, Some(next), Some(next + len)],
+                )
+            };
+            assert!(ranges(start).is_empty());
+            assert!(ranges(start + len - 1).is_empty());
+            assert_eq!(ranges(start + len).len(), 2);
+            assert_eq!(ranges(start + len + 1).len(), 2);
+
+            assert_eq!(
+                reader.try_read_many_sync(&[63, 64]),
+                vec![Some(appended[63].clone()), None]
+            );
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -5445,18 +5459,14 @@ mod tests {
 
     #[test_traced]
     fn test_variable_read_many_rejects_overlapping_prefix_frame() {
-        // A frame whose successor offset is cold is served by its length prefix. Its start must
-        // still be checked against the earlier frames of its blob, or it could decode another
-        // item's bytes.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
             let cfg = Config {
                 partition: "read-many-overlapping-prefix".into(),
                 items_per_section: NZU64!(128),
                 compression: None,
                 codec_config: (),
-                page_cache: page_cache.clone(),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5472,12 +5482,14 @@ mod tests {
             // Frames are 302 bytes. Point frame 63 at frame 0's bytes.
             let mut offsets: Vec<u64> = (0..128).map(|i| i * 302).collect();
             offsets[63] = 0;
+            // One offset per page lets either frame's successor be cold independently.
+            let offsets_cache = CacheRef::new(NZU16!(8), NZUsize!(16));
             let mut offsets_journal = fixed::Journal::<_, u64>::init(
                 context.child("offsets"),
                 fixed::Config {
                     partition: "read-many-overlapping-prefix-offsets".into(),
                     items_per_blob: NZU64!(128),
-                    page_cache: page_cache.clone(),
+                    page_cache: offsets_cache.clone(),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
@@ -5499,18 +5511,22 @@ mod tests {
                 metrics: journal.0.metrics.clone(),
             };
 
-            // Cache frame 0 and the offsets page holding entries 0 to 63, leaving entry 64 cold,
-            // so frame 63 has a cached start but no cached end.
-            page_cache.clear();
+            // The overlap must be rejected whether the first or the second frame uses its prefix.
             assert_eq!(reader.read(0).await.unwrap(), appended[0]);
-            assert!(reader.offsets.try_read_sync(63).is_some());
-            assert!(reader.offsets.try_read_sync(64).is_none());
-
-            assert_eq!(reader.try_read_many_sync(&[0, 63]), vec![None, None]);
-            assert!(matches!(
-                reader.read_many(&[0, 63]).await,
-                Err(Error::Corruption(_))
-            ));
+            for (warm_end, cold_end) in [(1, 64), (64, 1)] {
+                offsets_cache.clear();
+                for position in [0, 63, warm_end] {
+                    reader.offsets.read(position).await.unwrap();
+                }
+                assert_eq!(reader.try_read_sync(0), Some(appended[0].clone()));
+                assert!(reader.offsets.try_read_sync(warm_end).is_some());
+                assert!(reader.offsets.try_read_sync(cold_end).is_none());
+                assert_eq!(reader.try_read_many_sync(&[0, 63]), vec![None, None]);
+                assert!(matches!(
+                    reader.read_many(&[0, 63]).await,
+                    Err(Error::Corruption(_))
+                ));
+            }
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -11285,12 +11301,23 @@ mod tests {
     /// or as a fresh journal, and that a retried destroy removes.
     #[test_traced]
     fn issue_5668_regression_variable_interrupted_destroy_reopens() {
+        const SECTIONS: u64 = 4;
+
+        // Stop the destroy before its first mutation, then its second, and so on until one
+        // destroy completes.
         let (mut unchanged, mut emptied) = (0, 0);
-        for seed in 0..32u64 {
-            let executor = deterministic::Runner::seeded(seed);
-            let outcome = executor.start(|context| async move {
+        let mut interrupted = 0;
+        loop {
+            let executor = deterministic::Runner::default();
+            let reopened = executor.start(|context| async move {
                 // Record the digest of empty storage. A completed destroy must restore it.
                 let empty = context.storage_audit();
+
+                let faults = MutationFaults::default();
+                let context = MutationFaultContext {
+                    inner: context,
+                    faults: faults.clone(),
+                };
 
                 // Sync twice around a prune, leaving seven items in four sections above a
                 // pruned boundary.
@@ -11308,49 +11335,61 @@ mod tests {
                 }
                 let journal = journal.sync().await.unwrap();
                 assert_eq!(journal.bounds(), 4..11);
+                let sections = context.scan(&cfg.data_partition()).await.unwrap();
+                assert_eq!(sections.len() as u64, SECTIONS);
 
-                // Fail a sample of syncs and removals so destroy stops at varying depths, from
-                // the staged clear through the offsets checkpoint.
-                context.storage_fault_config().write().sync_rate = Some(probability!(0.3));
-                context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
-                let result = journal.destroy().await;
-                context.storage_fault_config().write().sync_rate = None;
-                context.storage_fault_config().write().remove_rate = None;
-                if result.is_ok() {
-                    assert_eq!(context.storage_audit(), empty, "seed {seed}");
-                    return 0;
+                // Destroy fails exactly when one of its mutations was refused.
+                faults.allow(interrupted);
+                let destroyed = journal.destroy().await.is_ok();
+                let stopped = faults.failed();
+                faults.disarm();
+                let scenario = format!("stopped after {interrupted} mutations");
+                assert_eq!(destroyed, !stopped, "{scenario}");
+                if destroyed {
+                    assert_eq!(context.inner.storage_audit(), empty, "{scenario}");
+                    return None;
                 }
 
                 // The reopened journal is the synced one or a fresh one.
                 let journal = Journal::<_, u64>::init(context.child("second"), cfg)
                     .await
-                    .unwrap_or_else(|err| panic!("seed {seed} must reopen: {err}"));
+                    .unwrap_or_else(|err| panic!("{scenario}: must reopen: {err}"));
                 let bounds = journal.bounds();
-                let outcome = if bounds == (4..11) {
-                    for pos in bounds {
-                        assert_eq!(journal.read(pos).await.unwrap(), pos);
+                if bounds == (4..11) {
+                    for pos in bounds.clone() {
+                        assert_eq!(journal.read(pos).await.unwrap(), pos, "{scenario}");
                     }
-                    1
                 } else {
-                    assert_eq!(bounds, 0..0, "seed {seed} must reopen unchanged or empty");
-                    2
-                };
+                    assert_eq!(bounds, 0..0, "{scenario}: must reopen unchanged or empty");
+                }
 
                 // A retried destroy completes and leaves no blob behind.
                 journal.destroy().await.unwrap();
-                assert_eq!(context.storage_audit(), empty, "seed {seed}");
-                outcome
+                assert_eq!(context.inner.storage_audit(), empty, "{scenario}");
+                Some(bounds)
             });
-            match outcome {
-                1 => unchanged += 1,
-                2 => emptied += 1,
-                _ => {}
+            let Some(bounds) = reopened else {
+                break;
+            };
+
+            // Once a stop leaves the journal empty, no later stop leaves it unchanged.
+            if bounds.is_empty() {
+                emptied += 1;
+            } else {
+                assert_eq!(emptied, 0, "stopped after {interrupted} mutations");
+                unchanged += 1;
             }
+            interrupted += 1;
         }
         assert!(
             unchanged > 0 && emptied > 0,
             "both outcomes must occur: unchanged {unchanged} emptied {emptied}"
         );
+
+        // Destroy stages the clear, removes every data section and the data partition, then
+        // removes the blobs and the checkpoint of the offsets journal, so it can stop at least
+        // once before each.
+        assert!(interrupted >= SECTIONS + 4, "{interrupted}");
     }
 
     /// A bounded open whose cap lies in a page below the watermark's page truncates the torn

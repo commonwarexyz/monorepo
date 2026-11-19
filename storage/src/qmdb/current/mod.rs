@@ -143,7 +143,7 @@
 //! height, it uses standard hashing. At the grafting height, it detects the boundary and
 //! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks the
 //! grafted leaf is `hash(chunk || ops_subtree_root)`, and for all-zero chunks it is the ops subtree
-//! root itself (the identity optimization in `grafting::Verifier::node`). Above the grafting
+//! root itself (the identity optimization in `grafting::Verifier::node_digest`). Above the grafting
 //! height, it resumes standard hashing. If the reconstructed root matches the expected root and bit
 //! _i_ is set in the chunk, the operation is proven active.
 //!
@@ -265,7 +265,7 @@
 //! individual height-`gh` peaks for each chunk in the pair, and those map to grafted _leaves_
 //! (height 0 in the grafted tree), which are not pinned peaks.
 //!
-//! To avoid this, [`Db::prune`] defers bitmap pruning for chunks whose chunk-pair
+//! To avoid this, [`Db::prune`] rejects locations that would prune a chunk whose chunk-pair
 //! parent has not yet been born in the ops tree (see `Db::sync_boundary`). Once the parent is born,
 //! every ops peak within the pruned region is at height `gh+1` or above, and maps to a pinned peak
 //! or an ancestor of pinned peaks that can be reconstructed by hashing children (see
@@ -315,8 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], also
-//! exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
+//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], the root of
+//! the [`sync::Database::target`](crate::qmdb::sync::Database::target).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
@@ -472,7 +472,7 @@ where
 
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
-async fn init_db<F, E, U, H, I, J, const N: usize, S>(
+pub(crate) async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
@@ -497,7 +497,7 @@ where
             "chunk size must be some multiple of the digest size",
         );
         // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-        // the status bitmap tree to be aligned with the underlying operations MMR.
+        // the status bitmap tree to be aligned with the underlying operations tree.
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
@@ -3227,6 +3227,18 @@ pub mod tests {
                 )
                 .await;
             }
+
+            // The batch and the database agree on the chunk-aligned sync target.
+            let merkleized = db
+                .new_batch()
+                .write(key(0), Some(val(1)))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            let expected = crate::qmdb::sync::MerkleizedBatch::target(&*merkleized);
+            db = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(crate::qmdb::sync::Database::target(&db), expected);
+            assert!(*expected.range.start() > 0, "expected a nonzero sync boundary");
 
             let prune_boundary = db.sync_boundary();
             let db = db.prune(prune_boundary).await.unwrap();

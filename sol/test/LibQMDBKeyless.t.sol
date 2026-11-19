@@ -57,14 +57,18 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
     }
 
     /// @dev One or two leaves determine their positioned preimages without a geometry implementation.
-    function smallCase(bytes memory operation, bool second) internal pure returns (KeylessCase memory c) {
+    function smallCase(bytes memory operation, bytes memory bootstrap, bool second)
+        internal
+        pure
+        returns (KeylessCase memory c)
+    {
         c.operation = operation;
         c.proof.leaves = second ? 2 : 1;
         c.proof.location = second ? 1 : 0;
         bytes32 folded = _hash(abi.encodePacked(uint64(c.proof.location), operation));
         c.proof.digests = new bytes32[](second ? 1 : 0);
         if (second) {
-            c.proof.digests[0] = _hash(abi.encodePacked(uint64(0), hex"000000"));
+            c.proof.digests[0] = _hash(abi.encodePacked(uint64(0), bootstrap));
             folded = _hash(abi.encodePacked(uint64(2), c.proof.digests[0], folded));
         }
         c.root = _root(c.proof.leaves, folded);
@@ -82,15 +86,16 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
     /// @dev Bootstrap commits authenticate absent metadata and a zero inactivity floor.
     function test_BootstrapCommit() public view {
         bytes memory fixedCommit = abi.encodePacked(hex"0000", bytes32(0), uint64(0));
-        rejectMutations(smallCase(fixedCommit, false));
-        rejectMutations(smallCase(hex"000000", false));
+        rejectMutations(smallCase(fixedCommit, fixedCommit, false));
+        rejectMutations(smallCase(hex"000000", hex"000000", false));
     }
 
     /// @dev Each of the nine fixed append padding bytes contributes to the commitment.
     function test_FixedAppendPadding() public view {
-        bytes memory operation = abi.encodePacked(hex"01", bytes32(uint256(71)), bytes9(0));
+        bytes memory operation = abi.encodePacked(hex"04", bytes32(uint256(71)), bytes9(0));
         assertEq(operation.length, 42);
-        KeylessCase memory c = smallCase(operation, true);
+        bytes memory bootstrap = abi.encodePacked(hex"0000", bytes32(0), uint64(0));
+        KeylessCase memory c = smallCase(operation, bootstrap, true);
         rejectMutations(c);
         for (uint256 i = 33; i < operation.length; ++i) {
             operation[i] = 0x01;
@@ -110,8 +115,8 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
             bytes memory value = abi.encodePacked(varint(payload.length), payload);
             for (uint256 kind; kind < 2; ++kind) {
                 bytes memory operation =
-                    kind == 0 ? abi.encodePacked(hex"01", value) : abi.encodePacked(hex"0001", value, hex"01");
-                KeylessCase memory c = smallCase(operation, true);
+                    kind == 0 ? abi.encodePacked(hex"04", value) : abi.encodePacked(hex"0001", value, hex"01");
+                KeylessCase memory c = smallCase(operation, hex"000000", true);
                 rejectMutations(c);
                 for (uint256 j; j < varint(payload.length).length; ++j) {
                     uint256 prefix = kind + 1 + j;
@@ -126,15 +131,16 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
     /// @dev Both metadata variants bind a nonzero floor in fixed and variable encodings.
     function test_NonzeroFloorCommit() public view {
         bytes32 metadata = bytes32(uint256(99));
-        rejectMutations(smallCase(abi.encodePacked(hex"0000", bytes32(0), uint64(1)), true));
-        rejectMutations(smallCase(abi.encodePacked(hex"0001", metadata, uint64(1)), true));
-        rejectMutations(smallCase(hex"000001", true));
-        rejectMutations(smallCase(hex"00010311223301", true));
+        bytes memory bootstrap = abi.encodePacked(hex"0000", bytes32(0), uint64(0));
+        rejectMutations(smallCase(abi.encodePacked(hex"0000", bytes32(0), uint64(1)), bootstrap, true));
+        rejectMutations(smallCase(abi.encodePacked(hex"0001", metadata, uint64(1)), bootstrap, true));
+        rejectMutations(smallCase(hex"000001", hex"000000", true));
+        rejectMutations(smallCase(hex"00010311223301", hex"000000", true));
     }
 
     /// @dev Inclusion authenticates opaque bytes without imposing an operation parser.
     function testFuzz_OpaqueOperation(bytes memory operation, bool second) public view {
-        KeylessCase memory c = smallCase(operation, second);
+        KeylessCase memory c = smallCase(operation, hex"000000", second);
         assertTrue(this.checked(c));
         c.operation = abi.encodePacked(operation, bytes1(0));
         assertFalse(this.checked(c), "operation length is not bound");
@@ -259,7 +265,7 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
             bytes memory expected =
                 encoding == Encoding.Fixed ? abi.encodePacked(hex"0000", bytes32(0), uint64(0)) : bytes(hex"000000");
             assertEq(c.operation, expected);
-            assertEq(c.root, smallCase(expected, false).root);
+            assertEq(c.root, smallCase(expected, expected, false).root);
             rejectMutations(c);
         }
     }

@@ -87,8 +87,8 @@ abstract contract LibQMDBLifecycleTest is QMDBTest {
             assertEq(c.afterOverwrite.root, c.excluded.root);
             assertNotEq(c.before.root, c.afterOverwrite.root);
             assertNotEq(c.afterOverwrite.root, c.empty.root);
-            assertEq(c.before.operation[0], bytes1(0xd2));
-            assertEq(c.empty.operation[0], bytes1(0xd3));
+            assertEq(c.before.operation[0], bytes1(0x01));
+            assertEq(c.empty.operation[0], bytes1(0x00));
             assertTrue(this.verifyMembership(c.before.root, c.before.operation, _proof(c.before)), "initial membership");
             assertTrue(
                 this.verifyMembership(c.afterOverwrite.root, c.afterOverwrite.operation, _proof(c.afterOverwrite)),

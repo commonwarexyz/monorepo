@@ -73,6 +73,20 @@ enum CertifyState {
     Aborted,
 }
 
+/// Outcome of [`Round::request_verify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyRequest {
+    /// The request is claimed and must be sent to the automaton.
+    Send,
+    /// The request is claimed and must not be sent, because certification of the round was
+    /// requested. Certification judges the notarized proposal on its own. A verification verdict
+    /// could only add a notarize vote to a view that is already notarized, or cast our nullify
+    /// vote before certification concludes.
+    Withhold,
+    /// The round is not pending verification, so nothing is claimed.
+    Skip,
+}
+
 /// Per-[Rnd] state machine.
 pub struct Round<S: Scheme, D: Digest> {
     // When the local node entered this view (see `State::enter_view`). Unset
@@ -178,7 +192,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.clear_request();
     }
 
-    /// Returns the leader info if we should verify a proposal.
+    /// Returns the leader info if the round's verification request can be claimed.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
         if self.is_signer(leader.idx)
@@ -190,21 +204,26 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
-    /// Returns the leader key and proposal ready for verification, without
-    /// recording the request. Resolve ancestry before calling
-    /// [`Self::request_verify`], after which this method returns `None`.
+    /// Returns the leader and proposal if the round's verification request can be claimed,
+    /// without claiming it. Resolve ancestry before calling [`Self::request_verify`], after which
+    /// this method returns `None`.
     pub fn pending_verification(&self) -> Option<(Leader<S::PublicKey>, Proposal<D>)> {
         let leader = self.verify_ready()?;
         let proposal = self.proposal.proposal().cloned()?;
         Some((leader.clone(), proposal))
     }
 
-    /// Marks that verification is in-flight; returns `false` to avoid duplicate requests.
-    pub fn request_verify(&mut self) -> bool {
-        if self.verify_ready().is_none() {
-            return false;
+    /// Claims the round's single verification request and returns what to do with it.
+    pub fn request_verify(&mut self) -> VerifyRequest {
+        if self.verify_ready().is_none() || !self.proposal.request_verify() {
+            return VerifyRequest::Skip;
         }
-        self.proposal.request_verify()
+        match self.certify {
+            CertifyState::Ready => VerifyRequest::Send,
+            CertifyState::Outstanding(_) | CertifyState::Certified(_) | CertifyState::Aborted => {
+                VerifyRequest::Withhold
+            }
+        }
     }
 
     /// Records the ancestry view that proposal verification requested. Returns
@@ -1414,8 +1433,9 @@ mod tests {
         assert!(round.broadcast_notarize);
 
         // No verification request should be emitted.
-        assert!(
-            !round.request_verify(),
+        assert_eq!(
+            round.request_verify(),
+            VerifyRequest::Skip,
             "leader-owned replay must not request verification again"
         );
 
@@ -1912,7 +1932,7 @@ mod tests {
 
         // Recovery alone does not verify the proposal.
         assert!(round.construct_notarize().is_none());
-        assert!(round.request_verify());
+        assert_eq!(round.request_verify(), VerifyRequest::Send);
 
         // But a successful certification still allows us to help finalize.
         round.certified(true);
@@ -1921,6 +1941,40 @@ mod tests {
         // Verification can complete after our finalize vote.
         assert!(round.verified());
         assert_eq!(round.construct_notarize(), Some(&proposal));
+    }
+
+    /// Once certification is requested, `request_verify` claims the verification request and
+    /// withholds it, whether certification is outstanding, succeeded, failed, or was aborted.
+    /// The proposal stays pending verification until that claim.
+    #[test]
+    fn request_verify_withholds_once_certification_requested() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([4u8; 32]));
+
+        // Certification stays outstanding, succeeds, fails, or is aborted.
+        let outcomes: [fn(&mut Round<ed25519::Scheme, Sha256Digest>); 4] = [
+            |_| {},
+            |round| round.certified(true),
+            |round| round.certified(false),
+            |round| round.abort_certify(),
+        ];
+        for outcome in outcomes {
+            // A recovered notarization leaves its proposal unverified. Its certification is
+            // requested and reaches the outcome.
+            let mut round = notarized_round(&schemes, &proposal, Participant::new(1));
+            let mut pool = AbortablePool::<()>::default();
+            round.set_certify_handle(pool.push(futures::future::pending()));
+            outcome(&mut round);
+
+            // The proposal stays pending verification until `request_verify` claims the request
+            // without sending it. Nothing is left to claim afterwards.
+            assert!(round.pending_verification().is_some());
+            assert_eq!(round.request_verify(), VerifyRequest::Withhold);
+            assert!(round.pending_verification().is_none());
+            assert_eq!(round.request_verify(), VerifyRequest::Skip);
+        }
     }
 
     /// Builds a round led by `leader` that holds a notarization of `proposal`
@@ -1976,7 +2030,7 @@ mod tests {
         assert_eq!(round.proposal.proposal(), Some(&proposal));
         assert_eq!(round.proposal.status(), ProposalStatus::Verified);
         assert!(round.elapsed_since_start(std::time::UNIX_EPOCH).is_some());
-        assert!(!round.request_verify());
+        assert_eq!(round.request_verify(), VerifyRequest::Skip);
     }
 
     #[test]
@@ -1996,7 +2050,7 @@ mod tests {
         assert_eq!(round.proposal.proposal(), Some(&proposal));
         assert_eq!(round.proposal.status(), ProposalStatus::Verified);
         assert!(round.broadcast_notarize);
-        assert!(!round.request_verify());
+        assert_eq!(round.request_verify(), VerifyRequest::Skip);
     }
 
     #[test]
@@ -2014,6 +2068,6 @@ mod tests {
         assert_eq!(round.proposal.proposal(), Some(&certified));
         assert_eq!(round.proposal.status(), ProposalStatus::Unverified);
         assert!(round.broadcast_notarize);
-        assert!(round.request_verify());
+        assert_eq!(round.request_verify(), VerifyRequest::Send);
     }
 }

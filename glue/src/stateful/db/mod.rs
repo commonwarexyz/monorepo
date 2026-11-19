@@ -1,9 +1,11 @@
 //! Database batch lifecycle and state sync for [`Stateful`](super::Stateful).
 //!
 //! `db` defines the traits a storage backend implements to be driven by
-//! [`Stateful`](super::Stateful) and implements them for QMDB databases ([`any`], [`compact`],
-//! [`current`], [`immutable`], [`keyless`]). [`p2p`] fetches and serves state sync data over the
-//! network.
+//! [`Stateful`](super::Stateful) and implements them for QMDB databases through [`qmdb::Qmdb`]
+//! ([`any`], [`current`], [`immutable`](commonware_storage::qmdb::immutable),
+//! [`keyless`](commonware_storage::qmdb::keyless), and
+//! [`compact`](commonware_storage::qmdb::compact)). [`p2p`] fetches and serves state sync data
+//! over the network.
 //!
 //! # Batch Lifecycle
 //!
@@ -94,7 +96,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner};
-use commonware_storage::qmdb::sync::{self, Request, Source, source};
+use commonware_storage::qmdb::sync::{Request, Source, source};
 use commonware_utils::{
     NZUsize,
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
@@ -116,11 +118,12 @@ use std::{
 use tracing::debug;
 
 pub mod any;
-pub mod compact;
+mod compact;
 pub mod current;
-pub mod immutable;
-pub mod keyless;
+mod immutable;
+mod keyless;
 pub mod p2p;
+pub mod qmdb;
 
 /// A database shared across tasks.
 ///
@@ -627,6 +630,11 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// - When `reached_target` is `Some`, report each reached target on it at most once, in the
     ///   order reached. Reports never wait, so an observer that falls behind skips intermediate
     ///   reports.
+    ///
+    /// A target the database cannot reach, such as a compact target covering more than its last
+    /// commit, fails the sync whether it is `target` or arrives on `tip_updates`. Targets come
+    /// from [`Application::sync_targets`](super::Application::sync_targets), so a malformed one is
+    /// a caller bug.
     #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,
@@ -1721,122 +1729,6 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         }
         self.dbs[idx] = DbSyncState::Reached { generation };
     }
-}
-
-/// Syncs a database that durably persists its operation log.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_standard_db<E, DB, S>(
-    context: E,
-    config: DB::Config,
-    source: S,
-    target: sync::Target<DB::Family, DB::Digest>,
-    tip_updates: ring::Receiver<sync::Target<DB::Family, DB::Digest>>,
-    finish: Option<mpsc::Receiver<()>>,
-    reached_target: Option<ring::Sender<sync::Target<DB::Family, DB::Digest>>>,
-    sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
-where
-    DB: sync::Database<Context = E>,
-    S: sync::SourceFor<DB>,
-{
-    sync::sync(sync::Config {
-        context,
-        source,
-        target,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        db_config: config,
-        update_rx: Some(tip_updates),
-        finish_rx: finish,
-        reached_target_tx: reached_target,
-    })
-    .await
-}
-
-/// Aborts an adapter task when its owning sync future completes or is cancelled.
-struct Forwarder(Handle<()>);
-
-impl Drop for Forwarder {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Syncs a compact database, which does not persist its operation log.
-///
-/// A compact target that does not convert to an engine target fails the sync when passed as
-/// `target` and is ignored when it arrives on `tip_updates`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn sync_compact_db<E, DB, S>(
-    context: E,
-    config: DB::Config,
-    source: S,
-    target: sync::CompactTarget<DB::Family, DB::Digest>,
-    mut tip_updates: ring::Receiver<sync::CompactTarget<DB::Family, DB::Digest>>,
-    finish: Option<mpsc::Receiver<()>>,
-    reached_target: Option<ring::Sender<sync::CompactTarget<DB::Family, DB::Digest>>>,
-    sync_config: SyncEngineConfig,
-) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
-where
-    E: Metrics + Spawner,
-    DB: sync::Database<Context = E>,
-    S: sync::SourceFor<DB>,
-{
-    let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
-    // Start at the newest target already queued.
-    while let Ok(update) = tip_updates.try_recv() {
-        let Ok(update) = sync::Target::try_from(&update) else {
-            continue;
-        };
-        if update.advances(&initial) {
-            initial = update;
-        }
-    }
-
-    let (update_tx, update_rx) = ring::channel(NZUsize!(1));
-    let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
-        while let Some(update) = tip_updates.recv().await {
-            let Ok(update) = sync::Target::try_from(&update) else {
-                continue;
-            };
-            if !update_tx.send_lossy(update) {
-                break;
-            }
-        }
-    }));
-
-    let reached_target_tx = reached_target.map(|reached| {
-        let (tx, mut rx) = ring::channel::<sync::Target<DB::Family, DB::Digest>>(NZUsize!(1));
-        context.child("compact_reached").spawn(move |_| async move {
-            while let Some(reached_engine_target) = rx.recv().await {
-                let target = sync::CompactTarget {
-                    root: reached_engine_target.root,
-                    size: reached_engine_target.range.end(),
-                };
-                if !reached.send_lossy(target) {
-                    break;
-                }
-            }
-        });
-        tx
-    });
-
-    let result = sync::sync(sync::Config {
-        context,
-        source,
-        target: initial,
-        db_config: config,
-        fetch_batch_size: sync_config.fetch_batch_size,
-        apply_batch_size: sync_config.apply_batch_size,
-        max_outstanding_requests: sync_config.max_outstanding_requests,
-        update_rx: Some(update_rx),
-        finish_rx: finish,
-        reached_target_tx,
-    })
-    .await;
-    drop(update_forwarder);
-    result
 }
 
 #[tracing::instrument(name = "stateful.db.apply", level = "info", skip_all, fields(index = index))]

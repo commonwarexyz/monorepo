@@ -246,7 +246,7 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     factory: F,
 
     /// One blob per section.
-    pub(crate) blobs: BTreeMap<u64, F::Buffer>,
+    blobs: BTreeMap<u64, F::Buffer>,
 
     /// Sections above this ceiling remain unopened until truncation or clear removes them.
     ceiling: u64,

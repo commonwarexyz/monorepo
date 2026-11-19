@@ -49,8 +49,8 @@
 //! ```
 
 use crate::{
-    merkle::{Family, Location, full::Config as MerkleConfig},
-    qmdb::{single_operation_root, value::ValueEncoding},
+    merkle::{Family, full::Config as MerkleConfig},
+    qmdb::{operation::Committable as _, single_operation_root, value::ValueEncoding},
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -80,7 +80,7 @@ where
     H: Hasher,
     Operation<F, V>: EncodeShared,
 {
-    single_operation_root::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, V>::initial_commit())
 }
 
 /// Configuration for a [Db].
@@ -98,6 +98,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         journal::contiguous::Mutable,
+        merkle::Location,
         qmdb::{Error, ProofExt as _},
     };
     use commonware_cryptography::Sha256;

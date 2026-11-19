@@ -9,9 +9,14 @@
 use crate::{Consumer, Delivery, Outcome};
 use ahash::AHashMap;
 use commonware_macros::select;
-use commonware_utils::{channel::oneshot, futures::Pool};
-use futures::future::Aborted;
-use std::collections::hash_map::Entry as HashMapEntry;
+use commonware_utils::{channel::oneshot, futures::Pool, sync::Mutex};
+use futures::{FutureExt as _, future::Aborted};
+use std::{
+    collections::hash_map::Entry as HashMapEntry,
+    future::poll_fn,
+    sync::Arc,
+    task::{Poll, ready},
+};
 use tracing::debug;
 
 /// Completed consumer validation for a delivery.
@@ -46,14 +51,47 @@ struct Response<Context, V> {
     accepted: bool,
 }
 
+// Verdict a delivery awaits, with the completion fields it reports.
+struct Pending<Con: Consumer, Context> {
+    verdict: oneshot::Receiver<Con::Outcome>,
+    context: Context,
+    delivery: Delivery<Con::Key, Con::Subscriber>,
+    previously_accepted: bool,
+}
+
+impl<Con: Consumer, Context> Pending<Con, Context> {
+    fn complete(
+        self,
+        outcome: Option<Outcome>,
+        canceled: bool,
+    ) -> Completion<Con::Key, Con::Subscriber, Context> {
+        Completion {
+            context: self.context,
+            delivery: self.delivery,
+            outcome,
+            canceled,
+            previously_accepted: self.previously_accepted,
+        }
+    }
+}
+
+// Delivery awaiting its verdict.
+struct Active<Con: Consumer, Context> {
+    // Dropping the handle cancels the pooled wait.
+    _cancel: oneshot::Sender<()>,
+    // Shared with the pooled wait so a sent verdict can be read without polling. The first
+    // side to finish the delivery takes the `Pending`, and the other then finds `None`.
+    pending: Arc<Mutex<Option<Pending<Con, Context>>>>,
+}
+
 // Per-key delivery state retained while a resolver fetch is active.
-struct Entry<Context, V, State> {
-    delivery: Option<oneshot::Sender<()>>,
-    response: Option<Response<Context, V>>,
+struct Entry<Con: Consumer, Context, State> {
+    delivery: Option<Active<Con, Context>>,
+    response: Option<Response<Context, Con::Value>>,
     state: Option<State>,
 }
 
-impl<Context, V, State> Entry<Context, V, State> {
+impl<Con: Consumer, Context, State> Entry<Con, Context, State> {
     const fn new(state: State) -> Self {
         Self {
             delivery: None,
@@ -76,7 +114,7 @@ where
     Con::Value: Clone + Send + 'static,
     Context: Clone + Send + 'static,
 {
-    entries: AHashMap<Con::Key, Entry<Context, Con::Value, State>>,
+    entries: AHashMap<Con::Key, Entry<Con, Context, State>>,
     deliveries: DeliveryPool<Con::Key, Con::Subscriber, Context>,
     consumer: Con,
 }
@@ -231,7 +269,8 @@ where
     /// Wait for the next consumer validation result.
     ///
     /// Returns [`Aborted`] when cancellation closes the receiver without an accepted
-    /// verdict. Otherwise, canceled deliveries return their verdict for source
+    /// verdict, and once for each delivery [`try_completion`](Self::try_completion)
+    /// returned. Otherwise, canceled deliveries return their verdict for source
     /// accounting without affecting any current fetch for the key. Active deliveries
     /// clear their slot so the key can be retried or redelivered. A verdict sender
     /// dropped by the consumer completes with no outcome.
@@ -252,6 +291,38 @@ where
         Ok(completed)
     }
 
+    /// Take the completion of the key's delivery if the consumer has already sent its
+    /// verdict or dropped its sender.
+    ///
+    /// Reads the verdict directly, so one sent before this call is never missed. Call
+    /// this before adding subscribers to a key so that such a verdict cannot retire
+    /// them. Returns the completion [`next_completion`](Self::next_completion) would
+    /// otherwise yield and frees the delivery slot. Returns `None` if the key has no
+    /// delivery in progress or its verdict is still pending.
+    pub fn try_completion(
+        &mut self,
+        key: &Con::Key,
+    ) -> Option<Completion<Con::Key, Con::Subscriber, Context>> {
+        let entry = self.entries.get_mut(key)?;
+        let completed = {
+            let mut pending = entry.delivery.as_ref()?.pending.lock();
+            let outcome = match pending.as_mut()?.verdict.try_recv() {
+                Ok(outcome) => Some(outcome.into()),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    debug!(?key, "consumer dropped delivery without a verdict");
+                    None
+                }
+                Err(oneshot::error::TryRecvError::Empty) => return None,
+            };
+            pending.take()?.complete(outcome, false)
+        };
+
+        // Dropping the delivery cancels its pooled wait. The wait finds nothing left
+        // to report and aborts.
+        entry.delivery = None;
+        Some(completed)
+    }
+
     // Start a consumer validation attempt whose cancellation is owned by its entry.
     fn push_delivery(
         &mut self,
@@ -261,42 +332,48 @@ where
     ) {
         let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
         let previously_accepted = entry.response.as_ref().expect("response").accepted;
-        let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
-        let mut receiver = consumer.deliver(delivery, value);
+        let pending = Arc::new(Mutex::new(Some(Pending::<Con, Context> {
+            verdict: consumer.deliver(delivery.clone(), value),
+            context,
+            delivery,
+            previously_accepted,
+        })));
         let (cancel, canceled) = oneshot::channel::<()>();
+        let active = Active {
+            _cancel: cancel,
+            pending: pending.clone(),
+        };
         self.deliveries.push(async move {
             // Cancellation takes precedence over a ready verdict so feedback from a
             // removed entry can never complete a replacement. Closing before reading
             // preserves successful sends without waiting for an unfinished verdict.
-            let (outcome, canceled) = select! {
-                _ = canceled => {
-                    receiver.close();
-                    (receiver.try_recv().ok().map(Into::into), true)
-                },
-                outcome = &mut receiver => {
-                    let outcome = match outcome {
+            // Once `try_completion` has taken the `Pending`, either branch finds
+            // `None` and the wait aborts.
+            let completed = select! {
+                _ = canceled => pending.lock().take().and_then(|mut pending| {
+                    pending.verdict.close();
+                    let outcome = pending.verdict.try_recv().ok()?;
+                    Some(pending.complete(Some(outcome.into()), true))
+                }),
+                completed = poll_fn(|cx| {
+                    let mut pending = pending.lock();
+                    let Some(Pending { verdict, delivery, .. }) = pending.as_mut() else {
+                        return Poll::Ready(None);
+                    };
+                    let outcome = match ready!(verdict.poll_unpin(cx)) {
                         Ok(outcome) => Some(outcome.into()),
                         Err(_) => {
-                            debug!(key = ?completed.key, "consumer dropped delivery without a verdict");
+                            debug!(key = ?delivery.key, "consumer dropped delivery without a verdict");
                             None
                         }
                     };
-                    (outcome, false)
-                },
+                    Poll::Ready(pending.take().map(|pending| pending.complete(outcome, false)))
+                }) => completed,
             };
-            if canceled && outcome.is_none() {
-                return Err(Aborted);
-            }
-            Ok(Completion {
-                context,
-                delivery: completed,
-                outcome,
-                canceled,
-                previously_accepted,
-            })
+            completed.ok_or(Aborted)
         });
-        assert!(entry.delivery.replace(cancel).is_none());
+        assert!(entry.delivery.replace(active).is_none());
     }
 }
 
@@ -328,7 +405,6 @@ mod tests {
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,
     };
-    use futures::FutureExt as _;
 
     type TestTracker = Tracker<MockConsumer<MockKey, Bytes>, u8>;
     type StateTracker = Tracker<MockConsumer<MockKey, Bytes>, u8, u8>;
@@ -542,6 +618,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_try_completion_takes_a_sent_verdict() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            let (consumer, mut senders) = PendingConsumer::new();
+            let mut tracker = Tracker::<_, u8>::new(consumer);
+            let key = MockKey(1);
+
+            // Nothing is taken without a delivery or while its verdict is pending.
+            assert!(tracker.try_completion(&key).is_none());
+            tracker.insert(key.clone());
+            assert!(tracker.try_completion(&key).is_none());
+            tracker.deliver(delivery(key.clone()), 2, Bytes::from("v"));
+            let sender = senders.recv().await.unwrap();
+            assert!(tracker.next_completion().now_or_never().is_none());
+            assert!(tracker.try_completion(&key).is_none());
+
+            // A sent verdict is taken once, before the pool reports it.
+            sender.send(true).unwrap();
+            let completed = tracker.try_completion(&key).unwrap();
+            assert_eq!(completed.context, 2);
+            assert_eq!(completed.delivery.key, key);
+            assert_eq!(
+                completed.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
+            assert!(!completed.canceled);
+            assert!(!completed.previously_accepted);
+            assert!(tracker.try_completion(&key).is_none());
+
+            // The slot is free for the next delivery. The abandoned wait reports
+            // `Aborted` without completing or clearing that delivery.
+            tracker.accept_response(&key);
+            tracker.redeliver(delivery(key.clone()));
+            let sender = senders.recv().await.unwrap();
+            assert!(matches!(
+                tracker.next_completion().now_or_never(),
+                Some(Err(Aborted))
+            ));
+            assert!(tracker.next_completion().now_or_never().is_none());
+
+            // A verdict that was pending when read still completes through the pool.
+            assert!(tracker.try_completion(&key).is_none());
+            sender.send(false).unwrap();
+            let completed = tracker.next_completion().await.unwrap();
+            assert_eq!(completed.outcome, Some(Outcome::Invalid));
+            assert!(completed.previously_accepted);
+
+            // A dropped sender is taken as a completion without an outcome, and
+            // the slot is free for the delivery that follows.
+            tracker.redeliver(delivery(key.clone()));
+            drop(senders.recv().await.unwrap());
+            let completed = tracker.try_completion(&key).unwrap();
+            assert_eq!(completed.outcome, None);
+            assert!(!completed.canceled);
+            assert!(completed.previously_accepted);
+            tracker.redeliver(delivery(key.clone()));
+        });
     }
 
     #[test]

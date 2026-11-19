@@ -1178,6 +1178,10 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Close and remove any underlying blobs created by the [Freezer].
+    ///
+    /// A [Checkpoint] returned earlier stops describing the stored data once this is called, even
+    /// if the call is interrupted. Retire it first and reopen with `None`, which removes whatever
+    /// an interrupted destroy left behind.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

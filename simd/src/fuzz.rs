@@ -263,11 +263,11 @@ fn execute_child<S: Simd, O: Operation<S>>(simd: S, child: O) -> O::Output {
 }
 
 fn expected_backend() -> (Path, usize) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     if crate::native::NativeX86V4C::new().is_some() {
         return (Path::X86V4C, 8);
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     if crate::native::NativeX86V3::new().is_some() {
         return (Path::Portable, 4);
     }
@@ -286,7 +286,7 @@ fn expected_backend() -> (Path, usize) {
 ///
 /// Dispatch selects x86-64-v3 only on CPUs without x86v4c, and its portable path skips
 /// instruction checks, so this check covers it on every host with AVX2.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 fn x86_v3(plan: Plan, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     use crate::{emulated::EmulatedX86V3, native::NativeX86V3};
     let Some(simd) = NativeX86V3::new() else {
@@ -330,7 +330,7 @@ impl Plan {
             }
             plan => {
                 dispatch(Instructions(plan, &mut *u))?;
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
                 x86_v3(plan, u)?;
             }
         }

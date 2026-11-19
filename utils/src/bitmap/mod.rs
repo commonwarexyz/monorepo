@@ -758,8 +758,8 @@ impl<const N: usize> BitMap<N> {
 
         // All of these chunks require all of their bits to be checked.
         // If first_chunk == last_chunk, we skip the loop.
-        for full_chunk in (first_chunk + 1)..last_chunk {
-            if self.chunks[full_chunk] != Self::EMPTY_CHUNK {
+        for full_chunk in self.chunks.iter().take(last_chunk).skip(first_chunk + 1) {
+            if *full_chunk != Self::EMPTY_CHUNK {
                 return false;
             }
         }
@@ -1186,6 +1186,35 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
     }
 }
 
+commonware_macros::stability_scope!(ALPHA, cfg(any(test, feature = "fuzz")) {
+    #[derive(Debug)]
+    pub(crate) struct IsUnsetPlan {
+        bits: Vec<bool>,
+        start: u64,
+        end: u64,
+    }
+
+    impl arbitrary::Arbitrary<'_> for IsUnsetPlan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let (start, end) = u.arbitrary::<(u64, u64)>()?;
+            let range = u.len() as u64 + 1;
+            let start = start % range;
+            let end = (end % range).max(start);
+            let bits = u.bytes(u.len())?.iter().map(|byte| byte & 1 == 1).collect();
+            Ok(Self { bits, start, end })
+        }
+    }
+
+    impl IsUnsetPlan {
+        pub(crate) fn run(self) {
+            let Self { bits, start, end } = self;
+            let bitmap: BitMap = BitMap::from(bits.as_slice());
+            let expected = bits[start as usize..end as usize].iter().all(|bit| !bit);
+            assert_eq!(bitmap.is_unset(start..end), expected);
+        }
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1193,6 +1222,7 @@ mod tests {
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
     use commonware_formatting::hex;
+    use commonware_invariants::minifuzz;
     use rand::RngExt as _;
 
     #[test]
@@ -2902,28 +2932,14 @@ mod tests {
         assert_eq!(prunable.get_chunk_containing(0), &chunk);
     }
 
-    mod proptests {
-        use super::*;
-        use proptest::prelude::*;
-
-        proptest! {
-            #[test]
-            fn is_unset_matches_naive(
-                bits in prop::collection::vec(any::<bool>(), 1..=512usize),
-                start in 0u64..=512,
-                end in 0u64..=512,
-            ) {
-                let bitmap: BitMap = BitMap::from(bits.as_slice());
-                let len = bitmap.len();
-                let start = start.min(len);
-                let end = end.max(start).min(len);
-                let range = start..end;
-
-                let expected = range.clone().all(|i| !bitmap.get(i));
-
-                prop_assert_eq!(bitmap.is_unset(range), expected);
-            }
-        }
+    #[test]
+    fn is_unset_matches_naive() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                u.arbitrary::<IsUnsetPlan>()?.run();
+                Ok(())
+            });
     }
 
     #[test]

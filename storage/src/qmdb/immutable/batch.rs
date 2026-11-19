@@ -28,7 +28,7 @@ use std::{
 
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 
-/// What happened to a key in this batch.
+/// The value a batch set for a key and the location of that set operation.
 #[derive(Clone)]
 pub(crate) struct DiffEntry<F: Family, V> {
     pub(crate) value: V,
@@ -634,5 +634,28 @@ where
             ancestor_diffs: Vec::new(),
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
+    }
+}
+
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> crate::qmdb::sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, K, V, S>
+where
+    Operation<F, K, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(
+                self.bounds.inactivity_floor,
+                self.bounds.tip.size
+            ),
+        }
     }
 }

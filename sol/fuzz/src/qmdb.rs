@@ -2000,7 +2000,7 @@ mod tests {
                             if floor != 0 {
                                 assert_ne!(output.inactivePeaks, 0);
                             }
-                            let mut expected = vec![u8::from(operation != "set")];
+                            let mut expected = vec![if operation == "set" { 0x03 } else { 0x00 }];
                             if operation == "set" {
                                 expected.extend_from_slice(key(location).as_ref());
                             } else {
@@ -2321,7 +2321,7 @@ mod tests {
                                 assert_eq!(output.leaves, leaves);
                                 assert_eq!(output.location, location);
                                 assert_eq!(output.operation.len(), 97);
-                                assert_eq!(output.operation[0], 0xD2);
+                                assert_eq!(output.operation[0], 0x01);
                                 match (family, hash) {
                                     ("mmr", "keccak256") => {
                                         verify_any_output::<mmr::Family, Keccak256>(&output)
@@ -2456,7 +2456,7 @@ mod tests {
                             assert_eq!(output.leaves, leaves);
                             assert_eq!(output.location, location);
                             assert_eq!(output.operation.len(), 97);
-                            assert_eq!(output.operation[0], 0xD2);
+                            assert_eq!(output.operation[0], 0x01);
                             assert_ne!(
                                 output.chunk[(location % 256 / 8) as usize] & (1 << (location % 8)),
                                 0

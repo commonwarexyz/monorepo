@@ -391,8 +391,9 @@ impl RMap {
     /// assert_eq!(map.missing_items(11, 5), Vec::<u64>::new());
     /// ```
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        // Ensure input is valid
-        assert!(max > 0, "max must be greater than 0");
+        if max == 0 {
+            return Vec::new();
+        }
         let mut missing = Vec::with_capacity(max);
 
         // Each range closes the gap before it. The scan then resumes past it.
@@ -986,13 +987,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_missing_items_zero_n() {
+    fn test_missing_items_zero_limit() {
         let mut map = RMap::new();
         map.insert(1);
         map.insert(5);
 
-        map.missing_items(1, 0);
+        assert!(map.missing_items(1, 0).is_empty());
     }
 
     #[test]
