@@ -2009,6 +2009,66 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// A database opened at an earlier commit can have its floor below its retained start. Reads
+    /// of a location between the two return `ItemPruned`, not `BelowInactivityFloor`.
+    #[boxed]
+    pub(crate) async fn run_get_pruned_above_floor<F: Family, V, C, H, S: Strategy>(
+        context: deterministic::Context,
+        mut db: TestDb<F, V, C, H, S>,
+        bounded: BoundedOpen<TestDb<F, V, C, H, S>, F>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // Two commits hold the floor at zero.
+        for round in 0..2u64 {
+            let mut batch = db.new_batch();
+            for i in 0..16 {
+                batch = batch.append(V::Value::make(round * 100 + i));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let earlier_size = db.bounds().end;
+        let earlier_commit = earlier_size - 1;
+
+        // A third commit raises the floor to the second, and pruning there drops early appends.
+        let merkleized = db
+            .new_batch()
+            .with_inactivity_floor(earlier_commit)
+            .merkleize(&db)
+            .await
+            .unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
+        db = db.commit().await.unwrap();
+        db = db.prune(earlier_commit).await.unwrap();
+        drop(db);
+
+        // Opening at the second commit restores its floor of zero, below the retained start.
+        let db = bounded(context.child("earlier"), earlier_size)
+            .await
+            .unwrap();
+        assert_eq!(db.inactivity_floor(), Location::new(0));
+        let start = db.bounds().start;
+        assert!(start > Location::new(1), "failed to prune any appends");
+        let pruned = start - 1;
+        assert!(matches!(
+            db.get(pruned).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
+        ));
+        assert!(matches!(
+            db.get_many(&[pruned, start]).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
+        ));
+        db.get(start).await.unwrap();
+        db.get_many(&[start]).await.unwrap();
+
+        db.destroy().await.unwrap();
+    }
+
     #[boxed]
     pub(crate) async fn run_batch_get<F: Family, V, C, H, S: Strategy>(
         mut db: TestDb<F, V, C, H, S>,

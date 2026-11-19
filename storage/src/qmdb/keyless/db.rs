@@ -329,6 +329,8 @@ where
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
+    /// Pruning leaves [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location
+    /// still require the requested operations and Merkle nodes to be retained.
     ///
     /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
