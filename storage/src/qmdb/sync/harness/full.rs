@@ -1005,14 +1005,13 @@ pub(crate) fn test_sync_source_fails<H: SyncTestHarness>() {
 /// Operations in each batch that the interrupted-destroy tests apply.
 pub(crate) const INTERRUPTED_DESTROY_OPS: usize = 300;
 
-/// Minimum distance between the requested start and the sync boundary of a database that
-/// [`prune_to_sync_boundary`] returns. It exceeds a journal section of every harness, so the
-/// section start that pruning records as the database's boundary is at or above the requested
-/// start.
+/// How far past `start` [`prune_to_sync_boundary`] raises the sync boundary. Pruning rounds down
+/// to a journal section, and every harness's sections are shorter than this, so the pruned
+/// database still starts at or above `start`.
 const PRUNED_SYNC_BOUNDARY: u64 = 64;
 
-/// Raises the sync boundary of `db` to at least [`PRUNED_SYNC_BOUNDARY`] past `start`, applying
-/// the operations of `seed` again until it does, and prunes `db` to that boundary.
+/// Prunes `db` to a sync boundary at least [`PRUNED_SYNC_BOUNDARY`] past `start`. While the
+/// boundary is too low, applies the operations of `seed` again to raise it.
 pub(crate) async fn prune_to_sync_boundary<H: SyncTestHarness>(
     mut db: DbOf<H>,
     seed: u64,
@@ -1059,12 +1058,11 @@ pub(crate) async fn interrupt_destroy<H: SyncTestHarness>(
     assert_eq!(log.size(), Location::new(0));
 }
 
-/// Client storage that an interrupted destroy left behind, beside a target whose operations that
-/// storage never held.
+/// Storage of a pruned client database whose destroy stopped after emptying its log, and an
+/// unrelated target to sync into that storage.
 ///
-/// The destroyed client was pruned, so beside its emptied log it leaves a frontier that records a
-/// nonzero boundary and the digests pinned there, and, where the database grafts a bitmap, the
-/// chunks it pruned.
+/// The client's stale state is still on disk. That is its frontier (its pruning boundary and the
+/// digests pinned there) and, for `current`, its record of pruned bitmap chunks.
 pub(crate) struct InterruptedDestroy<H: SyncTestHarness> {
     /// Source of the target's operations.
     pub(crate) target_db: Arc<DbOf<H>>,
@@ -1074,22 +1072,21 @@ pub(crate) struct InterruptedDestroy<H: SyncTestHarness> {
     pub(crate) canonical_root: sha256::Digest,
     /// End of the target's penultimate commit.
     pub(crate) penultimate_end: Location<H::Family>,
-    /// Root that sync verifies against at the target's penultimate commit.
+    /// Root that sync verifies operations against at the target's penultimate commit.
     pub(crate) penultimate_root: sha256::Digest,
     /// Canonical root of the target at its penultimate commit.
     pub(crate) penultimate_canonical_root: sha256::Digest,
-    /// Pruning boundary that the client's frontier records.
+    /// Pruning boundary in the client's stale frontier.
     pub(crate) stale_boundary: Location<H::Family>,
     /// Configuration naming the client storage.
     pub(crate) db_config: ConfigOf<H>,
 }
 
 impl<H: SyncTestHarness> InterruptedDestroy<H> {
-    /// Builds a target and a pruned client database that holds other operations, then interrupts
-    /// the destroy of the client database.
+    /// Builds the target and the client, then interrupts the client's destroy.
     ///
-    /// The target's range starts at a sync boundary of the target when `pruned` and at zero
-    /// otherwise. The client's boundary is at or above that start.
+    /// The target is pruned and its range starts above zero when `pruned`. Otherwise its range
+    /// starts at zero. The client's boundary is at or above that start.
     pub(crate) async fn new(context: &mut deterministic::Context, pruned: bool) -> Self {
         let ops = H::create_ops(INTERRUPTED_DESTROY_OPS);
         let mut target_db = H::init_db(context.child("target")).await;
@@ -1100,9 +1097,8 @@ impl<H: SyncTestHarness> InterruptedDestroy<H> {
             start = H::sync_boundary(&target_db);
         }
 
-        // The client pruned a different history before its destroy was interrupted, raising its
-        // sync boundary past the target's start so that the boundary its frontier records is at
-        // or above that start.
+        // The client holds other operations and is pruned past the target's start before its
+        // destroy is interrupted.
         let db_config = H::config(&context.next_u64().to_string());
         let local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
         let ops = H::create_ops_seeded(INTERRUPTED_DESTROY_OPS, 1);
@@ -1116,11 +1112,9 @@ impl<H: SyncTestHarness> InterruptedDestroy<H> {
         );
         interrupt_destroy::<H>(context, local_db, &db_config).await;
 
-        // The target rewrites the same keys in three more batches, the last of which is its
-        // penultimate commit. A database that derives its inactivity floor then commits past
-        // every chunk the client pruned, so that commit is recoverable whether or not those
-        // chunks are still recorded. The rewrites also place that commit past the client's
-        // boundary.
+        // Three more batches rewrite the same keys and end at the penultimate commit, which puts
+        // it past the client's boundary. On `current` they also raise the inactivity floor past
+        // the chunks the client pruned, so that commit opens with or without the stale chunks.
         for _ in 0..3 {
             let ops = H::create_ops(INTERRUPTED_DESTROY_OPS);
             target_db = H::apply_ops(target_db, ops, None).await;
@@ -1152,9 +1146,8 @@ impl<H: SyncTestHarness> InterruptedDestroy<H> {
 
 /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
 ///
-/// A sync into storage whose destroy stopped after emptying the log, leaving the frontier of a
-/// pruned database, completes with the target's roots, and the synced state survives a reopen.
-/// The cases vary whether the target's range starts at zero.
+/// A sync into the storage that [`InterruptedDestroy`] builds reaches the target's roots, and so
+/// does a reopen. The target's range starts above zero when `pruned`.
 pub(crate) fn issue_5669_regression_sync_after_interrupted_destroy<H: SyncTestHarness>(pruned: bool)
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,

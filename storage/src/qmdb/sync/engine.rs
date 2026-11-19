@@ -1280,11 +1280,10 @@ pub(crate) mod tests {
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
     ///
-    /// A sync into storage whose destroy stopped after emptying the log, leaving the frontier of a
-    /// pruned database, is stopped once fetched operations are durable in its journal, and the
-    /// sync that restarts over that journal completes with the target's roots. The cases vary
-    /// whether the target's range starts at zero and whether the first sync stops with the range
-    /// partly or wholly fetched.
+    /// A sync into the storage that [`InterruptedDestroy`] builds is stopped once fetched
+    /// operations are durable, and a second sync resumes from them and reaches the target's
+    /// roots. The target's range starts above zero when `pruned`. The first sync stops with the
+    /// whole range fetched when `fetched`, and with part of it otherwise.
     pub(crate) fn issue_5669_regression_sync_restart_after_destroy<H: SyncTestHarness>(
         pruned: bool,
         fetched: bool,
@@ -1347,12 +1346,11 @@ pub(crate) mod tests {
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
     ///
-    /// A sync into storage whose destroy stopped after emptying the log, leaving the frontier of a
-    /// pruned database, is stopped once a commit of the target is durable in its journal. Opening
-    /// the database then recovers the target's state at that commit or fails, and never reads the
-    /// destroyed database's frontier or pruned chunks as describing the fetched operations. A
-    /// retried sync then reaches the target. The cases vary whether the target's range starts at
-    /// zero.
+    /// A sync into the storage that [`InterruptedDestroy`] builds is stopped once the target's
+    /// penultimate commit is durable. Opening the database then recovers that commit. When
+    /// `pruned`, the target's range starts above zero and the open fails instead. Either way it
+    /// never applies the client's stale state to the fetched operations, and a retried sync
+    /// reaches the target.
     pub(crate) fn issue_5669_regression_open_after_stopped_sync<H: SyncTestHarness>(pruned: bool)
     where
         Arc<DbOf<H>>: SourceFor<DbOf<H>>,
@@ -1381,7 +1379,7 @@ pub(crate) mod tests {
                 reached_target_tx: None,
             };
 
-            // Stop the sync between the target's commits, with its journal durable.
+            // Fetch through the penultimate commit, make the journal durable, and stop.
             let mut engine: Engine<DbOf<H>, _> =
                 Engine::new(config(context.child("first"))).await.unwrap();
             while engine.journal.size() < penultimate_end {
@@ -1394,8 +1392,8 @@ pub(crate) mod tests {
             engine.journal = engine.journal.sync().await.unwrap();
             drop(engine);
 
-            // The boundary the destroyed database recorded lies among the fetched operations
-            // before the penultimate commit, where an open could read its frontier as theirs.
+            // The stale boundary lies among the fetched operations, where an open would accept
+            // the stale frontier if the sync had not discarded it.
             assert!(
                 stale_boundary >= target.range.start(),
                 "test setup requires the client's boundary {stale_boundary} at or above the \
@@ -1408,9 +1406,9 @@ pub(crate) mod tests {
                  penultimate commit's end {penultimate_end}"
             );
 
-            // Fetched operations that start at zero open at the penultimate commit under the
-            // target's roots. Fetched operations that start later lie beside a frontier at
-            // genesis, which an open rejects.
+            // The sync discarded the stale frontier, so the recorded boundary is zero. A journal
+            // that starts at zero opens at the penultimate commit. One that starts above zero does
+            // not match that boundary, so the open fails.
             let opened =
                 <DbOf<H> as Database>::init(context.child("opened"), db_config.clone(), None).await;
             match opened {
@@ -1435,7 +1433,7 @@ pub(crate) mod tests {
                 ),
             }
 
-            // A retried sync resumes the journal and reaches the target, which survives a reopen.
+            // A retried sync resumes from the journal and reaches the target, and so does a reopen.
             let synced_db: DbOf<H> = crate::qmdb::sync::sync(config(context.child("second")))
                 .await
                 .unwrap();
