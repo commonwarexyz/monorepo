@@ -17,7 +17,7 @@
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
 //! grafted root, and any pending or partial chunk digests.
 //!
-//! [`Database::ops_root`] returns the ops root used by the sync engine.
+//! The root of [`Database::target`] is the ops root used by the sync engine.
 //!
 //! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
 //! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
@@ -210,8 +210,11 @@ impl<F, E, C, I, H, U, const N: usize, S> Database for db::Db<F, E, C, I, H, U, 
 where
     F: Graftable,
     E: Context + Spawner,
-    C: Mutable<Item = Operation<F, U>>
-        + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as crate::qmdb::sync::Journal<F>>::Config,
+        > + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
     H: Hasher,
@@ -231,6 +234,14 @@ where
         <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
     >;
     type Digest = H::Digest;
+
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        crate::qmdb::current::init_db(context, config, max_size).await
+    }
 
     async fn from_sync_result(
         context: Self::Context,
@@ -312,10 +323,20 @@ where
         .await
     }
 
-    /// Returns the ops root (not the canonical root), since the sync engine verifies
+    /// The root is the ops root (not the canonical root), since the sync engine verifies
     /// batches against the ops tree.
-    fn ops_root(&self) -> Self::Digest {
-        Self::ops_root(self)
+    fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
+        qmdb::sync::Target {
+            root: Self::ops_root(self),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &qmdb::sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
     }
 }
 

@@ -212,13 +212,18 @@ pub(crate) mod test {
             type PartDb<S> = partitioned::Db<
                 mmr::Family,
                 deterministic::Context,
-                Digest,
+                [u8; 32],
                 Vec<u8>,
                 Sha256,
                 TwoCap,
                 1,
                 S,
             >;
+
+            // Raw arrays provide key bytes through AsRef without implementing Deref.
+            fn key(i: u64) -> [u8; 32] {
+                Sha256::hash(&[&i.to_be_bytes()]).0
+            }
 
             /// The value each key holds after the two commits below.
             fn expected_value(i: u64) -> Option<Vec<u8>> {
@@ -238,9 +243,8 @@ pub(crate) mod test {
                 .unwrap();
             let mut batch = db.new_batch();
             for i in 0u64..500 {
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = vec![(i % 251) as u8; (i % 40 + 1) as usize];
-                batch = batch.write(k, Some(v));
+                batch = batch.write(key(i), Some(v));
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -249,12 +253,10 @@ pub(crate) mod test {
             // Commit 2: update a third and delete a seventh so the replay carries churn.
             let mut batch = db.new_batch();
             for i in (0u64..500).step_by(3) {
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
-                batch = batch.write(k, Some(vec![0xAB; (i % 17 + 1) as usize]));
+                batch = batch.write(key(i), Some(vec![0xAB; (i % 17 + 1) as usize]));
             }
             for i in (1u64..500).step_by(7) {
-                let k = Sha256::hash(&[&i.to_be_bytes()]);
-                batch = batch.write(k, None);
+                batch = batch.write(key(i), None);
             }
             let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -276,13 +278,17 @@ pub(crate) mod test {
                     "root mismatch at concurrency={concurrency}"
                 );
                 for i in 0u64..500 {
-                    let k = Sha256::hash(&[&i.to_be_bytes()]);
                     assert_eq!(
-                        db.get(&k).await.unwrap(),
+                        db.get(&key(i)).await.unwrap(),
                         expected_value(i),
                         "value mismatch for key {i}"
                     );
                 }
+                let indices = [4, 1, 3, 4];
+                assert_eq!(
+                    db.get_many(&indices.map(key)).await.unwrap(),
+                    indices.map(expected_value)
+                );
                 drop(db);
             }
         });

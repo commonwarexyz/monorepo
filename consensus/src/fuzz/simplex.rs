@@ -1,19 +1,20 @@
-pub mod bounds;
-pub mod disrupter;
-pub mod invariants;
-pub mod simplex;
-pub mod strategy;
-pub mod types;
-pub mod utils;
+//! Deterministic simulations of Simplex with a mutating Byzantine participant.
 
-use crate::{
+mod bounds;
+mod connected;
+mod disrupter;
+mod invariants;
+mod schemes;
+mod strategy;
+mod types;
+mod utils;
+
+use self::{
     disrupter::Disrupter,
     strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
     utils::{Action, Partition, link_peers, register},
 };
-use arbitrary::Arbitrary;
-use commonware_codec::{Decode, DecodeExt};
-use commonware_consensus::{
+use crate::{
     Handoff, IndexSubscription, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
@@ -22,6 +23,8 @@ use commonware_consensus::{
     },
     types::{Delta, Epoch, TermLength, View, ViewDelta},
 };
+use arbitrary::Arbitrary;
+use commonware_codec::{Decode, DecodeExt};
 use commonware_cryptography::{
     Sha256,
     certificate::{Verifier as _, mocks::Fixture},
@@ -37,9 +40,10 @@ use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_utils::{FuzzRng, NZDuration, NZU16, NZU32, NZUsize, probability};
+pub(super) use connected::ConnectedPlan;
 use futures::future::join_all;
-pub use simplex::{
-    SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
+use schemes::{
+    Simplex, SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
 };
 use std::{
@@ -50,7 +54,7 @@ use std::{
     time::Duration,
 };
 
-pub const EPOCH: u64 = 333;
+const EPOCH: u64 = 333;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -64,35 +68,34 @@ const MAX_RAW_BYTES: usize = 32_768;
 
 /// Honest handoff decisions: wait for parent certification, relay early but hold the vote,
 /// or vote early.
-pub const HANDOFF_DECISIONS: [Handoff<()>; 3] =
-    [Handoff::Wait, Handoff::Stage(()), Handoff::Vote(())];
+const HANDOFF_DECISIONS: [Handoff<()>; 3] = [Handoff::Wait, Handoff::Stage(()), Handoff::Vote(())];
 
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Configuration {
+struct Configuration {
     /// Total number of nodes.
-    pub n: u32,
+    n: u32,
     /// Number of faulty (Byzantine) nodes.
-    pub faults: u32,
+    faults: u32,
     /// Number of correct (honest) nodes.
-    pub correct: u32,
+    correct: u32,
 }
 
 impl Configuration {
-    pub const fn new(n: u32, faults: u32, correct: u32) -> Self {
+    const fn new(n: u32, faults: u32, correct: u32) -> Self {
         Self { n, faults, correct }
     }
 
     /// Returns true if this configuration can make progress (liveness).
-    pub fn can_finalize(&self) -> bool {
+    fn can_finalize(&self) -> bool {
         self.faults <= bounds::max_faults(self.n)
     }
 }
 
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
-pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
+const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
-pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
+const N4F3C1: Configuration = Configuration::new(4, 3, 1);
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,
@@ -124,18 +127,19 @@ async fn setup_degraded_network<E: Clock>(
     }
 }
 
+/// A generated configuration and entropy for a Simplex simulation.
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
-    pub raw_bytes: Vec<u8>,
-    pub required_containers: u64,
-    pub term_length: TermLength,
-    pub optimistic_views: ViewDelta,
-    pub heterogeneous_optimism: bool,
-    pub handoff: Handoff<()>,
-    pub degraded_network: bool,
-    pub configuration: Configuration,
-    pub partition: Partition,
-    pub strategy: StrategyChoice,
+    raw_bytes: Vec<u8>,
+    required_containers: u64,
+    term_length: TermLength,
+    optimistic_views: ViewDelta,
+    heterogeneous_optimism: bool,
+    handoff: Handoff<()>,
+    degraded_network: bool,
+    configuration: Configuration,
+    partition: Partition,
+    strategy: StrategyChoice,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -175,12 +179,12 @@ impl Arbitrary<'_> for FuzzInput {
         let min_faults = MIN_NUMBER_OF_FAULTS.min(fault_rounds_bound);
         let fault_rounds = u.int_in_range(0..=max_faults)?.max(min_faults);
         let strategy = match u.int_in_range(0..=9)? {
-            0 => StrategyChoice::AnyScope,
-            1 => StrategyChoice::FutureScope {
+            0 => StrategyChoice::Any,
+            1 => StrategyChoice::Future {
                 fault_rounds,
                 fault_rounds_bound,
             },
-            _ => StrategyChoice::SmallScope {
+            _ => StrategyChoice::Small {
                 fault_rounds,
                 fault_rounds_bound,
             },
@@ -208,11 +212,11 @@ impl Arbitrary<'_> for FuzzInput {
 /// Derive a per-validator optimistic-view budget from the fuzzed base value.
 ///
 /// Mismatched values across validators are safe (see
-/// [`commonware_consensus::simplex::elector::Terms::stable`]), so a
+/// [`crate::simplex::elector::Terms::stable`]), so a
 /// heterogeneous run varies them deterministically per validator. A
 /// homogeneous run gives every validator the base value, covering uniform
 /// deployments (including optimism disabled everywhere).
-fn validator_optimistic_views(input: &FuzzInput, validator: usize) -> ViewDelta {
+const fn validator_optimistic_views(input: &FuzzInput, validator: usize) -> ViewDelta {
     if !input.heterogeneous_optimism {
         return input.optimistic_views;
     }
@@ -225,7 +229,7 @@ fn validator_optimistic_views(input: &FuzzInput, validator: usize) -> ViewDelta 
 /// Largest fuzzed optimistic-view value: the domain `[0, term_length + 2]`
 /// covers 0 (optimistic validation disabled), the term-length boundary, and
 /// values beyond the term length, which production accepts but caps.
-fn max_optimistic_views(term_length: TermLength) -> u64 {
+const fn max_optimistic_views(term_length: TermLength) -> u64 {
     term_length.get() + 2
 }
 
@@ -245,7 +249,7 @@ type NetworkChannels = (
 );
 
 /// Common setup for fuzz tests: network, participants, links.
-async fn setup_network<P: simplex::Simplex>(
+async fn setup_network<P: Simplex>(
     context: &mut deterministic::Context,
     input: &FuzzInput,
 ) -> (
@@ -298,7 +302,7 @@ async fn setup_network<P: simplex::Simplex>(
 }
 
 /// Start a Disrupter with the given strategy and network channels.
-fn start_disrupter<P: simplex::Simplex>(
+fn start_disrupter<P: Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     strategy: &StrategyChoice,
@@ -316,7 +320,7 @@ fn start_disrupter<P: simplex::Simplex>(
     ),
 ) {
     match *strategy {
-        StrategyChoice::SmallScope {
+        StrategyChoice::Small {
             fault_rounds,
             fault_rounds_bound,
         } => {
@@ -330,11 +334,11 @@ fn start_disrupter<P: simplex::Simplex>(
             );
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
-        StrategyChoice::AnyScope => {
+        StrategyChoice::Any => {
             let disrupter = Disrupter::new(context, scheme, AnyScope);
             disrupter.start(vote_network, certificate_network, resolver_network);
         }
-        StrategyChoice::FutureScope {
+        StrategyChoice::Future {
             fault_rounds,
             fault_rounds_bound,
         } => {
@@ -352,7 +356,7 @@ fn start_disrupter<P: simplex::Simplex>(
 }
 
 /// Spawn a Disrupter for a Byzantine node.
-fn spawn_disrupter<P: simplex::Simplex>(
+fn spawn_disrupter<P: Simplex>(
     context: deterministic::Context,
     scheme: P::Scheme,
     input: &FuzzInput,
@@ -396,7 +400,7 @@ fn spawn_honest_validator<
     resolver: (ResolverSender, ResolverReceiver),
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
 where
-    P: simplex::Simplex,
+    P: Simplex,
     PendingSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
@@ -431,7 +435,7 @@ where
         scheme,
         elector,
         automaton: application.clone(),
-        relay: application.clone(),
+        relay: application,
         reporter: reporter.clone(),
         partition: validator.to_string(),
         mailbox_size: NZUsize!(1024),
@@ -460,7 +464,7 @@ where
     reporter
 }
 
-fn run<P: simplex::Simplex>(input: FuzzInput) {
+fn run<P: Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
@@ -542,7 +546,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
-fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
+fn run_with_twin_mutator<P: Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
@@ -681,8 +685,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 scheme: scheme.clone(),
                 elector: primary_elector,
                 automaton: application.clone(),
-                relay: application.clone(),
-                reporter: reporter.clone(),
+                relay: application,
+                reporter,
                 partition: format!("twin_{idx}_primary"),
                 mailbox_size: NZUsize!(1024),
                 epoch: Epoch::new(EPOCH),
@@ -714,7 +718,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             // Secondary: Disrupter
             start_disrupter::<P>(
                 context.child("secondary"),
-                scheme.clone(),
+                scheme,
                 &input.strategy,
                 (vote_sender_secondary, vote_receiver_secondary),
                 (certificate_sender_secondary, certificate_receiver_secondary),
@@ -783,31 +787,62 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     });
 }
 
-pub trait FuzzMode {
-    const TWIN: bool;
+/// The topology used for the simulation's Byzantine participants.
+#[derive(Clone, Copy, Debug)]
+pub enum Mode {
+    /// Each Byzantine participant mutates and sends messages from a single node.
+    Standard,
+    /// Some Byzantine participants have a twin running the same validator identity.
+    Twin,
 }
 
-pub struct Standard;
-
-impl FuzzMode for Standard {
-    const TWIN: bool = false;
+/// The signature scheme used by the simulated validators.
+#[derive(Arbitrary, Clone, Copy, Debug)]
+pub enum Scheme {
+    /// Ed25519 signatures.
+    Ed25519,
+    /// Secp256r1 signatures.
+    Secp256r1,
+    /// BLS12-381 multisignatures with small public keys.
+    MultisigMinPk,
+    /// BLS12-381 multisignatures with small signatures.
+    MultisigMinSig,
+    /// BLS12-381 threshold signatures with small public keys.
+    ThresholdMinPk,
+    /// BLS12-381 threshold signatures with small signatures.
+    ThresholdMinSig,
 }
 
-pub struct Twinable;
+impl Scheme {
+    #[cfg(test)]
+    const ALL: [Self; 6] = [
+        Self::Ed25519,
+        Self::Secp256r1,
+        Self::MultisigMinPk,
+        Self::MultisigMinSig,
+        Self::ThresholdMinPk,
+        Self::ThresholdMinSig,
+    ];
 
-impl FuzzMode for Twinable {
-    const TWIN: bool = true;
+    /// Runs a Simplex simulation with this scheme and asserts its invariants.
+    pub fn run(self, input: FuzzInput, mode: Mode) {
+        match self {
+            Self::Ed25519 => run_simulation::<SimplexEd25519>(input, mode),
+            Self::Secp256r1 => run_simulation::<SimplexSecp256r1>(input, mode),
+            Self::MultisigMinPk => run_simulation::<SimplexBls12381MultisigMinPk>(input, mode),
+            Self::MultisigMinSig => run_simulation::<SimplexBls12381MultisigMinSig>(input, mode),
+            Self::ThresholdMinPk => run_simulation::<SimplexBls12381MinPk>(input, mode),
+            Self::ThresholdMinSig => run_simulation::<SimplexBls12381MinSig>(input, mode),
+        }
+    }
 }
 
-pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
+fn run_simulation<P: Simplex>(input: FuzzInput, mode: Mode) {
     let raw_bytes = input.raw_bytes.clone();
-    let run_result = if M::TWIN {
-        panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            run_with_twin_mutator::<P>(input)
-        }))
-    } else {
-        panic::catch_unwind(panic::AssertUnwindSafe(|| run::<P>(input)))
-    };
+    let run_result = panic::catch_unwind(panic::AssertUnwindSafe(|| match mode {
+        Mode::Standard => run::<P>(input),
+        Mode::Twin => run_with_twin_mutator::<P>(input),
+    }));
 
     match run_result {
         Ok(()) => {}

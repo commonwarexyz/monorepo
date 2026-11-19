@@ -7,7 +7,13 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, chain, metrics::Metrics, operation::Key, sync::source, value::ValueEncoding},
+    qmdb::{
+        Error, chain,
+        metrics::Metrics,
+        operation::{Committable as _, Key},
+        sync::source,
+        value::ValueEncoding,
+    },
     translator::Translator,
 };
 use commonware_codec::EncodeShared;
@@ -66,7 +72,7 @@ where
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
             if let Operation::Set(key, _) = op {
-                snapshot.insert(&key, loc);
+                snapshot.insert(key.as_ref(), loc);
             }
         }
     }
@@ -168,38 +174,27 @@ where
         .await?;
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 
         // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
         // the snapshot replay starts, so keys set before the floor are not loaded.
-        let (last_commit_loc, inactivity_floor_loc, snapshot) = {
-            let bounds = journal.journal.bounds();
-            let last_commit_loc =
-                Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
+        let size = journal.size();
+        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&journal, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
 
-            // Read the floor from the last commit operation.
-            let last_op = journal.journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .inactivity_floor()
-                .expect("last operation should be a commit with floor");
-
-            // Replay the log from the inactivity floor to build the snapshot.
-            let snapshot = build_snapshot(
-                context.child("snapshot"),
-                cfg.translator,
-                inactivity_floor_loc,
-                &journal.journal,
-                cfg.init_buffer,
-            )
-            .await?;
-
-            (last_commit_loc, inactivity_floor_loc, snapshot)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        // Replay the log from the inactivity floor to build the snapshot.
+        let snapshot = build_snapshot(
+            context.child("snapshot"),
+            cfg.translator,
+            inactivity_floor_loc,
+            &journal.journal,
+            cfg.init_buffer,
+        )
+        .await?;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -264,7 +259,7 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        for loc in self.snapshot.get(key) {
+        for loc in self.snapshot.get(key.as_ref()) {
             let loc = Location::new(loc);
             if loc < floor {
                 continue;
@@ -306,7 +301,7 @@ where
         // candidate for it, including collisions. They are read in one batch below, each location
         // once, and resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
-            for loc in self.snapshot.get(key.borrow()) {
+            for loc in self.snapshot.get(key.borrow().as_ref()) {
                 if loc < *floor {
                     continue;
                 }
@@ -596,14 +591,14 @@ where
         // Journal writes and snapshot inserts are independent until batch publication.
         let apply_snapshot = async {
             for (key, entry) in batch.diff.iter() {
-                self.snapshot.insert(key, *entry.loc);
+                self.snapshot.insert(key.as_ref(), *entry.loc);
             }
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
                 if batch.bounds.ancestors[i].size <= db_size {
                     continue;
                 }
                 for (key, entry) in ancestor_diff.iter() {
-                    self.snapshot.insert(key, *entry.loc);
+                    self.snapshot.insert(key.as_ref(), *entry.loc);
                 }
             }
         };

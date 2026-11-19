@@ -11,6 +11,7 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Payload},
 };
 use commonware_actor::mailbox::Sender as ActorSender;
+use commonware_codec::Codec;
 use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
@@ -594,7 +595,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,

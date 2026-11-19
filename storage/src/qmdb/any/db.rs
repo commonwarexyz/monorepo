@@ -138,9 +138,8 @@ where
         return Ok(results);
     }
 
-    // Fallback: read each distinct missed position once with one batched read, which also
-    // validates the missed positions: every candidate position is decoded by exactly one of
-    // the two passes, so corruption detection does not depend on cache state.
+    // Shard probes have already served their hits. One batched read serves the remaining
+    // candidates, reading each distinct missed position once.
     misses.sort_unstable_by_key(|&(_, pos)| pos);
     let positions = dedup_positions(&misses);
     let ops = reader.read_many(&positions).await?;
@@ -181,7 +180,7 @@ where
     // Probe the in-memory index with the bytes a write indexes each key by. Each key may map
     // to multiple locations due to hash collisions.
     let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-    snapshot.get_many(keys.iter().map(|key| &**key.borrow()), |key_idx, &loc| {
+    snapshot.get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
         candidates.push((key_idx, *loc))
     });
 
@@ -369,7 +368,7 @@ where
     ) -> impl Future<Output = Result<Option<(U, Location<F>)>, crate::qmdb::Error<F>>> + Send {
         async move {
             // Translated keys can collide, so read candidates until the full key matches.
-            for loc in self.snapshot.get(key).copied() {
+            for loc in self.snapshot.get(key.as_ref()).copied() {
                 let update = self.read_update(loc).await?;
                 if same_key(update.key(), key) {
                     return Ok(Some((update, loc)));

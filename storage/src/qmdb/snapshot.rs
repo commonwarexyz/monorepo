@@ -736,7 +736,7 @@ where
                 let Some(key) = op.key() else { continue };
 
                 // The bytes a lookup probes the index with.
-                let key: &[u8] = key;
+                let key: &[u8] = key.as_ref();
                 let bucket = (layout.partition_of)(key) / layout.per_bucket;
                 let staged = &mut staged[bucket];
                 layout.encode(staged, key, layout.tag(loc, op.is_delete()));
@@ -1152,7 +1152,7 @@ mod tests {
         index::{ordered, partitioned, unordered},
         journal::{Error as JournalError, contiguous::Batch},
         merkle::mmr,
-        qmdb::operation::Floored,
+        qmdb::operation::Committable,
         translator::{EightCap, OneCap},
     };
     use commonware_runtime::{
@@ -1172,9 +1172,13 @@ mod tests {
         Commit,
     }
 
-    impl Floored<mmr::Family> for TestOp {
+    impl Committable<mmr::Family> for TestOp {
         fn inactivity_floor(&self) -> Option<Location<mmr::Family>> {
             matches!(self, Self::Commit).then(|| Location::new(0))
+        }
+
+        fn initial_commit() -> Self {
+            Self::Commit
         }
     }
 

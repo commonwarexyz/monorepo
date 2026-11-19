@@ -1388,6 +1388,27 @@ where
     }
 }
 
+impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
+    crate::qmdb::sync::MerkleizedBatch for MerkleizedBatch<F, D, U, N, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    /// The root is the ops root, which the sync engine verifies against.
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.ops_root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().tip.size),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

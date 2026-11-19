@@ -6,7 +6,10 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, chain, metrics::Metrics, sync::source, value::ValueEncoding},
+    qmdb::{
+        Error, chain, metrics::Metrics, operation::Committable as _, sync::source,
+        value::ValueEncoding,
+    },
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -118,27 +121,15 @@ where
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .expect("at least one commit should exist"),
-            );
-            let op = journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op
-                .inactivity_floor()
-                .expect("last operation should be a commit with floor");
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let size = journal.size();
+        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&journal, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
