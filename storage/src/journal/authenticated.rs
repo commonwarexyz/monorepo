@@ -724,19 +724,11 @@ where
     /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
     /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
-    pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
-        let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
-        Ok((journal, boundary))
-    }
-
-    async fn prune_inner(
-        mut self,
-        prune_loc: Location<F>,
-    ) -> Result<(Self, Location<F>, bool), Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         if self.merkle.size() == 0 {
             // DB is empty, nothing to prune.
             let boundary = Location::new(self.journal.bounds().start);
-            return Ok((self, boundary, false));
+            return Ok((self, boundary));
         }
 
         // Sync the Merkle structure before pruning the journal, otherwise its last element could
@@ -749,8 +741,7 @@ where
             self.merkle.sync().map_err(Error::Merkle)
         )?;
 
-        let journal_pruned;
-        (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
+        (self.journal, _) = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
         let merkle_boundary = self.merkle.bounds().start;
@@ -760,7 +751,7 @@ where
             self.merkle = self.merkle.prune(boundary).await?;
         }
 
-        Ok((self, boundary, journal_pruned || boundary > merkle_boundary))
+        Ok((self, boundary))
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
