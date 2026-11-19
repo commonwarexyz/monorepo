@@ -2,7 +2,7 @@
 //! key.
 //!
 //! The specific variants provided within this module include:
-//! - Unordered: The database does not maintain or require any ordering over the key space.
+//! - Unordered: The database does not track the order of active keys.
 //!   - Fixed-size values
 //!   - Variable-size values
 //! - Ordered: The database maintains a total order over active keys.
@@ -131,7 +131,7 @@ use crate::{
         },
         bitmap::Shared,
         metrics::Metrics,
-        operation::Key,
+        operation::{Committable as _, Key},
         single_operation_root,
         value::ValueEncoding,
     },
@@ -149,6 +149,7 @@ use tracing::warn;
 pub mod batch;
 mod db;
 pub use db::Db;
+pub(crate) use db::read_many_map;
 pub mod operation;
 pub use operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub mod ordered;
@@ -170,7 +171,7 @@ where
     U: Update,
     Operation<F, U>: Codec,
 {
-    single_operation_root::<F, H>(&Operation::<F, U>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, U>::initial_commit())
 }
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
@@ -311,8 +312,7 @@ where
 
     if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
-        let commit = Operation::Commit(None, Location::new(0));
-        (log, _) = log.append(&commit).await?;
+        (log, _) = log.append(&Operation::initial_commit()).await?;
         log = log.sync().await?;
     }
 
@@ -1412,7 +1412,7 @@ pub(crate) mod test {
             locs: keys
                 .iter()
                 .map(|key| {
-                    let mut locs: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locs: Vec<_> = db.snapshot.get(key.as_ref()).copied().collect();
                     locs.sort();
                     locs
                 })
@@ -1578,7 +1578,7 @@ pub(crate) mod test {
         );
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
+                db.snapshot.get(key.as_ref()).any(|entry| entry == loc),
                 "snapshot misses the live update at {loc}",
             );
         }

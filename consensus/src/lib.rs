@@ -11,6 +11,10 @@
 
 use commonware_macros::stability_scope;
 
+stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), any(test, feature = "fuzz"))) {
+    pub mod fuzz;
+});
+
 stability_scope!(BETA {
     use commonware_codec::{Encode, Read};
     use commonware_cryptography::{Digestible, Digested};
