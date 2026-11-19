@@ -1784,6 +1784,15 @@ pub(crate) mod tests {
             db = db.apply_batch(merkleized).await.unwrap();
         }
 
+        // Size two ends at the first append.
+        for size in [Location::new(0), Location::new(2)] {
+            let result = db.historical_proof(size, Location::new(0), NZU64!(1)).await;
+            assert!(
+                matches!(result, Err(Error::NotCommitBoundary(actual)) if actual == size),
+                "expected NotCommitBoundary({size}), got {result:?}"
+            );
+        }
+
         // Test that historical proof fails with op_count > number of operations.
         assert!(matches!(
             db.historical_proof(db.bounds().end + 1, Location::new(5), NZU64!(10))

@@ -475,7 +475,8 @@ where
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
     /// activity bitmap, this returns ops-tree Merkle proofs suitable for state sync. Direct
-    /// verifiers should use [`crate::qmdb::ProofExt::verify`].
+    /// verifiers should use [`crate::qmdb::ProofExt::verify`]. Commit-boundary requirements and
+    /// errors follow [`crate::qmdb::any::Db::historical_proof`].
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location<F>,
