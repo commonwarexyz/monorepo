@@ -1162,17 +1162,26 @@ impl EngineDefinition for ReshareEngine {
         if should_state_sync {
             let finalization = match self.state_sync_floor {
                 Some(height) => {
-                    let source = self
-                        .marshals
-                        .lock()
-                        .values()
-                        .next()
-                        .cloned()
-                        .expect("state-sync floor source must be available");
-                    source
-                        .get_finalization(height)
-                        .await
-                        .expect("configured state-sync floor must be finalized")
+                    // The simulator releases delayed validators by round. Skipped views can
+                    // put that round ahead of the height whose proof the test needs.
+                    let sources: Vec<_> = self.marshals.lock().values().cloned().collect();
+                    assert!(
+                        !sources.is_empty(),
+                        "state-sync floor source must be available"
+                    );
+                    let deadline = context.current() + Duration::from_secs(30);
+                    'wait: loop {
+                        for source in &sources {
+                            if let Some(proof) = source.get_finalization(height).await {
+                                break 'wait proof;
+                            }
+                        }
+                        assert!(
+                            context.current() < deadline,
+                            "no source finalized configured floor {height}"
+                        );
+                        context.sleep(Duration::from_millis(50)).await;
+                    }
                 }
                 None => probe_artifact
                     .as_ref()
