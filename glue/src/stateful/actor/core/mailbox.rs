@@ -17,7 +17,7 @@ use commonware_consensus::{
     },
     simplex::scheme::Scheme,
 };
-use commonware_cryptography::{Digested, Digestible};
+use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{
     acknowledgement::Exact,
@@ -26,6 +26,7 @@ use commonware_utils::{
 };
 use std::{
     collections::VecDeque,
+    marker::PhantomData,
     sync::{Arc, Weak},
     task::{Context, Poll},
 };
@@ -220,36 +221,42 @@ where
 /// Handle to the [`Stateful`](super::Stateful) actor.
 ///
 /// Implements the consensus [`Application`](commonware_consensus::Application) and receives
-/// finalized blocks from marshal as a [`Reporter`]. The mailbox forwards proposal, verification,
+/// finalized blocks from marshal as a [`Reporter`] for its commitment type `D`.
+/// The mailbox forwards proposal, verification,
 /// and reporting calls to the actor. If the actor stops before responding, `prepare` returns
 /// [`Handoff::Wait`], `propose` returns `None`, and `verify` panics with "stateful actor dropped
 /// during verify".
-pub struct Mailbox<E, A>
+pub struct Mailbox<E, A, D: Digest = BlockDigest<A, E>>
 where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
+    _commitment: PhantomData<D>,
 }
 
-impl<E, A> Clone for Mailbox<E, A>
+impl<E, A, D: Digest> Clone for Mailbox<E, A, D>
 where
     A: Application<E>,
 {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            _commitment: PhantomData,
         }
     }
 }
 
-impl<E, A> Mailbox<E, A>
+impl<E, A, D: Digest> Mailbox<E, A, D>
 where
     E: Send + 'static,
     A: Application<E>,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
     pub(super) const fn new(sender: Sender<Message<E, A>>) -> Self {
-        Self { sender }
+        Self {
+            sender,
+            _commitment: PhantomData,
+        }
     }
 
     /// Returns the database set once startup completes.
@@ -275,7 +282,7 @@ where
     }
 }
 
-impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
+impl<E, A, D: Digest> ConsensusApplication<E> for Mailbox<E, A, D>
 where
     E: Send + 'static,
     A: Application<E>,
@@ -358,13 +365,13 @@ where
     }
 }
 
-impl<E, A> Reporter for Mailbox<E, A>
+impl<E, A, D: Digest> Reporter for Mailbox<E, A, D>
 where
     E: Send + 'static,
     A: Application<E>,
-    A::SigningScheme: Scheme<BlockDigest<A, E>>,
+    A::SigningScheme: Scheme<D>,
 {
-    type Activity = Update<A::Block, A::SigningScheme, BlockDigest<A, E>>;
+    type Activity = Update<A::Block, A::SigningScheme, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
@@ -391,15 +398,59 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Mailbox;
+    use super::{Mailbox, Message};
     use crate::stateful::tests::mocks::{TestApp, TestBlock, block_update, digested};
     use commonware_actor::{Feedback, mailbox};
-    use commonware_consensus::Reporter as _;
+    use commonware_coding::ReedSolomon;
+    use commonware_consensus::{
+        Reporter as _,
+        marshal::{
+            Finality, Update,
+            coding::types::{CodedBlock, coding_config_for_participants},
+        },
+    };
+    use commonware_cryptography::{Committable as _, Digestible as _, sha256::Sha256};
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         NZUsize,
         acknowledgement::{Acknowledgement as _, Exact},
     };
+
+    #[test]
+    fn reports_block_with_coding_commitment() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mut mailbox = Mailbox::<deterministic::Context, TestApp, _>::new(sender);
+            let block = digested(TestBlock::new(1, 1));
+            let coded = CodedBlock::<_, ReedSolomon<Sha256>, Sha256>::encode(
+                block.clone(),
+                coding_config_for_participants(4),
+                &Sequential,
+            )
+            .await;
+            let finality = Finality {
+                commitment: coded.commitment(),
+                finalization: None,
+            };
+            let (ack, receipt) = Exact::handle();
+            assert_eq!(
+                mailbox.report(Update::Block(block.clone(), finality, ack)),
+                Feedback::Ok
+            );
+            let Some(Message::Finalized {
+                block: delivered,
+                acknowledgement,
+                ..
+            }) = receiver.recv().await
+            else {
+                panic!("expected a finalized block");
+            };
+            assert_eq!(delivered.digest(), block.digest());
+            acknowledgement.acknowledge();
+            receipt.await.unwrap();
+        });
+    }
 
     /// Once every mailbox is dropped, the receiver yields the queued finalization reports and then
     /// reports the channel closed. Dropping an unacknowledged report cancels its acknowledgement.

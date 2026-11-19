@@ -176,7 +176,10 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(mut context: E, config: Config<E, A, V, R, T>) -> (Self, Mailbox<E, A>) {
+    pub fn new(
+        mut context: E,
+        config: Config<E, A, V, R, T>,
+    ) -> (Self, Mailbox<E, A, V::Commitment>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
