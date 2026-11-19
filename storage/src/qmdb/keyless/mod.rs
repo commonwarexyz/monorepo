@@ -3,7 +3,7 @@
 //! submodules.
 //!
 //! An unmerkleized batch reads using the inactivity floor it inherits from the database or its
-//! parent batch. If you advance the floor with
+//! parent batch. By default, its commit records that same floor. If you advance the floor with
 //! [`with_inactivity_floor`](batch::UnmerkleizedBatch::with_inactivity_floor), the new floor
 //! applies to reads from the merkleized batch. The database adopts it when you apply the batch.
 //!
