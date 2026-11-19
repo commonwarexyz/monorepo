@@ -22,9 +22,26 @@
 /// returned future to a pointer.
 ///
 /// Use on cold entry points with large state machines (initialization,
-/// teardown, recovery). Avoid on hot paths: each call allocates.
+/// teardown, recovery). Each call allocates, so avoid it on hot paths.
 ///
-/// # Example
+/// # Type Erasure
+///
+/// With `#[boxed]`, the returned future keeps the state machine's type, so a
+/// caller's future contains it. Proving that caller `Send` walks the futures
+/// nested beneath it. A deep enough chain of calls exceeds the compiler's
+/// recursion limit in the crate that spawns the outermost future.
+///
+/// `#[boxed(dyn)]` boxes the state machine as `dyn Future + Send` instead.
+/// Its state machine is proven `Send` on its own, apart from any caller, and
+/// a caller's proof covers only the function's arguments. Use it on a
+/// function that sits deep in a chain of awaiting callers, such as a database
+/// operation that an actor awaits.
+///
+/// The function's bounds must prove its state machine `Send`. The returned
+/// future is never `Sync` or `UnwindSafe`, and each poll goes through a
+/// vtable.
+///
+/// # Examples
 ///
 /// ```rust
 /// use commonware_macros::boxed;
@@ -39,6 +56,43 @@
 /// let fut = init();
 /// assert!(std::mem::size_of_val(&fut) <= 16);
 /// # futures::executor::block_on(async { assert_eq!(init().await, 1024) });
+/// ```
+///
+/// ```rust
+/// use commonware_macros::boxed;
+///
+/// #[boxed(dyn)]
+/// async fn replay(log: &[u64]) -> u64 {
+///     let mut sum = 0;
+///     for item in log {
+///         async {}.await;
+///         sum += item;
+///     }
+///     sum
+/// }
+///
+/// # futures::executor::block_on(async { assert_eq!(replay(&[1, 2, 3]).await, 6) });
+/// ```
+///
+/// # Compile Errors
+///
+/// ```compile_fail
+/// use commonware_macros::boxed;
+/// use std::rc::Rc;
+///
+/// #[boxed(dyn)]
+/// async fn held() -> usize {
+///     let count = Rc::new(1);
+///     async {}.await; // error: an `Rc` held across an await is not `Send`
+///     *count
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use commonware_macros::boxed;
+///
+/// #[boxed(dyn, static)] // error: `dyn` is the only argument
+/// async fn init() {}
 /// ```
 #[cfg(feature = "std")]
 pub use commonware_macros_impl::boxed;
