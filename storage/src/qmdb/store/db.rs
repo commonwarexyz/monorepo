@@ -445,16 +445,15 @@ where
             .expect("pruned chunk count fits in u64 bits");
         bitmap.extend_to(*inactivity_floor_loc);
 
-        // Build the snapshot from the operations at and above the floor, then append their
-        // statuses. The build shares the log with its tasks and drops every clone before it
-        // returns.
+        // Build the snapshot on this task from the operations at and above the floor, then
+        // append their statuses. The build drops every clone of the log before it returns.
         let log = Arc::new(log);
         let (active_keys, activity) = snapshot
             .build_snapshot(
                 context.child("build"),
                 inactivity_floor_loc,
                 &log,
-                (),
+                NonZeroUsize::MIN,
                 init_buffer,
                 &cfg.init_scratch_partition,
             )

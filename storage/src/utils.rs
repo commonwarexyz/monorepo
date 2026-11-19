@@ -4,6 +4,8 @@
 pub(crate) mod codec;
 #[cfg(test)]
 pub(crate) mod detached;
+#[cfg(test)]
+pub(crate) mod task_metrics;
 
 use commonware_utils::bitmap::BitMap;
 use std::{collections::BTreeMap, num::NonZeroU64};

@@ -56,7 +56,7 @@
 mod common;
 
 use common::{
-    AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
+    AnyOFixP3Db, AnyUFixP64kDb, Digest, THREADS, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
 use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher as _, Sha256};
@@ -373,7 +373,7 @@ fn get_bench(
         // production runs.
         let cache_pages = cache_pages.unwrap_or(MIN_PAGE_CACHE_SIZE);
         let cache_mode = format!("{cache_pages} pages");
-        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, cache_pages, NZUsize!(1));
+        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, cache_pages, THREADS);
 
         let batch_mode = batch.map_or_else(|| "point".to_string(), |b| format!("get_many x{b}"));
         println!(

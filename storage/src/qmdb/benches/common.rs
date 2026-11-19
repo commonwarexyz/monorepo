@@ -9,8 +9,11 @@ use commonware_runtime::{
     tokio::Context,
 };
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{self, Family, full::Config as MerkleConfig},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    merkle::{self, Family},
     qmdb::{
         any::{
             Config as AnyConfig,
@@ -114,20 +117,12 @@ const PARTITION_KEYLESS: &str = "bench-keyless";
 const PARTITION_STORE: &str = "bench-store";
 const PARTITION_IMM: &str = "bench-immutable";
 
-fn merkle_cfg(
-    suffix: &str,
-    ctx: &impl Strategizer,
-    page_cache: CacheRef,
-    items_per_blob: NonZeroU64,
-) -> MerkleConfig<Rayon> {
+fn merkle_cfg(suffix: &str, ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
     MerkleConfig {
-        journal_partition: format!("journal-{suffix}"),
-        metadata_partition: format!("metadata-{suffix}"),
-        items_per_blob,
-        write_buffer: WRITE_BUFFER_SIZE,
+        partition: format!("metadata-{suffix}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
-        page_cache,
+        resident_height: Default::default(),
     }
 }
 
@@ -167,19 +162,19 @@ pub fn any_fix_cfg_with(
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
 ) -> AnyConfig<EightCap, FConfig, Rayon> {
-    any_fix_cfg_full(ctx, items_per_blob, page_cache_size, ())
+    any_fix_cfg_full(ctx, items_per_blob, page_cache_size, THREADS)
 }
 
-/// Shared fixed-value config construction, generic over the index's snapshot-build concurrency.
-pub fn any_fix_cfg_full<B>(
+/// Shared fixed-value config construction.
+pub fn any_fix_cfg_full(
     ctx: &impl Strategizer,
     items_per_blob: NonZeroU64,
     page_cache_size: NonZeroUsize,
-    init_concurrency: B,
-) -> AnyConfig<EightCap, FConfig, Rayon, B> {
+    init_concurrency: NonZeroUsize,
+) -> AnyConfig<EightCap, FConfig, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, page_cache_size);
     AnyConfig {
-        merkle: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_FIX, ctx),
         log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_scratch_partition: format!("scratch-{PARTITION_FIX}"),
@@ -194,10 +189,11 @@ pub fn imm_fix_cfg_with(
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     ImmutableFixedConfig {
-        merkle: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_IMM, ctx),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: THREADS,
     }
 }
 
@@ -211,13 +207,13 @@ pub fn cur_fix_cfg_with(
 ) -> CurrentConfig<EightCap, FConfig, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentConfig {
-        merkle: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_FIX, ctx),
         log: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         init_scratch_partition: format!("scratch-{PARTITION_FIX}"),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -231,12 +227,12 @@ pub fn any_var_digest_cfg_with(
 ) -> AnyConfig<EightCap, VConfig<((), ())>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyConfig {
-        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
         log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -252,13 +248,13 @@ pub fn cur_var_digest_cfg_with(
 ) -> CurrentConfig<EightCap, VConfig<((), ())>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentConfig {
-        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
         log: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -275,7 +271,7 @@ pub fn any_var_vec_cfg_with(
 ) -> AnyConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyConfig {
-        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
         log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
@@ -285,7 +281,7 @@ pub fn any_var_vec_cfg_with(
         translator: EightCap,
         init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -301,7 +297,7 @@ pub fn cur_var_vec_cfg_with(
 ) -> CurrentConfig<EightCap, VConfig<VarVecCfg>, Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentConfig {
-        merkle: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_VAR, ctx),
         log: var_log_cfg(
             PARTITION_VAR,
             page_cache,
@@ -312,7 +308,7 @@ pub fn cur_var_vec_cfg_with(
         translator: EightCap,
         init_scratch_partition: format!("scratch-{PARTITION_VAR}"),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -328,13 +324,14 @@ pub fn keyless_cfg_with(
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
-        merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_KEYLESS, ctx),
         log: var_log_cfg(
             PARTITION_KEYLESS,
             page_cache,
             ((0..=10000).into(), ()),
             items_per_blob,
         ),
+        init_concurrency: THREADS,
     }
 }
 
@@ -648,14 +645,12 @@ where
     let mut rng = TestRng::new(42);
 
     // Count commits across both phases so `prune_frequency` can prune to the inactivity floor every
-    // N commits, bounding on-disk growth instead of accumulating the whole (re-appended) log until
-    // the end. Pruning below the floor never affects an `init` replay, which starts at the floor.
+    // N commits, bounding on-disk growth and the operations an `init` replays.
     let mut commits = 0u32;
 
-    // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before a
-    // merkleize+apply (bounding the batch). `None` seeds in a single batch. Each apply is followed
-    // by a `commit`, and its `merkle.flush()` writes the in-memory merkle nodes to the journal and
-    // prunes them from memory. Without that, a large build accumulates the whole merkle in RAM.
+    // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before
+    // a merkleize+apply (bounding the batch); `None` seeds in a single batch. Each apply is
+    // followed by a `commit`.
     {
         let mut batch = db.new_batch();
         let mut pending = 0u64;
@@ -683,8 +678,7 @@ where
         }
     }
 
-    // Perform `num_operations` random updates/deletes, committing periodically. Each apply is
-    // followed by a `commit` so the merkle structure is flushed out of memory (see the seed phase).
+    // Perform `num_operations` random updates/deletes, committing periodically.
     {
         // Sample over the full keyspace (which may exceed the seeded set, so some samples hit unseeded
         // keys and insert them). `Zipf::new` samples a rank in `[1, space]`; map it to a 0-based index.

@@ -75,7 +75,8 @@
 //! ```
 
 use crate::{
-    merkle::{Family, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::Family,
     qmdb::{
         operation::{Committable as _, Key},
         single_operation_root,
@@ -131,6 +132,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
+
+    /// Tasks that initialization spawns to scan the log at once, beside the calling task's index
+    /// build. With 1, initialization spawns nothing, and the calling task scans the log while the
+    /// strategy hashes it.
+    pub init_concurrency: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -1221,7 +1227,7 @@ pub(super) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_unsynced_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,

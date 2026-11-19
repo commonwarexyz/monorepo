@@ -5,6 +5,9 @@
 //! bucket by key and location, which puts the operations of one key side by side with the newest
 //! last, and loads the keys whose newest operation is not a delete. Buckets of a build too large
 //! to hold in memory live in a scratch blob until they are sorted.
+//!
+//! The tasks that replay the log can also hash its operations for the journal's Merkle structure,
+//! so that initialization reads the log once.
 
 use super::Error;
 use crate::{
@@ -12,12 +15,16 @@ use crate::{
         Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::contiguous::Contiguous,
-    merkle::{Family, Location},
+    journal::{
+        authenticated::{Chunk, ChunkHasher, LeafSink},
+        contiguous::Contiguous,
+    },
+    merkle::{self, Family, Location, hasher::Hasher as MerkleHasher},
     qmdb::operation::Operation,
     translator::Translator,
 };
 use bytes::BufMut as _;
+use commonware_codec::Encode;
 use commonware_runtime::{
     AbortOnDrop, Blob, Error as RuntimeError, IoBufMut, ReadOptions, Spawner, Storage, WriteOptions,
 };
@@ -27,13 +34,17 @@ use commonware_utils::{
 };
 use core::{
     num::NonZeroUsize,
+    ops::Range,
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
-use futures::{StreamExt as _, pin_mut};
-use std::{collections::VecDeque, sync::Arc};
+use futures::{StreamExt as _, pin_mut, stream::FuturesUnordered};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 
-/// Operations per chunk of the log that a build task claims and replays at a time. Small in
-/// tests so ordinary logs span several chunks.
+/// Operations per chunk of the log that a build task replays at a time, unless the journal
+/// chooses the chunks (see [Scan]). Small in tests so ordinary logs span several chunks.
 #[cfg(not(test))]
 const DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
@@ -473,6 +484,8 @@ struct Buckets<B, R> {
     buckets: Vec<Mutex<Bucket<R>>>,
     /// Bytes of records the buckets hold in memory.
     held: AtomicU64,
+    /// Sets of empty staging buffers, one buffer per bucket, that decoders pass between them.
+    spare: Mutex<Vec<Vec<Vec<u8>>>>,
 
     /// The partition of the scratch blob.
     scratch: String,
@@ -523,6 +536,21 @@ impl<B: Blob, R> Buckets<B, R> {
             }
         }
         Ok(())
+    }
+
+    /// Take a set of empty staging buffers, one per bucket.
+    fn stage(&self) -> Vec<Vec<u8>> {
+        let spare = self.spare.lock().pop();
+        spare.unwrap_or_else(|| {
+            (0..self.buckets.len())
+                .map(|_| Vec::with_capacity(STAGE_BYTES))
+                .collect()
+        })
+    }
+
+    /// Return a set of staging buffers, now empty, for another decoder to take.
+    fn unstage(&self, staged: Vec<Vec<u8>>) {
+        self.spare.lock().push(staged);
     }
 
     /// Move the records in `staged` into `bucket`, leaving `staged` empty. Once the build holds
@@ -698,51 +726,139 @@ impl<B: Blob, R> Buckets<B, R> {
     }
 }
 
-/// Replay chunks of the log claimed from `next`, appending the record of every keyed operation
-/// to the bucket that owns its key, until no chunk below `end` is left.
-async fn route<F, E, C, R>(
+/// What a build's decoder does with each operation of its chunk besides routing it.
+trait ChunkVisitor<F: Family, Item>: Send + 'static {
+    /// The chunk's result, passed on in position order once the chunk is routed.
+    type Output: Send + 'static;
+
+    /// See the chunk's next operation, in position order.
+    fn visit(&mut self, item: &Item);
+
+    /// The chunk's result, once every operation in it has been visited.
+    fn finish(self) -> Result<Self::Output, merkle::Error<F>>;
+}
+
+impl<F: Family, Item> ChunkVisitor<F, Item> for () {
+    type Output = ();
+
+    fn visit(&mut self, _: &Item) {}
+
+    fn finish(self) -> Result<(), merkle::Error<F>> {
+        Ok(())
+    }
+}
+
+impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkVisitor<F, Item>
+    for ChunkHasher<F, H>
+{
+    type Output = Chunk<F, H::Digest>;
+
+    fn visit(&mut self, item: &Item) {
+        Self::push(self, item);
+    }
+
+    fn finish(self) -> Result<Self::Output, merkle::Error<F>> {
+        Self::finish(self)
+    }
+}
+
+/// The operations a build decodes, and what its decoders do with them besides routing those at
+/// or after the floor. They do nothing more, or hash them for the journal's Merkle structure.
+trait Scan<F: Family, Item>: Send + Sync {
+    type Visitor: ChunkVisitor<F, Item>;
+
+    /// The chunks to decode, in position order, for a build from `floor` to `end`.
+    fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static;
+
+    /// The visitor of `chunk`, one of [Self::chunks], that its decoder calls.
+    fn visitor(&self, chunk: Range<u64>) -> Self::Visitor;
+
+    /// Pass a routed chunk's result on. Chunks are passed on in position order. Returns false to
+    /// stop the build.
+    fn send(
+        &self,
+        output: <Self::Visitor as ChunkVisitor<F, Item>>::Output,
+    ) -> impl Future<Output = bool> + Send;
+}
+
+/// A build that only routes, decoding from the floor.
+struct IndexOnly;
+
+impl<F: Family, Item> Scan<F, Item> for IndexOnly {
+    type Visitor = ();
+
+    fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        (floor..end)
+            .step_by(usize::try_from(DECODE_CHUNK).expect("chunk size fits usize"))
+            .map(move |start| start..(start + DECODE_CHUNK).min(end))
+    }
+
+    fn visitor(&self, _: Range<u64>) {}
+
+    async fn send(&self, _: ()) -> bool {
+        true
+    }
+}
+
+/// A build that also hashes every operation from the journal's boundary, in the journal's chunks.
+impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for LeafSink<F, H> {
+    type Visitor = ChunkHasher<F, H>;
+
+    // Starts at the journal's pruning boundary, which initialization keeps at or before the floor.
+    fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        Self::chunks(self)
+    }
+
+    fn visitor(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
+        self.chunk_hasher(chunk)
+    }
+
+    async fn send(&self, chunk: Chunk<F, H::Digest>) -> bool {
+        Self::send(self, chunk).await
+    }
+}
+
+/// Replay `chunk` of the log, appending the record of every keyed operation at or after the floor
+/// to the bucket that owns its key. `visitor` sees every replayed operation, including those
+/// before the floor.
+async fn route<F, E, C, R, V>(
     context: &E,
     log: &C,
-    next: &AtomicU64,
-    end: u64,
+    chunk: Range<u64>,
     init_buffer: NonZeroUsize,
     buckets: &Buckets<E::Blob, R>,
+    visitor: &mut V,
 ) -> Result<(), Error<F>>
 where
     F: Family,
     E: Storage,
     C: Contiguous<Item: Operation<F>>,
     R: Send,
+    V: ChunkVisitor<F, C::Item>,
 {
     let layout = buckets.layout;
-    let mut staged: Vec<Vec<u8>> = (0..buckets.buckets.len())
-        .map(|_| Vec::with_capacity(STAGE_BYTES))
-        .collect();
-    loop {
-        let start = next.fetch_add(DECODE_CHUNK, Ordering::Relaxed);
-        if start >= end {
-            break;
-        }
-        let stop = start.saturating_add(DECODE_CHUNK).min(end);
+    let mut staged = buckets.stage();
 
-        // Init reads every operation once, so the replayed pages are not kept in the OS page
-        // cache.
-        let stream = log
-            .replay(start..stop, init_buffer, ReadOptions::DONT_CACHE)
-            .await?;
-        pin_mut!(stream);
-        while let Some(batch) = stream.next().await {
-            for (loc, op) in batch? {
-                let Some(key) = op.key() else { continue };
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache.
+    let stream = log
+        .replay(chunk, init_buffer, ReadOptions::DONT_CACHE)
+        .await?;
+    pin_mut!(stream);
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            visitor.visit(&op);
+            if loc < layout.floor {
+                continue;
+            }
+            let Some(key) = op.key() else { continue };
 
-                // The bytes a lookup probes the index with.
-                let key: &[u8] = key.as_ref();
-                let bucket = (layout.partition_of)(key) / layout.per_bucket;
-                let staged = &mut staged[bucket];
-                layout.encode(staged, key, layout.tag(loc, op.is_delete()));
-                if staged.len() >= STAGE_BYTES {
-                    buckets.append(context, bucket, staged).await?;
-                }
+            // The bytes a lookup probes the index with.
+            let key: &[u8] = key.as_ref();
+            let bucket = (layout.partition_of)(key) / layout.per_bucket;
+            let staged = &mut staged[bucket];
+            layout.encode(staged, key, layout.tag(loc, op.is_delete()));
+            if staged.len() >= STAGE_BYTES {
+                buckets.append(context, bucket, staged).await?;
             }
         }
     }
@@ -751,7 +867,91 @@ where
             buckets.append(context, bucket, staged).await?;
         }
     }
+    buckets.unstage(staged);
     Ok(())
+}
+
+/// Replay the chunks of `scan` into `buckets` (see [route]), on up to `tasks` tasks at a time,
+/// and pass each chunk's result on in position order. Returns false if `scan` stopped the build.
+///
+/// Every task has ended when this returns, whatever it returns.
+#[allow(clippy::too_many_arguments)]
+async fn route_chunks<F, E, C, R, S>(
+    context: &E,
+    log: &Arc<C>,
+    scan: &S,
+    floor: u64,
+    end: u64,
+    tasks: usize,
+    init_buffer: NonZeroUsize,
+    buckets: &Arc<Buckets<E::Blob, R>>,
+) -> Result<bool, Error<F>>
+where
+    F: Family,
+    E: Spawner + crate::Context,
+    C: Contiguous<Item: Operation<F>> + 'static,
+    R: Send + 'static,
+    S: Scan<F, C::Item>,
+{
+    // A decoder beyond the number of chunks would have nothing to replay.
+    let chunks: Vec<_> = scan.chunks(floor, end).collect();
+    let decoders = tasks.min(chunks.len());
+    if decoders <= 1 {
+        for chunk in chunks {
+            let mut visitor = scan.visitor(chunk.clone());
+            route(context, &**log, chunk, init_buffer, buckets, &mut visitor).await?;
+            if !scan.send(visitor.finish()?).await {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+
+    // Buckets are sorted later, so chunks are routed in whatever order their decoders finish.
+    // Their results are still passed on in order, so one that finishes early waits for those
+    // before it. A chunk starts only within `window` of the next to pass on, which bounds how
+    // many wait without idling a decoder behind a slow chunk.
+    let window = 2 * decoders;
+    let mut chunks = chunks.into_iter().enumerate();
+    let mut running = FuturesUnordered::new();
+    let mut waiting = BTreeMap::new();
+    let (mut started, mut passed) = (0, 0);
+    let routed = async {
+        loop {
+            while running.len() < decoders && started - passed < window {
+                let Some((index, chunk)) = chunks.next() else {
+                    break;
+                };
+                let mut visitor = scan.visitor(chunk.clone());
+                let (log, buckets) = (log.clone(), buckets.clone());
+                let decoder = context
+                    .child("snapshot_decoder")
+                    .dedicated()
+                    .spawn(move |context| async move {
+                        route(&context, &*log, chunk, init_buffer, &buckets, &mut visitor).await?;
+                        Ok::<_, Error<F>>(visitor.finish()?)
+                    })
+                    .abort_on_drop();
+                running.push(async move { (index, decoder.join().await) });
+                started += 1;
+            }
+            let Some((index, output)) = running.next().await else {
+                return Ok(true);
+            };
+            waiting.insert(index, output??);
+            while let Some(output) = waiting.remove(&passed) {
+                if !scan.send(output).await {
+                    return Ok(false);
+                }
+                passed += 1;
+            }
+        }
+    }
+    .await;
+
+    // Wait for the decoders still running before surfacing a failure, so that none outlives it.
+    while running.next().await.is_some() {}
+    routed
 }
 
 /// Sort buckets claimed from `next` and insert their surviving keys, until no bucket is left.
@@ -798,13 +998,19 @@ where
 }
 
 /// Remove a build's blob from the `scratch` partition, and the partition with it unless
-/// something else is kept there. Neither has to exist.
+/// something else is kept there. Neither has to exist, and storage is left untouched if neither
+/// does.
 async fn remove_scratch(context: &impl Storage, scratch: &str) -> Result<(), RuntimeError> {
-    match context.remove(scratch, Some(SCRATCH_BLOB)).await {
-        Ok(()) | Err(RuntimeError::PartitionMissing(_) | RuntimeError::BlobMissing(..)) => {}
+    let blobs = match context.scan(scratch).await {
+        Ok(blobs) => blobs,
+        Err(RuntimeError::PartitionMissing(_)) => return Ok(()),
         Err(err) => return Err(err),
+    };
+    let ours = blobs.iter().any(|blob| blob == SCRATCH_BLOB);
+    if ours {
+        context.remove(scratch, Some(SCRATCH_BLOB)).await?;
     }
-    if matches!(context.scan(scratch).await, Ok(blobs) if blobs.is_empty()) {
+    if blobs.len() == usize::from(ours) {
         match context.remove(scratch, None).await {
             Ok(()) | Err(RuntimeError::PartitionMissing(_)) => {}
             Err(err) => return Err(err),
@@ -824,7 +1030,11 @@ async fn remove_scratch(context: &impl Storage, scratch: &str) -> Result<(), Run
 /// A build that holds more than [MEMORY_BYTES] of records keeps the rest in a blob of the
 /// `scratch` partition. Returns the number of active keys and the activity bitmap (see
 /// [Rebuild::build_snapshot]).
-async fn build<F, E, C, I>(
+///
+/// `scan` chooses the chunks of the first phase and sees each one's operations (see [Scan]). If
+/// it stops the build, nothing is sorted and the result is unspecified.
+#[allow(clippy::too_many_arguments)]
+async fn build<F, E, C, I, S>(
     snapshot: &mut I,
     context: E,
     inactivity_floor_loc: Location<F>,
@@ -832,12 +1042,14 @@ async fn build<F, E, C, I>(
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     scratch: &str,
+    scan: S,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
     E: Spawner + crate::Context,
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
+    S: Scan<F, C::Item>,
 {
     let floor = *inactivity_floor_loc;
     let end = log.bounds().end;
@@ -885,42 +1097,36 @@ where
             })
             .collect(),
         held: AtomicU64::new(0),
+        spare: Mutex::new(Vec::new()),
         scratch: scratch.to_string(),
         blob: AsyncMutex::new(None),
         end: AtomicU64::new(0),
     });
 
-    // Buckets are sorted later, so decoders claim chunks in any order. A decoder beyond the
-    // number of chunks would have nothing to claim.
-    let chunks = ops.div_ceil(DECODE_CHUNK);
-    let decoders = tasks.min(usize::try_from(chunks).unwrap_or(usize::MAX));
-    let next = Arc::new(AtomicU64::new(floor));
-    if decoders <= 1 {
-        route::<F, _, C, _>(&context, &**log, &next, end, init_buffer, &shared).await?;
-    } else {
-        let mut handles = Vec::with_capacity(decoders);
-        for decoder in 0..decoders {
-            let log = log.clone();
-            let next = next.clone();
-            let shared = shared.clone();
-            let handle = context
-                .child("snapshot_decoder")
-                .with_attribute("decoder", decoder)
-                .dedicated()
-                .spawn(move |context| async move {
-                    route::<F, _, C, _>(&context, &*log, &next, end, init_buffer, &shared).await
-                });
-            handles.push(handle.abort_on_drop());
-        }
-        AbortOnDrop::join_all::<Error<F>>(handles).await?;
-    }
+    // Fill the buckets. The scan has seen every chunk once this returns, so it is released
+    // before the buckets are sorted.
+    let routed = route_chunks(
+        &context,
+        log,
+        &scan,
+        floor,
+        end,
+        tasks,
+        init_buffer,
+        &shared,
+    )
+    .await?;
+    drop(scan);
 
     // All sorters share one atomic bitmap to track the activity bits. Keys are partitioned
     // across buckets, so every bit has a single writer.
     let active = Arc::new(Atomic::zeroes(ops));
     let sorters = tasks.min(buckets);
     let next = Arc::new(AtomicUsize::new(0));
-    let filled = if sorters <= 1 {
+    let filled = if !routed {
+        // The scan reports why it stopped the build, and its caller discards the result.
+        Vec::new()
+    } else if sorters <= 1 {
         vec![sort_and_load::<F, _, _>(&context, &shared, &next, &active).await?]
     } else {
         let mut handles = Vec::with_capacity(sorters);
@@ -982,20 +1188,17 @@ where
     reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
 )]
 pub trait SnapshotBuild<F: Family>:
-    Index<Value = Location<F>> + Rebuild<F, Self::Concurrency> + Sized + 'static
+    Index<Value = Location<F>> + Rebuild<F> + Sized + 'static
 {
-    /// The concurrency setting for this index: `()` for unpartitioned indexes or
-    /// [`NonZeroUsize`] for partitioned indexes.
-    type Concurrency: Copy + Send + Sync + 'static;
 }
 
 /// Replays the log into an index owned by initialization. Implementations must drop all log
 /// clones before returning, including on error.
-pub(super) trait Rebuild<F: Family, B>: Index<Value = Location<F>> + Sized {
-    /// Replay `log` from `inactivity_floor_loc`, populating `self`, which must be empty. Returns
-    /// the number of active keys and the activity status of every replayed location, in location
-    /// order: a location's bit is set iff it holds the current operation of an active key or is
-    /// the last commit.
+pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
+    /// Replay `log` from `inactivity_floor_loc` on `init_concurrency` tasks, populating `self`,
+    /// which must be empty. Returns the number of active keys and the activity status of every
+    /// replayed location, in location order: a location's bit is set iff it holds the current
+    /// operation of an active key or is the last commit.
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes). `scratch` names a partition the
     /// build may keep temporary data in, which it removes before returning successfully.
@@ -1004,89 +1207,46 @@ pub(super) trait Rebuild<F: Family, B>: Index<Value = Location<F>> + Sized {
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: B,
+        init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
         scratch: &str,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner + crate::Context,
         C: Contiguous<Item: Operation<F>> + 'static;
+
+    /// Like [Self::build_snapshot], but the tasks that replay the log also hash every chunk of
+    /// `leaves` and send them to it in order. If `leaves` stops accepting chunks, the journal
+    /// reports why and the result is unspecified.
+    #[allow(clippy::too_many_arguments)]
+    fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        scratch: &str,
+        leaves: LeafSink<F, H>,
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
+    where
+        E: Spawner + crate::Context,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static;
 }
 
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
-    type Concurrency = ();
-}
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
-    type Concurrency = ();
-}
-
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
-    type Concurrency = NonZeroUsize;
 }
-
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
-    type Concurrency = NonZeroUsize;
 }
 
-impl<F: Family, T: Translator> Rebuild<F, ()> for crate::index::unordered::Index<T, Location<F>> {
-    async fn build_snapshot<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        _init_concurrency: (),
-        init_buffer: NonZeroUsize,
-        scratch: &str,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner + crate::Context,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            NonZeroUsize::MIN,
-            init_buffer,
-            scratch,
-        )
-        .await
-    }
-}
-
-impl<F: Family, T: Translator> Rebuild<F, ()> for crate::index::ordered::Index<T, Location<F>> {
-    async fn build_snapshot<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        _init_concurrency: (),
-        init_buffer: NonZeroUsize,
-        scratch: &str,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner + crate::Context,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            NonZeroUsize::MIN,
-            init_buffer,
-            scratch,
-        )
-        .await
-    }
-}
-
-impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F, NonZeroUsize> for I {
+impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
     async fn build_snapshot<E, C>(
         &mut self,
         context: E,
@@ -1108,6 +1268,35 @@ impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F, NonZeroUsize> fo
             init_concurrency,
             init_buffer,
             scratch,
+            IndexOnly,
+        )
+        .await
+    }
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        init_concurrency: NonZeroUsize,
+        init_buffer: NonZeroUsize,
+        scratch: &str,
+        leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner + crate::Context,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        build(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_concurrency,
+            init_buffer,
+            scratch,
+            leaves,
         )
         .await
     }
@@ -1260,15 +1449,79 @@ mod tests {
         log
     }
 
+    /// The chunks a scan passed on, each with the number of operations its visitor saw.
+    type Passed = Arc<Mutex<Vec<(Range<u64>, u64)>>>;
+
+    /// Counts the operations of a chunk.
+    struct Counter(Range<u64>, u64);
+
+    impl ChunkVisitor<mmr::Family, TestOp> for Counter {
+        type Output = (Range<u64>, u64);
+
+        fn visit(&mut self, _: &TestOp) {
+            self.1 += 1;
+        }
+
+        fn finish(self) -> Result<Self::Output, merkle::Error<mmr::Family>> {
+            Ok((self.0, self.1))
+        }
+    }
+
+    /// A scan of the whole log in chunks of uneven sizes, as a journal that hashes them chooses
+    /// its own. Records each chunk passed on and stops the build at the `limit`th.
+    struct Recorder {
+        end: u64,
+        passed: Passed,
+        limit: usize,
+    }
+
+    impl Scan<mmr::Family, TestOp> for Recorder {
+        type Visitor = Counter;
+
+        fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+            let (end, mut next) = (self.end, 0);
+            [7, 64, 1, 120, 33]
+                .into_iter()
+                .cycle()
+                .map_while(move |width: u64| {
+                    (next < end).then(|| {
+                        let chunk = next..(next + width).min(end);
+                        next = chunk.end;
+                        chunk
+                    })
+                })
+        }
+
+        fn visitor(&self, chunk: Range<u64>) -> Counter {
+            Counter(chunk, 0)
+        }
+
+        async fn send(&self, output: (Range<u64>, u64)) -> bool {
+            let mut passed = self.passed.lock();
+            passed.push(output);
+            passed.len() < self.limit
+        }
+    }
+
+    /// The operations a [check_build] replays.
+    #[derive(Clone, Copy)]
+    enum Replay {
+        /// Those from the floor, as a build that only routes.
+        Floor,
+        /// The whole log, as a build that also hashes it.
+        Log,
+    }
+
     /// Build the snapshot of `log` from `floor` into `index` on `tasks` tasks, and check the
     /// index, the active-key count and the activity bitmap against the operations applied in
-    /// order.
+    /// order. A build that replays the whole log must also pass every chunk on once, in order.
     async fn check_build<I>(
         context: deterministic::Context,
         mut index: I,
         log: Vec<TestOp>,
         floor: u64,
         tasks: usize,
+        replay: Replay,
     ) where
         I: Partitioned + Index<Value = Location<mmr::Family>>,
     {
@@ -1286,17 +1539,53 @@ mod tests {
         }
         let end = log.len() as u64;
         let log = Arc::new(MemoryLog(log));
-        let (active_keys, active) = build(
-            &mut index,
-            context.child("build"),
-            Location::new(floor),
-            &log,
-            NonZeroUsize::new(tasks).unwrap(),
-            NZUsize!(1024),
-            "scratch",
-        )
-        .await
+        let passed = Passed::default();
+        let (start, tasks) = (Location::new(floor), NonZeroUsize::new(tasks).unwrap());
+        let (build_context, buffer) = (context.child("build"), NZUsize!(1024));
+        let (active_keys, active) = match replay {
+            Replay::Floor => {
+                let scan = IndexOnly;
+                build(
+                    &mut index,
+                    build_context,
+                    start,
+                    &log,
+                    tasks,
+                    buffer,
+                    "scratch",
+                    scan,
+                )
+                .await
+            }
+            Replay::Log => {
+                let scan = Recorder {
+                    end,
+                    passed: passed.clone(),
+                    limit: usize::MAX,
+                };
+                build(
+                    &mut index,
+                    build_context,
+                    start,
+                    &log,
+                    tasks,
+                    buffer,
+                    "scratch",
+                    scan,
+                )
+                .await
+            }
+        }
         .unwrap();
+        if matches!(replay, Replay::Log) {
+            let mut next = 0;
+            for (chunk, seen) in passed.lock().iter() {
+                assert_eq!(chunk.start, next);
+                assert_eq!(*seen, chunk.end - chunk.start);
+                next = chunk.end;
+            }
+            assert_eq!(next, end);
+        }
         assert_eq!(Arc::strong_count(&log), 1);
         assert!(matches!(
             context.scan("scratch").await,
@@ -1323,11 +1612,13 @@ mod tests {
 
     /// Run [check_build] on `log` for every index type, with translators that do and do
     /// not make keys collide, from the start of the log and from part way in, inline and on
-    /// several tasks.
+    /// several tasks, replaying from the floor and from the start of the log.
     fn check_builds(log: Vec<TestOp>) {
         deterministic::Runner::default().start(|context| async move {
             let mut case = 0;
-            for floor in [0, log.len() as u64 / 3] {
+            let floors = [0, log.len() as u64 / 3];
+            let replays = [Replay::Floor, Replay::Log];
+            for (floor, replay) in floors.into_iter().flat_map(|f| replays.map(|r| (f, r))) {
                 for tasks in [1, 3] {
                     let context = context.child("run").with_attribute("case", case);
                     case += 1;
@@ -1337,6 +1628,7 @@ mod tests {
                         log.clone(),
                         floor,
                         tasks,
+                        replay,
                     )
                     .await;
                     check_build(
@@ -1345,6 +1637,7 @@ mod tests {
                         log.clone(),
                         floor,
                         tasks,
+                        replay,
                     )
                     .await;
                     check_build(
@@ -1353,6 +1646,7 @@ mod tests {
                         log.clone(),
                         floor,
                         tasks,
+                        replay,
                     )
                     .await;
                     check_build(
@@ -1361,6 +1655,7 @@ mod tests {
                         log.clone(),
                         floor,
                         tasks,
+                        replay,
                     )
                     .await;
                     check_build(
@@ -1369,6 +1664,7 @@ mod tests {
                         log.clone(),
                         floor,
                         tasks,
+                        replay,
                     )
                     .await;
                     check_build(
@@ -1377,6 +1673,7 @@ mod tests {
                         log.clone(),
                         floor,
                         tasks,
+                        replay,
                     )
                     .await;
                 }
@@ -1449,6 +1746,7 @@ mod tests {
                     test_log(ops, |rng| vec![rng.random(); 32]),
                     0,
                     3,
+                    Replay::Floor,
                 )
                 .await;
             }
@@ -1497,6 +1795,7 @@ mod tests {
                 },
                 buckets: Vec::new(),
                 held: AtomicU64::new(0),
+                spare: Default::default(),
                 scratch: "scratch".to_string(),
                 blob: Default::default(),
                 end: AtomicU64::new(0),
@@ -1530,6 +1829,7 @@ mod tests {
                         log.clone(),
                         0,
                         1,
+                        Replay::Floor,
                     )
                     .await;
                     continue;
@@ -1549,10 +1849,50 @@ mod tests {
                     NonZeroUsize::MIN,
                     NZUsize!(1024),
                     "scratch",
+                    IndexOnly,
                 )
                 .await;
                 assert!(matches!(result, Err(Error::Runtime(_))));
                 context.storage_fault_config().write().write_rate = None;
+            }
+        });
+    }
+
+    #[test]
+    fn test_build_stops_with_its_scan() {
+        // A scan that stops accepting chunks ends the build without an error of its own, since
+        // the scan reports why. Every task must have ended and nothing may be left in scratch.
+        deterministic::Runner::default().start(|context| async move {
+            let ops = test_log(4000, |rng| vec![rng.random(); 32]);
+            for tasks in [1, 3] {
+                let context = context.child("case").with_attribute("tasks", tasks);
+                let log = Arc::new(MemoryLog(ops.clone()));
+                let passed = Passed::default();
+                let scan = Recorder {
+                    end: ops.len() as u64,
+                    passed: passed.clone(),
+                    limit: 5,
+                };
+                let mut index =
+                    partitioned::unordered::Index::<_, _, 1>::new(context.child("index"), EightCap);
+                build(
+                    &mut index,
+                    context.child("build"),
+                    Location::<mmr::Family>::new(0),
+                    &log,
+                    NZUsize!(tasks),
+                    NZUsize!(1024),
+                    "scratch",
+                    scan,
+                )
+                .await
+                .unwrap();
+                assert_eq!(passed.lock().len(), 5);
+                assert_eq!(Arc::strong_count(&log), 1);
+                assert!(matches!(
+                    context.scan("scratch").await,
+                    Err(RuntimeError::PartitionMissing(_))
+                ));
             }
         });
     }

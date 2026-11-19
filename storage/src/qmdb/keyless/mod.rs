@@ -54,12 +54,14 @@
 //! ```
 
 use crate::{
-    merkle::{Family, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::Family,
     qmdb::{operation::Committable as _, single_operation_root, value::ValueEncoding},
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use core::num::NonZeroUsize;
 
 pub mod batch;
 mod compact;
@@ -96,6 +98,10 @@ pub struct Config<J, S: Strategy> {
 
     /// Configuration for the operations log journal.
     pub log: J,
+
+    /// Tasks that initialization spawns to scan the log at once. With 1, initialization spawns
+    /// nothing, and the calling task scans the log while the strategy hashes it.
+    pub init_concurrency: NonZeroUsize,
 }
 
 #[cfg(test)]

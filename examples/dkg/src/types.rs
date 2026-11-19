@@ -38,9 +38,9 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     Context as StorageContext,
-    journal::contiguous::fixed::Config as FixedLogConfig,
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
     metadata::{self, Metadata},
-    mmr::{self, Location, full::Config as MmrJournalConfig},
+    mmr::{self, Location},
     qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
@@ -567,14 +567,11 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
 /// Application QMDB config with partitions derived from `prefix`.
 pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
     fixed::Config {
-        merkle: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-mmr-journal"),
-            metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
-            items_per_blob: NZU64!(11),
-            write_buffer: IO_BUFFER_SIZE,
+        merkle: MerkleConfig {
+            partition: format!("{prefix}-qmdb-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: Default::default(),
         },
         log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
@@ -586,7 +583,7 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Se
         translator: TwoCap,
         init_scratch_partition: format!("{prefix}-qmdb-log-journal-scratch"),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 

@@ -1861,19 +1861,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         mut self: Box<Self>,
         min_position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let items_per_blob = self.items_per_blob.get();
-
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        let Some((min_blob, new_boundary)) = self
+            .blobs
+            .prune_target(min_position, self.items_per_blob.get())
+        else {
             return Ok((self, false));
-        }
-
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        };
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -2591,6 +2584,13 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
+    }
+
+    fn prune_target(&self, min_position: u64) -> u64 {
+        self.0
+            .blobs
+            .prune_target(min_position, self.0.items_per_blob.get())
+            .map_or(self.0.bounds.start, |(_, start)| start)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
@@ -9792,12 +9792,10 @@ mod tests {
 
             assert_eq!(journal.size(), 20);
 
-            // Verify oldest retained is pruned to lower_bound's blob boundary (5)
-            assert_eq!(journal.bounds().start, 5); // Blob 1 starts at position 5
-
-            // Verify data integrity: positions before 5 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
+            // Operations before the lower bound stay until the synced database prunes them
+            assert_eq!(journal.bounds().start, 0);
+            assert_eq!(journal.read(0).await.unwrap(), 0);
+            assert_eq!(journal.read(4).await.unwrap(), 400);
 
             // Positions 5-19 should be accessible
             assert_eq!(journal.read(5).await.unwrap(), 500);
@@ -9888,12 +9886,10 @@ mod tests {
 
             assert_eq!(journal.size(), 20);
 
-            // Verify pruning to lower bound (blob 1 boundary = position 5)
-            assert_eq!(journal.bounds().start, 5); // Blob 1 starts at position 5
-
-            // Verify positions before 5 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
+            // Operations before the lower bound stay until the synced database prunes them
+            assert_eq!(journal.bounds().start, 0);
+            assert_eq!(journal.read(0).await.unwrap(), 0);
+            assert_eq!(journal.read(4).await.unwrap(), 400);
 
             // Positions 5-19 should be accessible
             assert_eq!(journal.read(5).await.unwrap(), 500);
@@ -9956,7 +9952,7 @@ mod tests {
             .await
             .expect("Failed to truncate journal to the older sync range");
 
-            assert_eq!(journal.bounds(), 5..upper_bound);
+            assert_eq!(journal.bounds(), 0..upper_bound);
             for i in lower_bound..upper_bound {
                 assert_eq!(journal.read(i).await.unwrap(), i * 1000);
             }
@@ -10251,12 +10247,10 @@ mod tests {
 
             assert_eq!(journal.size(), 25);
 
-            // Verify oldest retained is at blob 3 boundary (position 15)
-            assert_eq!(journal.bounds().start, 15);
-
-            // Verify positions before 15 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(14).await, Err(Error::ItemPruned(_))));
+            // Operations before the lower bound stay until the synced database prunes them
+            assert_eq!(journal.bounds().start, 0);
+            assert_eq!(journal.read(0).await.unwrap(), 0);
+            assert_eq!(journal.read(14).await.unwrap(), 1400);
 
             // Verify positions 15-24 are accessible
             assert_eq!(journal.read(15).await.unwrap(), 1500);
@@ -10321,13 +10315,10 @@ mod tests {
 
             assert_eq!(journal.size(), 15);
 
-            // Both operations are in blob 2, so blobs 0, 1 should be pruned, blob 2 retained
-            // Oldest retained position should be at blob 2 boundary (position 10)
-            assert_eq!(journal.bounds().start, 10);
-
-            // Verify positions before 10 are pruned
-            assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(9).await, Err(Error::ItemPruned(_))));
+            // Operations before the lower bound stay until the synced database prunes them
+            assert_eq!(journal.bounds().start, 0);
+            assert_eq!(journal.read(0).await.unwrap(), 0);
+            assert_eq!(journal.read(9).await.unwrap(), 900);
 
             // Verify positions 10-14 are accessible
             assert_eq!(journal.read(10).await.unwrap(), 1000);

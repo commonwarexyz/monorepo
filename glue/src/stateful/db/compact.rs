@@ -92,10 +92,11 @@ mod tests {
         buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::{
-            fixed::Config as FixedJournalConfig, variable::Config as JournalConfig,
+        journal::{
+            authenticated::Config as MerkleConfig,
+            contiguous::{fixed::Config as FixedJournalConfig, variable::Config as JournalConfig},
         },
-        merkle::{full::Config as MerkleConfig, mmb, mmr},
+        merkle::{mmb, mmr},
         qmdb::{ProofExt as _, compact::Config, immutable, keyless, sync::source},
         translator::TwoCap,
     };
@@ -398,15 +399,12 @@ mod tests {
         ) -> (Arc<Self::Full>, Vec<Target>);
     }
 
-    fn full_merkle_config(page_cache: CacheRef) -> MerkleConfig<Sequential> {
+    fn full_merkle_config() -> MerkleConfig<Sequential> {
         MerkleConfig {
-            journal_partition: "stateful-full-journal".into(),
-            metadata_partition: "stateful-full-metadata".into(),
-            items_per_blob: NZU64!(11),
-            write_buffer: NZUsize!(1024),
+            partition: "stateful-full-metadata".into(),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache,
+            resident_height: Default::default(),
         }
     }
 
@@ -437,8 +435,9 @@ mod tests {
         ) -> (Arc<FullKeylessDb>, Vec<Target>) {
             let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
             let config = keyless::fixed::Config {
-                merkle: full_merkle_config(page_cache.clone()),
+                merkle: full_merkle_config(),
                 log: full_log_config(page_cache),
+                init_concurrency: NZUsize!(2),
             };
             let mut source = FullKeylessDb::init(context, config, None).await.unwrap();
             let mut targets = Vec::new();
@@ -486,10 +485,11 @@ mod tests {
         ) -> (Arc<FullImmutableDb>, Vec<Target>) {
             let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
             let config = immutable::fixed::Config {
-                merkle: full_merkle_config(page_cache.clone()),
+                merkle: full_merkle_config(),
                 log: full_log_config(page_cache),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(2),
             };
             let mut source = FullImmutableDb::init(context, config, None).await.unwrap();
             let mut targets = Vec::new();
