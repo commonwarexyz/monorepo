@@ -5,6 +5,10 @@
 //! New batches inherit the database or parent batch's inactivity floor. Use
 //! [`with_inactivity_floor`](batch::UnmerkleizedBatch::with_inactivity_floor) to advance it.
 //!
+//! Declaring a floor retires every operation before it. Reads of a retired location return
+//! [`BelowInactivityFloor`](crate::qmdb::Error::BelowInactivityFloor), from the database and from
+//! a batch alike, however far the database has pruned.
+//!
 //! # Examples
 //!
 //! ```ignore
@@ -263,9 +267,9 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Batch reads below the batch's inactivity floor return `BelowInactivityFloor` however far
-    /// the database has pruned, and a merkleized batch returns `LocationOutOfBounds` at or past
-    /// its tip, like an unmerkleized one.
+    /// Reads below the inactivity floor, through the database or a batch, return
+    /// `BelowInactivityFloor` however far the database has pruned, and a merkleized batch returns
+    /// `LocationOutOfBounds` at or past its tip, like an unmerkleized one.
     #[boxed]
     pub(crate) async fn run_reads_below_floor_refused<F: Family, V, C, S: Strategy>(
         mut db: TestDb<F, V, C, Sha256, S>,
@@ -285,6 +289,32 @@ pub(crate) mod tests {
             .unwrap();
         db = db.apply_batch(seed).await.unwrap();
         db = db.commit().await.unwrap();
+
+        // The database refuses a location below its floor that its journal still holds.
+        assert_eq!(db.bounds().start, Location::new(0));
+        assert!(matches!(
+            db.get(Location::new(1)).await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(1)
+        ));
+        assert_eq!(
+            db.get(Location::new(2)).await.unwrap(),
+            Some(V::Value::make(2))
+        );
+        assert!(matches!(
+            db.get_many(&[Location::new(1), Location::new(2)]).await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(1)
+        ));
+        assert_eq!(
+            db.get_many(&[Location::new(2)]).await.unwrap(),
+            vec![Some(V::Value::make(2))]
+        );
+
+        // Unordered locations are reported before a location below the floor.
+        assert!(matches!(
+            db.get_many(&[Location::new(1), Location::new(0)]).await,
+            Err(Error::LocationOutOfOrder(first, second))
+                if first == Location::new(1) && second == Location::new(0)
+        ));
 
         // A batch built on the database uses its floor.
         let batch = db.new_batch();
@@ -381,6 +411,14 @@ pub(crate) mod tests {
         assert!(db.bounds().start > Location::new(2));
         assert!(matches!(
             db.new_batch().get(Location::new(2), &db).await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(2)
+        ));
+        assert!(matches!(
+            db.get(Location::new(2)).await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(2)
+        ));
+        assert!(matches!(
+            db.get_many(&[Location::new(2), floor]).await,
             Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(2)
         ));
         db.destroy().await.unwrap();
@@ -1951,18 +1989,22 @@ pub(crate) mod tests {
             db = db.prune(last_commit).await.unwrap();
         }
 
-        let start = db.bounds().start;
-        let pruned = start - 1;
-        assert!(matches!(
-            db.get(pruned).await,
-            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
-        ));
-        assert!(matches!(
-            db.get_many(&[pruned, start]).await,
-            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
-        ));
-        db.get(start).await.unwrap();
-        db.get_many(&[start]).await.unwrap();
+        // A pruned location and the last location below the floor, which pruning may have left
+        // in the journal, are refused alike.
+        let floor = db.inactivity_floor();
+        let pruned = db.bounds().start - 1;
+        for loc in [pruned, floor - 1] {
+            assert!(matches!(
+                db.get(loc).await,
+                Err(Error::BelowInactivityFloor(refused)) if refused == loc
+            ));
+            assert!(matches!(
+                db.get_many(&[loc, floor]).await,
+                Err(Error::BelowInactivityFloor(refused)) if refused == loc
+            ));
+        }
+        db.get(floor).await.unwrap();
+        db.get_many(&[floor]).await.unwrap();
 
         db.destroy().await.unwrap();
     }
@@ -2514,23 +2556,35 @@ pub(crate) mod tests {
         let initial_root = db.root();
         let initial_size = db.bounds().end;
 
+        // Both commits hold the floor at zero, so the appends stay readable.
         let value_a = V::Value::make(1);
         let value_b = V::Value::make(2);
         let metadata_a = V::Value::make(3);
-        let db = commit_appends(
-            db,
-            [value_a.clone(), value_b.clone()],
-            Some(metadata_a.clone()),
-        )
-        .await;
+        let merkleized = db
+            .new_batch()
+            .append(value_a.clone())
+            .append(value_b.clone())
+            .with_metadata(Some(metadata_a.clone()))
+            .merkleize(&db)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         let root_before = db.root();
         let size_before = db.bounds().end;
         let commit_before = db.bounds().end - 1;
 
-        let value_c = V::Value::make(4);
         let metadata_b = V::Value::make(5);
-        let db = commit_appends(db, [value_c.clone()], Some(metadata_b.clone())).await;
+        let merkleized = db
+            .new_batch()
+            .append(V::Value::make(4))
+            .with_metadata(Some(metadata_b.clone()))
+            .merkleize(&db)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_ne!(db.root(), root_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_b));
 
@@ -3150,12 +3204,10 @@ pub(crate) mod tests {
         // least `commit_loc` (= 4); advancing to the new tight max (= 7) exercises the
         // ancestor-to-tip floor transition from a single-commit starting point.
         let next_commit_loc = Location::<F>::new(7);
-        let v5 = V::Value::make(5);
-        let v6 = V::Value::make(6);
         let merkleized = db
             .new_batch()
-            .append(v5.clone())
-            .append(v6.clone())
+            .append(V::Value::make(5))
+            .append(V::Value::make(6))
             .with_inactivity_floor(next_commit_loc)
             .merkleize(&db)
             .await
@@ -3165,11 +3217,15 @@ pub(crate) mod tests {
         assert_eq!(db.bounds().end - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor(), next_commit_loc);
 
-        // New appends are readable, and the journal still holds the original commit op (it was
-        // not pruned again), so reading it still returns its metadata.
-        assert_eq!(db.get(Location::new(5)).await.unwrap(), Some(v5));
-        assert_eq!(db.get(Location::new(6)).await.unwrap(), Some(v6));
-        assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata));
+        // The floor at the new commit retires the original commit and the new appends. The
+        // journal still holds all three (it was not pruned again), and reads refuse them.
+        for loc in [commit_loc, Location::new(5), Location::new(6)] {
+            assert!(matches!(
+                db.get(loc).await,
+                Err(Error::BelowInactivityFloor(refused)) if refused == loc
+            ));
+        }
+        assert_eq!(db.get(next_commit_loc).await.unwrap(), None);
 
         db.destroy().await.unwrap();
     }

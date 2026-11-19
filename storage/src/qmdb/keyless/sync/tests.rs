@@ -894,11 +894,12 @@ pub(crate) mod harnesses {
             start: Location<Self::Family>,
             ops: &[OpOf<Self>],
         ) {
+            // Read the log itself, since the floor may have retired these locations from reads.
             for (loc, op) in (*start..).zip(ops) {
                 let Operation::Append(value) = op else {
                     panic!("apply_ops does not apply commit operations");
                 };
-                let got = db.get(Location::new(loc)).await.unwrap();
+                let got = db.journal.read(loc).await.unwrap().into_value();
                 assert_eq!(got.as_ref(), Some(value), "wrong value at location {loc}");
             }
         }
@@ -906,7 +907,7 @@ pub(crate) mod harnesses {
         async fn assert_ops_absent(db: &Self::Db, ops: &[OpOf<Self>]) {
             let bounds = db.bounds();
             for loc in *bounds.start..*bounds.end {
-                if let Some(value) = db.get(Location::new(loc)).await.unwrap() {
+                if let Some(value) = db.journal.read(loc).await.unwrap().into_value() {
                     assert!(
                         !ops.iter()
                             .any(|op| matches!(op, Operation::Append(v) if *v == value)),

@@ -130,7 +130,7 @@ where
 /// at the same commitment rejects it alike. The journal retains every location at or above the
 /// floor, unless the database was recovered or synced with its floor below its retained start
 /// (see [`Db::init`]).
-fn check_floor<F: Family>(loc: Location<F>, floor: Location<F>) -> Result<(), Error<F>> {
+pub(super) fn check_floor<F: Family>(loc: Location<F>, floor: Location<F>) -> Result<(), Error<F>> {
     if loc < floor {
         return Err(Error::BelowInactivityFloor(loc));
     }

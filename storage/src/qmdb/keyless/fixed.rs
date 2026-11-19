@@ -541,8 +541,20 @@ mod tests {
                 vec![Some(U64::new(1)), Some(U64::new(4))]
             );
 
-            // A batch built on the client returns `ItemPruned` for a location between the floor
-            // and the retained start, not `BelowInactivityFloor`.
+            // The client and a batch built on it return `ItemPruned` for a location between the
+            // floor and the retained start, not `BelowInactivityFloor`.
+            assert!(matches!(
+                client.get(Location::new(2)).await,
+                Err(crate::qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(2)
+                ))
+            ));
+            assert!(matches!(
+                client.get_many(&[Location::new(2), Location::new(5)]).await,
+                Err(crate::qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(2)
+                ))
+            ));
             let batch = client.new_batch();
             assert!(matches!(
                 batch.get(Location::new(2), &client).await,
