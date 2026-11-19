@@ -1787,7 +1787,10 @@ pub(crate) mod tests {
         // Size two ends at the first append.
         for size in [Location::new(0), Location::new(2)] {
             let result = db.historical_proof(size, Location::new(0), NZU64!(1)).await;
-            assert!(matches!(result, Err(Error::NotCommitBoundary(s)) if s == size));
+            assert!(
+                matches!(result, Err(Error::NotCommitBoundary(actual)) if actual == size),
+                "expected NotCommitBoundary({size}), got {result:?}"
+            );
         }
 
         // Test that historical proof fails with op_count > number of operations.

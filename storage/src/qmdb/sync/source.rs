@@ -1133,6 +1133,7 @@ pub(crate) mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = ordered_fixed::create_test_db(context).await;
             let db = ordered_fixed::apply_ops(db, ordered_fixed::create_test_ops(1)).await;
+
             // The initial commit is at 0 and the write is at 1.
             let start = Location::new(0);
             for size in [Location::new(0), Location::new(2)] {
