@@ -138,7 +138,8 @@ where
         return Ok(results);
     }
 
-    // Fetch each distinct position missed by the shard probes once.
+    // Shard probes have already served their hits. One batched read serves the remaining
+    // candidates, reading each distinct missed position once.
     misses.sort_unstable_by_key(|&(_, pos)| pos);
     let positions = dedup_positions(&misses);
     let ops = reader.read_many(&positions).await?;

@@ -665,7 +665,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 continue;
             };
 
-            // Each blob has its own byte offsets.
+            // Each blob has its own byte offsets. Positions in a missing blob stay unserved.
             if position >= next_blob_start {
                 let blob_num = position_to_blob(position, items_per_blob);
                 next_blob_start = (blob_num + 1).saturating_mul(items_per_blob);
@@ -5459,18 +5459,14 @@ mod tests {
 
     #[test_traced]
     fn test_variable_read_many_rejects_overlapping_prefix_frame() {
-        // A frame whose successor offset is cold is served by its length prefix. Its start must
-        // still be checked against the earlier frames of its blob, or it could decode another
-        // item's bytes.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
             let cfg = Config {
                 partition: "read-many-overlapping-prefix".into(),
                 items_per_section: NZU64!(128),
                 compression: None,
                 codec_config: (),
-                page_cache: page_cache.clone(),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5486,12 +5482,14 @@ mod tests {
             // Frames are 302 bytes. Point frame 63 at frame 0's bytes.
             let mut offsets: Vec<u64> = (0..128).map(|i| i * 302).collect();
             offsets[63] = 0;
+            // One offset per page lets either frame's successor be cold independently.
+            let offsets_cache = CacheRef::new(NZU16!(8), NZUsize!(16));
             let mut offsets_journal = fixed::Journal::<_, u64>::init(
                 context.child("offsets"),
                 fixed::Config {
                     partition: "read-many-overlapping-prefix-offsets".into(),
                     items_per_blob: NZU64!(128),
-                    page_cache: page_cache.clone(),
+                    page_cache: offsets_cache.clone(),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
@@ -5513,18 +5511,22 @@ mod tests {
                 metrics: journal.0.metrics.clone(),
             };
 
-            // Cache frame 0 and the offsets page holding entries 0 to 63, leaving entry 64 cold,
-            // so frame 63 has a cached start but no cached end.
-            page_cache.clear();
+            // The overlap must be rejected whether the first or the second frame uses its prefix.
             assert_eq!(reader.read(0).await.unwrap(), appended[0]);
-            assert!(reader.offsets.try_read_sync(63).is_some());
-            assert!(reader.offsets.try_read_sync(64).is_none());
-
-            assert_eq!(reader.try_read_many_sync(&[0, 63]), vec![None, None]);
-            assert!(matches!(
-                reader.read_many(&[0, 63]).await,
-                Err(Error::Corruption(_))
-            ));
+            for (warm_end, cold_end) in [(1, 64), (64, 1)] {
+                offsets_cache.clear();
+                for position in [0, 63, warm_end] {
+                    reader.offsets.read(position).await.unwrap();
+                }
+                assert_eq!(reader.try_read_sync(0), Some(appended[0].clone()));
+                assert!(reader.offsets.try_read_sync(warm_end).is_some());
+                assert!(reader.offsets.try_read_sync(cold_end).is_none());
+                assert_eq!(reader.try_read_many_sync(&[0, 63]), vec![None, None]);
+                assert!(matches!(
+                    reader.read_many(&[0, 63]).await,
+                    Err(Error::Corruption(_))
+                ));
+            }
             drop(reader);
 
             journal.destroy().await.unwrap();
