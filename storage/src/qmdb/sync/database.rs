@@ -370,6 +370,7 @@ mod tests {
             let db = KeylessDb::init(context.child("reopen"), config, None)
                 .await
                 .unwrap();
+            assert_eq!(db.bounds(), Location::new(30)..Location::new(51));
             assert_eq!(db.root(), root);
         });
     }
