@@ -170,11 +170,10 @@ const LIMITS: Limits = Limits {
 /// Most receivers a batch pays, one more than a request may carry under the limits.
 const MAX_BATCH: usize = 4;
 
-/// Most actions in a plan. A few closes with a few payments each reach every stage of the
-/// protocol, and each close writes to two databases, so longer plans cost throughput. The bound is
-/// still twice that, so the few inputs a run from an empty corpus starts with draw the rare
-/// actions more often.
-const MAX_OPS: usize = 64;
+/// Actions a plan draws. Every plan first opens a runtime and four databases, and the weights
+/// below draw each attack about once in this many actions, on a ledger several posts deep. The
+/// few inputs a run from an empty corpus starts with therefore draw most attacks.
+const MAX_OPS: usize = 128;
 
 /// Bytes of runtime randomness one arbitrary value is drawn from. A digest alone draws up to 257
 /// bytes, so a summary with five of them needs over a kilobyte to be drawn whole.
@@ -191,9 +190,9 @@ const MAX_PROOFS: usize = 8;
 /// deposit is sampled near it.
 const DEPOSIT_BASE: u64 = 1_000;
 
-/// Bytes of the stream a plan is sampled from, several times the largest plan (under a kilobyte),
-/// of each of the two seeds the input's head holds, and of the runtime's entropy.
-const STREAM_BYTES: usize = 1 << 12;
+/// Bytes of the stream a plan is sampled from, more than the largest plan draws (40 bytes for each
+/// action), of each of the two seeds the input's head holds, and of the runtime's entropy.
+const STREAM_BYTES: usize = 1 << 13;
 const SEED_BYTES: usize = 8;
 const ENTROPY_BYTES: usize = 32;
 
@@ -211,13 +210,16 @@ const OVER_SPAN: u8 = 8;
 const HUGE_SPAN: u8 = 16;
 
 /// Weights of the actions, in the order of the [`Op`] variants: Deposit, Force, Pay, Withdraw,
-/// Cut, Close, Audit, Payout, Challenge, Halt, Claim, Restart, Garbage, Mutate. Closes and
-/// payments drive the protocol, so they are drawn most often, and a halt, which ends posting for
-/// good, least often.
-const OP_WEIGHTS: [u8; 14] = [14, 6, 20, 6, 6, 16, 2, 7, 4, 1, 5, 2, 5, 6];
+/// Cut, Close, Audit, Payout, Challenge, Halt, Claim, Restart, Garbage, Mutate. An action weighs
+/// in proportion to how many attacks, arbitrary types or mutation targets it carries, so every one
+/// of them is drawn about as often as any other. Deposits fund everything else, so they weigh
+/// more than that, and a halt, which ends posting for good, weighs least.
+const OP_WEIGHTS: [u8; 14] = [9, 4, 20, 4, 3, 22, 1, 7, 5, 1, 3, 2, 11, 8];
 
-/// One action in this many is honest, and the others carry an attack.
-const ATTACK_ONE_IN: u8 = 2;
+/// One action in this many is honest, and the others carry an attack. The protocol still
+/// advances: a close posts honestly once its attack is refused, and several attacked payments are
+/// admitted.
+const ATTACK_ONE_IN: u8 = 4;
 
 /// One cut in this many omits a row. An omission halts the ledger at the post, so it is drawn
 /// rarely.
@@ -559,7 +561,7 @@ enum Op {
     },
 }
 
-/// Returns an attack half the time, and `None` for the honest action otherwise.
+/// Returns `None` for the honest action one time in [`ATTACK_ONE_IN`], and an attack otherwise.
 fn attack<'a, T: Arbitrary<'a>>(u: &mut Unstructured<'a>) -> arbitrary::Result<Option<T>> {
     Ok(if u.ratio(1u8, ATTACK_ONE_IN)? {
         None
@@ -671,7 +673,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
         Ok(Self {
             users: u.int_in_range(MIN_USERS..=MAX_USERS)?,
-            ops: (0..u.int_in_range(1..=MAX_OPS)?)
+            ops: (0..MAX_OPS)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?,
             entropy: Unstructured::new(&entropy).arbitrary()?,
@@ -2619,8 +2621,9 @@ impl Harness {
                     | PayAttack::LoseAck
             )
         ) {
-            // I10: every other attack is refused.
+            // I10: every other attack is refused, and the sender then pays as it signed.
             assert_eq!(self.snapshot(), before);
+            self.pay(sender, entries, None);
         }
     }
 
@@ -2770,6 +2773,7 @@ impl Harness {
         if self.ledger.halt.is_some() {
             return;
         }
+        let honest = (user, amount, tag);
         let user = self.payer(user);
         let epoch = self.desk.epoch;
         let amount = amount.resolve(self.desk.balances[user]);
@@ -2813,6 +2817,12 @@ impl Harness {
             self.desk.withdrawals.entry(key).or_insert(withdrawal);
         } else {
             assert_eq!(self.snapshot(), before);
+
+            // An attack is refused, and the account then asks as it signed.
+            if attack.is_some() {
+                let (user, amount, tag) = honest;
+                self.withdraw(user, amount, tag, None);
+            }
         }
     }
 
@@ -4444,6 +4454,7 @@ impl Harness {
         if self.proofs.len() > MAX_PROOFS {
             self.proofs.pop_front();
         }
+        let honest = proof.clone();
         let mut named = epoch;
         let mut forged = false;
         match attack {
@@ -4484,6 +4495,12 @@ impl Harness {
         }
         if !forged {
             self.withdraw_payout(named, &proof);
+
+            // A withdrawal naming a close that did not post is refused, and the account then
+            // withdraws as the validator served it.
+            if let Some(PayoutAttack::Unposted) = attack {
+                self.withdraw_payout(epoch, &honest);
+            }
             return;
         }
         let before = self.snapshot();
@@ -4493,6 +4510,7 @@ impl Harness {
             result => panic!("a forged payout withdrawal returned {result:?}"),
         }
         assert_eq!(self.snapshot(), before);
+        self.withdraw_payout(epoch, &honest);
     }
 
     /// Withdraws the payout `proof` proves under the posted root of `epoch`, which the ledger pays
@@ -4645,6 +4663,7 @@ impl Harness {
             roundtrip(proof, &());
             assert!(proof.verify::<Sha256, _>(&self.ledger.balances, &account));
         }
+        let honest = proof.clone();
         let mut claimant = user;
         let mut proof = proof;
         let mut forged = false;
@@ -4665,6 +4684,11 @@ impl Harness {
             Some(ClaimAttack::Twice) => self.claim_once(user, proof.as_ref(), false),
         }
         self.claim_once(claimant, proof.as_ref(), forged);
+
+        // A forged claim is refused, and the account then claims with the proof it was served.
+        if forged {
+            self.claim_once(user, honest.as_ref(), false);
+        }
     }
 
     /// Claims for `user` with `proof`, which the ledger pays at most once (L9).
