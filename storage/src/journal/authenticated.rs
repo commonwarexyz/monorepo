@@ -291,14 +291,6 @@ where
             .map_err(Into::into)
     }
 
-    /// Convert authenticated-journal errors to the contiguous journal trait error type.
-    fn map_error(error: Error<F>) -> JournalError {
-        match error {
-            Error::Journal(inner) => inner,
-            Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
-        }
-    }
-
     /// Return a reference to the merkleization strategy.
     pub const fn strategy(&self) -> &S {
         self.merkle.strategy()
@@ -732,19 +724,11 @@ where
     /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
     /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
-    pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
-        let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
-        Ok((journal, boundary))
-    }
-
-    async fn prune_inner(
-        mut self,
-        prune_loc: Location<F>,
-    ) -> Result<(Self, Location<F>, bool), Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         if self.merkle.size() == 0 {
             // DB is empty, nothing to prune.
             let boundary = Location::new(self.journal.bounds().start);
-            return Ok((self, boundary, false));
+            return Ok((self, boundary));
         }
 
         // Sync the Merkle structure before pruning the journal, otherwise its last element could
@@ -757,8 +741,7 @@ where
             self.merkle.sync().map_err(Error::Merkle)
         )?;
 
-        let journal_pruned;
-        (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
+        (self.journal, _) = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
         let merkle_boundary = self.merkle.bounds().start;
@@ -768,7 +751,7 @@ where
             self.merkle = self.merkle.prune(boundary).await?;
         }
 
-        Ok((self, boundary, journal_pruned || boundary > merkle_boundary))
+        Ok((self, boundary))
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -1018,86 +1001,6 @@ where
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<Batch<C::Item>, JournalError>> + Send, JournalError> {
         self.journal.replay(range, buffer, read_options).await
-    }
-}
-
-impl<F, E, C, H, S> Mutable for Journal<F, E, C, H, S>
-where
-    F: Family,
-    E: Context,
-    C: Mutable<Item: EncodeShared>,
-    H: Hasher,
-    S: Strategy,
-{
-    async fn append(self, item: &Self::Item) -> Result<(Self, u64), JournalError> {
-        let (journal, loc) = Self::append(self, item).await.map_err(Self::map_error)?;
-
-        Ok((journal, *loc))
-    }
-
-    async fn append_many(
-        mut self,
-        items: Many<'_, Self::Item>,
-    ) -> Result<(Self, u64), JournalError> {
-        // The per-item loop below never reaches the backing journal's shared empty check, so the
-        // trait's EmptyAppend contract must be enforced here.
-        if items.is_empty() {
-            return Err(JournalError::EmptyAppend);
-        }
-
-        // Every append must also update the Merkle structure, so items append one at a time.
-        // Batched appends of already-merkleized items go through `apply_batch`, which batches
-        // the backing journal writes instead.
-        let mut last_pos = self.journal.bounds().end;
-        match items {
-            Many::Flat(items) => {
-                for item in items {
-                    let (journal, loc) = Self::append(self, item).await.map_err(Self::map_error)?;
-                    self = journal;
-                    last_pos = *loc;
-                }
-            }
-            Many::Nested(nested_items) => {
-                for items in nested_items {
-                    for item in *items {
-                        let (journal, loc) =
-                            Self::append(self, item).await.map_err(Self::map_error)?;
-                        self = journal;
-                        last_pos = *loc;
-                    }
-                }
-            }
-        }
-        Ok((self, last_pos))
-    }
-
-    async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
-        let prune_to = {
-            let bounds = self.journal.bounds();
-            min_position.min(bounds.end)
-        };
-
-        let (journal, _, pruned) = self
-            .prune_inner(Location::new(prune_to))
-            .await
-            .map_err(Self::map_error)?;
-        Ok((journal, pruned))
-    }
-
-    async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
-        Self::start_sync(self).await.map_err(Self::map_error)
-    }
-
-    async fn commit(self) -> Result<Self, JournalError> {
-        Self::commit(self).await.map_err(Self::map_error)
-    }
-
-    async fn sync(self) -> Result<Self, JournalError> {
-        Self::sync(self).await.map_err(Self::map_error)
-    }
-
-    async fn destroy(self) -> Result<(), JournalError> {
-        Self::destroy(self).await.map_err(Self::map_error)
     }
 }
 
@@ -2745,48 +2648,6 @@ mod tests {
     fn test_prune_returns_actual_boundary_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_prune_returns_actual_boundary_inner::<mmb::Family>);
-    }
-
-    /// Verify that pruning through the Mutable trait also prunes authenticated Merkle state.
-    async fn test_mutable_prune_updates_merkle_boundary_inner<F: Family + PartialEq>(
-        context: Context,
-    ) {
-        let mut journal = create_journal_with_ops::<F>(context, "trait_prune", 100).await;
-
-        (journal, _) = journal
-            .append(&TestOp::<F>::Commit(None, Location::<F>::new(50)))
-            .await
-            .unwrap();
-        journal = journal.sync().await.unwrap();
-
-        let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
-            .await
-            .unwrap();
-        assert!(pruned);
-
-        let item_boundary = journal.bounds().start;
-        let merkle_boundary = journal.merkle.bounds().start;
-        assert_eq!(Location::<F>::new(item_boundary), merkle_boundary);
-        assert!(merkle_boundary > Location::<F>::new(0));
-
-        let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
-            .await
-            .unwrap();
-        assert!(!pruned);
-        assert_eq!(journal.bounds().start, item_boundary);
-        assert_eq!(journal.merkle.bounds().start, merkle_boundary);
-    }
-
-    #[test_traced("INFO")]
-    fn test_mutable_prune_updates_merkle_boundary_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_mutable_prune_updates_merkle_boundary_inner::<mmr::Family>);
-    }
-
-    #[test_traced("INFO")]
-    fn test_mutable_prune_updates_merkle_boundary_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_mutable_prune_updates_merkle_boundary_inner::<mmb::Family>);
     }
 
     /// Verify that pruning doesn't change the operation count.

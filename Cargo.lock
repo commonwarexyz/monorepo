@@ -2522,7 +2522,6 @@ name = "commonware-storage"
 version = "2026.10.1"
 dependencies = [
  "ahash",
- "anyhow",
  "arbitrary",
  "bytes",
  "cfg-if",
