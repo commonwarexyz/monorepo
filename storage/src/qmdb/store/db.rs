@@ -404,7 +404,7 @@ where
         } else {
             Some(pending.read(size - 1).await?)
         };
-        validate_initialization_commit(
+        let floor = validate_initialization_commit(
             bounds.start,
             size,
             bounds == (0..0),
@@ -422,18 +422,23 @@ where
             );
         }
         let mut log = pending.finish(size).await?;
-        if size == 0 {
-            warn!("Log is empty, initializing new db");
-            (log, _) = log.append(&Operation::initial_commit()).await?;
-        }
+
+        // Only a fresh log has no selected commit. Its floor is its initial commit's.
+        let inactivity_floor_loc = match floor {
+            Some(floor) => floor,
+            None => {
+                warn!("Log is empty, initializing new db");
+                let commit = Operation::initial_commit();
+                let floor = commit
+                    .inactivity_floor()
+                    .expect("the initial commit carries a floor");
+                (log, _) = log.append(&commit).await?;
+                floor
+            }
+        };
 
         // Persist recovery repairs and any genesis commit so the next startup need not repeat them.
         let log = log.sync().await?;
-
-        let size = Location::new(log.size());
-        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&log, size)
-            .await?
-            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
 
         // Build the snapshot only from the durable selected prefix.
         let mut snapshot = I::new(context.child("snapshot"), cfg.translator);
