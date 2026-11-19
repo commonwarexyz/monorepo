@@ -421,7 +421,7 @@ where
         let size = Location::new(log.size());
         let inactivity_floor_loc = crate::qmdb::commit_floor_at(&log, size)
             .await?
-            .ok_or(Error::UnexpectedData(size - 1))?;
+            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
 
         // Build the snapshot only from the durable selected prefix.
         let cache_size = cfg.init_cache;
