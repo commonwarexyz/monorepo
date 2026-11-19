@@ -114,6 +114,7 @@ where
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
+
         // The sync runs as a boxed trait object, so a `Send` proof of this actor's future ends at
         // the box.
         let mut task = OptionFuture::from(Some(
