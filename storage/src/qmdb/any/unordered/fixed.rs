@@ -159,6 +159,102 @@ pub(crate) mod test {
         AnyTestGeneric::<F>::init(context, cfg, None).await.unwrap()
     }
 
+    /// An `Any` database whose activity bitmap has `N`-byte chunks.
+    type AnyChunked<const N: usize> = crate::qmdb::any::Db<
+        mmr::Family,
+        deterministic::Context,
+        Journal<
+            deterministic::Context,
+            crate::qmdb::any::operation::Unordered<mmr::Family, Digest, FixedEncoding<Digest>>,
+        >,
+        Index<TwoCap, Location>,
+        Sha256,
+        crate::qmdb::any::operation::update::Unordered<Digest, FixedEncoding<Digest>>,
+        N,
+        Sequential,
+    >;
+
+    /// The number of keys [`write_round`] writes.
+    const CHUNKED_KEYS: u64 = 64;
+
+    /// The `i`th key [`write_round`] writes.
+    fn chunked_key(i: u64) -> Digest {
+        Sha256::hash(&[&i.to_be_bytes()])
+    }
+
+    /// The value [`write_round`] gives key `i` in `round`.
+    fn chunked_value(round: u64, i: u64) -> Digest {
+        Sha256::hash(&[&(round * CHUNKED_KEYS + i).to_be_bytes()])
+    }
+
+    /// Write `round`'s value for every key and commit.
+    async fn write_round<const N: usize>(db: AnyChunked<N>, round: u64) -> AnyChunked<N> {
+        let mut batch = db.new_batch();
+        for i in 0..CHUNKED_KEYS {
+            batch = batch.write(chunked_key(i), Some(chunked_value(round, i)));
+        }
+        let merkleized = batch.merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
+    }
+
+    /// Build and prune a database with 64-byte bitmap chunks, reopen it with `M`-byte chunks, check
+    /// the reopened state, and return the root after one more round of writes.
+    async fn reopen_with_chunks<const M: usize>(
+        context: deterministic::Context,
+        suffix: &str,
+    ) -> Digest {
+        let cfg = fixed_db_config::<TwoCap>(suffix);
+        let mut db = AnyChunked::<64>::init(context.child("built"), cfg.clone(), None)
+            .await
+            .unwrap();
+        for round in 0..8 {
+            db = write_round(db, round).await;
+        }
+        let floor = db.inactivity_floor();
+        db = db.prune(floor).await.unwrap();
+        db = db.sync().await.unwrap();
+        let root = db.root();
+        let bounds = db.bounds();
+
+        // The prune passes at least one whole 32-byte chunk, so the two chunk sizes rebuild
+        // bitmaps with different pruned prefixes.
+        assert!(bounds.start > Location::new(256), "too little was pruned");
+        drop(db);
+
+        let db = AnyChunked::<M>::init(context.child("reopened"), cfg, None)
+            .await
+            .unwrap();
+        assert_eq!(db.root(), root);
+        assert_eq!(db.bounds(), bounds);
+        assert_eq!(db.inactivity_floor(), floor);
+        for i in 0..CHUNKED_KEYS {
+            let value = db.get(&chunked_key(i)).await.unwrap();
+            assert_eq!(value, Some(chunked_value(7, i)));
+        }
+
+        // The floor walk draws its candidates from the bitmap, so another round shows that it
+        // moves the same operations whatever the chunk size.
+        let db = write_round(db, 8).await;
+        let root = db.root();
+        db.destroy().await.unwrap();
+        root
+    }
+
+    /// The bitmap's chunk size is the caller's choice each time a database is opened. A database
+    /// built and pruned with one chunk size reopens with another at the same root, holds the same
+    /// values, and reaches the same root as it keeps growing.
+    #[test_traced]
+    fn test_any_fixed_reopen_with_different_bitmap_chunk_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let same = reopen_with_chunks::<64>(context.child("same"), "chunks-same").await;
+            let narrower =
+                reopen_with_chunks::<32>(context.child("narrower"), "chunks-narrower").await;
+            assert_eq!(same, narrower);
+        });
+    }
+
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();

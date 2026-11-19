@@ -204,7 +204,7 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     pub init_concurrency: B,
 }
 
-impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
+impl<F, E, K, V, C, I, H, const N: usize, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, N, S>
 where
     F: Family,
     E: Context + Spawner,
@@ -231,7 +231,7 @@ where
     }
 }
 
-impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
+impl<F, E, K, V, C, I, H, const N: usize, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, N, S>
 where
     F: Family,
     E: Context + Spawner,
