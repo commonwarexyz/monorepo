@@ -1,5 +1,6 @@
 use super::{Config, Error};
 use crate::{Context, SyncCompletion};
+use bytes::Buf as _;
 use commonware_codec::{Codec, Copying, FixedSize, ReadExt};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_runtime::{
@@ -201,25 +202,37 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // Get parent
         let version = u64::from_be_bytes(bytes[..8].try_into().unwrap());
 
-        // Extract data
-        //
-        // If the checksum is correct, we assume data is correctly packed and we don't perform
-        // length checks on the cursor.
+        // A valid checksum can cover bytes written with a different codec.
+        // Reject that layout before either copy is normalized.
+        let mut payload = Copying(&bytes[u64::SIZE..checksum_index]);
         let mut data = BTreeMap::new();
         let mut lengths = HashMap::new();
-        let mut cursor = u64::SIZE;
-        while cursor < checksum_index {
-            // Read key
-            let key =
-                K::read(&mut Copying(&bytes[cursor..])).expect("unable to read key from blob");
-            cursor += key.encode_size();
-
-            // Read value
-            let value = V::read_cfg(&mut Copying(&bytes[cursor..]), codec_config)
-                .expect("unable to read value from blob");
-            lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
-            cursor += value.encode_size();
-            data.insert(key, value);
+        while payload.has_remaining() {
+            let before = payload.remaining();
+            let key = K::read(&mut payload).map_err(|err| {
+                Error::Corruption(format!("invalid key in metadata blob {index}: {err}"))
+            })?;
+            let value_bytes = payload.remaining();
+            let value = V::read_cfg(&mut payload, codec_config).map_err(|err| {
+                Error::Corruption(format!("invalid value in metadata blob {index}: {err}"))
+            })?;
+            if payload.remaining() == before {
+                return Err(Error::Corruption(format!(
+                    "empty entry in metadata blob {index}"
+                )));
+            }
+            if data.insert(key.clone(), value).is_some() {
+                return Err(Error::Corruption(format!(
+                    "duplicate key in metadata blob {index}"
+                )));
+            }
+            lengths.insert(
+                key,
+                Info::new(
+                    checksum_index - value_bytes,
+                    value_bytes - payload.remaining(),
+                ),
+            );
         }
 
         Ok(Loaded::Valid(
