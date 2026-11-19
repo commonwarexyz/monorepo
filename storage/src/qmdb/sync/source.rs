@@ -26,7 +26,8 @@ use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
 pub enum Request<F: Family> {
     /// Fetch the operations in `[start, start + max_ops)`.
     Operations {
-        /// Operation count immediately after the commit whose root the proof must verify against.
+        /// The number of operations in the log immediately after a commit.
+        /// Use the database root at that size to verify the proof.
         size: Location<F>,
         /// First operation to return.
         start: Location<F>,
@@ -37,7 +38,8 @@ pub enum Request<F: Family> {
     /// location the client will retain. The proof in the response authenticates the pinned nodes,
     /// so there is no way to request them on their own.
     Boundary {
-        /// Operation count immediately after the commit whose root the proof must verify against.
+        /// The number of operations in the log immediately after a commit.
+        /// Use the database root at that size to verify the proof.
         size: Location<F>,
         /// The operation to return, which is also the location of the returned pinned nodes.
         start: Location<F>,
@@ -45,7 +47,8 @@ pub enum Request<F: Family> {
 }
 
 impl<F: Family> Request<F> {
-    /// Operation count immediately after the commit whose root the proof must verify against.
+    /// The number of operations in the log immediately after a commit.
+    /// Use the database root at that size to verify the proof.
     pub const fn size(&self) -> Location<F> {
         match self {
             Self::Operations { size, .. } | Self::Boundary { size, .. } => *size,
