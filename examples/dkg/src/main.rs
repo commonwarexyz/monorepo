@@ -1,6 +1,4 @@
 #![doc = include_str!("../README.md")]
-// The stateful actor's future nests every database's startup, past the default limit of 128.
-#![recursion_limit = "256"]
 
 use clap::{Parser, Subcommand};
 use commonware_runtime::{
