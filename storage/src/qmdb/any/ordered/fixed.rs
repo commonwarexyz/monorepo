@@ -1390,7 +1390,8 @@ pub(crate) mod test {
             for size in [Location::new(0), Location::new(5)] {
                 let result = db.historical_proof(size, Location::new(0), NZU64!(1)).await;
                 assert!(
-                    matches!(result, Err(crate::qmdb::Error::NotCommitBoundary(s)) if s == size)
+                    matches!(result, Err(crate::qmdb::Error::NotCommitBoundary(s)) if s == size),
+                    "expected NotCommitBoundary({size}), got {result:?}"
                 );
             }
 

@@ -615,6 +615,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         merkle::mmr,
+        qmdb::any::ordered::fixed::test as ordered_fixed,
         translator::{OneCap, TwoCap},
     };
     use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _};
@@ -1125,6 +1126,32 @@ pub(crate) mod tests {
 
         // Unknown tag.
         assert!(R::decode_cfg(Copying(&[9u8]), &(1, ())).is_err());
+    }
+
+    #[test]
+    fn test_serve_rejects_non_commit_sizes() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = ordered_fixed::create_test_db(context).await;
+            let db = ordered_fixed::apply_ops(db, ordered_fixed::create_test_ops(1)).await;
+            // The initial commit is at 0 and the write is at 1.
+            let start = Location::new(0);
+            for size in [Location::new(0), Location::new(2)] {
+                for request in [
+                    Request::Operations {
+                        size,
+                        start,
+                        max_ops: NZU64!(1),
+                    },
+                    Request::Boundary { size, start },
+                ] {
+                    let result = db.serve(request).await.map(|_| ());
+                    assert!(
+                        matches!(result, Err(qmdb::Error::NotCommitBoundary(s)) if s == size),
+                        "{request:?} returned {result:?}"
+                    );
+                }
+            }
+        });
     }
 
     /// A source behind a lock reaches the source and reports its error.

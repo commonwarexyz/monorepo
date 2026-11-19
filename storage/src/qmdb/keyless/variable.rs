@@ -210,15 +210,19 @@ mod tests {
             let result = db
                 .historical_proof(Location::new(5), Location::new(4), NZU64!(1))
                 .await;
-            assert!(matches!(
-                result,
-                Err(Error::Journal(crate::journal::Error::ItemPruned(4)))
-            ));
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Journal(crate::journal::Error::ItemPruned(4)))
+                ),
+                "expected ItemPruned(4), got {result:?}"
+            );
             let result = db
                 .historical_proof(Location::new(8), bounds.start, NZU64!(1))
                 .await;
             assert!(
-                matches!(result, Err(Error::NotCommitBoundary(size)) if size == Location::new(8))
+                matches!(result, Err(Error::NotCommitBoundary(size)) if size == Location::new(8)),
+                "expected NotCommitBoundary(8), got {result:?}"
             );
 
             // Size 9 ends at the first retained commit.
