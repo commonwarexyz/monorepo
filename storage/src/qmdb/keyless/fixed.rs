@@ -217,6 +217,10 @@ mod tests {
         // Reads and proofs must exclude the local commit retained below the import boundary.
         assert_eq!(db.bounds(), Location::new(8)..Location::new(9));
         assert!(matches!(
+            db.get(Location::new(7)).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
+        ));
+        assert!(matches!(
             db.journal.read(7).await,
             Err(crate::journal::Error::ItemPruned(7))
         ));
@@ -245,6 +249,17 @@ mod tests {
         );
         drop(db);
 
+        // Reopening the imported suffix must still hide the preceding commit from public reads.
+        let reopened = TestDb::<F>::init(context.child("reopened"), cfg.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(reopened.bounds(), Location::new(8)..Location::new(9));
+        assert!(matches!(
+            reopened.get(Location::new(7)).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
+        ));
+        drop(reopened);
+
         // A bounded reopen cannot select the conflicting local commit in the padding.
         let bounded = TestDb::<F>::init(
             context.child("bounded"),
@@ -257,7 +272,7 @@ mod tests {
             Err(Error::NoRetainedCommit(cap)) if cap == Location::new(8)
         ));
 
-        // An unbounded reopen must retain the imported root and its final commit metadata.
+        // Rejecting the bound preserves the imported root and final commit metadata.
         let latest = TestDb::<F>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();

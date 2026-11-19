@@ -33,6 +33,7 @@ mod tests {
         qmdb::{
             Error,
             immutable::tests::{self, immutable_tests},
+            sync::{self, Source as _, source::tests::SequenceSource},
         },
         translator::TwoCap,
     };
@@ -49,7 +50,7 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability};
     use core::{future::Future, pin::Pin, time::Duration};
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -173,17 +174,15 @@ mod tests {
         context: deterministic::Context,
         from_sync: bool,
     ) {
+        type TestDb<F> = Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+
         // Append empty commits at 1 through 4, then set one key at location 5 with a commit at 6
         // whose floor is 5. That commit ends the bounded target size 7, and its floor is the
         // first operation of the second blob.
         let cfg = config("bounded-boundary-blob");
-        let mut db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
-            context.child("initial"),
-            cfg.clone(),
-            None,
-        )
-        .await
-        .unwrap();
+        let mut db = TestDb::<F>::init(context.child("initial"), cfg.clone(), None)
+            .await
+            .unwrap();
         for _ in 0..4 {
             let batch = db
                 .new_batch()
@@ -218,9 +217,45 @@ mod tests {
         let latest_root = db.root();
         let latest_end = db.bounds().end;
 
-        // Take the durable operations and the pins at location 6 out of the database. Location 6
-        // falls inside the blob covering 5 to 9, so starting there retains operation 5 as padding.
+        // Location 6 falls inside the blob covering 5 to 9, so operation 5 remains on disk.
         let start = Location::new(6);
+        if from_sync {
+            // The destination already has the suffix and can also obtain its boundary proof.
+            let (boundary, _) = db
+                .serve(sync::Request::Boundary {
+                    size: latest_end,
+                    start,
+                })
+                .await
+                .unwrap();
+            drop(db);
+
+            // Rebuilding the index needs the key at 5, outside the imported range 6..8.
+            let result = sync::sync::<TestDb<F>, _>(sync::Config {
+                context: context.child("sync"),
+                source: SequenceSource::new(vec![boundary]),
+                target: sync::Target {
+                    root: latest_root,
+                    range: non_empty_range!(start, latest_end),
+                },
+                max_outstanding_requests: NZUsize!(1),
+                fetch_batch_size: NZU64!(8),
+                apply_batch_size: NZU64!(8),
+                db_config: cfg,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            })
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Database(Error::Journal(
+                    crate::journal::Error::ItemPruned(5)
+                )))
+            ));
+            return;
+        }
+
         let pins = db.journal.pinned_nodes_at(start).await.unwrap();
         let crate::journal::authenticated::Journal {
             journal,
@@ -229,25 +264,6 @@ mod tests {
             ..
         } = db.journal;
         drop(frontier);
-
-        // Syncing to 6..8 imports the operations at start 6. The target commit's floor 5 lies
-        // in the retained blob but before that start, so the snapshot replay finds it pruned.
-        if from_sync {
-            let result = <Db<F, _, Digest, Digest, Sha256, _, _> as crate::qmdb::sync::Hooks<_>>::from_sync_result(
-                context.child("sync"),
-                cfg,
-                journal,
-                Some(pins),
-                commonware_utils::non_empty_range!(start, latest_end),
-                NZU64!(8),
-            )
-            .await;
-            assert!(matches!(
-                result,
-                Err(Error::Journal(crate::journal::Error::ItemPruned(5)))
-            ));
-            return;
-        }
 
         // A synced frontier can fall inside the oldest retained blob. Importing at start 6
         // records that boundary while the backing journal keeps the blob from 5.
@@ -272,16 +288,11 @@ mod tests {
 
         // The commit ending size 7 declares floor 5, which the retained blob holds but the
         // authenticated journal does not.
-        let result = Db::<F, _, Digest, Digest, Sha256, _, _>::init(
-            context.child("bounded"),
-            cfg.clone(),
-            Some(old_end),
-        )
-        .await;
+        let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
         assert!(matches!(result, Err(Error::HistoricalFloorPruned(size)) if size == old_end));
 
         // The rejected open truncated nothing, and the latest commit's floor 6 is readable.
-        let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
+        let db = TestDb::<F>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();
         assert_eq!(db.bounds().end, latest_end);
