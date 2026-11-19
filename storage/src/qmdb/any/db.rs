@@ -217,10 +217,8 @@ pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
 ///
-/// `N` is the chunk size, in bytes, of the activity bitmap. The bitmap is rebuilt from the log each
-/// time the database is opened and is never persisted, so `N` does not affect the root, and a
-/// database may be reopened with a different `N`. The specialized variants above use 64-byte
-/// chunks. `current::Db` wraps this database with the `N` its own root is defined by.
+/// `N` is the activity bitmap's chunk size in bytes. It does not affect the root, and a database
+/// may be reopened with a different `N`.
 pub struct Db<
     F: Family,
     E: Context,
