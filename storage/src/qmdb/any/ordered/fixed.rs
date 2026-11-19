@@ -113,7 +113,7 @@ pub(crate) mod test {
                 test::{fixed_db_config, fixed_db_config_partitioned},
             },
             floor::{Bounded, Policy, Proportional},
-            snapshot::Rebuild as _,
+            snapshot::Rebuild,
         },
         translator::{OneCap, OrderedTranslator, TwoCap},
     };
@@ -704,9 +704,8 @@ pub(crate) mod test {
         });
     }
 
-    /// A replay failure during a parallel build must join every worker before surfacing the
-    /// error: no worker may outlive the failed build, retaining a clone of the log and its
-    /// partition-range allocation.
+    /// On replay failure, a parallel build must join its workers and release their partition ranges.
+    /// Every log clone must be dropped before returning, as required by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {

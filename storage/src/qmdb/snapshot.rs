@@ -709,10 +709,12 @@ where
     Ok((total_items, active))
 }
 
-/// Configures snapshot rebuilding during QMDB initialization for the supported index types.
+/// Configures snapshot rebuilding during QMDB initialization.
+///
+/// This trait is sealed to the index types provided by this crate.
 #[expect(
     private_bounds,
-    reason = "only QMDB initialization can rebuild an index"
+    reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
 )]
 pub trait SnapshotBuild<F: Family>:
     Index<Value = Location<F>> + Rebuild<F, Self::Concurrency> + Sized + 'static
