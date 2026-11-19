@@ -2,12 +2,13 @@
 //! location. Both fixed-size and variable-size values are supported via the [fixed] and [variable]
 //! submodules.
 //!
-//! New batches inherit the database or parent batch's inactivity floor. Use
-//! [`with_inactivity_floor`](batch::UnmerkleizedBatch::with_inactivity_floor) to advance it.
+//! An unmerkleized batch reads using the inactivity floor it inherits from the database or its
+//! parent batch. If you advance the floor with
+//! [`with_inactivity_floor`](batch::UnmerkleizedBatch::with_inactivity_floor), the new floor
+//! applies to reads from the merkleized batch. The database adopts it when you apply the batch.
 //!
-//! Declaring a floor retires every operation before it. Reads of a retired location return
-//! [`BelowInactivityFloor`](crate::qmdb::Error::BelowInactivityFloor), from the database and from
-//! a batch alike, however far the database has pruned.
+//! `get` and `get_many` reject locations below the applicable floor with
+//! [`BelowInactivityFloor`](crate::qmdb::Error::BelowInactivityFloor), even before pruning.
 //!
 //! # Examples
 //!
