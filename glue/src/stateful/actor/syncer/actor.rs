@@ -20,6 +20,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
 };
+use futures::FutureExt as _;
 use tracing::debug;
 
 /// Configuration for [`Syncer`].
@@ -113,15 +114,20 @@ where
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
-        let mut task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
-            self.context.child("state_sync"),
-            self.db_config,
-            self.resolvers,
-            Anchor::from_block(&block),
-            A::sync_targets(block.inner()),
-            tip_updates_rx,
-            self.sync_config,
-        ))));
+        // The sync runs as a boxed trait object, so a `Send` proof of this actor's future ends at
+        // the box.
+        let mut task = OptionFuture::from(Some(
+            A::Databases::sync(
+                self.context.child("state_sync"),
+                self.db_config,
+                self.resolvers,
+                Anchor::from_block(&block),
+                A::sync_targets(block.inner()),
+                tip_updates_rx,
+                self.sync_config,
+            )
+            .boxed(),
+        ));
 
         select_loop! {
             self.context,

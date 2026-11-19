@@ -226,7 +226,7 @@ where
     /// At most one barrier is active, and blocks finalized while it runs are covered by a later
     /// barrier. A marshal acknowledgement is released only once its block is durable. If shutdown
     /// interrupts a barrier, processing stops and every pending acknowledgement is cancelled.
-    #[boxed]
+    #[boxed(dyn)]
     pub async fn run(mut self) {
         let mut pending_prune = None;
         let mut actions = VecDeque::new();
