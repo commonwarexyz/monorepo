@@ -410,6 +410,25 @@ stability_scope!(BETA {
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
         /// parent was configured.
+        ///
+        /// # Thread Safety
+        ///
+        /// The task's future must be [`Send`].
+        ///
+        /// ```compile_fail
+        /// use commonware_runtime::{deterministic, Runner, Spawner};
+        /// use std::rc::Rc;
+        ///
+        /// let executor = deterministic::Runner::default();
+        /// executor.start(|context| async move {
+        ///     // An `Rc` held across an await keeps the task's future from being `Send`.
+        ///     context.spawn(|_| async move {
+        ///         let shared = Rc::new(());
+        ///         std::future::ready(()).await;
+        ///         drop(shared);
+        ///     });
+        /// });
+        /// ```
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,
