@@ -771,7 +771,7 @@ mod tests {
             }
             assert!(matches!(
                 KeylessDb::init(context.child("capped"), local.clone(), Some(start)).await,
-                Err(qmdb::Error::Journal(crate::journal::Error::ItemPruned(n))) if n == *start
+                Err(qmdb::Error::NoRetainedCommit(cap)) if cap == start
             ));
 
             let retry = config(target.clone(), target.range.end(), None);

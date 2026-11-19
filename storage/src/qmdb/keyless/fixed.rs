@@ -129,7 +129,7 @@ mod tests {
         let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
         assert!(matches!(
             result,
-            Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
+            Err(Error::NoRetainedCommit(cap)) if cap == old_end
         ));
 
         // Rejecting the selection must leave the latest durable state available.
@@ -254,7 +254,7 @@ mod tests {
         .await;
         assert!(matches!(
             bounded,
-            Err(Error::Journal(crate::journal::Error::ItemPruned(8)))
+            Err(Error::NoRetainedCommit(cap)) if cap == Location::new(8)
         ));
 
         // An unbounded reopen must retain the imported root and its final commit metadata.

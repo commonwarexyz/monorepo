@@ -60,7 +60,9 @@
 //! With `Some(max_size)`, `init` opens the latest retained commit with at most `max_size`
 //! operations, counting commit records and pruned operations. `None` opens the latest retained
 //! state. Zero is invalid, and a bound above the stored size does not grow the database.
-//! Initialization fails if pruning removed history needed by the selected commit.
+//! If pruning leaves no commit at or below the bound, initialization returns
+//! [`Error::NoRetainedCommit`]. Initialization also fails if pruning removed history needed
+//! to rebuild the selected commit.
 //!
 //! Initialization durably removes later history before returning successfully. The bound does not
 //! limit future appends. To require an exact checkpoint, also check the recovered root and range.
@@ -88,16 +90,22 @@
 //!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
+    Context,
     index::{Cursor, Unordered as Index},
-    journal::{Error as JournalError, contiguous::Contiguous},
+    journal::{
+        Error as JournalError,
+        authenticated::{self, Backing, Config as MerkleConfig, Journal, Recovery},
+        contiguous::Contiguous,
+    },
     merkle::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::Committable,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use thiserror::Error;
 
 pub mod any;
@@ -131,6 +139,14 @@ pub(crate) fn validate_initialization_bound<F: Family>(
         return Err(Error::InvalidInitializationBound);
     }
     Ok(())
+}
+
+/// Classify pruning while selecting a commit for a bounded open.
+fn selection_error<F: Family>(error: JournalError, max_size: Option<Location<F>>) -> Error<F> {
+    match (error, max_size) {
+        (JournalError::ItemPruned(_), Some(cap)) => Error::NoRetainedCommit(cap),
+        (error, _) => error.into(),
+    }
 }
 
 /// Validate a selected commit against its retained history and return its floor.
@@ -167,18 +183,15 @@ fn validate_initialization_commit<F: Family>(
 /// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
-    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    pending: &Recovery<F, E, C, H, S>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<
-            E,
-            Item: Committable<F> + commonware_codec::EncodeShared,
-        >,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     let bounds = pending.bounds();
     let commit = if bounds.end == 0 {
@@ -198,22 +211,19 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::journal::authenticated::Config<S>,
+    merkle: MerkleConfig<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
-) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+) -> Result<Recovery<F, E, C, H, S>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<
-            E,
-            Item: Committable<F> + commonware_codec::EncodeShared,
-        >,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     validate_initialization_bound(max_size)?;
-    Ok(crate::journal::authenticated::Journal::prepare(
+    Journal::prepare(
         context,
         merkle,
         journal,
@@ -221,7 +231,12 @@ where
         |op: &C::Item| op.inactivity_floor().is_some(),
         ROOT_BAGGING,
     )
-    .await?)
+    .await
+    // Every pruning error from this step means the selection found no usable commit.
+    .map_err(|err| match err {
+        authenticated::Error::Journal(err) => selection_error(err, max_size),
+        err => err.into(),
+    })
 }
 
 /// Merkle peak bagging policy used by QMDB operation roots.
@@ -331,6 +346,10 @@ pub enum Error<F: Family> {
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
 
+    /// No retained commit is at or below the requested initialization bound.
+    #[error("no retained commit at or below size: {0}")]
+    NoRetainedCommit(Location<F>),
+
     /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
@@ -345,7 +364,7 @@ pub enum Error<F: Family> {
 
     /// An error from an underlying journal.
     #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
+    Journal(#[from] JournalError),
 
     /// An error from the runtime.
     #[error("runtime error: {0}")]
@@ -432,11 +451,11 @@ pub enum Error<F: Family> {
     HistoricalFloorPruned(Location<F>),
 }
 
-impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
-    fn from(e: crate::journal::authenticated::Error<F>) -> Self {
+impl<F: Family> From<authenticated::Error<F>> for Error<F> {
+    fn from(e: authenticated::Error<F>) -> Self {
         match e {
-            crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
-            crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
+            authenticated::Error::Journal(j) => Self::Journal(j),
+            authenticated::Error::Merkle(m) => Self::Merkle(m),
         }
     }
 }
