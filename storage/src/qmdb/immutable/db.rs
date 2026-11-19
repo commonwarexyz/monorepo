@@ -73,7 +73,7 @@ where
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
             if let Operation::Set(key, _) = op {
-                snapshot.insert(&key, loc);
+                snapshot.insert(key.as_ref(), loc);
             }
         }
     }
@@ -260,7 +260,7 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        for loc in self.snapshot.get(key) {
+        for loc in self.snapshot.get(key.as_ref()) {
             let loc = Location::new(loc);
             if loc < floor {
                 continue;
@@ -302,7 +302,7 @@ where
         // candidate for it, including collisions. They are read in one batch below, each location
         // once, and resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
-            for loc in self.snapshot.get(key.borrow()) {
+            for loc in self.snapshot.get(key.borrow().as_ref()) {
                 if loc < *floor {
                     continue;
                 }
@@ -592,14 +592,14 @@ where
         // Journal writes and snapshot inserts are independent until batch publication.
         let apply_snapshot = async {
             for (key, entry) in batch.diff.iter() {
-                self.snapshot.insert(key, *entry.loc);
+                self.snapshot.insert(key.as_ref(), *entry.loc);
             }
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
                 if batch.bounds.ancestors[i].size <= db_size {
                     continue;
                 }
                 for (key, entry) in ancestor_diff.iter() {
-                    self.snapshot.insert(key, *entry.loc);
+                    self.snapshot.insert(key.as_ref(), *entry.loc);
                 }
             }
         };

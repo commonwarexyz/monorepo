@@ -6,19 +6,15 @@ use commonware_codec::{
     util::ensure_zeros,
 };
 use commonware_runtime::BufMut;
-use core::{fmt::Debug, hash::Hash, ops::Deref};
+use core::{fmt::Debug, hash::Hash};
 
-/// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys
-/// (`Array` types) and variable-length keys (`Vec<u8>`).
-pub trait Key:
-    CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
-{
-}
+/// A QMDB key, indexed by its `AsRef<[u8]>` bytes.
+///
+/// For any two keys, `a.cmp(b)` must equal `a.as_ref().cmp(b.as_ref())`. This implies
+/// that two keys are equal exactly when their index bytes are equal.
+pub trait Key: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}
 
-impl<T> Key for T where
-    T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
-{
-}
+impl<T> Key for T where T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}
 
 /// An operation that may be a commit. Commits declare an inactivity floor.
 pub trait Committable<F: Family> {
