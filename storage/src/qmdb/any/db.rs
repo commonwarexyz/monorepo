@@ -521,9 +521,12 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
-    /// but is not a commit op, either because the caller passed a non-commit-boundary size or
-    /// because pruning removed the commit that would have governed it.
+    /// - [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation is
+    ///   retained and is not a commit.
+    /// - [`crate::merkle::Error::RangeOutOfBounds`] if the size exceeds the tip or `start_loc`
+    ///   is at or beyond the requested commit boundary.
+    /// - [`crate::journal::Error::ItemPruned`] or [`crate::merkle::Error::ElementPruned`] if a
+    ///   required operation or Merkle node has been pruned.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.db.historical_proof",
@@ -547,9 +550,7 @@ where
             ));
         }
 
-        let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
-        let inactive_peaks = F::inactive_peaks(historical_size, inactivity_floor);
+        let inactive_peaks = crate::qmdb::inactive_peaks_at(&self.log, historical_size).await?;
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
             .await

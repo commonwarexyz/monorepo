@@ -270,13 +270,11 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
         .expect("a single-leaf Merkle root is always valid")
 }
 
-/// Look up the inactivity floor declared by the commit at `size - 1`, or `None` if that
-/// operation is not a commit. [`find_inactivity_floor_at`] is the variant for callers that
-/// require a commit.
+/// Look up the inactivity floor declared by the commit at `size - 1`. Returns `None` for
+/// size zero or when the retained operation at `size - 1` is not a commit.
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `size` is zero (no preceding commit exists).
 /// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
 /// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
 pub(crate) async fn commit_floor_at<F, R>(
@@ -288,7 +286,7 @@ where
     R: Contiguous<Item: Committable<F>>,
 {
     let Some(last_op) = size.checked_sub(1) else {
-        return Err(Error::HistoricalFloorPruned(size));
+        return Ok(None);
     };
     let last_op = *last_op;
     let bounds = reader.bounds();
@@ -308,13 +306,12 @@ where
     Ok(Some(floor))
 }
 
-/// Look up the inactivity floor declared by the commit at `size - 1`.
+/// Look up the inactivity floor at the commit boundary required by recovery or sync.
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `size` is zero, or if the operation at `size - 1` is
-///   retained but is not a commit (the caller passed a non-commit-boundary size, or pruning
-///   removed the commit that would have governed it).
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero or the retained operation at
+///   `size - 1` has no commit floor.
 /// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
 /// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
 pub(crate) async fn find_inactivity_floor_at<F, R>(
@@ -330,7 +327,7 @@ where
         .ok_or(Error::HistoricalFloorPruned(size))
 }
 
-/// Compute the inactive peak count for a historical `size`.
+/// Compute the inactive peak count for a proof at the requested commit boundary.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
     size: Location<F>,
@@ -339,11 +336,9 @@ where
     F: Family,
     R: Contiguous<Item: Committable<F>>,
 {
-    if size == Location::new(0) {
-        return Ok(0);
-    }
-
-    let floor = find_inactivity_floor_at::<F, _>(reader, size).await?;
+    let floor = commit_floor_at(reader, size)
+        .await?
+        .ok_or(Error::NotCommitBoundary(size))?;
     Ok(F::inactive_peaks(size, floor))
 }
 
@@ -448,6 +443,10 @@ pub enum Error<F: Family> {
     /// operation's location.
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondCommit(Location<F>, Location<F>),
+
+    /// The requested operation count is zero or its final operation is a retained non-commit.
+    #[error("size {0} is not a commit boundary")]
+    NotCommitBoundary(Location<F>),
 
     /// The commit at the given operation count cannot be reconstructed from retained history.
     /// The payload is the requested or selected operation count, not its inactivity floor.
