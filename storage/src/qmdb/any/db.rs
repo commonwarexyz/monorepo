@@ -138,9 +138,8 @@ where
         return Ok(results);
     }
 
-    // Fallback: read each distinct missed position once with one batched read, which also
-    // validates the missed positions: every candidate position is decoded by exactly one of
-    // the two passes, so corruption detection does not depend on cache state.
+    // Shard probes have already served their hits. One batched read serves the remaining
+    // candidates, reading each distinct missed position once.
     misses.sort_unstable_by_key(|&(_, pos)| pos);
     let positions = dedup_positions(&misses);
     let ops = reader.read_many(&positions).await?;
