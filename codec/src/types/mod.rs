@@ -221,7 +221,7 @@ pub(crate) mod tests {
     fn test_encode_inline_size_matches_inline_bytes() {
         use crate::types::lazy::Lazy;
         use std::{
-            collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+            collections::{BTreeMap, BTreeSet},
             sync::Arc,
         };
 
@@ -237,15 +237,27 @@ pub(crate) mod tests {
         assert_encode_inline_size(&None::<u32>);
         assert_encode_inline_size(&Lazy::new(values));
         assert_encode_inline_size(&BTreeMap::from([(1u32, 2u32), (3, 4)]));
-        assert_encode_inline_size(&HashMap::from([(1u32, 2u32), (3, 4)]));
         assert_encode_inline_size(&BTreeSet::from([1u32, 2, 3]));
-        assert_encode_inline_size(&HashSet::from([1u32, 2, 3]));
 
         // Byte payloads are pushed, so only their length prefixes are inline.
         assert_encode_inline_size(&payload);
         assert_encode_inline_size(&vec![payload.clone(), payload.clone()]);
         assert_encode_inline_size(&Some(payload.clone()));
-        assert_encode_inline_size(&BTreeMap::from([(1u32, payload.clone())]));
+        assert_encode_inline_size(&BTreeMap::from([(1u32, payload)]));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_encode_inline_size_matches_inline_bytes_hash_collections() {
+        use std::collections::{HashMap, HashSet};
+
+        // Long enough that its length prefix takes two bytes.
+        let payload = Bytes::from(vec![7u8; 200]);
+
+        assert_encode_inline_size(&HashMap::from([(1u32, 2u32), (3, 4)]));
+        assert_encode_inline_size(&HashSet::from([1u32, 2, 3]));
+
+        // Byte payloads are pushed, so only their length prefixes are inline.
         assert_encode_inline_size(&HashMap::from([(1u32, payload)]));
     }
 
