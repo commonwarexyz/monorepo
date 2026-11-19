@@ -783,6 +783,7 @@ pub(crate) mod tests {
         qmdb::{
             operation::Committable,
             sync::{
+                Hooks,
                 harness::{
                     DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, OpOf, SyncTestHarness,
                     interrupt_destroy, prune_to_sync_boundary,
@@ -884,39 +885,6 @@ pub(crate) mod tests {
             Ok(Self)
         }
 
-        async fn from_sync_result(
-            _context: Self::Context,
-            _config: Self::Config,
-            _journal: Self::Journal,
-            _pinned_nodes: Option<Vec<Self::Digest>>,
-            _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
-            _apply_batch_size: NonZeroU64,
-        ) -> Result<Self, qmdb::Error<Self::Family>> {
-            Ok(Self)
-        }
-
-        async fn persist_sync_result(self) -> Result<Self, qmdb::Error<Self::Family>> {
-            Ok(self)
-        }
-
-        async fn discard_local_state(
-            _context: Self::Context,
-            config: &Self::Config,
-        ) -> Result<(), qmdb::Error<Self::Family>> {
-            config.local_state_discards.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn local_pinned_nodes(
-            _context: Self::Context,
-            config: &Self::Config,
-            _target: &Target<Self::Family, Self::Digest>,
-            _journal: &Self::Journal,
-        ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<Self::Family>> {
-            config.pinned_node_probes.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(vec![]))
-        }
-
         fn target(&self) -> Target<MmrFamily, sha256::Digest> {
             Target {
                 root: sha256::Digest::from([0u8; 32]),
@@ -929,6 +897,41 @@ pub(crate) mod tests {
             _target: &Target<MmrFamily, sha256::Digest>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             Ok(self)
+        }
+    }
+
+    impl Hooks<MmrFamily, deterministic::Context, TestConfig, TestJournal, sha256::Digest> for TestDb {
+        async fn from_sync_result(
+            _context: deterministic::Context,
+            _config: TestConfig,
+            _journal: TestJournal,
+            _pinned_nodes: Option<Vec<sha256::Digest>>,
+            _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
+            _apply_batch_size: NonZeroU64,
+        ) -> Result<Self, qmdb::Error<MmrFamily>> {
+            Ok(Self)
+        }
+
+        async fn persist_sync_result(self) -> Result<Self, qmdb::Error<MmrFamily>> {
+            Ok(self)
+        }
+
+        async fn discard_local_state(
+            _context: deterministic::Context,
+            config: &TestConfig,
+        ) -> Result<(), qmdb::Error<MmrFamily>> {
+            config.local_state_discards.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn local_pinned_nodes(
+            _context: deterministic::Context,
+            config: &TestConfig,
+            _target: &Target<MmrFamily, sha256::Digest>,
+            _journal: &TestJournal,
+        ) -> Result<Option<Vec<sha256::Digest>>, qmdb::Error<MmrFamily>> {
+            config.pinned_node_probes.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(vec![]))
         }
     }
 

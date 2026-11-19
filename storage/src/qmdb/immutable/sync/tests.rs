@@ -879,7 +879,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_, _, _, _, _>>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -895,7 +895,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_, _, _, _, _>>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,

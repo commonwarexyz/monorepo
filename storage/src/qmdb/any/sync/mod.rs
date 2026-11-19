@@ -132,11 +132,54 @@ where
         .await
     }
 
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: Self::root(self),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S>
+    sync::Hooks<
+        F,
+        E,
+        Config<
+            I::Translator,
+            <C as sync::Journal<F>>::Config,
+            S,
+            <I as SnapshotBuild<F>>::Concurrency,
+        >,
+        C,
+        H::Digest,
+    > for Db<F, E, C, I, H, U, N, S>
+where
+    F: merkle::Family,
+    E: Context + Spawner,
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as sync::Journal<F>>::Config,
+        > + sync::Journal<F, Context = E, Op = Operation<F, U>>
+        + 'static,
+    I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
     async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        context: E,
+        config: <Self as sync::Database>::Config,
+        log: C,
+        pinned_nodes: Option<Vec<H::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
@@ -160,18 +203,18 @@ where
     }
 
     async fn discard_local_state(
-        context: Self::Context,
-        config: &Self::Config,
+        context: E,
+        config: &<Self as sync::Database>::Config,
     ) -> Result<(), qmdb::Error<F>> {
         qmdb::sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
     }
 
     async fn local_pinned_nodes(
-        context: Self::Context,
-        config: &Self::Config,
-        target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-        journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+        context: E,
+        config: &<Self as sync::Database>::Config,
+        target: &sync::Target<F, H::Digest>,
+        journal: &C,
+    ) -> Result<Option<Vec<H::Digest>>, qmdb::Error<F>> {
         if target.range.start() == Location::new(0)
             || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
         {
@@ -190,19 +233,5 @@ where
             inactivity_floor,
         )
         .await
-    }
-
-    fn target(&self) -> sync::Target<F, H::Digest> {
-        sync::Target {
-            root: Self::root(self),
-            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
-        }
-    }
-
-    async fn prune_to_target(
-        self,
-        target: &sync::Target<F, H::Digest>,
-    ) -> Result<Self, qmdb::Error<F>> {
-        self.prune(target.range.start()).await
     }
 }
