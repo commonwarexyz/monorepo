@@ -10,10 +10,7 @@ use core::fmt::Display;
 pub(crate) mod fixed;
 pub(crate) mod variable;
 
-/// Wire tag for [Operation::Commit].
-pub const COMMIT_CONTEXT: u8 = 0;
-/// Wire tag for [Operation::Append].
-pub const APPEND_CONTEXT: u8 = 1;
+pub use crate::qmdb::operation::{APPEND_CONTEXT, COMMIT_CONTEXT};
 
 /// Delegates Operation-level codec (Write, Read) to the value encoding.
 ///

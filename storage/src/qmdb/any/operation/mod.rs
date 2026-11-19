@@ -10,14 +10,8 @@ use std::fmt;
 pub(crate) mod fixed;
 pub(crate) mod update;
 pub(crate) mod variable;
+pub use crate::qmdb::operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub use update::Update;
-
-/// Wire tag for [Operation::Delete].
-pub const DELETE_CONTEXT: u8 = 0xD1;
-/// Wire tag for [Operation::Update].
-pub const UPDATE_CONTEXT: u8 = 0xD2;
-/// Wire tag for [Operation::Commit].
-pub const COMMIT_CONTEXT: u8 = 0xD3;
 
 pub type Ordered<F, K, V> = Operation<F, update::Ordered<K, V>>;
 pub type Unordered<F, K, V> = Operation<F, update::Unordered<K, V>>;

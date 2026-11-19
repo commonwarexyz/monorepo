@@ -421,7 +421,7 @@ mod tests {
                 }
                 let output = run("keccak256", "variable", &arguments).unwrap();
                 assert!(!output.10);
-                let mut expected = vec![0xd2];
+                let mut expected = vec![0x01];
                 if key_size.is_none() {
                     expected.extend(raw_key.encode());
                 } else {
@@ -532,7 +532,7 @@ mod tests {
                     }
                     let output = run("keccak256", "variable", &arguments).unwrap();
                     assert!(output.10);
-                    let mut expected = vec![0xd3, u8::from(metadata)];
+                    let mut expected = vec![0x00, u8::from(metadata)];
                     if metadata {
                         if let Some(size) = value_size {
                             expected.extend(leaf(42, floor).into_iter().cycle().take(size));
