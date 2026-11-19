@@ -777,7 +777,7 @@ where
     /// never precedes the journal's existing frontier, including one installed by state sync.
     /// A journal built by [Self::from_components] prunes nothing until [Self::persist_boundary]
     /// records its boundary.
-    #[boxed]
+    #[boxed(dyn)]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
         Ok((journal, boundary))
