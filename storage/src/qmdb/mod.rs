@@ -445,10 +445,10 @@ pub enum Error<F: Family> {
     #[error("stale read: database is at no state of the batch's chain")]
     StaleRead,
 
-    /// A batch read asked for a location below the batch's inactivity floor (for an unmerkleized
-    /// batch, the floor it builds on).
+    /// A read by location asked for a location below the inactivity floor: the database's, or for
+    /// a batch read the batch's (for an unmerkleized batch, the floor it builds on).
     ///
-    /// Whether the journal still retains such a location depends on local pruning, so batch reads
+    /// Whether the journal still retains such a location depends on local pruning, so reads
     /// reject it on every database at the same commitment.
     #[error("location below inactivity floor: {0}")]
     BelowInactivityFloor(Location<F>),
