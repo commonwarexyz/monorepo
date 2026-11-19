@@ -241,9 +241,9 @@ pub(crate) mod test {
         root
     }
 
-    /// The bitmap's chunk size is the caller's choice each time a database is opened. A database
-    /// built and pruned with one chunk size reopens with another at the same root, holds the same
-    /// values, and reaches the same root as it keeps growing.
+    /// An Any database's bitmap chunk size is the caller's choice each time it is opened. A
+    /// database built and pruned with one chunk size reopens with another at the same root, holds
+    /// the same values, and reaches the same root as it keeps growing.
     #[test_traced]
     fn test_any_fixed_reopen_with_different_bitmap_chunk_size() {
         let executor = deterministic::Runner::default();
