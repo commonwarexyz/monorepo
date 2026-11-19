@@ -126,9 +126,10 @@
 //! +---------+-------------------------+
 //! ```
 //!
-//! The tag adds one byte to the encoding of each request and response. Every message must fit the
-//! configured `max_message_size` of the network that carries the channel, less the subchannel
-//! prefix on a [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
+//! The tag adds one byte to the encoding of each request and response. [max_message_size] bounds
+//! the size of a message given the sizes of the largest encoded request and response. Every
+//! message must fit the network's payload limit, less the subchannel prefix on a
+//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
 
 mod config;
 pub use config::Config;
@@ -137,6 +138,7 @@ pub use engine::Engine;
 mod ingress;
 pub use ingress::Mailbox;
 mod wire;
+pub use wire::max_message_size;
 
 #[cfg(test)]
 mod mocks;

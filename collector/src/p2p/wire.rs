@@ -7,6 +7,12 @@ const REQUEST: u8 = 0;
 /// Tag of a response.
 const RESPONSE: u8 = 1;
 
+/// Returns an upper bound on the encoded size of any message for requests of at most `request`
+/// bytes and responses of at most `response` bytes.
+pub fn max_message_size(request: usize, response: usize) -> usize {
+    u8::SIZE + request.max(response)
+}
+
 /// A request or a response, sent as a one-byte tag followed by its encoding.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Message<Rq, Rs> {
@@ -110,6 +116,14 @@ mod tests {
         // A request starts with the byte 0 and a response with the byte 1.
         assert_eq!(Simple::Request(7).encode().as_ref(), [0, 7]);
         assert_eq!(Simple::Response(0x0102).encode().as_ref(), [1, 1, 2]);
+    }
+
+    #[test]
+    fn test_max_message_size() {
+        // The larger encoding meets the bound, and the smaller one stays below it.
+        let bound = max_message_size(u8::SIZE, u16::SIZE);
+        assert_eq!(Simple::Response(0x0102).encode().len(), bound);
+        assert!(Simple::Request(7).encode().len() < bound);
     }
 
     #[test]
