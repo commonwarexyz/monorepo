@@ -1,4 +1,4 @@
-//! Threshold signature operations for BLS12-381.
+//! Threshold signature operations for BLS.
 //!
 //! This module provides functions for threshold signature schemes, including:
 //! - Partial signing and verification
@@ -11,8 +11,7 @@
 use super::{
     super::{
         Error,
-        group::Share,
-        sharing::Sharing,
+        sharing::{Share, Sharing},
         variant::{PartialSignature, Variant},
     },
     batch,
@@ -40,7 +39,7 @@ fn prepare_evaluations<'a, V: Variant>(
 
 /// Signs the provided message with the key share.
 pub fn sign_message<V: Variant>(
-    share: &Share,
+    share: &Share<V::Scalar>,
     namespace: &[u8],
     message: &[u8],
 ) -> PartialSignature<V> {
@@ -59,7 +58,7 @@ pub fn sign_message<V: Variant>(
 /// verifiable with `ops::verify_proof_of_possession`.
 pub fn sign_proof_of_possession<V: Variant>(
     sharing: &Sharing<V>,
-    share: &Share,
+    share: &Share<V::Scalar>,
     namespace: &[u8],
 ) -> PartialSignature<V> {
     let sig = super::sign::<V>(
@@ -341,18 +340,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::{
-        dkg::feldman_desmedt as dkg,
-        primitives::{
-            group::{G1_MESSAGE, G2_MESSAGE, Private, Scalar},
-            ops::{self, hash_with_namespace},
-            sharing::Mode,
+    use crate::{
+        bls::{
+            dkg::feldman_desmedt as dkg, key::Private, ops, ops::hash_with_namespace, sharing::Mode,
+        },
+        bls12381::primitives::{
+            group::{G1_MESSAGE, G2_MESSAGE},
             variant::{MinPk, MinSig},
         },
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
+    use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring as _, Space};
     use commonware_parallel::{Sequential, mocks::explore};
     use commonware_utils::{Faults, N3f1, NZU32, non_empty, test_rng, union_unique};
 
@@ -1008,14 +1007,14 @@ mod tests {
     }
 
     fn threshold_derive_missing_partials<V: Variant>() {
-        fn lagrange_coeff(
-            scalars: &[Scalar],
+        fn lagrange_coeff<V: Variant>(
+            scalars: &[V::Scalar],
             eval_x: Participant,
             i_x: Participant,
             x_coords: &[Participant],
-        ) -> Scalar {
-            let mut num = Scalar::one();
-            let mut den = Scalar::one();
+        ) -> V::Scalar {
+            let mut num = V::Scalar::one();
+            let mut den = V::Scalar::one();
 
             let eval_x = scalars[usize::from(eval_x)].clone();
             let xi = scalars[usize::from(i_x)].clone();
@@ -1059,16 +1058,19 @@ mod tests {
         for target in &shares {
             let target = target.index;
 
-            let weights: Vec<Scalar> = recovery_indices
+            let weights: Vec<V::Scalar> = recovery_indices
                 .iter()
                 .map(|&recovery_index| {
-                    lagrange_coeff(&scalars, target, recovery_index, &recovery_indices)
+                    lagrange_coeff::<V>(&scalars, target, recovery_index, &recovery_indices)
                 })
                 .collect();
 
             let points: Vec<_> = recovery_partials.iter().map(|p| p.value).collect();
-            let derived =
-                <<V as Variant>::Signature as Space<Scalar>>::msm(&points, &weights, &Sequential);
+            let derived = <<V as Variant>::Signature as Space<V::Scalar>>::msm(
+                &points,
+                &weights,
+                &Sequential,
+            );
             let derived = PartialSignature {
                 index: target,
                 value: derived,
@@ -1102,7 +1104,7 @@ mod tests {
         verify_message::<V>(&sharing, namespace, msg, &partial1).expect("partial1 should be valid");
         verify_message::<V>(&sharing, namespace, msg, &partial2).expect("partial2 should be valid");
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_partial1 = PartialSignature {
             index: partial1.index,
@@ -1133,7 +1135,7 @@ mod tests {
         let pk2 = sharing.partial_public(partial2.index).unwrap();
         let pk_sum = pk1 + &pk2;
         let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, msg);
-        V::verify(&pk_sum, &hm, &forged_sum)
+        crate::bls::ops::verify_hashed::<V>(&pk_sum, &hm, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_partials = [forged_partial1, forged_partial2];
@@ -1186,7 +1188,7 @@ mod tests {
         verify_message::<V>(&sharing, namespace, msg2, &partial2)
             .expect("partial2 should be valid");
 
-        let random_scalar = Scalar::random(&mut rng);
+        let random_scalar = V::Scalar::random(&mut rng);
         let delta = V::Signature::generator() * &random_scalar;
         let forged_partial1 = PartialSignature {
             index: partial1.index,
@@ -1217,7 +1219,7 @@ mod tests {
         let hm1 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg1);
         let hm2 = hash_with_namespace::<V>(V::MESSAGE, namespace, msg2);
         let hm_sum = hm1 + &hm2;
-        V::verify(&pk, &hm_sum, &forged_sum)
+        crate::bls::ops::verify_hashed::<V>(&pk, &hm_sum, &forged_sum)
             .expect("vulnerable naive verification accepts forged aggregate");
 
         let forged_entries = [

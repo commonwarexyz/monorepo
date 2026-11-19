@@ -180,9 +180,7 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
-use commonware_cryptography::{
-    Digest, PublicKey, bls12381::primitives::variant::Variant as BlsVariant,
-};
+use commonware_cryptography::{Digest, PublicKey, bls::variant::Variant as BlsVariant};
 use commonware_utils::sequence::Unit;
 
 mod actor;
@@ -269,9 +267,9 @@ mod tests {
     };
     use commonware_cryptography::{
         Digest as _, Digested, Digestible as _, Hasher as _,
-        bls12381::{
+        bls::{
             dkg::feldman_desmedt::deal,
-            primitives::sharing::{Mode, Sharing},
+            sharing::{Mode, Sharing},
         },
         certificate::Verifier as _,
         sha256::Sha256,

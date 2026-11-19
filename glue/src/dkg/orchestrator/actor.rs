@@ -22,7 +22,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digest, Digested, PublicKey,
-    bls12381::primitives::variant::Variant as BlsVariant,
+    bls::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
 use commonware_macros::{select, select_loop};

@@ -566,7 +566,7 @@ mod tests {
             types::{CodedBlock, coding_config_for_participants},
         },
         simplex::{
-            scheme::bls12381_threshold::vrf::Scheme as ThresholdScheme,
+            scheme::bls_threshold::vrf::Scheme as ThresholdScheme,
             types::{Finalization, Finalize, Proposal},
         },
         types::{Epoch, Height, Round, View, coding::Commitment},
@@ -704,7 +704,7 @@ mod tests {
     fn threshold_fixture(
         context: &mut deterministic::Context,
     ) -> commonware_cryptography::certificate::mocks::Fixture<TestThresholdScheme> {
-        commonware_consensus::simplex::scheme::bls12381_threshold::vrf::fixture::<MinPk, _>(
+        commonware_consensus::simplex::scheme::bls_threshold::vrf::fixture::<MinPk, _>(
             context,
             THRESHOLD_NAMESPACE,
             4,

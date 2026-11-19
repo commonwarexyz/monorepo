@@ -478,7 +478,7 @@ mod tests {
         types::{Round, View},
     };
     use commonware_cryptography::{
-        ChaCha20Poly1305, Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal,
+        ChaCha20Poly1305, Hasher as _, Signer as _, bls::dkg::feldman_desmedt::deal,
     };
     use commonware_glue::dkg::types::EpochOutcome;
     use commonware_runtime::{Runner as _, deterministic};

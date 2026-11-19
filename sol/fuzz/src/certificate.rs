@@ -4,9 +4,9 @@ use alloy_sol_macro::sol;
 use alloy_sol_types::SolType;
 use clap::{Subcommand, ValueEnum};
 use commonware_codec::Encode;
-use commonware_cryptography::bls12381::primitives::{
-    ops,
-    variant::{MinPk, MinSig, Variant},
+use commonware_cryptography::{
+    bls::{ops, variant::Variant},
+    bls12381::primitives::variant::{MinPk, MinSig},
 };
 use commonware_utils::union_unique;
 

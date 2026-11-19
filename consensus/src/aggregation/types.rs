@@ -476,9 +476,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::scheme::{
-        Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1,
-    };
+    use crate::aggregation::scheme::{Scheme, bls_multisig, bls_threshold, ed25519, secp256r1};
     use bytes::BytesMut;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -607,10 +605,10 @@ mod tests {
     fn test_codec() {
         codec(ed25519::fixture);
         codec(secp256r1::fixture);
-        codec(bls12381_multisig::fixture::<MinPk, _>);
-        codec(bls12381_multisig::fixture::<MinSig, _>);
-        codec(bls12381_threshold::fixture::<MinPk, _>);
-        codec(bls12381_threshold::fixture::<MinSig, _>);
+        codec(bls_multisig::fixture::<MinPk, _>);
+        codec(bls_multisig::fixture::<MinSig, _>);
+        codec(bls_threshold::fixture::<MinPk, _>);
+        codec(bls_threshold::fixture::<MinSig, _>);
     }
 
     fn activity_invalid_enum<S, F>(fixture: F)
@@ -637,20 +635,20 @@ mod tests {
     fn test_activity_invalid_enum() {
         activity_invalid_enum(ed25519::fixture);
         activity_invalid_enum(secp256r1::fixture);
-        activity_invalid_enum(bls12381_multisig::fixture::<MinPk, _>);
-        activity_invalid_enum(bls12381_multisig::fixture::<MinSig, _>);
-        activity_invalid_enum(bls12381_threshold::fixture::<MinPk, _>);
-        activity_invalid_enum(bls12381_threshold::fixture::<MinSig, _>);
+        activity_invalid_enum(bls_multisig::fixture::<MinPk, _>);
+        activity_invalid_enum(bls_multisig::fixture::<MinSig, _>);
+        activity_invalid_enum(bls_threshold::fixture::<MinPk, _>);
+        activity_invalid_enum(bls_threshold::fixture::<MinSig, _>);
     }
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use crate::aggregation::scheme::bls12381_threshold;
+        use crate::aggregation::scheme::bls_threshold;
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::{ed25519::PublicKey, sha256::Digest as Sha256Digest};
 
-        type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+        type Scheme = bls_threshold::Scheme<PublicKey, MinSig>;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Item<Sha256Digest>>,

@@ -2,8 +2,7 @@ use crate::{
     simplex::{
         elector::{self, RoundRobin},
         scheme::{
-            Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
-            secp256r1,
+            Scheme, bls_multisig, bls_threshold::vrf as bls_threshold_vrf, ed25519, secp256r1,
         },
     },
     types::{TermLength, ViewDelta},
@@ -64,7 +63,7 @@ impl Simplex for SimplexEd25519 {
 pub struct SimplexBls12381MultisigMinPk;
 
 impl Simplex for SimplexBls12381MultisigMinPk {
-    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinPk>;
+    type Scheme = bls_multisig::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
     fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
@@ -76,14 +75,14 @@ impl Simplex for SimplexBls12381MultisigMinPk {
         namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        bls12381_multisig::fixture::<MinPk, _>(context, namespace, n)
+        bls_multisig::fixture::<MinPk, _>(context, namespace, n)
     }
 }
 
 pub struct SimplexBls12381MultisigMinSig;
 
 impl Simplex for SimplexBls12381MultisigMinSig {
-    type Scheme = bls12381_multisig::Scheme<Ed25519PublicKey, MinSig>;
+    type Scheme = bls_multisig::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
     fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
@@ -95,14 +94,14 @@ impl Simplex for SimplexBls12381MultisigMinSig {
         namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        bls12381_multisig::fixture::<MinSig, _>(context, namespace, n)
+        bls_multisig::fixture::<MinSig, _>(context, namespace, n)
     }
 }
 
 pub struct SimplexBls12381MinPk;
 
 impl Simplex for SimplexBls12381MinPk {
-    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
+    type Scheme = bls_threshold_vrf::Scheme<Ed25519PublicKey, MinPk>;
     type Elector = RoundRobin;
 
     fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
@@ -114,14 +113,14 @@ impl Simplex for SimplexBls12381MinPk {
         namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n)
+        bls_threshold_vrf::fixture::<MinPk, _>(context, namespace, n)
     }
 }
 
 pub struct SimplexBls12381MinSig;
 
 impl Simplex for SimplexBls12381MinSig {
-    type Scheme = bls12381_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
+    type Scheme = bls_threshold_vrf::Scheme<Ed25519PublicKey, MinSig>;
     type Elector = RoundRobin;
 
     fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
@@ -133,7 +132,7 @@ impl Simplex for SimplexBls12381MinSig {
         namespace: &[u8],
         n: u32,
     ) -> Fixture<Self::Scheme> {
-        bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n)
+        bls_threshold_vrf::fixture::<MinSig, _>(context, namespace, n)
     }
 }
 
@@ -207,7 +206,7 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_bls12381_multisig_minpk_connected() {
+    fn test_bls_multisig_minpk_connected() {
         Scheme::MultisigMinPk.run(
             connected_input(SEED, TEST_CONTAINERS, TermLength::ONE),
             Mode::Standard,
@@ -216,7 +215,7 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_bls12381_multisig_minsig_connected() {
+    fn test_bls_multisig_minsig_connected() {
         Scheme::MultisigMinSig.run(
             connected_input(SEED, TEST_CONTAINERS, TermLength::ONE),
             Mode::Standard,
@@ -225,7 +224,7 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_bls12381_threshold_minpk_connected() {
+    fn test_bls_threshold_minpk_connected() {
         Scheme::ThresholdMinPk.run(
             connected_input(SEED, TEST_CONTAINERS, TermLength::ONE),
             Mode::Standard,
@@ -234,7 +233,7 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_bls12381_threshold_minsig_connected() {
+    fn test_bls_threshold_minsig_connected() {
         Scheme::ThresholdMinSig.run(
             connected_input(SEED, TEST_CONTAINERS, TermLength::ONE),
             Mode::Standard,

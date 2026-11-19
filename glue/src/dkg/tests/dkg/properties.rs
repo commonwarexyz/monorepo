@@ -5,8 +5,7 @@ use crate::{
 };
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    bls12381::{dkg::feldman_desmedt::Output, primitives::variant::MinPk},
-    ed25519,
+    bls::dkg::feldman_desmedt::Output, bls12381::primitives::variant::MinPk, ed25519,
 };
 use commonware_utils::ordered::Set;
 use std::{future::Future, pin::Pin};

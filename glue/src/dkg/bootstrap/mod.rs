@@ -73,16 +73,14 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, PublicKey, Sha256, Signer as _,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::Reveal,
-        primitives::{
-            sharing::{Mode as SharingMode, ModeVersion},
-            variant::Variant,
-        },
+        sharing::{Mode as SharingMode, ModeVersion},
+        variant::Variant,
     },
     certificate::{ConstantProvider, Verifier as _},
-    ed25519,
-    sha256::{self, Digest as Sha256Digest},
+    ed25519, sha256,
+    sha256::Digest as Sha256Digest,
 };
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -398,7 +396,7 @@ where
     V: Variant,
     M: Manager<PublicKey = ed25519::PublicKey, Directory = D>,
     X: Blocker<PublicKey = ed25519::PublicKey>,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     T: Strategy,
     D: Directory<ed25519::PublicKey>,
 {

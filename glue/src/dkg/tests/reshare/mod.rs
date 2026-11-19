@@ -3,7 +3,7 @@ use commonware_consensus::{
     simplex::elector::RoundRobin,
     types::{Epoch, Epocher, FixedEpocher, Height},
 };
-use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
+use commonware_cryptography::{bls::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_utils::{probability, vec::NonEmptyVec};

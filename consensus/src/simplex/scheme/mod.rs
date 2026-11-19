@@ -5,13 +5,13 @@
 //! Signing schemes differ in whether per-validator activities can be used as evidence of either
 //! liveness or of committing a fault:
 //!
-//! - **Attributable Schemes** ([`ed25519`], [`bls12381_multisig`], [`secp256r1`]): Individual signatures can be
+//! - **Attributable Schemes** ([`ed25519`], [`bls_multisig`], [`secp256r1`]): Individual signatures can be
 //!   presented to some third party as evidence of either liveness or of committing a fault. Certificates contain signer
 //!   indices alongside individual signatures, enabling secure per-validator activity tracking and conflict detection.
 //!
-//! - **Non-Attributable schemes** ([`bls12381_threshold`]): Individual signatures cannot be presented
+//! - **Non-Attributable schemes** ([`bls_threshold`]): Individual signatures cannot be presented
 //!   to some third party as evidence of either liveness or of committing a fault because they can be forged
-//!   by other players (often after some quorum of partial signatures are collected). With [`bls12381_threshold`],
+//!   by other players (often after some quorum of partial signatures are collected). With [`bls_threshold`],
 //!   possession of any `t` valid partial signatures can be used to forge a partial signature for any other player.
 //!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
 //!   but can't be used by an external observer.
@@ -25,12 +25,12 @@
 //!
 //! # BLS12-381 Threshold Variants
 //!
-//! The [`bls12381_threshold`] module provides two variants:
+//! The [`bls_threshold`] module provides two variants:
 //!
-//! - [`bls12381_threshold::standard`]: Standard threshold signatures. Certificates contain only a
+//! - [`bls_threshold::standard`]: Standard threshold signatures. Certificates contain only a
 //!   vote signature recovered from partial signatures.
 //!
-//! - [`bls12381_threshold::vrf`]: Threshold VRF (Verifiable Random Function) that produces both
+//! - [`bls_threshold::vrf`]: Threshold VRF (Verifiable Random Function) that produces both
 //!   vote signatures and per-round seed signatures. The seed can be used for randomness (e.g.,
 //!   leader election, timelock encryption).
 //!
@@ -40,7 +40,7 @@
 //! the round resolves and without any certificate forming. A malicious leader can use this early
 //! knowledge to front-run the outcome. Applications should employ a "commit-then-reveal" pattern
 //! by binding randomness requests in finalized blocks **before** the reveal occurs (e.g.,
-//! `draw(view+100)`). See [`bls12381_threshold::vrf`] for details.
+//! `draw(view+100)`). See [`bls_threshold::vrf`] for details.
 
 use crate::simplex::types::Subject;
 use bytes::Bytes;
@@ -54,8 +54,8 @@ use commonware_cryptography::{
 };
 use commonware_utils::{N3f1, union};
 
-pub mod bls12381_multisig;
-pub mod bls12381_threshold;
+pub mod bls_multisig;
+pub mod bls_threshold;
 pub mod ed25519;
 commonware_macros::stability_mod!(ALPHA, pub mod secp256r1);
 

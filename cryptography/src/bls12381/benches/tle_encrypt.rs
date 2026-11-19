@@ -1,6 +1,9 @@
-use commonware_cryptography::bls12381::{
-    primitives::{ops::keypair, variant::MinSig},
-    tle::{Block, encrypt},
+use commonware_cryptography::{
+    bls::{
+        ops::keypair,
+        tle::{Block, encrypt},
+    },
+    bls12381::primitives::variant::MinSig,
 };
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};

@@ -1,7 +1,7 @@
 //! Size limits for the payloads DKG sends.
 
 use crate::dkg::types::Message;
-use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{PublicKey, bls::variant::Variant};
 use commonware_p2p::utils::mux::prefixed;
 use std::num::NonZeroU32;
 
@@ -27,14 +27,8 @@ mod tests {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,
-        bls12381::{
-            dkg::feldman_desmedt::SignedDealerLog,
-            primitives::{
-                group::Scalar,
-                sharing::ModeVersion,
-                variant::{MinPk, MinSig},
-            },
-        },
+        bls::{dkg::feldman_desmedt::SignedDealerLog, sharing::ModeVersion},
+        bls12381::primitives::variant::{MinPk, MinSig},
         ed25519,
         transcript::{Transcript, Version},
     };
@@ -57,7 +51,7 @@ mod tests {
 
     /// Returns an encoded commitment with `count` coefficients.
     fn commitment<V: Variant>(count: u32) -> Vec<u8> {
-        let scalars = Poly::<Scalar>::new(test_rng(), count - 1);
+        let scalars = Poly::<V::Scalar>::new(test_rng(), count - 1);
         Poly::<V::Public>::commit(scalars).encode().to_vec()
     }
 
@@ -73,7 +67,7 @@ mod tests {
     fn dealer<V: Variant>(count: u32) -> Vec<u8> {
         let mut message = vec![0u8];
         message.extend(commitment::<V>(count));
-        Scalar::random(test_rng()).write(&mut message);
+        V::Scalar::random(test_rng()).write(&mut message);
         message
     }
 
@@ -87,7 +81,7 @@ mod tests {
     /// Returns the widest dealer log payload for `count` participants.
     fn log<V: Variant>(count: u32) -> Vec<u8> {
         // Every player is acknowledged, since a signature is wider than a revealed share.
-        const { assert!(Signature::SIZE > Scalar::SIZE) };
+        const { assert!(Signature::SIZE > V::Scalar::SIZE) };
 
         let mut payload = vec![0u8];
         ed25519::PrivateKey::from_seed(0)

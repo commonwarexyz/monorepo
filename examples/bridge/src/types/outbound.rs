@@ -80,10 +80,8 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
-        bls12381::{
-            certificate::threshold::Certificate,
-            primitives::{group, variant::MinSig},
-        },
+        bls::certificate::threshold::Certificate,
+        bls12381::primitives::{group, variant::MinSig},
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{CryptoGroup, Random as _};
@@ -99,7 +97,8 @@ mod tests {
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
         let scalar = group::Scalar::random(test_rng());
-        let mut signature = <MinSig as commonware_cryptography::bls12381::primitives::variant::Variant>::Signature::generator();
+        let mut signature =
+            <MinSig as commonware_cryptography::bls::variant::Variant>::Signature::generator();
         signature *= &scalar;
         Finalization {
             proposal: Proposal {

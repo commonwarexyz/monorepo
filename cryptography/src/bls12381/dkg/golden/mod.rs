@@ -1,7 +1,7 @@
 //! Non-interactive Distributed Key Generation (DKG) and Resharing for BLS12-381.
 //!
 //! This module implements a non-interactive DKG and Resharing protocol for the BLS12-381
-//! curve. Unlike the interactive [`super::feldman_desmedt`] protocol, this construction requires no
+//! curve. Unlike the interactive [`feldman_desmedt`](crate::bls::dkg::feldman_desmedt) protocol, this construction requires no
 //! back-and-forth between dealers and players. Each dealer publishes a single message,
 //! and any observer can verify correctness and compute the public output without private
 //! key material.
@@ -128,11 +128,15 @@ mod evrf;
 
 use crate::{
     Signer as _, Verifier as _,
+    bls::{
+        key::Private,
+        sharing::{Mode, ModeVersion, Share, Sharing},
+    },
     bls12381::primitives::{
-        group::{G1, Private, Scalar, ScalarReadCfg, Share, SmallScalar},
-        sharing::{Mode, ModeVersion, Sharing},
+        group::{G1, Scalar, SmallScalar},
         variant::MinPk,
     },
+    curve::ScalarReadCfg,
     transcript::{Summary, Transcript, Version},
 };
 use bytes::{BufMut, Bytes};
@@ -227,7 +231,7 @@ impl<P> Output<P> {
 
     /// Get the public polynomial associated with this output.
     ///
-    /// This is useful for verifying partial signatures, with [`crate::bls12381::primitives::ops::threshold::verify_message`].
+    /// This is useful for verifying partial signatures, with [`crate::bls::ops::threshold::verify_message`].
     pub const fn public(&self) -> &Sharing<MinPk> {
         &self.public
     }
@@ -468,7 +472,7 @@ pub fn deal(
     setup: &Setup,
     info: &Info,
     me: &PrivateKey,
-    share: Option<Share>,
+    share: Option<Share<Scalar>>,
     strategy: &impl Strategy,
 ) -> Result<SignedDealerLog, Error> {
     check_setup(setup, info)?;
@@ -646,7 +650,7 @@ pub fn play(
     logs: BTreeMap<PublicKey, DealerLog>,
     me: &PrivateKey,
     strategy: &impl Strategy,
-) -> Result<(Output<PublicKey>, Share), Error> {
+) -> Result<(Output<PublicKey>, Share<Scalar>), Error> {
     check_setup(setup, info)?;
     let me_pub = me.public();
     let my_index = info.player_index(&me_pub)?;
@@ -1222,7 +1226,7 @@ mod test_plan {
             dealer_keys: &[PrivateKey],
             player_keys: &[PrivateKey],
             strategy: &impl Strategy,
-        ) -> anyhow::Result<(Output<PublicKey>, Vec<Share>)> {
+        ) -> anyhow::Result<(Output<PublicKey>, Vec<Share<Scalar>>)> {
             let info = Self::make_info(0, None, dealer_keys, player_keys);
 
             let mut logs = BTreeMap::new();

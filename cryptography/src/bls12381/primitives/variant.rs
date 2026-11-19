@@ -1,176 +1,35 @@
-//! Different variants of the BLS signature scheme.
+//! The variants of the BLS signature scheme over BLS12-381.
+//!
+//! [MinPk] puts public keys in [G1] and [MinSig] puts them in [G2], as [Twin]<[G1]>.
 
-use super::{
-    Error,
-    group::{
-        DST, G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, GT,
-        Scalar, SmallScalar,
-    },
+use super::group::{
+    G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION, G2, G2_MESSAGE, G2_PROOF_OF_POSSESSION, Scalar,
+    SmallScalar,
 };
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-use blst::{blst_final_exp, blst_fp12, blst_miller_loop};
-use bytes::BufMut;
-use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
-};
-use commonware_math::algebra::{Additive, CryptoGroup, HashToGroup, Space};
-use commonware_parallel::Strategy;
-use commonware_utils::Participant;
-use core::{
-    fmt::{Debug, Formatter},
-    hash::Hash,
-};
-use rand_core::CryptoRng;
+use crate::{bls::variant::Variant, curve::DST};
+use commonware_math::algebra::Twin;
+use core::fmt::{Debug, Formatter};
 
-/// A specific instance of a signature scheme.
-pub trait Variant: Clone + Send + Sync + Hash + Eq + Debug + 'static {
-    /// The public key type.
-    type Public: HashToGroup<Scalar = Scalar>
-        + Space<SmallScalar>
-        + FixedSize
-        + Write
-        + Read<Cfg = ()>
-        + Hash
-        + Copy;
+/// The domain separation tag (DST) for the scalar that timelock encryption derives.
+const TLE: DST = b"TLE_BLS12381_XMD:SHA-256_SSWU_RO_H3_";
 
-    /// The signature type.
-    type Signature: HashToGroup<Scalar = Scalar>
-        + Space<SmallScalar>
-        + FixedSize
-        + Write
-        + Read<Cfg = ()>
-        + Hash
-        + Copy;
-
-    /// The domain separator tag (DST) for a proof of possession.
-    const PROOF_OF_POSSESSION: DST;
-
-    /// The domain separator tag (DST) for a message.
-    const MESSAGE: DST;
-
-    /// Verify the signature from the provided public key and pre-hashed message.
-    /// Identity signatures are invalid.
-    fn verify(
-        public: &Self::Public,
-        hm: &Self::Signature,
-        signature: &Self::Signature,
-    ) -> Result<(), Error>;
-
-    /// Verify a batch of signatures from the provided public keys and pre-hashed messages.
-    /// An empty batch and any batch containing an identity signature are invalid.
-    fn batch_verify(
-        rng: &mut impl CryptoRng,
-        publics: &[Self::Public],
-        hms: &[Self::Signature],
-        signatures: &[Self::Signature],
-        strategy: &impl Strategy,
-    ) -> Result<(), Error>;
-
-    /// Compute the pairing `e(G1, G2) -> GT`.
-    fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT;
-}
+/// The namespace of the transcripts of a distributed key generation.
+const DKG: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG";
 
 /// A [Variant] with a public key of type [G1] and a signature of type [G2].
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinPk {}
 
 impl Variant for MinPk {
+    type Scalar = Scalar;
     type Public = G1;
     type Signature = G2;
+    type Challenge = SmallScalar;
 
     const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G2_MESSAGE;
-
-    /// Verifies that `e(hm,pk)` is equal to `e(sig,G1::one())` using a single product check with
-    /// a negated G1 generator (`e(hm,pk) * e(sig,-G1::one()) == 1`).
-    fn verify(
-        public: &Self::Public,
-        hm: &Self::Signature,
-        signature: &Self::Signature,
-    ) -> Result<(), Error> {
-        // Raw multi-pairing only evaluates the equation, so reject identity signatures at this
-        // verification boundary.
-        if signature == &Self::Signature::zero() {
-            return Err(Error::InvalidSignature);
-        }
-        if !G2::multi_pairing_check(&[*hm], &[*public], signature, &-G1::generator()) {
-            return Err(Error::InvalidSignature);
-        }
-        Ok(())
-    }
-
-    /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
-    ///
-    /// This method is outperforms individual signature verification (`2` pairings per signature) by
-    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
-    /// `2n` multiplications for `n` signatures).
-    ///
-    /// The verification equation for each signature `i` is:
-    /// `e(hm_i,pk_i) == e(sig_i,G1::one())`,
-    /// which is equivalent to checking if `e(hm_i,pk_i) * e(sig_i,-G1::one()) == 1`.
-    ///
-    /// To batch verify `n` such equations, we sample random 128-bit scalars `r_i` from
-    /// `[0, 2^128)` (for `i=1..n`). The batch verification checks if the product of these individual
-    /// equations, each raised to the power of its respective `r_i`, equals one:
-    /// `prod_i((e(hm_i,pk_i) * e(sig_i,-G1::one()))^{r_i}) == 1`
-    ///
-    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings,
-    /// onto `pk_i` rather than `hm_i` because G1 multiplication is cheaper):
-    /// `prod_i(e(hm_i,r_i * pk_i) * e(r_i * sig_i,-G1::one())) == 1`
-    ///
-    /// The second term `e(r_i * sig_i,-G1::one())` can be computed efficiently with Multi-Scalar Multiplication:
-    /// `e(sum_i(r_i * sig_i),-G1::one())`
-    ///
-    /// Finally, we aggregate all pairings `e(hm_i,r_i * pk_i)` (`n`) and `e(sum_i(r_i * sig_i),-G1::one())` (`1`)
-    /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
-    /// the batch verification succeeds.
-    ///
-    /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify(
-        rng: &mut impl CryptoRng,
-        publics: &[Self::Public],
-        hms: &[Self::Signature],
-        signatures: &[Self::Signature],
-        par: &impl Strategy,
-    ) -> Result<(), Error> {
-        // Ensure there is an equal number of public keys, messages, and signatures.
-        assert_eq!(publics.len(), hms.len());
-        assert_eq!(publics.len(), signatures.len());
-        if publics.is_empty() || signatures.contains(&Self::Signature::zero()) {
-            return Err(Error::InvalidSignature);
-        }
-
-        // Generate 128-bit random scalars (sufficient for batch verification security).
-        let scalars: Vec<SmallScalar> = (0..publics.len())
-            .map(|_| SmallScalar::random(&mut *rng))
-            .collect();
-
-        let (s_agg, scaled_pks) = par.join(
-            || G2::msm(signatures, &scalars, par),
-            || par.map_collect_vec(publics.iter().zip(scalars.iter()), |(&pk, s)| pk * s),
-        );
-        if !G2::multi_pairing_check(hms, &scaled_pks, &s_agg, &-G1::generator()) {
-            return Err(Error::InvalidSignature);
-        }
-        Ok(())
-    }
-
-    /// Compute the pairing `e(public, signature) -> GT`.
-    fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
-        let p1_affine = public.as_blst_p1_affine();
-        let p2_affine = signature.as_blst_p2_affine();
-
-        let mut result = blst_fp12::default();
-        let ptr = &raw mut result;
-        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
-        unsafe {
-            blst_miller_loop(ptr, &p2_affine, &p1_affine);
-            blst_final_exp(ptr, ptr);
-        }
-
-        GT::from_blst_fp12(result)
-    }
+    const TLE: DST = TLE;
+    const DKG: &'static [u8] = DKG;
 }
 
 impl Debug for MinPk {
@@ -179,321 +38,24 @@ impl Debug for MinPk {
     }
 }
 
-/// A [Variant] with a public key of type [G2] and a signature of type [G1].
+/// A [Variant] with a public key in [G2], held as [Twin]<[G1]>, and a signature of type [G1].
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct MinSig {}
 
 impl Variant for MinSig {
-    type Public = G2;
+    type Scalar = Scalar;
+    type Public = Twin<G1>;
     type Signature = G1;
+    type Challenge = SmallScalar;
 
     const PROOF_OF_POSSESSION: DST = G1_PROOF_OF_POSSESSION;
     const MESSAGE: DST = G1_MESSAGE;
-
-    /// Verifies that `e(pk,hm)` is equal to `e(G2::one(),sig)` using a single product check with
-    /// a negated G2 generator (`e(pk,hm) * e(-G2::one(),sig) == 1`).
-    fn verify(
-        public: &Self::Public,
-        hm: &Self::Signature,
-        signature: &Self::Signature,
-    ) -> Result<(), Error> {
-        // Raw multi-pairing only evaluates the equation, so reject identity signatures at this
-        // verification boundary.
-        if signature == &Self::Signature::zero() {
-            return Err(Error::InvalidSignature);
-        }
-        if !G1::multi_pairing_check(&[*hm], &[*public], signature, &-G2::generator()) {
-            return Err(Error::InvalidSignature);
-        }
-        Ok(())
-    }
-
-    /// Verifies a set of signatures against their respective public keys and pre-hashed messages.
-    ///
-    /// This method outperforms individual signature verification (`2` pairings per signature) by
-    /// verifying a random linear combination of the public keys and signatures (`n+1` pairings and
-    /// `2n` multiplications for `n` signatures).
-    ///
-    /// The verification equation for each signature `i` is:
-    /// `e(pk_i,hm_i) == e(G2::one(),sig_i)`,
-    /// which is equivalent to checking if `e(pk_i,hm_i) * e(-G2::one(),sig_i) == 1`.
-    ///
-    /// To batch verify `n` such equations, we sample random 128-bit scalars `r_i` from
-    /// `[0, 2^128)` (for `i=1..n`). The batch verification checks if the product of these individual
-    /// equations, each effectively raised to the power of its respective `r_i`, equals one:
-    /// `prod_i((e(pk_i,hm_i) * e(-G2::one(),sig_i))^{r_i}) == 1`
-    ///
-    /// Using the bilinearity of pairings, this can be rewritten (by moving `r_i` inside the pairings,
-    /// onto `hm_i` rather than `pk_i` because G1 multiplication is cheaper):
-    /// `prod_i(e(pk_i,r_i * hm_i) * e(-G2::one(),r_i * sig_i)) == 1`
-    ///
-    /// The second term `e(-G2::one(),r_i * sig_i)` can be computed efficiently with Multi-Scalar Multiplication:
-    /// `e(-G2::one(),sum_i(r_i * sig_i))`
-    ///
-    /// Finally, we aggregate all pairings `e(pk_i,r_i * hm_i)` (`n`) and `e(-G2::one(),sum_i(r_i * sig_i))` (`1`)
-    /// into a single product in the target group `G_T`. If the result is the identity element in `G_T`,
-    /// the batch verification succeeds.
-    ///
-    /// Source: <https://ethresear.ch/t/security-of-bls-batch-verification/10748>
-    fn batch_verify(
-        rng: &mut impl CryptoRng,
-        publics: &[Self::Public],
-        hms: &[Self::Signature],
-        signatures: &[Self::Signature],
-        par: &impl Strategy,
-    ) -> Result<(), Error> {
-        // Ensure there is an equal number of public keys, messages, and signatures.
-        assert_eq!(publics.len(), hms.len());
-        assert_eq!(publics.len(), signatures.len());
-        if publics.is_empty() || signatures.contains(&Self::Signature::zero()) {
-            return Err(Error::InvalidSignature);
-        }
-
-        // Generate 128-bit random scalars (sufficient for batch verification security).
-        let scalars: Vec<SmallScalar> = (0..publics.len())
-            .map(|_| SmallScalar::random(&mut *rng))
-            .collect();
-
-        let (s_agg, scaled_hms) = par.join(
-            || G1::msm(signatures, &scalars, par),
-            || par.map_collect_vec(hms.iter().zip(scalars.iter()), |(&hm, s)| hm * s),
-        );
-        if !G1::multi_pairing_check(&scaled_hms, publics, &s_agg, &-G2::generator()) {
-            return Err(Error::InvalidSignature);
-        }
-        Ok(())
-    }
-
-    /// Compute the pairing `e(signature, public) -> GT`.
-    fn pairing(public: &Self::Public, signature: &Self::Signature) -> GT {
-        let p1_affine = signature.as_blst_p1_affine();
-        let p2_affine = public.as_blst_p2_affine();
-
-        let mut result = blst_fp12::default();
-        let ptr = &raw mut result;
-        // SAFETY: blst_final_exp supports in-place (ret==f). Raw pointer avoids aliased refs.
-        unsafe {
-            blst_miller_loop(ptr, &p2_affine, &p1_affine);
-            blst_final_exp(ptr, ptr);
-        }
-
-        GT::from_blst_fp12(result)
-    }
+    const TLE: DST = TLE;
+    const DKG: &'static [u8] = DKG;
 }
 
 impl Debug for MinSig {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MinSig").finish()
-    }
-}
-
-/// A partial signature.
-///
-/// c.f. [`super::ops`] for how to manipulate these.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PartialSignature<V: Variant> {
-    pub index: Participant,
-    pub value: V::Signature,
-}
-
-impl<V: Variant> Write for PartialSignature<V> {
-    fn write(&self, buf: &mut impl BufMut) {
-        self.index.write(buf);
-        self.value.write(buf);
-    }
-}
-
-impl<V: Variant> Read for PartialSignature<V> {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let index = Participant::read(buf)?;
-        let value = V::Signature::read(buf)?;
-        Ok(Self { index, value })
-    }
-}
-
-impl<V: Variant> EncodeSize for PartialSignature<V> {
-    fn encode_size(&self) -> usize {
-        self.index.encode_size() + V::Signature::SIZE
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<'a, V: Variant> arbitrary::Arbitrary<'a> for PartialSignature<V> {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        use commonware_math::algebra::CryptoGroup;
-
-        Ok(Self {
-            index: u.arbitrary()?,
-            value: <V::Signature as CryptoGroup>::generator() * &u.arbitrary::<Scalar>()?,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bls12381::primitives::{group::Scalar, ops};
-    use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_parallel::{Sequential, mocks::explore};
-    use commonware_utils::test_rng;
-
-    fn batch_verify_correct<V: Variant>() {
-        let mut rng = test_rng();
-        let (private1, public1) = ops::keypair::<_, V>(&mut rng);
-        let (private2, public2) = ops::keypair::<_, V>(&mut rng);
-        let (private3, public3) = ops::keypair::<_, V>(&mut rng);
-
-        let msg1: &[u8] = b"message 1";
-        let msg2: &[u8] = b"message 2";
-        let msg3: &[u8] = b"message 3";
-
-        let sig1 = ops::sign_message::<V>(&private1, b"test", msg1);
-        let sig2 = ops::sign_message::<V>(&private2, b"test", msg2);
-        let sig3 = ops::sign_message::<V>(&private3, b"test", msg3);
-
-        let hm1 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg1);
-        let hm2 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
-        let hm3 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg3);
-
-        assert!(
-            explore(|strategy| {
-                V::batch_verify(
-                    &mut rng,
-                    &[public1, public2, public3],
-                    &[hm1, hm2, hm3],
-                    &[sig1, sig2, sig3],
-                    strategy,
-                )
-                .is_ok()
-            }),
-            "a valid batch must verify"
-        );
-    }
-
-    #[test]
-    fn test_batch_verify_correct() {
-        batch_verify_correct::<MinPk>();
-        batch_verify_correct::<MinSig>();
-    }
-
-    fn batch_verify_rejects_empty<V: Variant>() {
-        assert!(matches!(
-            V::batch_verify(&mut test_rng(), &[], &[], &[], &Sequential),
-            Err(Error::InvalidSignature)
-        ));
-    }
-
-    #[test]
-    fn test_batch_verify_rejects_empty() {
-        batch_verify_rejects_empty::<MinPk>();
-        batch_verify_rejects_empty::<MinSig>();
-    }
-
-    fn batch_verify_rejects_identity_entry<V: Variant>() {
-        let mut rng = test_rng();
-        let (private, public) = ops::keypair::<_, V>(&mut rng);
-        let namespace = b"test";
-        let message = b"message";
-        let signature = ops::sign_message::<V>(&private, namespace, message);
-        let hm = ops::hash_with_namespace::<V>(V::MESSAGE, namespace, message);
-        let identity_public = V::Public::zero();
-        let identity_signature = V::Signature::zero();
-        let identity_hm = ops::hash_with_namespace::<V>(V::MESSAGE, namespace, b"identity entry");
-
-        assert!(matches!(
-            V::batch_verify(
-                &mut rng,
-                &[public, identity_public],
-                &[hm, identity_hm],
-                &[signature, identity_signature],
-                &Sequential,
-            ),
-            Err(Error::InvalidSignature)
-        ));
-    }
-
-    #[test]
-    fn test_batch_verify_rejects_identity_entry() {
-        batch_verify_rejects_identity_entry::<MinPk>();
-        batch_verify_rejects_identity_entry::<MinSig>();
-    }
-
-    fn batch_verify_rejects_malleability<V: Variant>() {
-        let mut rng = test_rng();
-        let (private1, public1) = ops::keypair::<_, V>(&mut rng);
-        let (private2, public2) = ops::keypair::<_, V>(&mut rng);
-
-        let msg1: &[u8] = b"message 1";
-        let msg2: &[u8] = b"message 2";
-
-        let sig1 = ops::sign_message::<V>(&private1, b"test", msg1);
-        let sig2 = ops::sign_message::<V>(&private2, b"test", msg2);
-
-        let hm1 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg1);
-        let hm2 = ops::hash_with_namespace::<V>(V::MESSAGE, b"test", msg2);
-
-        // Forge signatures that cancel out: sig1' = sig1 - delta, sig2' = sig2 + delta
-        let random_scalar = Scalar::random(&mut rng);
-        let delta = V::Signature::generator() * &random_scalar;
-        let forged_sig1 = sig1 - &delta;
-        let forged_sig2 = sig2 + &delta;
-
-        // Individual verification should fail for forged signatures
-        assert!(
-            V::verify(&public1, &hm1, &forged_sig1).is_err(),
-            "forged sig1 should be invalid individually"
-        );
-        assert!(
-            V::verify(&public2, &hm2, &forged_sig2).is_err(),
-            "forged sig2 should be invalid individually"
-        );
-
-        // Naive aggregate verification would accept forged signatures because:
-        // sig1' + sig2' = (sig1 - delta) + (sig2 + delta) = sig1 + sig2
-        let forged_agg = forged_sig1 + &forged_sig2;
-        let valid_agg = sig1 + &sig2;
-        assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
-
-        // batch_verify with random weights should reject forged signatures
-        let result = V::batch_verify(
-            &mut rng,
-            &[public1, public2],
-            &[hm1, hm2],
-            &[forged_sig1, forged_sig2],
-            &Sequential,
-        );
-        assert!(
-            result.is_err(),
-            "batch_verify should reject forged signatures"
-        );
-
-        // Valid signatures should still pass
-        V::batch_verify(
-            &mut rng,
-            &[public1, public2],
-            &[hm1, hm2],
-            &[sig1, sig2],
-            &Sequential,
-        )
-        .expect("valid signatures should pass batch_verify");
-    }
-
-    #[test]
-    fn test_batch_verify_rejects_malleability() {
-        batch_verify_rejects_malleability::<MinPk>();
-        batch_verify_rejects_malleability::<MinSig>();
-    }
-
-    #[cfg(feature = "arbitrary")]
-    mod conformance {
-        use super::*;
-        use commonware_codec::conformance::CodecConformance;
-
-        commonware_conformance::conformance_tests! {
-            CodecConformance<PartialSignature<MinPk>>,
-            CodecConformance<PartialSignature<MinSig>>,
-        }
     }
 }

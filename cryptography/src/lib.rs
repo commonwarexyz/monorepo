@@ -30,6 +30,16 @@ extern crate alloc;
         commonware_stability_RESERVED
     ))
 ))] // BETA
+pub mod bls;
+#[cfg(all(
+    feature = "bls12381",
+    not(any(
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ))
+))] // BETA
 pub mod bls12381;
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -88,6 +98,8 @@ commonware_macros::stability_scope!(BETA {
     use rand_core::{CryptoRng, SeedableRng as _};
     #[cfg(feature = "std")]
     use std::{sync::Arc, vec::Vec};
+
+    pub mod curve;
 
     pub mod secret;
     pub use crate::secret::Secret;

@@ -153,11 +153,11 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_consensus::simplex::scheme::bls12381_threshold::standard as bls12381_threshold;
+use commonware_consensus::simplex::scheme::bls_threshold::standard as bls_threshold;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_utils::NZUsize;
 use std::num::NonZeroUsize;
-pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
+pub type Scheme = bls_threshold::Scheme<PublicKey, MinSig>;
 
 #[doc(hidden)]
 pub mod application;

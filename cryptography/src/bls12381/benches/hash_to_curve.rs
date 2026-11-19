@@ -1,6 +1,6 @@
-use commonware_cryptography::bls12381::primitives::{
-    ops::hash_with_namespace,
-    variant::{MinSig, Variant},
+use commonware_cryptography::{
+    bls::{ops::hash_with_namespace, variant::Variant},
+    bls12381::primitives::variant::MinSig,
 };
 use commonware_parallel::{Rayon, Sequential, Strategy, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, test_rng};

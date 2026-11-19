@@ -66,8 +66,7 @@ mod tests {
             mocks::{self, application::Certifier},
             quorum,
             scheme::{
-                Scheme, bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf,
-                ed25519, secp256r1,
+                Scheme, bls_multisig, bls_threshold::vrf as bls_threshold_vrf, ed25519, secp256r1,
             },
             types::{
                 Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
@@ -1513,19 +1512,19 @@ mod tests {
     #[test_traced]
     fn test_stale_backfill() {
         stale_backfill::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         stale_backfill::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         stale_backfill::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         stale_backfill::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         stale_backfill::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
@@ -1811,19 +1810,19 @@ mod tests {
     #[test_traced]
     fn test_append_old_interesting_view() {
         append_old_interesting_view::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         append_old_interesting_view::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         append_old_interesting_view::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         append_old_interesting_view::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         append_old_interesting_view::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
@@ -1933,19 +1932,19 @@ mod tests {
     #[test_traced]
     fn test_finalization_without_notarization_certificate() {
         finalization_without_notarization_certificate::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         finalization_without_notarization_certificate::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         finalization_without_notarization_certificate::<_, _, RoundRobin>(
@@ -2081,19 +2080,19 @@ mod tests {
     #[test_traced]
     fn test_certificate_conflicts_proposal() {
         certificate_conflicts_proposal::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         certificate_conflicts_proposal::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         certificate_conflicts_proposal::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         certificate_conflicts_proposal::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         certificate_conflicts_proposal::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
@@ -2214,19 +2213,19 @@ mod tests {
     #[test_traced]
     fn test_proposal_conflicts_certificate() {
         proposal_conflicts_certificate::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         proposal_conflicts_certificate::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         proposal_conflicts_certificate::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         proposal_conflicts_certificate::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         proposal_conflicts_certificate::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
@@ -2394,19 +2393,19 @@ mod tests {
     #[test_traced]
     fn test_certificate_verifies_proposal() {
         certificate_verifies_proposal::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         certificate_verifies_proposal::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         certificate_verifies_proposal::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         certificate_verifies_proposal::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         certificate_verifies_proposal::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
@@ -2623,10 +2622,10 @@ mod tests {
 
     #[test_traced]
     fn test_drop_our_proposal_on_conflict() {
-        drop_our_proposal_on_conflict(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        drop_our_proposal_on_conflict(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinPk, _>);
-        drop_our_proposal_on_conflict(bls12381_multisig::fixture::<MinSig, _>);
+        drop_our_proposal_on_conflict(bls_threshold_vrf::fixture::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls_threshold_vrf::fixture::<MinSig, _>);
+        drop_our_proposal_on_conflict(bls_multisig::fixture::<MinPk, _>);
+        drop_our_proposal_on_conflict(bls_multisig::fixture::<MinSig, _>);
         drop_our_proposal_on_conflict(ed25519::fixture);
         drop_our_proposal_on_conflict(secp256r1::fixture);
     }
@@ -3090,19 +3089,19 @@ mod tests {
     #[test_traced]
     fn test_populate_resolver_on_restart() {
         populate_resolver_on_restart::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         populate_resolver_on_restart::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         populate_resolver_on_restart::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         populate_resolver_on_restart::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
@@ -3287,16 +3286,16 @@ mod tests {
     #[test_traced]
     fn test_startup_update_timeout_hint_nullifies_recovered_view() {
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
         );
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(ed25519::fixture);
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
@@ -3646,10 +3645,10 @@ mod tests {
 
     #[test_traced]
     fn test_stall_timeout_nullifies_current_view() {
-        stall_timeout_nullifies_current_view::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        stall_timeout_nullifies_current_view::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        stall_timeout_nullifies_current_view::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
-        stall_timeout_nullifies_current_view::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        stall_timeout_nullifies_current_view::<_, _>(bls_threshold_vrf::fixture::<MinPk, _>);
+        stall_timeout_nullifies_current_view::<_, _>(bls_threshold_vrf::fixture::<MinSig, _>);
+        stall_timeout_nullifies_current_view::<_, _>(bls_multisig::fixture::<MinPk, _>);
+        stall_timeout_nullifies_current_view::<_, _>(bls_multisig::fixture::<MinSig, _>);
         stall_timeout_nullifies_current_view::<_, _>(ed25519::fixture);
         stall_timeout_nullifies_current_view::<_, _>(secp256r1::fixture);
     }
@@ -3783,10 +3782,10 @@ mod tests {
 
     #[test_traced]
     fn test_finalize_resumes_after_same_term_heal() {
-        finalize_resumes_after_same_term_heal::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        finalize_resumes_after_same_term_heal::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        finalize_resumes_after_same_term_heal::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
-        finalize_resumes_after_same_term_heal::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls_threshold_vrf::fixture::<MinPk, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls_threshold_vrf::fixture::<MinSig, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls_multisig::fixture::<MinPk, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls_multisig::fixture::<MinSig, _>);
         finalize_resumes_after_same_term_heal::<_, _>(ed25519::fixture);
         finalize_resumes_after_same_term_heal::<_, _>(secp256r1::fixture);
     }
@@ -6980,19 +6979,19 @@ mod tests {
     #[test_traced]
     fn test_recovered_finalization_is_reported() {
         recovered_finalization_is_reported::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         recovered_finalization_is_reported::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         recovered_finalization_is_reported::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         recovered_finalization_is_reported::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         recovered_finalization_is_reported::<_, _, RoundRobin>(
@@ -7361,19 +7360,19 @@ mod tests {
     #[test_traced]
     fn test_verification_failure_emits_nullify_immediately() {
         verification_failure_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         verification_failure_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(
@@ -7568,19 +7567,19 @@ mod tests {
     #[test_traced]
     fn test_leader_nullify_timeout_hint_fast_paths_nullify() {
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
@@ -7750,10 +7749,10 @@ mod tests {
 
     #[test_traced]
     fn test_dropped_propose_emits_nullify_immediately() {
-        dropped_propose_emits_nullify_immediately(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        dropped_propose_emits_nullify_immediately(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        dropped_propose_emits_nullify_immediately(bls12381_multisig::fixture::<MinPk, _>);
-        dropped_propose_emits_nullify_immediately(bls12381_multisig::fixture::<MinSig, _>);
+        dropped_propose_emits_nullify_immediately(bls_threshold_vrf::fixture::<MinPk, _>);
+        dropped_propose_emits_nullify_immediately(bls_threshold_vrf::fixture::<MinSig, _>);
+        dropped_propose_emits_nullify_immediately(bls_multisig::fixture::<MinPk, _>);
+        dropped_propose_emits_nullify_immediately(bls_multisig::fixture::<MinSig, _>);
         dropped_propose_emits_nullify_immediately(ed25519::fixture);
         dropped_propose_emits_nullify_immediately(secp256r1::fixture);
     }
@@ -7946,19 +7945,19 @@ mod tests {
     #[test_traced]
     fn test_dropped_verify_emits_nullify_immediately() {
         dropped_verify_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         dropped_verify_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(
@@ -8396,19 +8395,19 @@ mod tests {
     #[test_traced]
     fn test_invalid_ancestry_emits_nullify_immediately() {
         invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
@@ -8679,17 +8678,13 @@ mod tests {
     #[test_traced]
     fn test_dropped_verify_still_votes_after_prior_participation() {
         dropped_verify_still_votes_after_prior_participation(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         dropped_verify_still_votes_after_prior_participation(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
-        dropped_verify_still_votes_after_prior_participation(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        dropped_verify_still_votes_after_prior_participation(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
+        dropped_verify_still_votes_after_prior_participation(bls_multisig::fixture::<MinPk, _>);
+        dropped_verify_still_votes_after_prior_participation(bls_multisig::fixture::<MinSig, _>);
         dropped_verify_still_votes_after_prior_participation(ed25519::fixture);
         dropped_verify_still_votes_after_prior_participation(secp256r1::fixture);
     }
@@ -8936,19 +8931,19 @@ mod tests {
     #[test_traced]
     fn test_no_recertification_after_replay() {
         no_recertification_after_replay::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         no_recertification_after_replay::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         no_recertification_after_replay::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         no_recertification_after_replay::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         no_recertification_after_replay::<_, _, RoundRobin>(
@@ -9118,10 +9113,10 @@ mod tests {
 
     #[test_traced]
     fn test_no_self_verify_when_proposing() {
-        no_self_verify_when_proposing(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_verify_when_proposing(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_verify_when_proposing(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_verify_when_proposing(bls12381_multisig::fixture::<MinSig, _>);
+        no_self_verify_when_proposing(bls_threshold_vrf::fixture::<MinPk, _>);
+        no_self_verify_when_proposing(bls_threshold_vrf::fixture::<MinSig, _>);
+        no_self_verify_when_proposing(bls_multisig::fixture::<MinPk, _>);
+        no_self_verify_when_proposing(bls_multisig::fixture::<MinSig, _>);
         no_self_verify_when_proposing(ed25519::fixture);
         no_self_verify_when_proposing(secp256r1::fixture);
     }
@@ -9380,10 +9375,10 @@ mod tests {
 
     #[test_traced]
     fn test_no_self_propose_or_verify_after_restart() {
-        no_self_propose_or_verify_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_propose_or_verify_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_propose_or_verify_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_propose_or_verify_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        no_self_propose_or_verify_after_restart(bls_threshold_vrf::fixture::<MinPk, _>);
+        no_self_propose_or_verify_after_restart(bls_threshold_vrf::fixture::<MinSig, _>);
+        no_self_propose_or_verify_after_restart(bls_multisig::fixture::<MinPk, _>);
+        no_self_propose_or_verify_after_restart(bls_multisig::fixture::<MinSig, _>);
         no_self_propose_or_verify_after_restart(ed25519::fixture);
         no_self_propose_or_verify_after_restart(secp256r1::fixture);
     }
@@ -9664,10 +9659,10 @@ mod tests {
 
     #[test_traced]
     fn test_nullify_after_crash_in_propose_window() {
-        nullify_after_crash_in_propose_window(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        nullify_after_crash_in_propose_window(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        nullify_after_crash_in_propose_window(bls12381_multisig::fixture::<MinPk, _>);
-        nullify_after_crash_in_propose_window(bls12381_multisig::fixture::<MinSig, _>);
+        nullify_after_crash_in_propose_window(bls_threshold_vrf::fixture::<MinPk, _>);
+        nullify_after_crash_in_propose_window(bls_threshold_vrf::fixture::<MinSig, _>);
+        nullify_after_crash_in_propose_window(bls_multisig::fixture::<MinPk, _>);
+        nullify_after_crash_in_propose_window(bls_multisig::fixture::<MinSig, _>);
         nullify_after_crash_in_propose_window(ed25519::fixture);
         nullify_after_crash_in_propose_window(secp256r1::fixture);
     }
@@ -9942,10 +9937,10 @@ mod tests {
 
     #[test_traced]
     fn test_no_self_verify_after_restart() {
-        no_self_verify_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        no_self_verify_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        no_self_verify_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        no_self_verify_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        no_self_verify_after_restart(bls_threshold_vrf::fixture::<MinPk, _>);
+        no_self_verify_after_restart(bls_threshold_vrf::fixture::<MinSig, _>);
+        no_self_verify_after_restart(bls_multisig::fixture::<MinPk, _>);
+        no_self_verify_after_restart(bls_multisig::fixture::<MinSig, _>);
         no_self_verify_after_restart(ed25519::fixture);
         no_self_verify_after_restart(secp256r1::fixture);
     }
@@ -10125,10 +10120,10 @@ mod tests {
 
     #[test_traced]
     fn test_certifies_own_proposal_when_proposing() {
-        certifies_own_proposal_when_proposing(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        certifies_own_proposal_when_proposing(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        certifies_own_proposal_when_proposing(bls12381_multisig::fixture::<MinPk, _>);
-        certifies_own_proposal_when_proposing(bls12381_multisig::fixture::<MinSig, _>);
+        certifies_own_proposal_when_proposing(bls_threshold_vrf::fixture::<MinPk, _>);
+        certifies_own_proposal_when_proposing(bls_threshold_vrf::fixture::<MinSig, _>);
+        certifies_own_proposal_when_proposing(bls_multisig::fixture::<MinPk, _>);
+        certifies_own_proposal_when_proposing(bls_multisig::fixture::<MinSig, _>);
         certifies_own_proposal_when_proposing(ed25519::fixture);
         certifies_own_proposal_when_proposing(secp256r1::fixture);
     }
@@ -10387,10 +10382,10 @@ mod tests {
 
     #[test_traced]
     fn test_certifies_own_proposal_after_restart() {
-        certifies_own_proposal_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        certifies_own_proposal_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        certifies_own_proposal_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        certifies_own_proposal_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        certifies_own_proposal_after_restart(bls_threshold_vrf::fixture::<MinPk, _>);
+        certifies_own_proposal_after_restart(bls_threshold_vrf::fixture::<MinSig, _>);
+        certifies_own_proposal_after_restart(bls_multisig::fixture::<MinPk, _>);
+        certifies_own_proposal_after_restart(bls_multisig::fixture::<MinSig, _>);
         certifies_own_proposal_after_restart(ed25519::fixture);
         certifies_own_proposal_after_restart(secp256r1::fixture);
     }
@@ -10578,16 +10573,12 @@ mod tests {
 
     #[test_traced]
     fn test_certify_observer_fires_for_external_leader_proposal() {
+        certify_observer_fires_for_external_leader_proposal(bls_threshold_vrf::fixture::<MinPk, _>);
         certify_observer_fires_for_external_leader_proposal(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
-        certify_observer_fires_for_external_leader_proposal(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        certify_observer_fires_for_external_leader_proposal(bls12381_multisig::fixture::<MinPk, _>);
-        certify_observer_fires_for_external_leader_proposal(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
+        certify_observer_fires_for_external_leader_proposal(bls_multisig::fixture::<MinPk, _>);
+        certify_observer_fires_for_external_leader_proposal(bls_multisig::fixture::<MinSig, _>);
         certify_observer_fires_for_external_leader_proposal(ed25519::fixture);
         certify_observer_fires_for_external_leader_proposal(secp256r1::fixture);
     }
@@ -10764,19 +10755,19 @@ mod tests {
     #[test_traced]
     fn test_certification_cancelled_on_finalization() {
         certification_cancelled_on_finalization::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         certification_cancelled_on_finalization::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         certification_cancelled_on_finalization::<_, _, RoundRobin>(
@@ -11043,19 +11034,19 @@ mod tests {
     #[test_traced]
     fn test_certification_still_reports_to_resolver_after_nullification() {
         certification_still_reports_to_resolver_after_nullification::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
@@ -11163,16 +11154,16 @@ mod tests {
     #[test_traced]
     fn test_late_notarization_after_nullification_still_certifies() {
         late_notarization_after_nullification_still_certifies::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         late_notarization_after_nullification_still_certifies::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
         late_notarization_after_nullification_still_certifies::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
         );
         late_notarization_after_nullification_still_certifies::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         late_notarization_after_nullification_still_certifies::<_, _>(ed25519::fixture);
         late_notarization_after_nullification_still_certifies::<_, _>(secp256r1::fixture);
@@ -11289,10 +11280,10 @@ mod tests {
 
     #[test_traced]
     fn test_certification_after_timeout() {
-        certification_after_timeout::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        certification_after_timeout::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        certification_after_timeout::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
-        certification_after_timeout::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        certification_after_timeout::<_, _>(bls_threshold_vrf::fixture::<MinPk, _>);
+        certification_after_timeout::<_, _>(bls_threshold_vrf::fixture::<MinSig, _>);
+        certification_after_timeout::<_, _>(bls_multisig::fixture::<MinPk, _>);
+        certification_after_timeout::<_, _>(bls_multisig::fixture::<MinSig, _>);
         certification_after_timeout::<_, _>(ed25519::fixture);
         certification_after_timeout::<_, _>(secp256r1::fixture);
     }
@@ -11434,16 +11425,14 @@ mod tests {
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_follower() {
         certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
+        certification_after_notarize_timeout_as_follower::<_, _>(bls_multisig::fixture::<MinPk, _>);
         certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        certification_after_notarize_timeout_as_follower::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         certification_after_notarize_timeout_as_follower::<_, _>(ed25519::fixture);
         certification_after_notarize_timeout_as_follower::<_, _>(secp256r1::fixture);
@@ -11577,17 +11566,13 @@ mod tests {
     #[test_traced]
     fn test_certification_after_notarize_timeout_as_leader() {
         certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
-        certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
-        );
-        certification_after_notarize_timeout_as_leader::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
-        );
+        certification_after_notarize_timeout_as_leader::<_, _>(bls_multisig::fixture::<MinPk, _>);
+        certification_after_notarize_timeout_as_leader::<_, _>(bls_multisig::fixture::<MinSig, _>);
         certification_after_notarize_timeout_as_leader::<_, _>(ed25519::fixture);
         certification_after_notarize_timeout_as_leader::<_, _>(secp256r1::fixture);
     }
@@ -11711,21 +11696,15 @@ mod tests {
     #[test_collect_traces]
     fn test_cancelled_certification_does_not_hang(traces: TraceStorage) {
         cancelled_certification_does_not_hang(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             traces.clone(),
         );
         cancelled_certification_does_not_hang(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             traces.clone(),
         );
-        cancelled_certification_does_not_hang(
-            bls12381_multisig::fixture::<MinPk, _>,
-            traces.clone(),
-        );
-        cancelled_certification_does_not_hang(
-            bls12381_multisig::fixture::<MinSig, _>,
-            traces.clone(),
-        );
+        cancelled_certification_does_not_hang(bls_multisig::fixture::<MinPk, _>, traces.clone());
+        cancelled_certification_does_not_hang(bls_multisig::fixture::<MinSig, _>, traces.clone());
         cancelled_certification_does_not_hang(ed25519::fixture, traces.clone());
         cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
@@ -12127,16 +12106,16 @@ mod tests {
     #[test_traced]
     fn test_cancelled_certification_recertifies_after_restart() {
         cancelled_certification_recertifies_after_restart::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         cancelled_certification_recertifies_after_restart::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
         cancelled_certification_recertifies_after_restart::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
         );
         cancelled_certification_recertifies_after_restart::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         cancelled_certification_recertifies_after_restart::<_, _>(ed25519::fixture);
         cancelled_certification_recertifies_after_restart::<_, _>(secp256r1::fixture);
@@ -12326,10 +12305,10 @@ mod tests {
 
     #[test_traced]
     fn test_only_finalization_rescues_validator() {
-        only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        only_finalization_rescues_validator::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
-        only_finalization_rescues_validator::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        only_finalization_rescues_validator::<_, _>(bls_threshold_vrf::fixture::<MinPk, _>);
+        only_finalization_rescues_validator::<_, _>(bls_threshold_vrf::fixture::<MinSig, _>);
+        only_finalization_rescues_validator::<_, _>(bls_multisig::fixture::<MinPk, _>);
+        only_finalization_rescues_validator::<_, _>(bls_multisig::fixture::<MinSig, _>);
         only_finalization_rescues_validator::<_, _>(ed25519::fixture);
         only_finalization_rescues_validator::<_, _>(secp256r1::fixture);
     }
@@ -12462,16 +12441,16 @@ mod tests {
     #[test_traced]
     fn test_certification_failure_allows_nullify_after_notarize() {
         certification_failure_allows_nullify_after_notarize::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         certification_failure_allows_nullify_after_notarize::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
         certification_failure_allows_nullify_after_notarize::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
         );
         certification_failure_allows_nullify_after_notarize::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         certification_failure_allows_nullify_after_notarize::<_, _>(ed25519::fixture);
         certification_failure_allows_nullify_after_notarize::<_, _>(secp256r1::fixture);
@@ -12624,14 +12603,10 @@ mod tests {
 
     #[test_traced]
     fn test_pending_certification_nullifies_on_timeout() {
-        pending_certification_nullifies_on_timeout::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-        pending_certification_nullifies_on_timeout::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        pending_certification_nullifies_on_timeout::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
-        pending_certification_nullifies_on_timeout::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        pending_certification_nullifies_on_timeout::<_, _>(bls_threshold_vrf::fixture::<MinPk, _>);
+        pending_certification_nullifies_on_timeout::<_, _>(bls_threshold_vrf::fixture::<MinSig, _>);
+        pending_certification_nullifies_on_timeout::<_, _>(bls_multisig::fixture::<MinPk, _>);
+        pending_certification_nullifies_on_timeout::<_, _>(bls_multisig::fixture::<MinSig, _>);
         pending_certification_nullifies_on_timeout::<_, _>(ed25519::fixture);
         pending_certification_nullifies_on_timeout::<_, _>(secp256r1::fixture);
     }
@@ -12765,16 +12740,16 @@ mod tests {
     #[test_traced]
     fn test_proposal_clears_leader_timeout_before_certification_timeout() {
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
         );
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(ed25519::fixture);
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(secp256r1::fixture);
@@ -12899,16 +12874,16 @@ mod tests {
     #[test_traced]
     fn test_recovered_proposal_clears_leader_timeout_before_certification_timeout() {
         recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
         recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
         );
         recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
             ed25519::fixture,
@@ -13043,16 +13018,16 @@ mod tests {
     #[test_traced]
     fn test_next_view_gets_fresh_timeout_after_prior_view_nullifies() {
         next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
         );
         next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
         );
         next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
         );
         next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
         );
         next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(ed25519::fixture);
         next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(secp256r1::fixture);
@@ -13218,19 +13193,19 @@ mod tests {
     #[test_traced]
     fn test_first_view_progress_without_timeout() {
         first_view_progress_without_timeout::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            bls_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
         first_view_progress_without_timeout::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            bls_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
         first_view_progress_without_timeout::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+            bls_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
         first_view_progress_without_timeout::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+            bls_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
         first_view_progress_without_timeout::<_, _, RoundRobin>(
@@ -13687,14 +13662,10 @@ mod tests {
 
     #[test_traced]
     fn test_successful_certification_replayed_after_restart() {
-        successful_certification_replayed_after_restart(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-        successful_certification_replayed_after_restart(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        successful_certification_replayed_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        successful_certification_replayed_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        successful_certification_replayed_after_restart(bls_threshold_vrf::fixture::<MinPk, _>);
+        successful_certification_replayed_after_restart(bls_threshold_vrf::fixture::<MinSig, _>);
+        successful_certification_replayed_after_restart(bls_multisig::fixture::<MinPk, _>);
+        successful_certification_replayed_after_restart(bls_multisig::fixture::<MinSig, _>);
         successful_certification_replayed_after_restart(ed25519::fixture);
         successful_certification_replayed_after_restart(secp256r1::fixture);
     }
@@ -13949,10 +13920,10 @@ mod tests {
 
     #[test_traced]
     fn test_failed_certification_replayed_after_restart() {
-        failed_certification_replayed_after_restart(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        failed_certification_replayed_after_restart(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        failed_certification_replayed_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        failed_certification_replayed_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        failed_certification_replayed_after_restart(bls_threshold_vrf::fixture::<MinPk, _>);
+        failed_certification_replayed_after_restart(bls_threshold_vrf::fixture::<MinSig, _>);
+        failed_certification_replayed_after_restart(bls_multisig::fixture::<MinPk, _>);
+        failed_certification_replayed_after_restart(bls_multisig::fixture::<MinSig, _>);
         failed_certification_replayed_after_restart(ed25519::fixture);
         failed_certification_replayed_after_restart(secp256r1::fixture);
     }
@@ -14238,14 +14209,10 @@ mod tests {
 
     #[test_traced]
     fn test_nullify_and_nullification_replayed_after_restart() {
-        nullify_and_nullification_replayed_after_restart(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-        );
-        nullify_and_nullification_replayed_after_restart(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-        );
-        nullify_and_nullification_replayed_after_restart(bls12381_multisig::fixture::<MinPk, _>);
-        nullify_and_nullification_replayed_after_restart(bls12381_multisig::fixture::<MinSig, _>);
+        nullify_and_nullification_replayed_after_restart(bls_threshold_vrf::fixture::<MinPk, _>);
+        nullify_and_nullification_replayed_after_restart(bls_threshold_vrf::fixture::<MinSig, _>);
+        nullify_and_nullification_replayed_after_restart(bls_multisig::fixture::<MinPk, _>);
+        nullify_and_nullification_replayed_after_restart(bls_multisig::fixture::<MinSig, _>);
         nullify_and_nullification_replayed_after_restart(ed25519::fixture);
         nullify_and_nullification_replayed_after_restart(secp256r1::fixture);
     }
@@ -14415,10 +14382,10 @@ mod tests {
 
     #[test_traced]
     fn test_batcher_update_triggers_timeout() {
-        batcher_update_triggers_timeout(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        batcher_update_triggers_timeout(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinPk, _>);
-        batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinSig, _>);
+        batcher_update_triggers_timeout(bls_threshold_vrf::fixture::<MinPk, _>);
+        batcher_update_triggers_timeout(bls_threshold_vrf::fixture::<MinSig, _>);
+        batcher_update_triggers_timeout(bls_multisig::fixture::<MinPk, _>);
+        batcher_update_triggers_timeout(bls_multisig::fixture::<MinSig, _>);
         batcher_update_triggers_timeout(ed25519::fixture);
         batcher_update_triggers_timeout(secp256r1::fixture);
     }

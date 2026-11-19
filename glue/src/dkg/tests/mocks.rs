@@ -32,13 +32,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
-    bls12381::{
+    bls::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
-        primitives::{
-            group::Share,
-            variant::{MinPk, Variant},
-        },
+        sharing::Share,
+        variant::Variant,
     },
+    bls12381::primitives::{group::Scalar, variant::MinPk},
     certificate::{ConstantProvider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
@@ -708,7 +707,7 @@ pub(crate) async fn store<E, SS, V, P>(
 ) -> Store<E, SS, V, P>
 where
     E: Clock + Storage + Metrics,
-    SS: SecretStore,
+    SS: SecretStore<V::Scalar>,
     V: Variant,
     P: CryptoPublicKey,
 {
@@ -845,9 +844,9 @@ pub(crate) struct MemorySecretStore {
 
 #[derive(Default)]
 struct MemorySecretStoreInner {
-    shares: BTreeMap<Epoch, Share>,
+    shares: BTreeMap<Epoch, Share<Scalar>>,
     seeds: BTreeMap<Epoch, Summary>,
-    dealings: BTreeMap<(Epoch, Vec<u8>, Bytes), DealerPrivMsg>,
+    dealings: BTreeMap<(Epoch, Vec<u8>, Bytes), DealerPrivMsg<Scalar>>,
     prunes: Vec<Epoch>,
     stall: bool,
     park_dealings: bool,
@@ -866,7 +865,7 @@ impl MemorySecretStore {
 
     /// Pre-seeds a share for `epoch`, for tests that install state before the
     /// actor starts.
-    pub(crate) fn seed_share(&self, epoch: Epoch, share: Share) {
+    pub(crate) fn seed_share(&self, epoch: Epoch, share: Share<Scalar>) {
         self.inner.lock().shares.insert(epoch, share);
     }
 
@@ -883,8 +882,8 @@ impl MemorySecretStore {
     }
 }
 
-impl SecretStore for MemorySecretStore {
-    async fn put_share(&mut self, epoch: Epoch, share: Share) {
+impl SecretStore<Scalar> for MemorySecretStore {
+    async fn put_share(&mut self, epoch: Epoch, share: Share<Scalar>) {
         let stall = {
             let mut inner = self.inner.lock();
             inner.shares.insert(epoch, share);
@@ -895,7 +894,7 @@ impl SecretStore for MemorySecretStore {
         }
     }
 
-    async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {
+    async fn get_share(&mut self, epoch: Epoch) -> Option<Share<Scalar>> {
         self.inner.lock().shares.get(&epoch).cloned()
     }
 
@@ -907,12 +906,12 @@ impl SecretStore for MemorySecretStore {
         self.inner.lock().seeds.get(&epoch).cloned()
     }
 
-    async fn put_dealing<V: Variant, P: CryptoPublicKey>(
+    async fn put_dealing<V: Variant<Scalar = Scalar>, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
         public: &DealerPubMsg<V>,
-        private: DealerPrivMsg,
+        private: DealerPrivMsg<Scalar>,
     ) {
         let park = self.inner.lock().park_dealings;
         if park {
@@ -926,12 +925,12 @@ impl SecretStore for MemorySecretStore {
         );
     }
 
-    async fn get_dealing<V: Variant, P: CryptoPublicKey>(
+    async fn get_dealing<V: Variant<Scalar = Scalar>, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
         public: &DealerPubMsg<V>,
-    ) -> Option<DealerPrivMsg> {
+    ) -> Option<DealerPrivMsg<Scalar>> {
         self.inner
             .lock()
             .dealings
