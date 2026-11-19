@@ -1856,36 +1856,17 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.end
     }
 
-    /// Return the retained start that [Self::prune] would leave for `min_position`.
-    fn prune_target(&self, min_position: u64) -> u64 {
-        let items_per_blob = self.items_per_blob.get();
-        let target = position_to_blob(min_position.min(self.bounds.end), items_per_blob);
-        if target <= self.blobs.oldest_blob_index() {
-            return self.bounds.start;
-        }
-
-        // The target blob starts at or before the journal's end, so this cannot overflow.
-        target * items_per_blob
-    }
-
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let items_per_blob = self.items_per_blob.get();
-
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        let Some((min_blob, new_boundary)) = self
+            .blobs
+            .prune_target(min_position, self.items_per_blob.get())
+        else {
             return Ok((self, false));
-        }
-
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        };
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -2606,7 +2587,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     }
 
     fn prune_target(&self, min_position: u64) -> u64 {
-        self.0.prune_target(min_position)
+        self.0
+            .blobs
+            .prune_target(min_position, self.0.items_per_blob.get())
+            .map_or(self.0.bounds.start, |(_, start)| start)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {

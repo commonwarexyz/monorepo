@@ -200,7 +200,7 @@ pub trait MerkleizedBatch {
 
 /// Whether a completed sync journal's `bounds` cover `range`: retained data reaches back to
 /// `range.start()` and ends exactly at `range.end()`.
-pub(crate) fn journal_covers_range<F: Family>(
+fn journal_covers_range<F: Family>(
     bounds: std::ops::Range<u64>,
     range: &NonEmptyRange<Location<F>>,
 ) -> bool {
@@ -208,13 +208,14 @@ pub(crate) fn journal_covers_range<F: Family>(
 }
 
 /// Shared body for [`Hooks::local_pinned_nodes`] implementations backed by an authenticated
-/// journal. Returns the pinned nodes at `target.range.start()`, rebuilt by replaying `journal`
+/// journal. Genesis needs no pins, and an incomplete journal cannot supply them. Otherwise,
+/// returns the pinned nodes at `target.range.start()`, rebuilt by replaying `journal`
 /// from the boundary of the frontier read from `config` through its end. Returns `None`
 /// if that boundary lies after the target start, `journal` does not hold the operations from the
 /// boundary through the target start, or the rebuilt root differs from the target root.
 pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     context: E,
-    config: authenticated::Config<S>,
+    config: &authenticated::Config<S>,
     target: &Target<F, H::Digest>,
     journal: &impl Contiguous<Item: EncodeShared + Committable<F>>,
 ) -> Result<Option<Vec<H::Digest>>, Error<F>>
@@ -224,12 +225,18 @@ where
     H: Hasher,
     S: Strategy,
 {
+    if target.range.start() == Location::new(0)
+        || !journal_covers_range(journal.bounds(), &target.range)
+    {
+        return Ok(None);
+    }
+
     let hasher = crate::qmdb::hasher::<H>();
     let floor = crate::qmdb::find_inactivity_floor_at(journal, target.range.end()).await?;
     let inactive_peaks = F::inactive_peaks(target.range.end(), floor);
     Ok(authenticated::pinned_nodes_from_frontier(
         context,
-        &config,
+        config,
         journal,
         &hasher,
         target.range.start(),
@@ -387,6 +394,34 @@ mod tests {
                 .unwrap();
             assert_eq!(db.bounds(), Location::new(30)..Location::new(51));
             assert_eq!(db.root(), root);
+        });
+    }
+
+    #[test]
+    fn local_pinned_nodes_skip_genesis_and_incomplete_journals() {
+        deterministic::Runner::default().start(|context| async move {
+            // Neither target needs a local lookup. Reading its final commit would fail:
+            // position 0 is an append, and position 1 is outside the journal.
+            let journal = Ops::init(context.child("journal"), journal_config())
+                .await
+                .unwrap();
+            let (journal, _) = journal.append(&Op::Append(U64::new(1))).await.unwrap();
+            let root = <KeylessDb as sync::Database>::initial_target().root;
+            for (start, end) in [(0, 1), (1, 2)] {
+                let target = Target {
+                    root,
+                    range: non_empty_range!(Location::new(start), Location::new(end)),
+                };
+                let pins = local_pinned_nodes::<MmrFamily, _, Sha256, _>(
+                    context.child("pins"),
+                    &merkle_config(),
+                    &target,
+                    &journal,
+                )
+                .await
+                .unwrap();
+                assert!(pins.is_none());
+            }
         });
     }
 
@@ -834,7 +869,7 @@ mod tests {
                 let (journal, _) = journal.prune(start).await.unwrap();
                 let local = local_pinned_nodes::<MmrFamily, _, Sha256, _>(
                     context.child("local_pins"),
-                    merkle_config(),
+                    &merkle_config(),
                     &target,
                     &journal,
                 )

@@ -1237,19 +1237,15 @@ mod tests {
         },
         translator::{OneCap, TwoCap},
     };
-    use bytes::BufMut;
-    use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt, Write};
-    use commonware_cryptography::{Sha256, sha256};
+    use commonware_codec::FixedSize as _;
+    use commonware_cryptography::{Crc32, Sha256, crc32, sha256};
     use commonware_macros::test_traced;
-    use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Storage as _, Supervisor as _, deterministic,
         mocks::{MutationFaultContext, MutationFaults},
     };
-    use commonware_utils::{Array, NZU64, Span, bitmap::Prunable as PrunableBitMap};
-    use core::{fmt, ops::Deref};
-    use rand::CryptoRng;
+    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap};
     use std::future::Future;
 
     const N: usize = sha256::Digest::SIZE;
@@ -2108,77 +2104,6 @@ mod tests {
         });
     }
 
-    /// A 16-byte digest. Bitmap chunks must be a multiple of the digest size, so this digest
-    /// admits 16-byte chunks. Their graft height of 7 lies below the maximum resident height of 8.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-    struct D16([u8; 16]);
-    impl fmt::Display for D16 {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{:02x?}", self.0)
-        }
-    }
-    impl AsRef<[u8]> for D16 {
-        fn as_ref(&self) -> &[u8] {
-            &self.0
-        }
-    }
-    impl Deref for D16 {
-        type Target = [u8];
-        fn deref(&self) -> &[u8] {
-            &self.0
-        }
-    }
-    impl Write for D16 {
-        fn write(&self, buf: &mut impl BufMut) {
-            self.0.write(buf);
-        }
-    }
-    impl Read for D16 {
-        type Cfg = ();
-        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-            Ok(Self(<[u8; 16]>::read(buf)?))
-        }
-    }
-    impl FixedSize for D16 {
-        const SIZE: usize = 16;
-    }
-    impl Span for D16 {}
-    impl Array for D16 {}
-    impl commonware_cryptography::Digest for D16 {
-        const EMPTY: Self = Self([0; 16]);
-    }
-    impl Random for D16 {
-        fn random(mut rng: impl CryptoRng) -> Self {
-            let mut out = [0; 16];
-            rng.fill_bytes(&mut out);
-            Self(out)
-        }
-    }
-
-    /// SHA-256 truncated to a `D16` digest.
-    #[derive(Default)]
-    struct Sha256128(Sha256);
-    fn truncate(digest: sha256::Digest) -> D16 {
-        D16(digest.0[..16].try_into().unwrap())
-    }
-    impl Hasher for Sha256128 {
-        type Digest = D16;
-        fn hash(parts: &[&[u8]]) -> D16 {
-            truncate(Sha256::hash(parts))
-        }
-        fn hash_pair(left: &[&[u8]], right: &[&[u8]], _: &impl Strategy) -> (D16, D16) {
-            (Self::hash(left), Self::hash(right))
-        }
-        fn update(&mut self, bytes: &[u8]) -> &mut Self {
-            self.0.update(bytes);
-            self
-        }
-        fn finalize(self) -> (Self, D16) {
-            let (reset, digest) = self.0.finalize();
-            (Self(reset), truncate(digest))
-        }
-    }
-
     /// Apply `writes` keys under the given ops-tree `resident_height` and return the root. With
     /// `descendant`, the applied batch is a child whose parent holds the writes and is dropped
     /// first. The applied and reopened roots must match the merkleized root.
@@ -2187,13 +2112,14 @@ mod tests {
         resident_height: u32,
         writes: u16,
         descendant: bool,
-    ) -> D16 {
+    ) -> crc32::Digest {
+        // CRC32's four-byte digest permits 16-byte bitmap chunks, which graft at height 7.
         type TestDb<F> = fixed::Db<
             F,
             deterministic::Context,
             sha256::Digest,
             sha256::Digest,
-            Sha256128,
+            Crc32,
             TwoCap,
             16,
             Sequential,
@@ -2221,7 +2147,7 @@ mod tests {
         // chunks the parent completed.
         let batch = if descendant {
             let child = parent
-                .new_batch::<Sha256128>()
+                .new_batch::<Crc32>()
                 .write(Sha256::hash(&[b"child"]), Some(Sha256::hash(&[b"value"])))
                 .merkleize_with(&db, &mut Hold)
                 .await

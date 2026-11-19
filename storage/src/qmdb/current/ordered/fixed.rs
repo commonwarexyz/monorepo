@@ -46,7 +46,7 @@ pub mod partitioned {
     //! [Any's counterpart]: crate::qmdb::any::ordered::fixed::partitioned
 
     use super::*;
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::index::partitioned::ordered::Index;
 
     /// A partitioned variant of [super::Db].
@@ -67,9 +67,6 @@ pub mod partitioned {
             N,
             S,
         >;
-
-    /// Configuration for a [Db].
-    pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {

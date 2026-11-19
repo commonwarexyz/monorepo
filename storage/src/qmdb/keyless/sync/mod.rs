@@ -138,14 +138,7 @@ where
         target: &sync::Target<F, H::Digest>,
         journal: &C,
     ) -> Result<Option<Vec<H::Digest>>, qmdb::Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !sync::journal_covers_range(journal.bounds(), &target.range)
-        {
-            return Ok(None);
-        }
-
-        sync::local_pinned_nodes::<F, _, H, S>(context, config.merkle.clone(), target, journal)
-            .await
+        sync::local_pinned_nodes::<F, _, H, S>(context, &config.merkle, target, journal).await
     }
 }
 

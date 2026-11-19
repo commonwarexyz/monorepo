@@ -895,46 +895,6 @@ pub trait SnapshotBuild<F: Family>:
         H: MerkleHasher<F> + 'static;
 }
 
-/// Build a partitioned index's snapshot on parallel workers, or serially when the concurrency
-/// allows no workers.
-async fn build_partitioned<F, E, C, I>(
-    snapshot: &mut I,
-    context: E,
-    inactivity_floor_loc: Location<F>,
-    log: &Arc<C>,
-    init_concurrency: NonZeroUsize,
-    init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
-) -> Result<(usize, BitMap), Error<F>>
-where
-    F: Family,
-    E: Spawner,
-    C: Contiguous<Item: Operation<F>> + 'static,
-    I: Partitioned + Index<Value = Location<F>>,
-{
-    let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
-    else {
-        return build_snapshot_serial(
-            inactivity_floor_loc,
-            &**log,
-            snapshot,
-            init_buffer,
-            cache_size,
-        )
-        .await;
-    };
-    build_snapshot_parallel(
-        snapshot,
-        plan,
-        context,
-        inactivity_floor_loc,
-        log,
-        init_buffer,
-        IndexOnly,
-    )
-    .await
-}
-
 mod sealed {
     use crate::translator::Translator;
 
@@ -993,8 +953,10 @@ impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index
     }
 }
 
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
-    for crate::index::partitioned::unordered::Index<T, Location<F>, P>
+impl<F, I> SnapshotBuild<F> for I
+where
+    F: Family,
+    I: Partitioned + Index<Value = Location<F>> + sealed::SnapshotBuildSealed + 'static,
 {
     type HashingPlan = ParallelPlan;
 
@@ -1011,40 +973,17 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_partitioned(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            init_concurrency,
-            init_buffer,
-            cache_size,
-        )
-        .await
-    }
-
-    fn hashing_plan(
-        &self,
-        init_concurrency: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> Option<ParallelPlan> {
-        ParallelPlan::hashing(self.partition_count(), init_concurrency, cache_size)
-    }
-
-    async fn build_snapshot_hashing<E, C, H>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        plan: ParallelPlan,
-        init_buffer: NonZeroUsize,
-        leaves: LeafSink<F, H>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F> + Encode> + 'static,
-        H: MerkleHasher<F> + 'static,
-    {
+        let Some(plan) = ParallelPlan::new(self.partition_count(), init_concurrency, cache_size)
+        else {
+            return build_snapshot_serial(
+                inactivity_floor_loc,
+                &**log,
+                self,
+                init_buffer,
+                cache_size,
+            )
+            .await;
+        };
         build_snapshot_parallel(
             self,
             plan,
@@ -1052,38 +991,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             inactivity_floor_loc,
             log,
             init_buffer,
-            leaves,
-        )
-        .await
-    }
-}
-
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
-    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
-{
-    type HashingPlan = ParallelPlan;
-
-    async fn build_snapshot<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
-        init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build_partitioned(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            init_concurrency,
-            init_buffer,
-            cache_size,
+            IndexOnly,
         )
         .await
     }

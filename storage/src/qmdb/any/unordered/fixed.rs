@@ -35,8 +35,7 @@ pub type Config<T, S> = any::Config<T, JournalConfig, S>;
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
 pub mod partitioned {
-    use super::{JournalConfig, any};
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::{
         index::partitioned::unordered::Index, journal::contiguous::fixed::Journal, merkle::Location,
     };
@@ -61,9 +60,6 @@ pub mod partitioned {
         { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
-
-    /// Configuration for a [Db].
-    pub type Config<T, S> = any::Config<T, JournalConfig, S>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {

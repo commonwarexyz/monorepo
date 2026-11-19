@@ -357,14 +357,12 @@ where
         return db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics);
     }
 
-    // Publish the selected journal prefix only after its in-memory state is reconstructible.
+    // Only a fresh journal has no selected commit.
     let mut log = pending.finish().await?;
 
-    if log.size() == 0 {
-        warn!("Authenticated log is empty, initializing new db");
-        (log, _) = log.append(&Operation::initial_commit()).await?;
-        log = log.sync().await?;
-    }
+    warn!("Authenticated log is empty, initializing new db");
+    (log, _) = log.append(&Operation::initial_commit()).await?;
+    log = log.sync().await?;
 
     // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
     let index = I::new(context.child("index"), cfg.translator);

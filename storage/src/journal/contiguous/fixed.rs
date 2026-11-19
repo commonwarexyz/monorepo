@@ -1463,32 +1463,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.start
     }
 
-    /// Return the retained start that [Self::prune] would leave for `min_item_pos`.
-    fn prune_target(&self, min_item_pos: u64) -> u64 {
-        let items_per_blob = self.items_per_blob.get();
-        let target = super::position_to_blob(min_item_pos.min(self.bounds.end), items_per_blob);
-        if target <= self.blobs.oldest_blob_index() {
-            return self.bounds.start;
-        }
-
-        // The target blob starts at or before the journal's end, so this cannot overflow.
-        target * items_per_blob
-    }
-
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_item_pos: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
-        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
-        let min_blob = std::cmp::min(target_blob, tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        let Some((min_blob, new_boundary)) = self
+            .blobs
+            .prune_target(min_item_pos, self.items_per_blob.get())
+        else {
             return Ok((self, false));
-        }
+        };
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -1502,7 +1487,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         sync.await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs = self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
@@ -2132,7 +2116,10 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     }
 
     fn prune_target(&self, min_position: u64) -> u64 {
-        self.0.prune_target(min_position)
+        self.0
+            .blobs
+            .prune_target(min_position, self.0.items_per_blob.get())
+            .map_or(self.0.bounds.start, |(_, start)| start)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
@@ -4425,11 +4412,27 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(NZU64!(7));
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-            for i in 0u64..45 {
+            // A no-op prune preserves the mid-blob start.
+            let mut journal = Journal::init_at_size(context.child("storage"), cfg, 5)
+                .await
+                .unwrap();
+            for i in 5..45 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
-            let journal = assert_prune_target(journal, &[0, 5, 7, 13, 14, 30, 45, 60]).await;
+            let journal = assert_prune_target(
+                journal,
+                &[
+                    (0, 5),
+                    (5, 5),
+                    (7, 7),
+                    (13, 7),
+                    (14, 14),
+                    (30, 28),
+                    (u64::MAX, 42),
+                    (45, 42),
+                ],
+            )
+            .await;
             journal.destroy().await.unwrap();
         });
     }

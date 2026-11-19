@@ -30,7 +30,7 @@ pub use metrics::Metrics;
 
 mod database;
 pub(in crate::qmdb) use database::Hooks;
-pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
+pub(crate) use database::{Config as DatabaseConfig, local_pinned_nodes};
 pub use database::{Database, MerkleizedBatch};
 
 pub mod source;

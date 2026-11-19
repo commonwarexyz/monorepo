@@ -517,13 +517,19 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Prune `journal` to each of `positions` in turn, checking that [Mutable::prune_target] predicts
-/// the retained start each prune leaves.
-pub(super) async fn assert_prune_target<J: Mutable>(mut journal: J, positions: &[u64]) -> J {
-    for &min_position in positions {
-        let expected = journal.prune_target(min_position);
-        (journal, _) = journal.prune(min_position).await.unwrap();
-        assert_eq!(journal.bounds().start, expected, "prune({min_position})");
+/// Check the predicted and actual retained start for each prune request.
+pub(super) async fn assert_prune_target<J: Mutable>(mut journal: J, cases: &[(u64, u64)]) -> J {
+    for &(request, expected) in cases {
+        let start = journal.bounds().start;
+        assert_eq!(
+            journal.prune_target(request),
+            expected,
+            "prune_target({request})"
+        );
+        let advanced;
+        (journal, advanced) = journal.prune(request).await.unwrap();
+        assert_eq!(journal.bounds().start, expected, "prune({request})");
+        assert_eq!(advanced, expected > start);
     }
     journal
 }
@@ -538,7 +544,20 @@ where
     for i in 0..45u64 {
         (journal, _) = journal.append(&i).await.unwrap();
     }
-    let journal = assert_prune_target(journal, &[0, 5, 10, 19, 20, 33, 45, 60]).await;
+    let journal = assert_prune_target(
+        journal,
+        &[
+            (0, 0),
+            (5, 0),
+            (10, 10),
+            (19, 10),
+            (20, 20),
+            (33, 30),
+            (u64::MAX, 40),
+            (45, 40),
+        ],
+    )
+    .await;
     journal.destroy().await.unwrap();
 }
 
