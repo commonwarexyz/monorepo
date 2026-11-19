@@ -30,9 +30,9 @@
 //! reporting the total build time.
 //!
 //! `init` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
-//! `0` = off) and `concurrency` (`1` = serial, `2` and `3` decode on the init task with one or
-//! two insert workers, and larger values split between spawned decode and insert tasks while the
-//! init task merely forwards). It reports the replay-region size `R` and the elapsed time.
+//! `0` = off) and `concurrency` (`init_concurrency`: `1` = serial, larger values scan the log on
+//! that many tasks beside fewer insert tasks). It reports the replay-region size `R` and the
+//! elapsed time.
 //! A capacity of `R` entries can still evict locations when too many map to the same cache set.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
@@ -60,7 +60,7 @@
 mod common;
 
 use common::{
-    AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
+    AnyOFixP3Db, AnyUFixP64kDb, Digest, THREADS, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
 use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher as _, Sha256};
@@ -137,16 +137,15 @@ impl IndexKind {
     }
 }
 
-/// Parse a `concurrency` CLI argument into a snapshot-build concurrency (`1` = serial on the
-/// init task, larger values follow the decode/insert split in the module docs). `None` is a
-/// parse failure.
+/// Parse a `concurrency` CLI argument into an init concurrency (`1` = serial on the init task).
+/// `None` is a parse failure.
 fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
     arg.parse::<usize>().ok().and_then(NonZeroUsize::new)
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N tasks scanning the log)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
     );
 }
 
@@ -384,7 +383,7 @@ fn get_bench(
         // production runs.
         let cache_pages = cache_pages.unwrap_or(MIN_PAGE_CACHE_SIZE);
         let cache_mode = format!("{cache_pages} pages");
-        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, cache_pages, NZUsize!(1));
+        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, cache_pages, THREADS);
 
         let batch_mode = batch.map_or_else(|| "point".to_string(), |b| format!("get_many x{b}"));
         println!(

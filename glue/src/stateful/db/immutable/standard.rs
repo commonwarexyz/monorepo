@@ -159,8 +159,10 @@ mod tests {
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::{full::Config as MerkleConfig, mmr},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedJournalConfig,
+        },
+        merkle::mmr,
         qmdb::immutable::fixed,
         translator::TwoCap,
     };
@@ -173,13 +175,10 @@ mod tests {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("stateful-immutable-journal-{suffix}"),
-                metadata_partition: format!("stateful-immutable-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("stateful-immutable-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("stateful-immutable-log-{suffix}"),
@@ -190,6 +189,7 @@ mod tests {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 

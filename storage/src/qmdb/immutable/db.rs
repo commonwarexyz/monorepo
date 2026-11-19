@@ -20,7 +20,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Spawner};
 use core::{
     borrow::Borrow,
     num::{NonZeroU64, NonZeroUsize},
@@ -161,41 +161,45 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>>
     where
-        C: authenticated::Backing<E>,
+        E: Spawner,
+        C: authenticated::Backing<E> + 'static,
     {
         // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
             max_size,
-            true,
         )
         .await?;
+        let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, true)
+            .await?
+            .unwrap_or(Location::new(0));
+
+        // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
+        // digests. Its inactivity floor is where the snapshot replay starts, so keys set before
+        // the floor are not loaded.
+        let (snapshot_context, translator, buffer) =
+            (context.child("snapshot"), cfg.translator, cfg.init_buffer);
+        let (mut journal, snapshot) = pending
+            .finish_with(cfg.init_concurrency, |journal| async move {
+                build_snapshot(
+                    snapshot_context,
+                    translator,
+                    inactivity_floor_loc,
+                    &*journal,
+                    buffer,
+                )
+                .await
+            })
+            .await?;
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
             (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
-
-        // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
-        // the snapshot replay starts, so keys set before the floor are not loaded.
-        let size = journal.size();
-        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&journal, size)
-            .await?
-            .ok_or(Error::UnexpectedData(size - 1))?;
-
-        // Replay the log from the inactivity floor to build the snapshot.
-        let snapshot = build_snapshot(
-            context.child("snapshot"),
-            cfg.translator,
-            inactivity_floor_loc,
-            &journal.journal,
-            cfg.init_buffer,
-        )
-        .await?;
-        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -216,8 +220,6 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -397,13 +399,12 @@ where
     /// # Errors
     ///
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `historical_size` > number of
-    /// operations, or if `start_loc` >= `historical_size`.
+    /// operations, or if `start_loc` is at or beyond the requested commit boundary.
     /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     /// been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `historical_size` or
-    /// because pruning removed the commit that would have governed `historical_size`.
+    /// Returns [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation
+    /// is retained and is not a commit.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",
@@ -498,11 +499,7 @@ where
 
     /// Return the pinned Merkle nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -524,8 +521,7 @@ where
     /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed recovery-watermark sync is not observed by
-    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
-    /// [Self::sync].
+    /// [Self::commit]. It resurfaces on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.immutable.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();

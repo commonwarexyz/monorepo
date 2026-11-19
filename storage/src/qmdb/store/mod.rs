@@ -36,7 +36,7 @@
 //!         init_cache: Some(NZUsize!(1 << 16)),
 //!         init_buffer: NZUsize!(1 << 21),
 //!         strategy: Sequential,
-//!         init_concurrency: (),
+//!         init_concurrency: NZUsize!(1),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap, _>::init(ctx.child("store"), config, None)
@@ -94,7 +94,6 @@ pub type Batch<'a, E, K, V, T, S> = db::Batch<'a, E, K, V, Index<T, Location>, S
 pub mod partitioned {
     use super::db;
     use crate::{index::partitioned::unordered::Index, merkle::mmr::Location};
-    use core::num::NonZeroUsize;
 
     /// An unauthenticated key-value database with a partitioned snapshot index.
     ///
@@ -111,9 +110,6 @@ pub mod partitioned {
     /// A batch of writes and deletes staged against a partitioned [Db].
     pub type Batch<'a, E, K, V, T, const P: usize, S> =
         db::Batch<'a, E, K, V, Index<T, Location, P>, S>;
-
-    /// Configuration for a [Db], whose `init_concurrency` is the number of snapshot-build tasks.
-    pub type Config<T, C, S> = db::Config<T, C, S, NonZeroUsize>;
 }
 
 #[cfg(test)]

@@ -5,7 +5,8 @@
 //! the modules the shared macro generates.
 
 use crate::{
-    merkle::{Location, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::Location,
     qmdb::{
         self,
         immutable::{self, variable::Operation},
@@ -159,13 +160,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -178,6 +176,7 @@ pub(crate) mod harnesses {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -277,10 +276,6 @@ pub(crate) mod harnesses {
         #[boxed]
         async fn try_destroy(db: Self::Db) -> Result<(), qmdb::Error<Self::Family>> {
             db.destroy().await
-        }
-
-        fn merkle_config(config: &ConfigOf<Self>) -> MerkleConfig<Sequential> {
-            config.merkle.clone()
         }
 
         async fn db_sync(db: Self::Db) -> Self::Db {
@@ -431,13 +426,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -450,6 +442,7 @@ pub(crate) mod harnesses {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -457,13 +450,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),
@@ -474,6 +464,7 @@ pub(crate) mod harnesses {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -879,7 +870,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -895,7 +886,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,

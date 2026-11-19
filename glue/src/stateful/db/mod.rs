@@ -1922,10 +1922,13 @@ mod tests {
             Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
         };
         use commonware_storage::{
-            journal::contiguous::{
-                fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+            journal::{
+                authenticated::Config as MerkleConfig,
+                contiguous::{
+                    fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+                },
             },
-            merkle::{full::Config as MerkleConfig, mmr},
+            merkle::mmr,
             qmdb::{
                 any as storage_any, current as storage_current, immutable as storage_immutable,
                 keyless as storage_keyless,
@@ -2048,13 +2051,10 @@ mod tests {
 
         fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
             MerkleConfig {
-                journal_partition: format!("initial-target-{suffix}-merkle-journal"),
-                metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("initial-target-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache(),
+                resident_height: Default::default(),
             }
         }
 
@@ -2089,7 +2089,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2102,7 +2102,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2116,7 +2116,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2130,7 +2130,7 @@ mod tests {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2142,6 +2142,7 @@ mod tests {
                 log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2153,6 +2154,7 @@ mod tests {
                 log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2160,6 +2162,7 @@ mod tests {
             storage_keyless::Config {
                 merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
+                init_concurrency: NZUsize!(2),
             }
         }
 
@@ -2169,6 +2172,7 @@ mod tests {
             storage_keyless::Config {
                 merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ()),
+                init_concurrency: NZUsize!(2),
             }
         }
 

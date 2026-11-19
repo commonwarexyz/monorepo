@@ -139,7 +139,7 @@ fn test_config(test_name: &str) -> StoreConfig {
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
         strategy: Sequential,
-        init_concurrency: (),
+        init_concurrency: NZUsize!(1),
     }
 }
 

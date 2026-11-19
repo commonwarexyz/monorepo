@@ -32,12 +32,6 @@ use commonware_storage::{
 use core::borrow::Borrow;
 use std::{ops::Range, sync::Arc};
 
-// Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
-const ANY_BITMAP_CHUNK_BYTES: usize = 64;
-
-/// An `any` database as glue manages it.
-type AnyDb<F, E, C, I, H, U, S> = Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>;
-
 /// A staged batch returned by [`Unmerkleized::stage`].
 ///
 /// Like any speculative batch, this handle reads the shared database only while the database is
@@ -55,12 +49,12 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, S>,
-    db: Shared<AnyDb<F, E, C, I, H, U, S>>,
+    db: Shared<Db<F, E, C, I, H, U, S>>,
 }
 
-impl<F, E, C, I, H, U, S> Unmerkleized<AnyDb<F, E, C, I, H, U, S>>
+impl<F, E, C, I, H, U, S> Unmerkleized<Db<F, E, C, I, H, U, S>>
 where
-    AnyDb<F, E, C, I, H, U, S>: Qmdb<Batch = UnmerkleizedBatch<F, H, U, S>>,
+    Db<F, E, C, I, H, U, S>: Qmdb<Batch = UnmerkleizedBatch<F, H, U, S>>,
     F: Family,
     E: Context,
     U: Update,
@@ -169,7 +163,7 @@ where
 
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
 where
-    AnyDb<F, E, C, I, H, unordered::Update<K, V>, S>:
+    Db<F, E, C, I, H, unordered::Update<K, V>, S>:
         Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, unordered::Update<K, V>, S>>,
     F: Family,
     E: Context,
@@ -195,7 +189,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-    ) -> Result<Merkleized<AnyDb<F, E, C, I, H, unordered::Update<K, V>, S>>, Error<F>> {
+    ) -> Result<Merkleized<Db<F, E, C, I, H, unordered::Update<K, V>, S>>, Error<F>> {
         let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
@@ -207,7 +201,7 @@ where
 
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>
 where
-    AnyDb<F, E, C, I, H, ordered::Update<K, V>, S>:
+    Db<F, E, C, I, H, ordered::Update<K, V>, S>:
         Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, ordered::Update<K, V>, S>>,
     F: Family,
     E: Context,
@@ -233,7 +227,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-    ) -> Result<Merkleized<AnyDb<F, E, C, I, H, ordered::Update<K, V>, S>>, Error<F>> {
+    ) -> Result<Merkleized<Db<F, E, C, I, H, ordered::Update<K, V>, S>>, Error<F>> {
         let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
@@ -243,9 +237,9 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, S> Merkleized<AnyDb<F, E, C, I, H, U, S>>
+impl<F, E, C, I, H, U, S> Merkleized<Db<F, E, C, I, H, U, S>>
 where
-    AnyDb<F, E, C, I, H, U, S>: Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, U, S>>,
+    Db<F, E, C, I, H, U, S>: Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, U, S>>,
     F: Family,
     E: Context,
     U: Update,
@@ -273,7 +267,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, K, V, S> Qmdb for AnyDb<F, E, C, I, H, unordered::Update<K, V>, S>
+impl<F, E, C, I, H, K, V, S> Qmdb for Db<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     Self: sync::Database<Family = F, Context = E, Digest = H::Digest, Hasher = H, Config: Send>,
     F: Family,
@@ -310,7 +304,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, K, V, S> Qmdb for AnyDb<F, E, C, I, H, ordered::Update<K, V>, S>
+impl<F, E, C, I, H, K, V, S> Qmdb for Db<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     Self: sync::Database<Family = F, Context = E, Digest = H::Digest, Hasher = H, Config: Send>,
     F: Family,
@@ -360,8 +354,10 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::{full::Config as MerkleConfig, mmr},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedJournalConfig,
+        },
+        merkle::mmr,
         qmdb::{self, any::unordered::fixed},
         translator::TwoCap,
     };
@@ -395,13 +391,10 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         fixed::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("stateful-any-journal-{suffix}"),
-                metadata_partition: format!("stateful-any-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("stateful-any-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("stateful-any-log-{suffix}"),
@@ -413,7 +406,7 @@ mod tests {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         }
     }
 

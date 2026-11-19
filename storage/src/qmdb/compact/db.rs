@@ -237,7 +237,7 @@ where
     /// # Errors
     ///
     /// - [`Error::InvalidInitializationBound`] if `max_size` is zero.
-    /// - [`Error::HistoricalFloorPruned`] if no retained witness is at or below `max_size`.
+    /// - [`Error::NoRetainedCommit`] if no retained witness is at or below `max_size`.
     /// - [`Error::Journal`] if the journal or the selected witness's commit cannot be decoded.
     /// - [`Error::DataCorrupted`] if the selected witness cannot be rebuilt, or the journal holds
     ///   an interrupted compact-sync import (re-sync to recover).
@@ -279,7 +279,7 @@ where
                     }
                 }
                 if end == bounds.start {
-                    return Err(Error::HistoricalFloorPruned(cap));
+                    return Err(Error::NoRetainedCommit(cap));
                 }
             }
             // Decode and validate only the selected witness, before discarding newer history or
@@ -841,17 +841,17 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
     /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
     /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are applied (applying it or a
-    /// descendant prunes the store to its frontier).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Db::to_batch`]).
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned, and
+    /// [`crate::merkle::Error::Empty`] if the batch has no operations (such as a batch from
+    /// [`Db::to_batch`]).
     pub fn proof<E, H>(&self, db: &Db<F, E, O, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -875,16 +875,15 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
     /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are applied (applying it or a
-    /// descendant prunes the store to its frontier).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor.
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub fn pinned_nodes<E, H>(&self, db: &Db<F, E, O, H, S>) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
@@ -3351,7 +3350,7 @@ pub(crate) mod tests {
                             cap,
                         )
                         .await,
-                        Err(Error::HistoricalFloorPruned(found)) if found == cap
+                        Err(Error::NoRetainedCommit(found)) if found == cap
                     ));
                 }
                 let db = TestDb::<O>::init(
@@ -3454,7 +3453,7 @@ pub(crate) mod tests {
             // No retained witness fits under the cap, so selection fails.
             assert!(matches!(
                 open_bounded::<O>(context.child("failed"), witness.clone(), cap).await,
-                Err(Error::HistoricalFloorPruned(found)) if found == cap
+                Err(Error::NoRetainedCommit(found)) if found == cap
             ));
 
             // Selection fails before publication, and inspection anchored at the ceiling skips the
@@ -3704,7 +3703,7 @@ pub(crate) mod tests {
 
             assert!(matches!(
                 open_bounded::<O>(context.child("pruned"), witness_cfg, sizes[0]).await,
-                Err(Error::HistoricalFloorPruned(_))
+                Err(Error::NoRetainedCommit(cap)) if cap == sizes[0]
             ));
         });
     }

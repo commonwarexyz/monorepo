@@ -75,7 +75,8 @@
 //! ```
 
 use crate::{
-    merkle::{Family, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::Family,
     qmdb::{
         operation::{Committable as _, Key},
         single_operation_root,
@@ -131,6 +132,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
+
+    /// Tasks that initialization spawns to scan the log at once, beside the calling task's index
+    /// build. With 1, initialization spawns nothing, and the calling task scans the log while the
+    /// strategy hashes it.
+    pub init_concurrency: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -843,6 +849,18 @@ pub(super) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
+        // Size two ends at the Set following the initial commit.
+        for size in [Location::new(0), Location::new(2)] {
+            let result = db
+                .historical_proof(size, Location::new(0), NZU64!(1))
+                .await
+                .map(|_| ());
+            assert!(
+                matches!(result, Err(Error::NotCommitBoundary(actual)) if actual == size),
+                "expected NotCommitBoundary({size}), got {result:?}"
+            );
+        }
+
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
         assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
@@ -1209,7 +1227,7 @@ pub(super) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_unsynced_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1697,7 +1715,7 @@ pub(super) mod tests {
         assert!(
             matches!(
                 boundary_err,
-                Error::Journal(crate::journal::Error::ItemPruned(_))
+                Error::NoRetainedCommit(cap) if cap == oldest_retained
             ),
             "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
         );
@@ -1711,7 +1729,7 @@ pub(super) mod tests {
             panic!("expected bounded initialization to fail");
         };
         assert!(
-            matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+            matches!(err, Error::NoRetainedCommit(cap) if cap == first_start),
             "unexpected bounded initialization error: {err:?}"
         );
     }

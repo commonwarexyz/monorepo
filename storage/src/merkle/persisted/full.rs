@@ -30,7 +30,7 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::{Copying, DecodeExt, Write};
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
@@ -65,17 +65,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     pub fn add_leaf_digest(self, digest: D) -> Self {
         Self {
             inner: self.inner.add_leaf_digest(digest),
-        }
-    }
-
-    /// Add `items` as leaves in order, encoding and hashing them across the strategy.
-    pub(crate) fn add_many<Item: Write + Sync>(
-        self,
-        hasher: &impl Hasher<F, Digest = D>,
-        items: &[Item],
-    ) -> Self {
-        Self {
-            inner: self.inner.add_many(hasher, items),
         }
     }
 
@@ -158,11 +147,8 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
     ///
-    /// Held in an [`Arc`] so [`Merkle::snapshot`] can hand a zero-copy, immutable view to jobs
-    /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
-    /// while no snapshot is alive and copy-on-write otherwise, so a snapshot never observes
-    /// later mutations.
-    mem: Arc<Mem<F, D>>,
+    /// Stored on the heap to keep this by-value handle small.
+    mem: Box<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
@@ -189,9 +175,6 @@ pub(crate) enum Retain<F: Family> {
     All,
     /// At most this many leaves. The persisted pruning boundary must not exceed it.
     AtMost(Location<F>),
-    /// No leaf. The caller keeps no item of its leaf source, so the persisted pruning boundary
-    /// and pins are cleared first.
-    Nothing,
 }
 
 /// A validated Merkle prefix whose storage has not yet been deliberately truncated.
@@ -214,11 +197,6 @@ pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
-    /// Number of leaves available before operation replay.
-    pub(crate) fn leaves(&self) -> Location<F> {
-        self.mem.leaves()
-    }
-
     /// Finalize a validated prefix and publish its Merkle handle.
     pub(crate) async fn finish(mut self) -> Result<Merkle<F, E, D, S>, Error<F>> {
         // Reconcile the journal with the validated complete size and durable metadata boundary.
@@ -231,7 +209,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
         // any reconstructed nodes.
         let journal = (*self.journal).finish(*self.retained_size).await?;
         Merkle {
-            mem: Arc::new(self.mem),
+            mem: Box::new(self.mem),
             pruned_to_pos: self.effective_prune_pos,
             journal,
             metadata: self.metadata,
@@ -309,7 +287,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// A persisted pruning boundary beyond the recovered journal fails with [Error::MissingNode].
     /// An interrupted [Self::init_sync] can leave this state until its retry completes the reset.
-    /// A pruned journal with no persisted boundary has lost its pins. A discard or an interrupted
+    /// A pruned journal with no persisted boundary has lost its pins. An interrupted
     /// [Self::destroy] leaves one, and it is cleared before any leaf cap applies, so the store
     /// reopens empty.
     pub(crate) async fn prepare(
@@ -318,12 +296,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         cfg: Config<S>,
         retain: Retain<F>,
     ) -> Result<Recovery<F, E, D, S>, Error<F>> {
-        let (max_leaves, discard) = match retain {
-            Retain::All => (None, false),
-            Retain::AtMost(leaves) => (Some(leaves), false),
-            Retain::Nothing => (Some(Location::new(0)), true),
+        let max_leaves = match retain {
+            Retain::All => None,
+            Retain::AtMost(leaves) => Some(leaves),
         };
-        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
             context.child("metadata"),
             MConfig {
                 partition: cfg.metadata_partition,
@@ -331,13 +308,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             },
         )
         .await?;
-
-        // One metadata commit drops the boundary together with its pins.
-        if discard && metadata.keys().next().is_some() {
-            warn!("discarding Merkle metadata without a leaf source");
-            metadata.clear();
-            metadata = metadata.sync().await?;
-        }
 
         // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
         // opening the node journal.
@@ -371,9 +341,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             replay_buffer: cfg.replay_buffer,
         };
 
-        // A pruned journal with no persisted boundary lost its pins with the metadata. The
-        // discard above leaves one, and so does a destroy interrupted after removing the
-        // metadata. Prune and init_sync make the boundary durable first. Clear the journal before
+        // A pruned journal with no persisted boundary lost its pins with the metadata. A destroy
+        // interrupted after removing the metadata leaves one. Prune and init_sync make the
+        // boundary durable first. Clear the journal before
         // a leaf cap could reject its start.
         let orphaned = persisted_pruned_to.is_none()
             && Journal::<E, D>::span(context.child("span"), &journal_cfg)
@@ -613,7 +583,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let journal = (*journal).finish(*journal_size).await?;
 
         Ok(Self {
-            mem: Arc::new(mem),
+            mem: Box::new(mem),
             pruned_to_pos: prune_pos,
             journal,
             metadata,
@@ -801,7 +771,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
         // the mem. We prune to the previously captured leaf count.
-        let mem = Arc::make_mut(&mut self.mem);
+        let mem = &mut self.mem;
         mem.prune(sync_target_leaves)
             .expect("captured leaves is in bounds");
         mem.add_pinned_nodes(pinned_nodes);
@@ -834,7 +804,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         (self, pinned_nodes) = self.update_metadata(pos).await?;
 
         (self.journal, _) = self.journal.prune(*pos).await?;
-        Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
+        self.mem.add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok(self)
@@ -940,30 +910,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, Error<F>> {
-        Arc::make_mut(&mut self.mem).apply_batch(batch)?;
+        self.mem.apply_batch(batch)?;
         Ok(self)
-    }
-
-    /// Create an owned [`batch::MerkleizedBatch`] representing the current committed state.
-    ///
-    /// The batch has no data (the committed items are on disk, not in memory).
-    /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
     }
 
     /// The committed [`Mem`].
     pub fn mem(&self) -> &Mem<F, D> {
         &self.mem
-    }
-
-    /// Return a zero-copy, immutable snapshot of the committed Mem.
-    ///
-    /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
-    /// alive. Use this to move committed node fallback into a job running off the calling task;
-    /// prefer [`Merkle::mem()`] when a borrow suffices.
-    pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
-        Arc::clone(&self.mem)
     }
 
     /// Create a new speculative batch with this structure as its parent.
@@ -5922,7 +5875,7 @@ mod tests {
         // Attempt to update leaf 0 which has been synced out of memory.
         // Use the inner batch type directly since the full wrapper
         // intentionally hides update_leaf.
-        let batch = mmr.to_batch().new_batch();
+        let batch = mmr.mem().new_batch();
         let result = batch.update_leaf(&hasher, Location::<F>::new(0), b"updated");
         assert!(matches!(result, Err(Error::ElementPruned(_))));
 

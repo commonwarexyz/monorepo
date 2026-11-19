@@ -20,7 +20,8 @@ use crate::{
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
         operation::{Committable as _, Key, Operation as _},
-        update_known_loc,
+        selection_error, update_known_loc, validate_initialization_bound,
+        validate_initialization_commit,
         value::{VariableEncoding, VariableValue},
     },
     translator::Translator,
@@ -39,17 +40,9 @@ use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
 
-/// The [Config] that [Db::init] takes for a store over index `I`.
-type InitConfig<K, V, I, S> = Config<
-    <I as IndexFactory>::Translator,
-    <Operation<crate::mmr::Family, K, V> as Read>::Cfg,
-    S,
-    <I as SnapshotBuild<crate::mmr::Family>>::Concurrency,
->;
-
 /// Configuration for initializing a [Db](super::Db).
 #[derive(Clone)]
-pub struct Config<T: Translator, C, S: Strategy, B = ()> {
+pub struct Config<T: Translator, C, S: Strategy> {
     /// Configuration for the variable-size operations log journal.
     pub log: JournalConfig<C>,
 
@@ -66,10 +59,9 @@ pub struct Config<T: Translator, C, S: Strategy, B = ()> {
     /// The strategy used to parallelize batched reads.
     pub strategy: S,
 
-    /// The index's snapshot-build concurrency (see [SnapshotBuild::Concurrency]): `()` for index
-    /// types that build serially, and the number of build tasks for index types that build in
-    /// parallel.
-    pub init_concurrency: B,
+    /// The number of tasks a partitioned index may build its snapshot on during init. Any other
+    /// index builds on the calling task.
+    pub init_concurrency: NonZeroUsize,
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
@@ -385,7 +377,7 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: InitConfig<K, V, I, S>,
+        cfg: Config<I::Translator, <Operation<crate::mmr::Family, K, V> as Read>::Cfg, S>,
         max_size: Option<Location>,
     ) -> Result<Self, Error>
     where
@@ -394,23 +386,25 @@ where
     {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
         // recovery owner unpublished until that commit and its replay floor are validated.
-        crate::qmdb::validate_initialization_bound(max_size)?;
+        validate_initialization_bound(max_size)?;
         let pending = Journal::<E, Operation<crate::mmr::Family, K, V>>::recover(
             context.child("log"),
             cfg.log,
             max_size.map(|size| *size),
         )
-        .await?;
+        .await
+        .map_err(|err| selection_error(err, max_size))?;
         let size = pending
             .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
-            .await?;
+            .await
+            .map_err(|err| selection_error(err, max_size))?;
         let bounds = pending.bounds();
         let commit = if size == 0 {
             None
         } else {
             Some(pending.read(size - 1).await?)
         };
-        crate::qmdb::validate_initialization_commit(
+        validate_initialization_commit(
             bounds.start,
             size,
             bounds == (0..0),
@@ -439,7 +433,7 @@ where
         let size = Location::new(log.size());
         let inactivity_floor_loc = crate::qmdb::commit_floor_at(&log, size)
             .await?
-            .ok_or(Error::UnexpectedData(size - 1))?;
+            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
 
         // Build the snapshot only from the durable selected prefix.
         let mut snapshot = I::new(context.child("snapshot"), cfg.translator);
@@ -856,14 +850,11 @@ mod test {
     type PartitionedStore =
         partitioned::Db<deterministic::Context, Digest, Vec<u8>, TwoCap, 1, Sequential>;
 
-    type TestConfig<B> = Config<
-        TwoCap,
-        <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg,
-        Sequential,
-        B,
-    >;
+    /// The configuration type of [TestStore] and [PartitionedStore].
+    type TestConfig =
+        Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg, Sequential>;
 
-    fn test_config<B>(init_concurrency: B) -> TestConfig<B> {
+    fn test_config() -> TestConfig {
         Config {
             log: JournalConfig {
                 partition: "journal".into(),
@@ -878,12 +869,20 @@ mod test {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
-            init_concurrency,
+            init_concurrency: NZUsize!(1),
+        }
+    }
+
+    /// [test_config] with `tasks` snapshot-build tasks.
+    fn test_config_with_tasks(tasks: usize) -> TestConfig {
+        Config {
+            init_concurrency: NZUsize!(tasks),
+            ..test_config()
         }
     }
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
-        let cfg = test_config(());
+        let cfg = test_config();
         TestStore::init(context, cfg, None).await.unwrap()
     }
 
@@ -946,7 +945,7 @@ mod test {
     #[test_traced]
     fn test_store_prune_updates_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
-            let mut cfg = test_config(());
+            let mut cfg = test_config();
             cfg.log.items_per_section = NZU64!(2);
             let db = TestStore::init(ctx.child("db"), cfg, None).await.unwrap();
             let key = Blake3::hash(&[b"key"]);
@@ -975,7 +974,7 @@ mod test {
         for cap_case in 0..4 {
             deterministic::Runner::default().start(move |context| async move {
                 // Persist two commits with distinct metadata and key state.
-                let cfg = test_config(());
+                let cfg = test_config();
                 let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                     .await
                     .unwrap();
@@ -1065,7 +1064,7 @@ mod test {
     #[test_traced]
     fn test_store_bounded_initialization_rejects_zero() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(());
+            let cfg = test_config();
             let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -1089,7 +1088,7 @@ mod test {
     fn test_store_bounded_initialization_rejects_pruned_floor() {
         deterministic::Runner::default().start(|context| async move {
             const KEYS: u64 = 64;
-            let cfg = test_config(());
+            let cfg = test_config();
             let mut db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -1110,7 +1109,16 @@ mod test {
             let db = db.prune(prune_loc).await.unwrap();
             let bounds = db.bounds();
             assert!(bounds.start > *target_floor && bounds.start < *target);
+            assert!(!db.log.read(*bounds.start).await.unwrap().is_commit());
             _ = db.sync().await.unwrap();
+
+            // One cap precedes the retained operations. The other includes just the first write.
+            for cap in [Location::new(1), bounds.start + 1] {
+                assert!(matches!(
+                    TestStore::init(context.child("no_commit"), cfg.clone(), Some(cap)).await,
+                    Err(Error::NoRetainedCommit(found)) if found == cap
+                ));
+            }
             assert!(matches!(
                 TestStore::init(context.child("cap"), cfg.clone(), Some(target)).await,
                 Err(Error::HistoricalFloorPruned(size)) if size == target
@@ -1154,7 +1162,7 @@ mod test {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
-            init_concurrency: (),
+            init_concurrency: NZUsize!(1),
         };
         DelayedStore::init(
             DelayedSyncContext {
@@ -1772,7 +1780,7 @@ mod test {
             drop(serial);
 
             for concurrency in [1, 2, 3, 4, 8] {
-                let cfg = test_config(NZUsize!(concurrency));
+                let cfg = test_config_with_tasks(concurrency);
                 let context = context
                     .child("partitioned")
                     .with_attribute("index", concurrency);
@@ -1803,7 +1811,7 @@ mod test {
             let db = db.apply_batch(changes).await.unwrap();
             drop(db.commit().await.unwrap());
 
-            let open = |ctx| PartitionedStore::init(ctx, test_config(NZUsize!(4)), None);
+            let open = |ctx| PartitionedStore::init(ctx, test_config_with_tasks(4), None);
             let db = open(context.child("partitioned")).await.unwrap();
             assert_eq!(
                 db.get_many(&keys).await.unwrap(),
@@ -2427,7 +2435,7 @@ mod test {
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 strategy: Sequential,
-                init_concurrency: (),
+                init_concurrency: NZUsize!(1),
             };
 
             // Commit two keys of different lengths that share a translated prefix.
@@ -2483,7 +2491,7 @@ mod test {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
-            init_concurrency: (),
+            init_concurrency: NZUsize!(1),
         };
         PolicyStore::init(context, cfg, None).await.unwrap()
     }
@@ -2627,7 +2635,7 @@ mod test {
             type CountedStore =
                 Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator, Sequential>;
             let lookups = Arc::new(AtomicUsize::new(0));
-            let cfg = test_config(());
+            let cfg = test_config();
             let db = CountedStore::init(
                 context,
                 Config {
