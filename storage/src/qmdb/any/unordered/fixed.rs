@@ -1885,11 +1885,7 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(proof.verify::<Sha256, _>(
-                Location::new(1),
-                &proof_ops,
-                &root
-            ));
+            assert!(proof.verify::<Sha256, _>(Location::new(1), &proof_ops, &root));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -1916,14 +1912,16 @@ pub(crate) mod test {
             assert_eq!(min_proof.leaves, Location::new(1));
             assert_eq!(min_ops.len(), 1);
 
-            // Non-commit-boundary historical sizes are rejected.
-            let result = db
-                .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
-                .await;
-            assert!(
-                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
-                "expected HistoricalFloorPruned(5), got {result:?}"
-            );
+            for size in [Location::new(0), Location::new(5)] {
+                let result = db.historical_proof(size, Location::new(0), NZU64!(1)).await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::qmdb::Error::NotCommitBoundary(actual)) if actual == size
+                    ),
+                    "expected NotCommitBoundary({size}), got {result:?}"
+                );
+            }
 
             db.destroy().await.unwrap();
         });
