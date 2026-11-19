@@ -27,7 +27,7 @@ pub(super) fn check_locations<F: Family>(
     if let Some(pair) = locs.windows(2).find(|pair| pair[0] >= pair[1]) {
         return Err(Error::LocationOutOfOrder(pair[0], pair[1]));
     }
-    // Strictly increasing, so only the last location can reach `end`.
+    // The last location is the largest, so checking it against `end` is sufficient.
     if let Some(&last) = locs.last()
         && last >= end
     {
@@ -191,7 +191,7 @@ where
         self.metrics.lookups_requested.inc_by(locs.len() as u64);
         check_locations(locs, Location::new(self.journal.bounds().end))?;
 
-        // Strictly increasing, so only the first location can fall below the floor.
+        // The first location is the smallest, so checking it against the floor is sufficient.
         batch::check_floor(locs[0], self.inactivity_floor_loc)?;
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = self.journal.read_many(&positions).await?;
