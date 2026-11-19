@@ -4,6 +4,7 @@ use super::{
     wire,
 };
 use crate::{Handler, Monitor};
+use ahash::AHashMap;
 use commonware_actor::mailbox;
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, PublicKey};
@@ -17,7 +18,6 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::{channel::oneshot, futures::Pool};
-use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
 /// Sends requests and collects their responses, and serves the requests of other peers.
@@ -44,8 +44,8 @@ where
     handler: H,
     mailbox: mailbox::Receiver<Message<P, Rq>>,
 
-    // Collections by commitment, each with its recipients and the recipients that have responded
-    tracked: HashMap<Rq::Commitment, (HashSet<P>, HashSet<P>)>,
+    // Collections by commitment, each with a responded flag per recipient and how many responded
+    tracked: AHashMap<Rq::Commitment, (AHashMap<P, bool>, usize)>,
 
     // Commitments being collected
     outstanding: Gauge,
@@ -104,7 +104,7 @@ where
                 monitor: cfg.monitor,
                 handler: cfg.handler,
                 mailbox: rx,
-                tracked: HashMap::new(),
+                tracked: AHashMap::new(),
                 outstanding,
                 serve_processing,
                 send,
@@ -168,8 +168,15 @@ where
                         continue;
                     }
                     self.send.inc(Status::Success);
-                    let (sent, _) = self.tracked.entry(commitment).or_default();
-                    sent.extend(recipients);
+
+                    // A recipient that has already responded stays marked as such
+                    let (sent, _) = self
+                        .tracked
+                        .entry(commitment)
+                        .or_insert_with(|| (AHashMap::with_capacity(recipients.len()), 0));
+                    for recipient in recipients {
+                        sent.entry(recipient).or_insert(false);
+                    }
                 }
                 Message::Cancel { commitment } => {
                     if self.tracked.remove(&commitment).is_none() {
@@ -231,22 +238,24 @@ where
                         // Collect the first response from each peer the commitment was sent to
                         let mut status = self.collect.guard(Status::Dropped);
                         let commitment = response.commitment();
-                        let Some((sent, responded)) = self.tracked.get_mut(&commitment) else {
+                        let Some((sent, count)) = self.tracked.get_mut(&commitment) else {
                             debug!(?commitment, ?peer, "response for unknown commitment");
                             continue;
                         };
-                        if !sent.contains(&peer) {
+                        let Some(responded) = sent.get_mut(&peer) else {
                             debug!(?commitment, ?peer, "never sent request");
                             continue;
-                        }
-                        if !responded.insert(peer.clone()) {
+                        };
+                        if *responded {
                             debug!(?commitment, ?peer, "duplicate response");
                             continue;
                         }
+                        *responded = true;
+                        *count += 1;
                         status.set(Status::Success);
 
                         // Send the response to the monitor
-                        self.monitor.collected(peer, response, responded.len());
+                        self.monitor.collected(peer, response, *count);
                     }
                 }
             },

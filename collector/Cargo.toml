@@ -15,6 +15,7 @@ documentation = "https://docs.rs/commonware-collector"
 workspace = true
 
 [dependencies]
+ahash = { workspace = true, features = ["std", "runtime-rng"] }
 arbitrary = { workspace = true, optional = true }
 commonware-actor.workspace = true
 commonware-codec.workspace = true

@@ -1885,6 +1885,7 @@ dependencies = [
 name = "commonware-collector"
 version = "2026.10.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "commonware-actor",
  "commonware-codec",
