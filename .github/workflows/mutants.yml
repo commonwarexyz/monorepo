@@ -7,9 +7,9 @@ on:
       - ".github/workflows/mutants.yml"
   workflow_dispatch:
     inputs:
-      args:
-        description: "Arguments for `just mutants`"
-        default: "-p commonware-codec"
+      sample:
+        description: "Mutants to test per crate"
+        default: "150"
 
 permissions:
   contents: read
@@ -23,18 +23,50 @@ env:
   # Follows `mod` statements inside `stability_scope!` (https://github.com/vicsn/cargo-mutants/pull/1).
   MUTANTS_REPO: https://github.com/vicsn/cargo-mutants
   MUTANTS_REV: 4f2c498e10fa9ac7865d99fb7400363dfb5de839
+  SAMPLE: ${{ inputs.sample || '150' }}
 
 jobs:
+  # Tests a round-robin sample of about SAMPLE mutants from each crate, so the sample spreads over
+  # all files of the crate.
   Mutants:
+    name: "Mutants (${{ matrix.package }})"
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - commonware-actor
+          - commonware-allocator
+          - commonware-broadcast
+          - commonware-clearing
+          - commonware-codec
+          - commonware-coding
+          - commonware-collector
+          - commonware-consensus
+          - commonware-cryptography
+          - commonware-cryptography-curve25519
+          - commonware-dkg
+          - commonware-glue
+          - commonware-invariants
+          - commonware-math
+          - commonware-p2p
+          - commonware-parallel
+          - commonware-resolver
+          - commonware-runtime
+          - commonware-simd
+          - commonware-storage
+          - commonware-stream
+          - commonware-utils
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: mutants
+        additional-cache-key: mutants-${{ matrix.package }}
         kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
@@ -54,11 +86,62 @@ jobs:
       run: cargo install --locked --git "$MUTANTS_REPO" --rev "$MUTANTS_REV" cargo-mutants
     - name: Run mutants
       env:
-        ARGS: ${{ inputs.args || '-p commonware-codec' }}
-      run: just mutants $ARGS -j2
+        PACKAGE: ${{ matrix.package }}
+      run: |
+        total=$(cargo mutants --list -p "$PACKAGE" | wc -l)
+        shards=$(( (total + SAMPLE - 1) / SAMPLE ))
+        status=0
+        just mutants -p "$PACKAGE" --shard "1/$shards" --sharding round-robin -j2 || status=$?
+        echo "$total" > mutants.out/total.txt
+        # 2 reports missed mutants and 3 reports timeouts. Both are results, not job failures.
+        case $status in 0|2|3) ;; *) exit "$status" ;; esac
     - name: Upload results
       if: always()
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
-        name: mutants.out
-        path: mutants.out
+        name: mutants-${{ matrix.package }}
+        path: |
+          mutants.out/outcomes.json
+          mutants.out/total.txt
+          mutants.out/missed.txt
+          mutants.out/timeout.txt
+
+  Summary:
+    needs: Mutants
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download results
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      with:
+        pattern: mutants-*
+        path: results
+    - name: Summarize
+      run: |
+        {
+          echo "Score is caught / (caught + missed). Full run is the estimated hours for all mutants of the crate on one runner."
+          echo
+          echo "| Crate | Mutants | Tested | Caught | Missed | Timeout | Unviable | Score | Unviable time | Minutes | Full run (h) |"
+          echo "|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|"
+          for dir in results/mutants-*; do
+            [ -f "$dir/outcomes.json" ] || { echo "| ${dir#results/mutants-} | failed | | | | | | | | | |"; continue; }
+            jq -r --arg crate "${dir#results/mutants-}" --argjson total "$(cat "$dir/total.txt")" '
+              def secs: sub("\\.[0-9]+Z$"; "Z") | fromdate;
+              def pct: . * 100 | floor | tostring + "%";
+              ([.outcomes[] | .phase_results[].duration] | add) as $all
+              | ([.outcomes[] | select(.summary == "Unviable") | .phase_results[].duration] | add // 0) as $unviable
+              | ((.end_time | secs) - (.start_time | secs)) as $wall
+              | "| \($crate) | \($total) | \(.total_mutants) | \(.caught) | \(.missed) | \(.timeout) | \(.unviable)"
+                + " | \(if .caught + .missed > 0 then .caught / (.caught + .missed) | pct else "-" end)"
+                + " | \($unviable / $all | pct) | \($wall / 60 | floor)"
+                + " | \($wall * $total / .total_mutants / 3600 * 10 | floor / 10) |"
+            ' "$dir/outcomes.json"
+          done
+        } >> "$GITHUB_STEP_SUMMARY"
+        jq -r '.outcomes[] | select(.summary == "MissedMutant" or .summary == "Timeout") | "\(.summary)\t\(.scenario.Mutant.name)"' \
+          results/*/outcomes.json | sort > missed.tsv
+    - name: Upload missed mutants
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: mutants-missed
+        path: missed.tsv
