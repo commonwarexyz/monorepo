@@ -214,7 +214,7 @@ const HUGE_SPAN: u8 = 16;
 /// in proportion to how many attacks, arbitrary types or mutation targets it carries, so every one
 /// of them is drawn about as often as any other. Deposits fund everything else, so they weigh
 /// more than that, and a halt, which ends posting for good, weighs least.
-const OP_WEIGHTS: [u8; 14] = [9, 4, 20, 4, 3, 22, 1, 7, 5, 1, 3, 2, 11, 8];
+const OP_WEIGHTS: [u8; 14] = [9, 4, 20, 5, 3, 22, 1, 7, 5, 1, 3, 2, 11, 8];
 
 /// One action in this many is honest, and the others carry an attack. The protocol still
 /// advances: a close posts honestly once its attack is refused, and several attacked payments are
@@ -323,6 +323,8 @@ enum WithdrawAttack {
     TamperAmount,
     /// The request is for another epoch.
     StaleEpoch(bool),
+    /// The request was signed for another epoch and names this one.
+    Relabeled(bool),
 }
 
 /// A deviation from the honest close of an epoch.
@@ -332,8 +334,8 @@ enum CloseAttack {
     Count(bool),
     /// A row that pays no receiver.
     EmptyRow,
-    /// A soft withdrawal of the next epoch.
-    LateWithdrawal,
+    /// A soft withdrawal of the next epoch or of the one before.
+    StaleWithdrawal(bool),
     /// An account's second row, or a repeated withdrawal request.
     Duplicate(bool),
     /// Another key signs the close.
@@ -346,8 +348,9 @@ enum CloseAttack {
     StaleQueue(bool),
     /// A row its sender did not sign on its posted row.
     ForeignRow(u8),
-    /// A soft withdrawal that does not verify.
-    ForgedWithdrawal(bool),
+    /// A soft withdrawal that does not verify: it has no amount, its amount changed after
+    /// signing, or it was signed for another epoch.
+    ForgedWithdrawal(u8),
     /// A checkpoint whose matrix is not its summary's, or whose epoch has no successor.
     Checkpoint(bool),
     /// A signed row that takes its sender's balance below zero.
@@ -2802,6 +2805,13 @@ impl Harness {
                 withdrawal =
                     TestWithdrawal::sign(&self.keys[user], &self.namespace, stale, amount, tag);
             }
+            Some(WithdrawAttack::Relabeled(future)) => {
+                let stale = if future { epoch + 1 } else { epoch - 1 };
+                let signed =
+                    TestWithdrawal::sign(&self.keys[user], &self.namespace, stale, amount, tag);
+                withdrawal.signature = signed.signature;
+                authentic = false;
+            }
         }
         roundtrip(&withdrawal, &());
 
@@ -3099,20 +3109,39 @@ impl Harness {
                     self.assemble(&operator, queue, rows, withdrawals, deposits, forced);
                 assert!(matches!(assembled, Err(AssemblyError::NoReceivers)));
             }
-            CloseAttack::LateWithdrawal => {
+            CloseAttack::StaleWithdrawal(next) => {
+                let stale = if next { epoch + 1 } else { epoch - 1 };
+                let request = TestWithdrawal::sign(&self.keys[0], &self.namespace, stale, 1, 0);
+                assert!(request.verify(&self.namespace));
+                let close = honest(self);
                 let mut withdrawals = withdrawals;
-                withdrawals.push(TestWithdrawal::sign(
-                    &self.keys[0],
-                    &self.namespace,
-                    epoch + 1,
-                    1,
-                    0,
-                ));
+                withdrawals.push(request.clone());
                 let assembled =
                     self.assemble(&operator, queue, plan.rows, withdrawals, deposits, forced);
                 assert!(matches!(
                     assembled,
-                    Err(AssemblyError::WrongEpoch { expected, found }) if expected == epoch && found == epoch + 1
+                    Err(AssemblyError::WrongEpoch { expected, found }) if expected == epoch && found == stale
+                ));
+
+                // A faulty operator signs the close without assembly, and validators refuse it.
+                // Requests order by epoch first.
+                let mut withdrawals = close.withdrawals().to_vec();
+                withdrawals.truncate(LIMITS.withdrawals - 1);
+                withdrawals.insert(if next { withdrawals.len() } else { 0 }, request);
+                let matrix = close.matrix::<Sha256>(&Sequential).root();
+                let message = close_message(epoch, &matrix, &withdrawals, deposits, forced);
+                let bytes = close_bytes(
+                    epoch,
+                    close.rows(),
+                    &withdrawals,
+                    deposits,
+                    forced,
+                    &operator.sign(&self.namespace.close, &message),
+                );
+                let close = TestClose::decode_cfg(bytes, &LIMITS).expect("a canonical close");
+                assert!(matches!(
+                    self.check_close(close, &parent, queue),
+                    Err(CheckError::WrongEpoch { expected, found }) if expected == epoch && found == stale
                 ));
             }
             CloseAttack::Duplicate(row) => {
@@ -3233,21 +3262,28 @@ impl Harness {
             }
             CloseAttack::ForeignRow(kind) => {
                 let mut rows = plan.rows;
-                let user = self.idle(usize::from(kind)).unwrap_or(0);
+                let users = self.users();
+                let posted = (0..users)
+                    .map(|offset| (usize::from(kind) + offset) % users)
+                    .find(|user| parent.matrix.payments_root(&self.accounts[*user]).is_some())
+                    .filter(|_| kind % 4 == 3);
+                let user = posted.or_else(|| self.idle(usize::from(kind))).unwrap_or(0);
                 rows.retain(|row| row.account != self.accounts[user]);
                 let map = Map::from([(self.other(user), 1)]);
                 let previous = self.closed_previous(user);
-                let row = match kind % 3 {
-                    // Signed on a root other than its posted row.
-                    0 => self.sign_row(user, epoch, &map, Sha256::hash(&[b"elsewhere"])),
+                let row = match (kind % 4, posted) {
+                    // Signed on the empty root by a sender whose posted row is not empty.
+                    (3, Some(_)) => self.sign_row(user, epoch, &map, empty_root()),
                     // Signed for another map than the row carries.
-                    1 => {
+                    (1, _) => {
                         let mut row = self.sign_row(user, epoch, &map, previous);
                         row.payments = self.amounts(&Map::from([(self.other(user), 2)]));
                         row
                     }
                     // Signed for the previous epoch.
-                    _ => self.sign_row(user, epoch.saturating_sub(1), &map, previous),
+                    (2, _) => self.sign_row(user, epoch.saturating_sub(1), &map, previous),
+                    // Signed on a root other than its posted row.
+                    _ => self.sign_row(user, epoch, &map, Sha256::hash(&[b"elsewhere"])),
                 };
                 rows.push(row);
                 let (close, _) = self
@@ -3258,16 +3294,27 @@ impl Harness {
                     Err(CheckError::InvalidSignature)
                 ));
             }
-            CloseAttack::ForgedWithdrawal(zero) => {
+            CloseAttack::ForgedWithdrawal(kind) => {
                 let mut withdrawals = withdrawals;
                 let tag = u64::MAX;
-                let forged = if zero {
-                    TestWithdrawal::sign(&self.keys[0], &self.namespace, epoch, 0, tag)
-                } else {
-                    let mut forged =
-                        TestWithdrawal::sign(&self.keys[0], &self.namespace, epoch, 5, tag);
-                    forged.amount = 6;
-                    forged
+                let sign = |epoch, amount| {
+                    TestWithdrawal::sign(&self.keys[0], &self.namespace, epoch, amount, tag)
+                };
+                let forged = match kind % 4 {
+                    0 => sign(epoch, 0),
+                    1 => Withdrawal {
+                        amount: 6,
+                        ..sign(epoch, 5)
+                    },
+                    // Signed for the next epoch or the one before, and naming this one.
+                    2 => Withdrawal {
+                        epoch,
+                        ..sign(epoch + 1, 5)
+                    },
+                    _ => Withdrawal {
+                        epoch,
+                        ..sign(epoch - 1, 5)
+                    },
                 };
                 assert!(!forged.verify(&self.namespace));
                 withdrawals.push(forged);
@@ -3515,10 +3562,23 @@ impl Harness {
             6 => {
                 let certificate = self.certify(summary, QUORUM).expect("a quorum certifies");
                 let mut tampered = *summary;
-                if (kind / 8).is_multiple_of(2) {
-                    tampered.deposits.count = self.ledger.deposits.len() as u64 + 1;
+                let ledger = &self.ledger;
+                let deposits = (kind / 8).is_multiple_of(2);
+                let (required, queued) = if deposits {
+                    (ledger.required_deposits, ledger.deposits.len())
                 } else {
-                    tampered.forced_withdrawals.count = self.ledger.forced.len() as u64 + 1;
+                    (ledger.required_forced, ledger.forced.len())
+                };
+
+                // One below the required count where the queue has one, else one past its length.
+                let count = match required.checked_sub(1) {
+                    Some(below) if (kind / 16).is_multiple_of(2) => below,
+                    _ => queued + 1,
+                } as u64;
+                if deposits {
+                    tampered.deposits.count = count;
+                } else {
+                    tampered.forced_withdrawals.count = count;
                 }
                 (tampered, (certificate, "count"))
             }
