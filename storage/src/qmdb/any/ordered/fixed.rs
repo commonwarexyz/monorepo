@@ -19,16 +19,8 @@ pub type Operation<F, K, V> = ordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S> = super::Db<
-    F,
-    E,
-    Journal<E, Operation<F, K, V>>,
-    Index<T, Location<F>>,
-    H,
-    Update<K, V>,
-    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
-    S,
->;
+pub type Db<F, E, K, V, H, T, S> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>, S>;
 
 /// Configuration for a [Db].
 pub type Config<T, S> = any::Config<T, JournalConfig, S>;
@@ -67,7 +59,6 @@ pub mod partitioned {
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
 
@@ -100,7 +91,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            ProofExt as _, SnapshotBuild as _,
+            ProofExt as _,
             any::{
                 batch::Slot,
                 ordered::{
@@ -113,6 +104,7 @@ pub(crate) mod test {
                 test::{fixed_db_config, fixed_db_config_partitioned},
             },
             floor::{Bounded, Policy, Proportional},
+            snapshot::Rebuild,
         },
         translator::{OneCap, OrderedTranslator, TwoCap},
     };
@@ -142,7 +134,6 @@ pub(crate) mod test {
         Index<TwoCap, GenericLocation<F>>,
         Sha256,
         crate::qmdb::any::operation::update::Ordered<Digest, FixedEncoding<Digest>>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;
 
@@ -703,8 +694,8 @@ pub(crate) mod test {
     }
 
     /// A replay failure during a parallel build must join every task before surfacing the
-    /// error: no task may outlive the failed build, retaining a clone of the log (the
-    /// [crate::qmdb::SnapshotBuild] cleanup invariant).
+    /// error: no task may outlive the failed build, retaining a clone of the log, as required
+    /// by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
@@ -1360,11 +1351,7 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(proof.verify::<Sha256, _>(
-                Location::new(1),
-                &proof_ops,
-                &root
-            ));
+            assert!(proof.verify::<Sha256, _>(Location::new(1), &proof_ops, &root));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -1391,14 +1378,16 @@ pub(crate) mod test {
             assert_eq!(min_proof.leaves, Location::new(1));
             assert_eq!(min_ops.len(), 1);
 
-            // Non-commit-boundary historical sizes are rejected.
-            let result = db
-                .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
-                .await;
-            assert!(
-                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
-                "expected HistoricalFloorPruned(5), got {result:?}"
-            );
+            for size in [Location::new(0), Location::new(5)] {
+                let result = db.historical_proof(size, Location::new(0), NZU64!(1)).await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::qmdb::Error::NotCommitBoundary(actual)) if actual == size
+                    ),
+                    "expected NotCommitBoundary({size}), got {result:?}"
+                );
+            }
 
             db.destroy().await.unwrap();
         });

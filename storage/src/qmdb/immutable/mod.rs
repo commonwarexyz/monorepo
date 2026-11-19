@@ -843,6 +843,18 @@ pub(super) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
+        // Size two ends at the Set following the initial commit.
+        for size in [Location::new(0), Location::new(2)] {
+            let result = db
+                .historical_proof(size, Location::new(0), NZU64!(1))
+                .await
+                .map(|_| ());
+            assert!(
+                matches!(result, Err(Error::NotCommitBoundary(actual)) if actual == size),
+                "expected NotCommitBoundary({size}), got {result:?}"
+            );
+        }
+
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
         assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));

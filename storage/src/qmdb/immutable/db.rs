@@ -396,13 +396,12 @@ where
     /// # Errors
     ///
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `historical_size` > number of
-    /// operations, or if `start_loc` >= `historical_size`.
+    /// operations, or if `start_loc` is at or beyond the requested commit boundary.
     /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     /// been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `historical_size` or
-    /// because pruning removed the commit that would have governed `historical_size`.
+    /// Returns [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation
+    /// is retained and is not a commit.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",

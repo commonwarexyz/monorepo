@@ -10,7 +10,6 @@ use crate::{
     },
     merkle::mmr::Location,
     qmdb::{
-        SnapshotBuild as _,
         any::{
             BITMAP_CHUNK_BYTES, read_many_map,
             unordered::{Update, variable::Operation},
@@ -20,8 +19,9 @@ use crate::{
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
         operation::{Committable as _, Key, Operation as _, same_key},
-        selection_error, update_known_loc, validate_initialization_bound,
-        validate_initialization_commit,
+        selection_error,
+        snapshot::Rebuild as _,
+        update_known_loc, validate_initialization_bound, validate_initialization_commit,
         value::{VariableEncoding, VariableValue},
     },
     translator::Translator,

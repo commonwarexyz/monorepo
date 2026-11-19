@@ -541,8 +541,20 @@ mod tests {
                 vec![Some(U64::new(1)), Some(U64::new(4))]
             );
 
-            // A batch built on the client returns `ItemPruned` for a location between the floor
-            // and the retained start, not `BelowInactivityFloor`.
+            // The client and a batch built on it return `ItemPruned` for a location between the
+            // floor and the retained start, not `BelowInactivityFloor`.
+            assert!(matches!(
+                client.get(Location::new(2)).await,
+                Err(crate::qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(2)
+                ))
+            ));
+            assert!(matches!(
+                client.get_many(&[Location::new(2), Location::new(5)]).await,
+                Err(crate::qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(2)
+                ))
+            ));
             let batch = client.new_batch();
             assert!(matches!(
                 batch.get(Location::new(2), &client).await,
@@ -949,6 +961,7 @@ mod tests {
         test_keyless_fixed_replay_with_trailing_appends => run_replay_with_trailing_appends, reopen_indexed;
         test_keyless_fixed_get_out_of_bounds => run_get_out_of_bounds, db;
         test_keyless_fixed_get_pruned => run_get_pruned, db;
+        test_keyless_fixed_get_pruned_above_floor => run_get_pruned_above_floor, bounded_floor;
         test_keyless_fixed_metadata => run_metadata, db;
         test_keyless_fixed_pruning => run_pruning, reopen;
         test_keyless_fixed_batch_get => run_batch_get, db;

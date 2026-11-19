@@ -225,7 +225,7 @@ pub struct Db<
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value. Owns the activity-status bitmap (`any.bitmap`) that this layer reads to
     /// install grafted-tree updates and serve proofs.
-    pub(super) any: any::Db<F, E, C, I, H, U, N, S>,
+    pub(super) any: any::Db<F, E, C, I, H, U, S, N>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -475,7 +475,8 @@ where
     ///
     /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
     /// activity bitmap, this returns ops-tree Merkle proofs suitable for state sync. Direct
-    /// verifiers should use [`crate::qmdb::ProofExt::verify`].
+    /// verifiers should use [`crate::qmdb::ProofExt::verify`]. Commit-boundary requirements and
+    /// errors follow [`crate::qmdb::any::Db::historical_proof`].
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location<F>,

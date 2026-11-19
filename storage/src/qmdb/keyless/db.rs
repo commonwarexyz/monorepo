@@ -27,7 +27,7 @@ pub(super) fn check_locations<F: Family>(
     if let Some(pair) = locs.windows(2).find(|pair| pair[0] >= pair[1]) {
         return Err(Error::LocationOutOfOrder(pair[0], pair[1]));
     }
-    // Strictly increasing, so only the last location can reach `end`.
+    // The last location is the largest, so checking it against `end` is sufficient.
     if let Some(&last) = locs.last()
         && last >= end
     {
@@ -94,11 +94,11 @@ where
     /// `None` selects the latest retained state.
     ///
     /// After a bounded initialization past a prune, or a sync of a range that starts above the
-    /// floor, the selected commit's inactivity floor can be below the retained start. A batch
-    /// read of a location between the two that no batch chain holds then returns
+    /// floor, the selected commit's inactivity floor can be below the retained start. A read of a
+    /// location between the two that no batch chain holds then returns
     /// [`crate::journal::Error::ItemPruned`], while a database that retains the location answers
-    /// it. Databases at the same commitment therefore answer batch reads alike only when each
-    /// retains every operation from its floor onward.
+    /// it. Databases at the same commitment therefore answer reads alike only when each retains
+    /// every operation from its floor onward.
     #[boxed]
     pub async fn init(
         context: E,
@@ -144,11 +144,16 @@ where
 
     /// Get the value at location `loc` in the database.
     ///
+    /// Every database at the same commitment that retains its operations from the inactivity
+    /// floor onward answers alike, however far it has pruned.
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::LocationOutOfBounds`] if `loc` >= `self.bounds().end`.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `loc` <
-    ///   `self.bounds().start`.
+    /// - Returns [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `loc` is at or
+    ///   above the inactivity floor and below `self.bounds().start`. Only a database recovered or
+    ///   synced with its floor below its retained start has such locations (see [`Self::init`]).
     pub async fn get(&self, loc: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
@@ -157,6 +162,7 @@ where
         if loc >= op_count {
             return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
         }
+        batch::check_floor(loc, self.inactivity_floor_loc)?;
         let op = self.journal.read(*loc).await?;
 
         let result = op.into_value();
@@ -165,15 +171,16 @@ where
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be strictly increasing.
-    /// Returns results in the same order as the input locations.
+    /// Locations must be strictly increasing. Returns results in the same order as the input
+    /// locations, each as [`Self::get`] would.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     /// - Returns [`Error::LocationOutOfBounds`] if any location >= `self.bounds().end`.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any location <
-    ///   `self.bounds().start`.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below the inactivity floor.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any location is
+    ///   at or above the inactivity floor and below `self.bounds().start`.
     pub async fn get_many(&self, locs: &[Location<F>]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         if locs.is_empty() {
             return Ok(Vec::new());
@@ -183,6 +190,9 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(locs.len() as u64);
         check_locations(locs, Location::new(self.journal.bounds().end))?;
+
+        // The first location is the smallest, so checking it against the floor is sufficient.
+        batch::check_floor(locs[0], self.inactivity_floor_loc)?;
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = self.journal.read_many(&positions).await?;
         let result = ops.into_iter().map(|op| op.into_value()).collect();
@@ -272,13 +282,14 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
-    ///   >= `historical_size` or `historical_size` > number of operations.
+    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if
+    ///   `historical_size` exceeds the number of operations or `start_loc` is at or beyond
+    ///   the requested commit boundary.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
-    ///   commit op.
+    /// - Returns [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation
+    ///   is retained and is not a commit.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.keyless.db.historical_proof",
@@ -319,6 +330,8 @@ where
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
+    /// Pruning leaves [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location
+    /// still require the requested operations and Merkle nodes to be retained.
     ///
     /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///

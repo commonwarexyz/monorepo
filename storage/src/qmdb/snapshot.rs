@@ -823,7 +823,7 @@ async fn remove_scratch(context: &impl Storage, scratch: &str) -> Result<(), Run
 ///
 /// A build that holds more than [MEMORY_BYTES] of records keeps the rest in a blob of the
 /// `scratch` partition. Returns the number of active keys and the activity bitmap (see
-/// [SnapshotBuild::build_snapshot]).
+/// [Rebuild::build_snapshot]).
 async fn build<F, E, C, I>(
     snapshot: &mut I,
     context: E,
@@ -974,20 +974,24 @@ where
     Ok((total_items, active))
 }
 
-/// Builds a database's snapshot index from the operations log.
+/// Configures snapshot rebuilding during QMDB initialization.
 ///
-/// Generic over the `Index` type so each index declares the concurrency its build can use.
-///
-/// Sealed: only in-crate index types implement this, so internal invariants (e.g. builds must
-/// drop every clone of the shared log before returning) are enforced by the implementations
-/// rather than the public contract.
+/// This trait is sealed to the index types provided by this crate.
+#[expect(
+    private_bounds,
+    reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
+)]
 pub trait SnapshotBuild<F: Family>:
-    sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
+    Index<Value = Location<F>> + Rebuild<F, Self::Concurrency> + Sized + 'static
 {
-    /// The concurrency configuration the build consumes. Index types that always build serially
-    /// declare `()`, so a setting they cannot use is unrepresentable.
+    /// The concurrency setting for this index: `()` for unpartitioned indexes or
+    /// [`NonZeroUsize`] for partitioned indexes.
     type Concurrency: Copy + Send + Sync + 'static;
+}
 
+/// Replays the log into an index owned by initialization. Implementations must drop all log
+/// clones before returning, including on error.
+pub(super) trait Rebuild<F: Family, B>: Index<Value = Location<F>> + Sized {
     /// Replay `log` from `inactivity_floor_loc`, populating `self`, which must be empty. Returns
     /// the number of active keys and the activity status of every replayed location, in location
     /// order: a location's bit is set iff it holds the current operation of an active key or is
@@ -1000,7 +1004,7 @@ pub trait SnapshotBuild<F: Family>:
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: Self::Concurrency,
+        init_concurrency: B,
         init_buffer: NonZeroUsize,
         scratch: &str,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
@@ -1009,91 +1013,32 @@ pub trait SnapshotBuild<F: Family>:
         C: Contiguous<Item: Operation<F>> + 'static;
 }
 
-mod sealed {
-    use crate::translator::Translator;
-
-    pub trait SnapshotBuildSealed {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::ordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::unordered::Index<T, V, P>
-    {
-    }
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::ordered::Index<T, V, P>
-    {
-    }
-}
-
 impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
     type Concurrency = ();
-
-    async fn build_snapshot<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        _init_concurrency: (),
-        init_buffer: NonZeroUsize,
-        scratch: &str,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner + crate::Context,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            NonZeroUsize::MIN,
-            init_buffer,
-            scratch,
-        )
-        .await
-    }
 }
-
 impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
     type Concurrency = ();
-
-    async fn build_snapshot<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        _init_concurrency: (),
-        init_buffer: NonZeroUsize,
-        scratch: &str,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner + crate::Context,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            NonZeroUsize::MIN,
-            init_buffer,
-            scratch,
-        )
-        .await
-    }
 }
 
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
     type Concurrency = NonZeroUsize;
+}
 
+impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
+{
+    type Concurrency = NonZeroUsize;
+}
+
+impl<F: Family, T: Translator> Rebuild<F, ()> for crate::index::unordered::Index<T, Location<F>> {
     async fn build_snapshot<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
+        _init_concurrency: (),
         init_buffer: NonZeroUsize,
         scratch: &str,
     ) -> Result<(usize, BitMap), Error<F>>
@@ -1106,7 +1051,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             context,
             inactivity_floor_loc,
             log,
-            init_concurrency,
+            NonZeroUsize::MIN,
             init_buffer,
             scratch,
         )
@@ -1114,11 +1059,34 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     }
 }
 
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
-    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
-{
-    type Concurrency = NonZeroUsize;
+impl<F: Family, T: Translator> Rebuild<F, ()> for crate::index::ordered::Index<T, Location<F>> {
+    async fn build_snapshot<E, C>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        _init_concurrency: (),
+        init_buffer: NonZeroUsize,
+        scratch: &str,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner + crate::Context,
+        C: Contiguous<Item: Operation<F>> + 'static,
+    {
+        build(
+            self,
+            context,
+            inactivity_floor_loc,
+            log,
+            NonZeroUsize::MIN,
+            init_buffer,
+            scratch,
+        )
+        .await
+    }
+}
 
+impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F, NonZeroUsize> for I {
     async fn build_snapshot<E, C>(
         &mut self,
         context: E,
