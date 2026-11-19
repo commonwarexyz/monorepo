@@ -206,7 +206,7 @@ impl Counts {
     /// What a bootstrap run of `target` with these counts reports, in the
     /// units of `SPEC.md`, section 8.1. `repeated` is the number of reports
     /// an engine repeated after a restart, each compared with its first
-    /// under I1 (see [`check_reports_agree`]).
+    /// under I1 (see `check_reports_agree`).
     ///
     /// The counts are those of a run that executed its scenario, whose panic
     /// record and engines I8 judged and whose blocks I9 judged, once each.

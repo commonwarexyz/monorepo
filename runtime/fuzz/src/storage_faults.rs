@@ -124,7 +124,7 @@ impl BlobName {
 pub struct WriteFault {
     /// `failure_rate` 1 when set, else 0 (the crash policy of a write that succeeds, SF-R7).
     pub fails: bool,
-    /// One of [RETENTION_PERCENTS].
+    /// One of `RETENTION_PERCENTS`.
     pub retention_percent: u8,
     pub mode: PartialWriteMode,
 }
