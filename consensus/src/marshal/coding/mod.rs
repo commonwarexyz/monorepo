@@ -80,7 +80,6 @@ mod tests {
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
         Reporter,
         marshal::{
-            Finality,
             ancestry::BlockProvider,
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
@@ -138,7 +137,7 @@ mod tests {
         },
         utils::reschedule,
     };
-    use commonware_storage::archive::immutable;
+    use commonware_storage::archive::{Archive as _, immutable};
     use commonware_utils::{
         NZU16, NZU64, NZUsize,
         channel::oneshot::{self, error::TryRecvError},
@@ -184,10 +183,11 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+            let partition = "coding-finalization";
             let cache = core::cache::Manager::<_, TestCodingVariant, S>::init(
                 context.child("cache"),
                 core::cache::Config {
-                    partition_prefix: "coding-finalization".into(),
+                    partition_prefix: format!("{partition}-cache"),
                     prunable_items_per_section: NZU64!(10),
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
@@ -214,10 +214,30 @@ mod tests {
                 Some(&certificate)
             );
 
-            let recovered = cache.get_finalization_by_digest(other.digest()).await;
-            let finality = Finality::from_block::<TestCodingVariant>(&other, recovered);
-            assert_eq!(finality.commitment, signed.commitment());
-            assert_eq!(finality.finalization, Some(certificate));
+            drop(cache);
+
+            // Reopen an archive holding another encoding of the signed application block.
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let config = test_config(partition, provider.clone());
+            let (_, blocks) = immutable_finalized_stores(&context, partition, &config).await;
+            let height = other.height();
+            blocks
+                .put(height.get(), other.digest(), &other.into())
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
+            let (mailbox, _, _handle) = start_coding_actor_with_recording(
+                context.child("restart"),
+                partition,
+                provider,
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let (block, proof) = mailbox.get_block_with_finalization(height).await.unwrap();
+            assert_eq!(block.commitment(), signed.commitment());
+            assert_eq!(proof, Some(certificate));
         });
     }
 

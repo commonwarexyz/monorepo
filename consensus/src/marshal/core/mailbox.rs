@@ -26,6 +26,11 @@ use std::{
 };
 use tracing::{Span, info_span};
 
+type BlockWithFinalization<S, V> = (
+    <V as Variant>::Block,
+    Option<Finalization<S, <V as Variant>::Commitment>>,
+);
+
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
 /// These messages are sent from the consensus engine and other parts of the
@@ -53,6 +58,12 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         identifier: Identifier<<V::Block as Digestible>::Digest>,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<Option<V::Block>>,
+    },
+    /// Reads a finalized block and its certificate, if available, in one actor turn.
+    GetBlockWithFinalization {
+        span: Span,
+        height: Height,
+        response: oneshot::Sender<Option<BlockWithFinalization<S, V>>>,
     },
     /// A request to retrieve a finalization by height.
     GetFinalization {
@@ -327,6 +338,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         match self {
             Self::GetInfo { span, .. }
             | Self::GetBlock { span, .. }
+            | Self::GetBlockWithFinalization { span, .. }
             | Self::GetFinalization { span, .. }
             | Self::GetVerified { span, .. }
             | Self::SubscribeByDigest { span, .. }
@@ -353,6 +365,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         match self {
             Self::GetInfo { .. } => "get_info",
             Self::GetBlock { .. } => "get_block",
+            Self::GetBlockWithFinalization { .. } => "get_block_with_finalization",
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessed { .. } => "get_processed",
             Self::GetAnchor { .. } => "get_anchor",
@@ -401,6 +414,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             | Self::GetProcessed { .. }
             | Self::GetAnchor { .. } => false,
+            // An unacknowledged block may still be needed even if a queued prune is rejected.
+            Self::GetBlockWithFinalization { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -421,6 +436,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetBlock { response, .. } | Self::GetVerified { response, .. } => {
                 response.is_closed()
             }
+            Self::GetBlockWithFinalization { response, .. } => response.is_closed(),
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessed { response, .. } => response.is_closed(),
             Self::GetAnchor { response, .. } => response.is_closed(),
@@ -716,6 +732,27 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let _ = self.sender.enqueue(Message::GetBlock {
             span: info_span!("marshal.mailbox.get_block"),
             identifier,
+            response,
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// Reads a finalized block and its available certificate together. When present, the
+    /// certificate signs the returned block's full commitment. A block recovered by walking
+    /// back from a finalized descendant may have no certificate of its own.
+    ///
+    /// Returns `None` if the block is unavailable or marshal has stopped.
+    pub async fn get_block_with_finalization(
+        &self,
+        height: Height,
+    ) -> Option<(V::Block, Option<Finalization<S, V::Commitment>>)> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetBlockWithFinalization {
+            span: info_span!(
+                "marshal.mailbox.get_block_with_finalization",
+                height = height.traced()
+            ),
+            height,
             response,
         });
         receiver.await.ok().flatten()

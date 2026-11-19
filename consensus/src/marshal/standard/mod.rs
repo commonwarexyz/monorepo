@@ -1223,7 +1223,10 @@ mod tests {
             assert_eq!(delivered.height(), height);
             assert_eq!(delivered.digest(), digest);
             assert_eq!(finality.commitment, digest);
-            assert_eq!(finality.finalization, Some(finalization));
+            assert_eq!(finality.finalization, Some(finalization.clone()));
+            let (archived, proof) = mailbox.get_block_with_finalization(height).await.unwrap();
+            assert_eq!(archived.digest(), digest);
+            assert_eq!(proof, Some(finalization));
             ack.acknowledge();
         });
     }
@@ -7797,16 +7800,22 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B, S, D>::manual_ack();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "floor-jump-ignores-stale-ack",
+            let prefix = "floor-jump-ignores-stale-ack";
+            let (certificates, blocks) = prunable_finalized_stores(&context, prefix).await;
+            let config = test_config(
+                prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                NZUsize!(1),
+            );
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                blocks,
+                config,
             )
             .await;
-            let mut mailbox = mailbox;
+            let (rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let _actor_handle = actor.start_unbuffered(application.clone(), (rx, resolver.clone()));
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
@@ -7817,7 +7826,7 @@ mod tests {
                 QUORUM,
             );
             assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
+            StandardHarness::report_finalization(&mut mailbox, block1_finalization.clone()).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -7826,17 +7835,25 @@ mod tests {
             )
             .await;
 
-            let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
+            let (pending, proof) = mailbox
+                .get_block_with_finalization(block1.height())
+                .await
+                .unwrap();
+            assert_eq!(pending.digest(), block1.digest());
+            assert_eq!(proof, Some(block1_finalization));
+
+            let floor_round = Round::new(Epoch::zero(), View::new(15));
+            let floor_block =
+                make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(15), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(floor_round, View::new(4), floor_block.digest()),
+                Proposal::new(floor_round, View::new(14), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
 
             // The anchor is not local yet, so SetFloor must install a pending
             // floor before the old height 1 ack can be released.
-            mailbox.set_floor(floor_finalization);
+            mailbox.set_floor(floor_finalization.clone());
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -7858,17 +7875,23 @@ mod tests {
                     .verified(floor_round, ready(floor_block.clone()))
                     .await
             );
-            assert_eq!(
+            let (anchor, proof) = mailbox
+                .get_block_with_finalization(floor_block.height())
+                .await
+                .unwrap();
+            assert_eq!(anchor.digest(), floor_block.digest());
+            assert_eq!(proof, Some(floor_finalization));
+
+            // The old block's section has been pruned, even though its ack is still held.
+            assert!(
                 mailbox
-                    .get_block(Height::new(5))
+                    .get_block_with_finalization(block1.height())
                     .await
-                    .expect("floor block missing")
-                    .digest(),
-                floor_block.digest()
+                    .is_none()
             );
 
             // Release the stale ack after the remote floor has been applied.
-            // It must not lower the processed floor back below height 5.
+            // It must not lower the processed floor back below the new floor.
             let fetches_after_floor = resolver.fetches().len();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
@@ -7880,7 +7903,7 @@ mod tests {
                     round: None,
                 },
             );
-            let _ = mailbox.get_block(Height::new(5)).await;
+            let _ = mailbox.get_block(Height::new(15)).await;
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_after_floor,

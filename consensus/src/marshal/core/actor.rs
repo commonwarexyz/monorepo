@@ -903,6 +903,11 @@ where
                     response.send_lossy(block);
                 }
             },
+            Message::GetBlockWithFinalization {
+                height, response, ..
+            } => {
+                response.send_lossy(self.get_block_with_finalization(height).await);
+            }
             Message::GetFinalization {
                 height, response, ..
             } => {
@@ -2077,6 +2082,26 @@ where
             Ok(stored) => stored,
             Err(e) => panic!("failed to get block: {e}"),
         }
+    }
+
+    /// Returns the archived block in its certified encoding when a certificate is available.
+    async fn get_block_with_finalization(
+        &self,
+        height: Height,
+    ) -> Option<(V::Block, Option<Finalization<P::Scheme, V::Commitment>>)> {
+        let stored = self.get_finalized_block(height).await?;
+        let mut block = V::restore_across(stored, &self.strategy).await;
+        let finalization = match self.get_finalization_by_height(height).await {
+            Some(proof) => Some(proof),
+            // A crash between the two height archive syncs can leave the proof only in the cache.
+            None => self.cache.get_finalization_by_digest(block.digest()).await,
+        };
+        if let Some(proof) = &finalization
+            && V::commitment(&block) != proof.proposal.payload
+        {
+            block = V::from_application_block(V::into_shared(block), proof.proposal.payload);
+        }
+        Some((block, finalization))
     }
 
     /// Check whether a finalized block exists in the archive at `height` without
