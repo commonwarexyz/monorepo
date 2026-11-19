@@ -510,6 +510,7 @@ where
     let strategy = cfg.merkle.strategy.clone();
     let metadata_partition = cfg.grafted_metadata_partition.clone();
 
+    // Check the bitmap chunk size before a bounded open can truncate the log.
     let (mut metadata, mut pruned_chunks, mut pinned_nodes) =
         db::init_metadata::<F, _, _, N>(context.child("metadata"), &metadata_partition).await?;
 
@@ -553,7 +554,8 @@ where
     .await?;
 
     let root = ops_root_witness.root::<H>(&any.root());
-    // A legacy database can only record the caller's width once its reconstruction succeeds.
+
+    // Record the chunk size on first open or upgrade, after reconstruction succeeds.
     if metadata.get(&db::BITMAP_CHUNK_SIZE_KEY).is_none() {
         metadata = metadata
             .put_sync(

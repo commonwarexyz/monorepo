@@ -57,11 +57,12 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// A database that [`sync`](super::sync) can build from operations fetched from a [`Source`].
 ///
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
-/// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
-/// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
-/// it already reaches the target, fetches and verifies the remaining operations, builds the
-/// database with [`Self::from_sync_result`], checks the root of [`Self::target`] against the
-/// target, and only then calls [`Self::persist_sync_result`].
+/// [`sync`](super::sync). The engine calls [`Self::validate_target`] and
+/// [`Self::validate_sync_config`] before opening the journal. If the journal holds no operations
+/// in the target range, the engine calls [`Self::discard_local_state`]. If the journal already
+/// reaches the target, the engine calls [`Self::local_pinned_nodes`]. It fetches and verifies any
+/// remaining operations, builds the database with [`Self::from_sync_result`], and calls
+/// [`Self::persist_sync_result`] once the root of [`Self::target`] matches the requested root.
 ///
 /// [`Source`]: super::Source
 pub trait Database: Sized + Send {

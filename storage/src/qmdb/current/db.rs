@@ -1176,8 +1176,11 @@ pub(super) async fn open_metadata<F: merkle::Graftable, E: Context, const N: usi
     };
     let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), cfg).await?;
     if let Some(bytes) = metadata.get(&BITMAP_CHUNK_SIZE_KEY) {
-        let stored = u64::decode(Copying(bytes))
+        let bytes = bytes
+            .as_slice()
+            .try_into()
             .map_err(|_| Error::<F>::DataCorrupted("bitmap chunk size is not a u64"))?;
+        let stored = u64::from_be_bytes(bytes);
         let configured = Widen::widen(N);
         if stored != configured {
             return Err(Error::BitmapChunkSizeMismatch { stored, configured });
@@ -1194,6 +1197,8 @@ pub(super) async fn open_metadata<F: merkle::Graftable, E: Context, const N: usi
 /// - **Pinned node digests** ([NODE_PREFIX]): grafted tree digests at peak positions whose
 ///   underlying data has been pruned. These are needed to recompute the grafted tree root without
 ///   the pruned chunks.
+///
+/// Returns the metadata handle, the number of pruned chunks, and the pinned node digests.
 pub(super) async fn init_metadata<F: merkle::Graftable, E: Context, D: Digest, const N: usize>(
     context: E,
     partition: &str,
