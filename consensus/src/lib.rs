@@ -126,8 +126,9 @@ stability_scope!(BETA {
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    use crate::marshal::ancestry::Ancestry;
     use commonware_actor::Feedback;
-    use commonware_cryptography::{Digest, PublicKey};
+    use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
     use commonware_utils::channel::{fallible::OneshotExt, oneshot, ring};
     use std::future::Future;
 
@@ -430,13 +431,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
         ) -> impl Future<Output = (Self::Index, IndexSubscription<Self::Index>)> + Send;
     }
-});
-stability_scope!(ALPHA {
-    pub mod aggregation;
-});
-stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
-    use commonware_cryptography::certificate::Scheme;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
@@ -547,4 +541,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
+});
+stability_scope!(ALPHA {
+    pub mod aggregation;
 });

@@ -56,15 +56,13 @@
 //! context if the validator missed the proposal or restarted. Its notarizations therefore do not
 //! guarantee application validity and cannot safely be trusted by [`Inline`] validators.
 
-commonware_macros::stability_scope!(ALPHA {
-    mod deferred;
-    pub use deferred::Deferred;
+mod deferred;
+pub use deferred::Deferred;
 
-    mod inline;
-    pub use inline::Inline;
+mod inline;
+pub use inline::Inline;
 
-    mod validation;
-});
+mod validation;
 
 mod variant;
 pub use variant::Standard;

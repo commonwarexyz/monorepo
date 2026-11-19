@@ -410,7 +410,6 @@ impl<E: Context> Writable<E> {
     ///
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear(mut self, tail_blob: u64) -> Result<Self, Error> {
         // Observe outstanding sync failures before removing any retained data.
         self.drain_tail_predecessor_sync().await?;
