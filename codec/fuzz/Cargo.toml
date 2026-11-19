@@ -21,6 +21,14 @@ thiserror.workspace = true
 
 [dependencies.commonware-codec]
 path = ".."
+features = ["fuzz"]
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "roundtrip"

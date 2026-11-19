@@ -315,8 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], also
-//! exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
+//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], the root of
+//! the [`sync::Database::target`](crate::qmdb::sync::Database::target).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
@@ -472,7 +472,7 @@ where
 
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
-async fn init_db<F, E, U, H, I, J, const N: usize, S>(
+pub(crate) async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
@@ -3227,6 +3227,18 @@ pub mod tests {
                 )
                 .await;
             }
+
+            // The batch and the database agree on the chunk-aligned sync target.
+            let merkleized = db
+                .new_batch()
+                .write(key(0), Some(val(1)))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            let expected = crate::qmdb::sync::MerkleizedBatch::target(&*merkleized);
+            db = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(crate::qmdb::sync::Database::target(&db), expected);
+            assert!(*expected.range.start() > 0, "expected a nonzero sync boundary");
 
             let prune_boundary = db.sync_boundary();
             let db = db.prune(prune_boundary).await.unwrap();

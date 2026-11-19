@@ -1,6 +1,5 @@
-use crate::{EPOCH, strategy::Strategy, types::Message};
-use commonware_codec::{Encode, Read, ReadExt};
-use commonware_consensus::{
+use super::{EPOCH, strategy::Strategy, types::Message};
+use crate::{
     Viewable,
     simplex::{
         scheme::Scheme,
@@ -8,6 +7,7 @@ use commonware_consensus::{
     },
     types::{Epoch, Participant, Round, View},
 };
+use commonware_codec::{Encode, Read, ReadExt};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -214,51 +214,51 @@ where
         loop {
             // Send disruptive messages across all channels
             match (self.context.random::<u8>()) % 7 {
-                0 => self.send_random_vote(&mut vote_sender).await,
-                1 => self.send_proposal(&mut vote_sender).await,
+                0 => self.send_random_vote(&mut vote_sender),
+                1 => self.send_proposal(&mut vote_sender),
                 2 => {
                     // Equivocation style: send multiple different proposals
-                    self.send_proposal(&mut vote_sender).await;
-                    self.send_proposal(&mut vote_sender).await;
+                    self.send_proposal(&mut vote_sender);
+                    self.send_proposal(&mut vote_sender);
                 }
                 3 => {
-                    self.send_random_message(&mut cert_sender).await;
+                    self.send_random_message(&mut cert_sender);
                 }
                 4 => {
-                    self.send_random_message(&mut resolver_sender).await;
+                    self.send_random_message(&mut resolver_sender);
                 }
                 5 => {
                     // flood random victim
-                    self.flood_victim(&mut vote_sender).await;
+                    self.flood_victim(&mut vote_sender);
                 }
                 _ => {
                     // Send on multiple channels simultaneously
-                    self.send_proposal(&mut vote_sender).await;
-                    self.send_random_message(&mut cert_sender).await;
-                    self.send_random_message(&mut resolver_sender).await;
+                    self.send_proposal(&mut vote_sender);
+                    self.send_random_message(&mut cert_sender);
+                    self.send_random_message(&mut resolver_sender);
                 }
             }
 
             select! {
                 result = vote_receiver.recv() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_vote(&mut vote_sender, msg.into()).await;
+                        self.handle_vote(&mut vote_sender, msg.into());
                     }
                 },
                 result = cert_receiver.recv() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_certificate(&mut cert_sender, msg.into()).await;
+                        self.handle_certificate(&mut cert_sender, msg.into());
                     }
                 },
                 result = resolver_receiver.recv() => {
                     if let Ok((_, msg)) = result {
-                        self.handle_resolver(&mut resolver_sender, msg.into()).await;
+                        self.handle_resolver(&mut resolver_sender, msg.into());
                     }
                 },
                 _ = self.context.sleep(TIMEOUT) => {
-                    self.send_random_vote(&mut vote_sender).await;
-                    self.send_random_message(&mut cert_sender).await;
-                    self.send_random_message(&mut resolver_sender).await;
+                    self.send_random_vote(&mut vote_sender);
+                    self.send_random_message(&mut cert_sender);
+                    self.send_random_message(&mut resolver_sender);
                 },
             }
 
@@ -267,7 +267,7 @@ where
         }
     }
 
-    async fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+    fn handle_vote(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         let msg = IoBuf::from(msg);
         let Ok(vote) = Vote::<S, Sha256Digest>::read(&mut msg.clone()) else {
             return;
@@ -334,7 +334,7 @@ where
         }
     }
 
-    async fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+    fn handle_certificate(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         let msg = IoBuf::from(msg);
         let cfg = self.scheme.certificate_codec_config();
         let Ok(cert) = Certificate::<S, Sha256Digest>::read_cfg(&mut msg.clone(), &cfg) else {
@@ -372,7 +372,7 @@ where
         }
     }
 
-    async fn handle_resolver(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
+    fn handle_resolver(&mut self, sender: &mut impl Sender, msg: Vec<u8>) {
         if !self.is_faulty_view(self.current_view()) {
             return;
         }
@@ -385,7 +385,7 @@ where
         }
     }
 
-    async fn flood_victim(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+    fn flood_victim(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
         if !self.is_faulty_view(self.current_view()) {
             return;
         }
@@ -425,7 +425,7 @@ where
         }
     }
 
-    async fn send_proposal(&mut self, sender: &mut impl Sender) {
+    fn send_proposal(&mut self, sender: &mut impl Sender) {
         if !self.is_faulty_view(self.current_view()) {
             return;
         }
@@ -442,7 +442,7 @@ where
         let _ = sender.send(Recipients::All, msg, true);
     }
 
-    async fn send_random_message(&mut self, sender: &mut impl Sender) {
+    fn send_random_message(&mut self, sender: &mut impl Sender) {
         if !self.is_faulty_view(self.current_view()) {
             return;
         }
@@ -450,11 +450,11 @@ where
         let _ = sender.send(Recipients::All, IoBuf::from(cert), true);
     }
 
-    async fn send_random_vote(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
-        self.send_random_vote_to(sender, Recipients::All).await;
+    fn send_random_vote(&mut self, sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+        self.send_random_vote_to(sender, Recipients::All);
     }
 
-    async fn send_random_vote_to(
+    fn send_random_vote_to(
         &mut self,
         sender: &mut impl Sender<PublicKey = S::PublicKey>,
         recipients: Recipients<S::PublicKey>,

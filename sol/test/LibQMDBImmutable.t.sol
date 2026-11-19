@@ -71,13 +71,13 @@ abstract contract LibQMDBImmutableTest is QMDBTest {
         pure
         returns (bytes memory)
     {
-        if (kind == ImmutableOperation.Set) return abi.encodePacked(hex"00", bytes32(uint256(1)), value);
+        if (kind == ImmutableOperation.Set) return abi.encodePacked(hex"03", bytes32(uint256(1)), value);
         if (encoding == Encoding.Variable) {
-            return abi.encodePacked(kind == ImmutableOperation.Commit ? hex"0100" : hex"0101", value, varint(floor));
+            return abi.encodePacked(kind == ImmutableOperation.Commit ? hex"0000" : hex"0001", value, varint(floor));
         }
         return
             abi.encodePacked(
-                kind == ImmutableOperation.Commit ? hex"0100" : hex"0101", value, uint64(floor), bytes23(0)
+                kind == ImmutableOperation.Commit ? hex"0000" : hex"0001", value, uint64(floor), bytes23(0)
             );
     }
 
@@ -115,8 +115,8 @@ abstract contract LibQMDBImmutableTest is QMDBTest {
 
     /// @dev Independent encodings cover bootstrap, sets, metadata, floors, and length transitions.
     function test_OperationEncodings() public view {
-        bytes memory shortBootstrap = abi.encodePacked(hex"0100", uint64(0), uint64(0));
-        rejectMutations(smallCase(abi.encodePacked(hex"00", uint64(1), uint64(2), hex"00"), shortBootstrap, true));
+        bytes memory shortBootstrap = abi.encodePacked(hex"0000", uint64(0), uint64(0));
+        rejectMutations(smallCase(abi.encodePacked(hex"03", uint64(1), uint64(2), hex"00"), shortBootstrap, true));
         uint256[5] memory lengths = [uint256(0), 31, 32, 127, 128];
         for (uint256 encodingIndex; encodingIndex <= uint256(Encoding.Variable); ++encodingIndex) {
             Encoding encoding = Encoding(encodingIndex);

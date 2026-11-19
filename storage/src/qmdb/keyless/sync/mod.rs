@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{
         Family, Location,
         full::{self, Merkle},
@@ -23,7 +23,8 @@ where
     F: Family,
     E: Context,
     V: OperationCodec,
-    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
+    C: sync::Journal<F, Context = E, Op = Operation<F, V>>
+        + authenticated::Backing<E, Item = Operation<F, V>, Config = <C as sync::Journal<F>>::Config>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -32,9 +33,17 @@ where
     type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<C::Config, S>;
+    type Config = super::Config<<C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
+
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config, max_size).await
+    }
 
     /// Returns a [Db] initialized from data collected in the sync process.
     ///
@@ -136,8 +145,18 @@ where
         .await
     }
 
-    fn ops_root(&self) -> Self::Digest {
-        self.root()
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
     }
 }
 
