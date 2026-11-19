@@ -8,7 +8,7 @@ use crate::Neon;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedNeon;
 
-super::common::impl_common!(EmulatedNeon, 16, 4, 2, neon);
+super::common::impl_common!(EmulatedNeon, 16, 4, 2, false, neon);
 
 impl Neon for EmulatedNeon {
     #[inline]
@@ -128,16 +128,41 @@ impl Neon for EmulatedNeon {
     fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64 {
         core::array::from_fn(|i| acc[i].wrapping_add(u64::from(a[i]) * u64::from(b[i])))
     }
+
+    #[inline]
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        assert!(L < 4);
+        core::array::from_fn(|i| u64::from(a[i]) * u64::from(b[L as usize]))
+    }
+
+    #[inline]
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        assert!(L < 4);
+        core::array::from_fn(|i| u64::from(a[i + 2]) * u64::from(b[L as usize]))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{super::test_utils, EmulatedNeon};
+    use crate::Simd;
 
     #[test]
     fn common_contracts() {
         test_utils::common(EmulatedNeon);
         test_utils::basic_common(EmulatedNeon);
+    }
+
+    #[test]
+    fn widening_splits_low_and_high_lanes() {
+        let simd = EmulatedNeon;
+        let (a, b) = ([1, 2, 3, u32::MAX], [5, 6, 7, u32::MAX]);
+        assert_eq!(simd.u32_widen_mul_first(a, b), [5, 12]);
+        assert_eq!(
+            simd.u32_widen_mul_second(a, b),
+            [21, u64::from(u32::MAX).pow(2)]
+        );
+        assert_eq!(simd.u64_narrow_pair([1, 2 | 1 << 32], [3, 4]), [1, 2, 3, 4]);
     }
 
     #[test]
