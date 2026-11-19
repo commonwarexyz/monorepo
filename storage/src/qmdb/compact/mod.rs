@@ -57,7 +57,7 @@ pub struct Config<C, S: Strategy> {
     /// Strategy used to parallelize merkleization.
     pub strategy: S,
 
-    /// Configuration for the witness journal. Its codec config decodes the commit operations the
-    /// witnesses hold.
+    /// Configuration for the witness journal. Its `codec_config` must accept the commit metadata
+    /// callers supply so the database can decode the selected witness on reopen.
     pub witness: variable::Config<C>,
 }

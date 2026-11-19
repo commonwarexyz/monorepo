@@ -48,6 +48,16 @@
 //! reads ancestor operations through the weak parent links, so every unapplied ancestor must be
 //! held until its descendant is merkleized. See [`chain`] for the details.
 //!
+//! # Variable-size writes
+//!
+//! Callers must ensure that the journal's [`codec_config`] can decode the keys, values, and commit
+//! metadata they write to the operation log. For example, if byte values are limited to 4096 bytes,
+//! check the length of the final value before adding it to a batch. A commit can succeed with an
+//! out-of-bounds value. Reads, proofs, and recovery can then fail when they decode it.
+//! [Compact databases](compact) apply the same requirement to commit metadata in their witnesses.
+//!
+//! [`codec_config`]: crate::journal::contiguous::variable::Config#structfield.codec_config
+//!
 //! # Durability
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
