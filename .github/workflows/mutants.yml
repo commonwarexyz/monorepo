@@ -91,7 +91,7 @@ jobs:
         total=$(cargo mutants --list -p "$PACKAGE" | wc -l)
         shards=$(( (total + SAMPLE - 1) / SAMPLE ))
         status=0
-        just mutants -p "$PACKAGE" --shard "1/$shards" --sharding round-robin -j2 || status=$?
+        just mutants -p "$PACKAGE" --shard "0/$shards" --sharding round-robin -j2 || status=$?
         echo "$total" > mutants.out/total.txt
         # 2 reports missed mutants and 3 reports timeouts. Both are results, not job failures.
         case $status in 0|2|3) ;; *) exit "$status" ;; esac
