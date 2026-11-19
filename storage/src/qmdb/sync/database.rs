@@ -67,9 +67,7 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
     private_bounds,
     reason = "the Hooks supertrait is private so only the sync engine can call its methods"
 )]
-pub trait Database:
-    Hooks<Self::Family, Self::Context, Self::Config, Self::Journal, Self::Digest> + Sized + Send
-{
+pub trait Database: Hooks<Self> + Sized + Send {
     /// The Merkle family of the operations log.
     type Family: Family;
 
@@ -124,8 +122,7 @@ pub trait Database:
 
 /// The steps the sync engine takes to build a [`Database`].
 ///
-/// The type parameters are the database's [`Database::Family`], [`Database::Context`],
-/// [`Database::Config`], [`Database::Journal`] and [`Database::Digest`].
+/// `DB` is the database the steps build. [`Database`] requires `Hooks<Self>`.
 ///
 /// The engine calls [`Self::validate_target`] on the initial target and on every update it
 /// adopts. If the sync journal it opens holds no operation of the target's range, the engine
@@ -133,25 +130,23 @@ pub trait Database:
 /// calls [`Self::local_pinned_nodes`]. It fetches and verifies any remaining operations, builds
 /// the database with [`Self::from_sync_result`], and calls [`Self::persist_sync_result`] once the
 /// root of [`Database::target`] matches the requested root.
-pub(in crate::qmdb) trait Hooks<F: Family, E, Cfg, J, D: Digest>:
-    Sized + Send
-{
+pub(in crate::qmdb) trait Hooks<DB: Database>: Sized + Send {
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
-        context: E,
-        config: Cfg,
-        journal: J,
-        pinned_nodes: Option<Vec<D>>,
-        range: NonEmptyRange<Location<F>>,
+        context: DB::Context,
+        config: DB::Config,
+        journal: DB::Journal,
+        pinned_nodes: Option<Vec<DB::Digest>>,
+        range: NonEmptyRange<Location<DB::Family>>,
         apply_batch_size: NonZeroU64,
-    ) -> impl Future<Output = Result<Self, Error<F>>> + Send;
+    ) -> impl Future<Output = Result<Self, Error<DB::Family>>> + Send;
 
     /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
     ///
     /// The engine calls this only after the root of [`Database::target`] matches the requested
     /// target. Implementations that persist everything in [`Self::from_sync_result`] must
     /// explicitly return `Ok(self)`.
-    fn persist_sync_result(self) -> impl Future<Output = Result<Self, Error<F>>> + Send;
+    fn persist_sync_result(self) -> impl Future<Output = Result<Self, Error<DB::Family>>> + Send;
 
     /// Durably discard persisted state derived from the operations of the sync journal.
     ///
@@ -161,9 +156,9 @@ pub(in crate::qmdb) trait Hooks<F: Family, E, Cfg, J, D: Digest>:
     /// Implementations with no persisted state that would be read that way must explicitly
     /// return `Ok(())`.
     fn discard_local_state(
-        context: E,
-        config: &Cfg,
-    ) -> impl Future<Output = Result<(), Error<F>>> + Send;
+        context: DB::Context,
+        config: &DB::Config,
+    ) -> impl Future<Output = Result<(), Error<DB::Family>>> + Send;
 
     /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.
@@ -172,16 +167,18 @@ pub(in crate::qmdb) trait Hooks<F: Family, E, Cfg, J, D: Digest>:
     /// database instead of fetching them from peers. Returning `None` always falls back to
     /// fetching from peers.
     fn local_pinned_nodes(
-        context: E,
-        config: &Cfg,
-        target: &Target<F, D>,
-        journal: &J,
-    ) -> impl Future<Output = Result<Option<Vec<D>>, Error<F>>> + Send;
+        context: DB::Context,
+        config: &DB::Config,
+        target: &Target<DB::Family, DB::Digest>,
+        journal: &DB::Journal,
+    ) -> impl Future<Output = Result<Option<Vec<DB::Digest>>, Error<DB::Family>>> + Send;
 
     /// Reject a target this database cannot sync to. The engine checks the initial target and
     /// every adopted update, and a rejected target fails the sync, since a malformed target is a
     /// caller bug. The default accepts any target.
-    fn validate_target(_target: &Target<F, D>) -> Result<(), EngineError<F, D>> {
+    fn validate_target(
+        _target: &Target<DB::Family, DB::Digest>,
+    ) -> Result<(), EngineError<DB::Family, DB::Digest>> {
         Ok(())
     }
 }

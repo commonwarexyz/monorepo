@@ -60,9 +60,7 @@ where
     }
 }
 
-impl<F, E, V, C, H, S>
-    sync::Hooks<F, E, super::Config<<C as sync::Journal<F>>::Config, S>, C, H::Digest>
-    for Db<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> sync::Hooks<Self> for Db<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,

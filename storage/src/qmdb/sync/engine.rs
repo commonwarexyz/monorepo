@@ -900,7 +900,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl Hooks<MmrFamily, deterministic::Context, TestConfig, TestJournal, sha256::Digest> for TestDb {
+    impl Hooks<Self> for TestDb {
         async fn from_sync_result(
             _context: deterministic::Context,
             _config: TestConfig,

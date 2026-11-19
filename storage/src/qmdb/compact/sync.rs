@@ -51,8 +51,7 @@ where
     }
 }
 
-impl<F, E, O, H, S> sync::Hooks<F, E, Config<O::Cfg, S>, Memory<F, E, O>, H::Digest>
-    for Db<F, E, O, H, S>
+impl<F, E, O, H, S> sync::Hooks<Self> for Db<F, E, O, H, S>
 where
     F: Family,
     E: Context,

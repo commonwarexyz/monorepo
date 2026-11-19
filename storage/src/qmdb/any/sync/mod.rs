@@ -147,19 +147,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S>
-    sync::Hooks<
-        F,
-        E,
-        Config<
-            I::Translator,
-            <C as sync::Journal<F>>::Config,
-            S,
-            <I as SnapshotBuild<F>>::Concurrency,
-        >,
-        C,
-        H::Digest,
-    > for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> sync::Hooks<Self> for Db<F, E, C, I, H, U, N, S>
 where
     F: merkle::Family,
     E: Context + Spawner,

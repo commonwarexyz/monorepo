@@ -69,9 +69,7 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T, S>
-    sync::Hooks<F, E, immutable::Config<T, <C as sync::Journal<F>>::Config, S>, C, H::Digest>
-    for immutable::Db<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> sync::Hooks<Self> for immutable::Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,

@@ -42,7 +42,7 @@ use crate::{
         bitmap::Shared,
         current::{db, grafting},
         metrics::Metrics as AnyMetrics,
-        sync::{Database, DatabaseConfig as Config, Request, source},
+        sync::{Database, DatabaseConfig as Config, Hooks, Request, source},
     },
     translator::Translator,
 };
@@ -260,19 +260,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S>
-    crate::qmdb::sync::Hooks<
-        F,
-        E,
-        super::Config<
-            I::Translator,
-            <C as crate::qmdb::sync::Journal<F>>::Config,
-            S,
-            <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
-        >,
-        C,
-        H::Digest,
-    > for db::Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Hooks<Self> for db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
     E: Context + Spawner,
