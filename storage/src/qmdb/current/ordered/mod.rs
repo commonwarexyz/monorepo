@@ -3,8 +3,10 @@
 //! These variants maintain the lexicographic-next active key for each active key, enabling
 //! exclusion proofs via [ExclusionProof](proof::constant::ExclusionProof). This adds overhead
 //! compared to [super::unordered] variants. Their translator must implement
-//! [OrderedTranslator](crate::translator::OrderedTranslator). A [key](crate::qmdb::operation::Key)
-//! must sort in the same order as its `AsRef<[u8]>` bytes.
+//! [OrderedTranslator](crate::translator::OrderedTranslator).
+//!
+//! Span lookups use the lexicographic byte order defined by [`Key`](crate::qmdb::operation::Key),
+//! including when the queried key is absent.
 //!
 //! Variants:
 //! - [fixed]: Variant optimized for values of fixed size.
