@@ -2174,6 +2174,68 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_recipient_before_cancel_is_ignored_after_resend_to_another() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            // Peer 0 runs the engine, and peers 1 and 2 are raw peers that answer when the test
+            // decides.
+            let (mut oracle, schemes, peers, connections) =
+                setup_network_and_peers(&context, &[0, 1, 2]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+            let mut connections = connections.into_iter();
+            let connection = connections.next().unwrap();
+            let (mut raw1, mut raw_receiver1) = connections.next().unwrap();
+            let (mut raw2, mut raw_receiver2) = connections.next().unwrap();
+
+            // Peer 0 records what its monitor collects.
+            let scheme = schemes.into_iter().next().unwrap();
+            let (monitor, mut monitor_out) = MockMonitor::new();
+            let mut mailbox = setup_and_spawn_engine(
+                &context,
+                oracle.control(scheme.public_key()),
+                scheme,
+                connection,
+                monitor,
+                MockHandler::dummy(),
+            );
+
+            // Peer 0 sends a request to peer 1, and peer 1 receives it.
+            let request = Request { id: 1, data: 10 };
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[1].clone()), request.clone()),
+                Feedback::Ok
+            );
+            raw_receiver1.recv().await.unwrap();
+
+            // Peer 0 cancels the commitment and sends the request to peer 2 alone. Peer 2
+            // receives it, so the engine has handled the cancel and the second send.
+            assert_eq!(mailbox.cancel(request.commitment()), Feedback::Ok);
+            assert_eq!(
+                mailbox.send(Recipients::One(peers[2].clone()), request),
+                Feedback::Ok
+            );
+            raw_receiver2.recv().await.unwrap();
+
+            // Peer 1 answers late, and its response is ignored.
+            let response = Message::Response(Response { id: 1, result: 20 }).encode();
+            raw1.send(Recipients::One(peers[0].clone()), response.clone(), false);
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                engine_count(&context, "collect", Status::Dropped, &peers[0]),
+                1
+            );
+            assert!(monitor_out.try_recv().is_err());
+
+            // Peer 2 answers, and its response is collected.
+            raw2.send(Recipients::One(peers[0].clone()), response, false);
+            let collected = monitor_out.recv().await.unwrap();
+            assert_eq!(collected.handler, peers[2]);
+            assert_eq!(collected.count, 1);
+        });
+    }
+
+    #[test_traced]
     fn test_rate_limited_recipient_is_not_collected() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {

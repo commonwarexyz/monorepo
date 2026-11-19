@@ -454,17 +454,18 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-/// What the harness knows about one honest originator.
+/// What the harness knows about one honest originator. Period `k` of a commitment holds the sends
+/// enqueued after `k` cancels of that commitment.
 #[derive(Default)]
 struct Sent {
-    /// Every peer each commitment was ever addressed to.
-    addressed: HashMap<Digest, HashSet<PublicKey>>,
+    /// Peers each commitment was addressed to in each of its periods.
+    addressed: HashMap<Digest, Vec<HashSet<PublicKey>>>,
     /// Every request enqueued, paired with each peer it was addressed to.
     sent: HashSet<(PublicKey, FuzzRequest)>,
     /// Number of cancels enqueued for each commitment.
     cancels: HashMap<Digest, usize>,
-    /// Collections started for each commitment, and the handlers collected in the latest one.
-    collections: HashMap<Digest, (usize, HashSet<PublicKey>)>,
+    /// Periods the latest collection of each commitment may belong to, and the handlers collected.
+    collections: HashMap<Digest, (Vec<usize>, HashSet<PublicKey>)>,
     /// Commitments the engine must be collecting once it has handled every enqueued command.
     live: HashSet<Digest>,
     /// Number of sends enqueued.
@@ -503,43 +504,39 @@ impl Model {
         for peer in &addressed {
             originator.sent.insert((peer.clone(), request.clone()));
         }
-        originator
-            .addressed
-            .entry(commitment)
-            .or_default()
-            .extend(addressed);
+        let period = originator.cancels.get(&commitment).copied().unwrap_or(0);
+        let periods = originator.addressed.entry(commitment).or_default();
+        if periods.len() <= period {
+            periods.resize_with(period + 1, HashSet::new);
+        }
+        periods[period].extend(addressed);
     }
 
     /// Checks every observation recorded since the previous call.
     fn check(&mut self, log: &Log, peers: &[PublicKey], byzantine: &PublicKey) {
-        // A collected response comes from a peer its commitment was sent to, and never from the
-        // engine that cannot send responses. A collection collects each handler at most once with a
-        // count that grows by one per handler, and a new collection starts only after a cancel.
+        // A collected response never comes from the engine that cannot send responses, and a
+        // collection collects each handler at most once with a count that grows by one per handler.
+        //
+        // The engine handles commands in order and its mailbox drops only queued sends and repeated
+        // cancels. Every handler of a collection was therefore addressed in one period, and that
+        // period is later than the previous collection's.
         for (index, handler, response, count) in log.collected.lock().drain(..) {
             self.collected[index] += 1;
             let originator = &mut self.originators[index];
             let commitment = response.commitment();
-            let addressed = originator
+            let periods = originator
                 .addressed
                 .get(&commitment)
                 .expect("a collected commitment must have been sent");
-            assert!(
-                addressed.contains(&handler),
-                "a response must be collected from a peer its commitment was sent to"
-            );
             assert_ne!(
                 self.muted.as_ref(),
                 Some(&handler),
                 "an engine that cannot send responses must not be collected"
             );
-            let cancels = originator.cancels.get(&commitment).copied().unwrap_or(0);
-            let (started, responders) = originator.collections.entry(commitment).or_default();
+            let (candidates, responders) = originator.collections.entry(commitment).or_default();
             if count == 1 {
-                *started += 1;
-                assert!(
-                    *started <= cancels + 1,
-                    "a collection must restart only after a cancel"
-                );
+                let first = candidates.first().map_or(0, |period| period + 1);
+                *candidates = (first..periods.len()).collect();
                 responders.clear();
             }
             assert_eq!(
@@ -548,8 +545,13 @@ impl Model {
                 "count must grow by one with each handler collected"
             );
             assert!(
-                responders.insert(handler),
+                responders.insert(handler.clone()),
                 "a handler must be collected at most once per collection"
+            );
+            candidates.retain(|period| periods[*period].contains(&handler));
+            assert!(
+                !candidates.is_empty(),
+                "a collection's handlers must share a period later than the previous collection's"
             );
         }
 
