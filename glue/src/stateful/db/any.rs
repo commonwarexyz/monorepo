@@ -37,7 +37,7 @@ use std::{ops::Range, sync::Arc};
 /// Like any speculative batch, this handle reads the shared database only while the database is
 /// at a state of the batch's chain, and its reads return [`Error::StaleRead`] once the database
 /// is at any other state (see [`MerkleizedBatch`]'s "Batch validity" docs).
-pub struct AnyStaged<F, E, C, I, H, U, const N: usize, S>
+pub struct AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
     E: Context,
@@ -49,12 +49,12 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, S>,
-    db: Shared<Db<F, E, C, I, H, U, N, S>>,
+    db: Shared<Db<F, E, C, I, H, U, S>>,
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Unmerkleized<Db<F, E, C, I, H, U, N, S>>
+impl<F, E, C, I, H, U, S> Unmerkleized<Db<F, E, C, I, H, U, S>>
 where
-    Db<F, E, C, I, H, U, N, S>: Qmdb<Batch = UnmerkleizedBatch<F, H, U, S>>,
+    Db<F, E, C, I, H, U, S>: Qmdb<Batch = UnmerkleizedBatch<F, H, U, S>>,
     F: Family,
     E: Context,
     U: Update,
@@ -96,7 +96,7 @@ where
     pub async fn stage(
         self,
         keys: &[impl Borrow<U::Key> + Sync],
-    ) -> Result<(AnyStaged<F, E, C, I, H, U, N, S>, Vec<Option<U::Value>>), Error<F>> {
+    ) -> Result<(AnyStaged<F, E, C, I, H, U, S>, Vec<Option<U::Value>>), Error<F>> {
         let Self { batch, db } = self;
         let (staged, values) = {
             let guard = db.read().await;
@@ -112,7 +112,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> AnyStaged<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
     E: Context,
@@ -161,9 +161,9 @@ where
     }
 }
 
-impl<F, E, C, I, H, K, V, const N: usize, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, N, S>
+impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
 where
-    Db<F, E, C, I, H, unordered::Update<K, V>, N, S>:
+    Db<F, E, C, I, H, unordered::Update<K, V>, S>:
         Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, unordered::Update<K, V>, S>>,
     F: Family,
     E: Context,
@@ -189,7 +189,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-    ) -> Result<Merkleized<Db<F, E, C, I, H, unordered::Update<K, V>, N, S>>, Error<F>> {
+    ) -> Result<Merkleized<Db<F, E, C, I, H, unordered::Update<K, V>, S>>, Error<F>> {
         let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
@@ -199,9 +199,9 @@ where
     }
 }
 
-impl<F, E, C, I, H, K, V, const N: usize, S> AnyStaged<F, E, C, I, H, ordered::Update<K, V>, N, S>
+impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>
 where
-    Db<F, E, C, I, H, ordered::Update<K, V>, N, S>:
+    Db<F, E, C, I, H, ordered::Update<K, V>, S>:
         Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, ordered::Update<K, V>, S>>,
     F: Family,
     E: Context,
@@ -227,7 +227,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-    ) -> Result<Merkleized<Db<F, E, C, I, H, ordered::Update<K, V>, N, S>>, Error<F>> {
+    ) -> Result<Merkleized<Db<F, E, C, I, H, ordered::Update<K, V>, S>>, Error<F>> {
         let Self { staged, db } = self;
         let inner = {
             let guard = db.read().await;
@@ -237,9 +237,9 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Merkleized<Db<F, E, C, I, H, U, N, S>>
+impl<F, E, C, I, H, U, S> Merkleized<Db<F, E, C, I, H, U, S>>
 where
-    Db<F, E, C, I, H, U, N, S>: Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, U, S>>,
+    Db<F, E, C, I, H, U, S>: Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, U, S>>,
     F: Family,
     E: Context,
     U: Update,
@@ -267,8 +267,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, K, V, const N: usize, S> Qmdb
-    for Db<F, E, C, I, H, unordered::Update<K, V>, N, S>
+impl<F, E, C, I, H, K, V, S> Qmdb for Db<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     Self: sync::Database<Family = F, Context = E, Digest = H::Digest, Hasher = H, Config: Send>,
     F: Family,
@@ -305,7 +304,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, K, V, const N: usize, S> Qmdb for Db<F, E, C, I, H, ordered::Update<K, V>, N, S>
+impl<F, E, C, I, H, K, V, S> Qmdb for Db<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     Self: sync::Database<Family = F, Context = E, Digest = H::Digest, Hasher = H, Config: Send>,
     F: Family,

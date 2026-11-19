@@ -64,7 +64,7 @@ impl<
     H: Hasher,
     const N: usize,
     S: Strategy,
-> Db<F, E, C, I, H, Update<K, V>, N, S>
+> Db<F, E, C, I, H, Update<K, V>, S, N>
 where
     Operation<F, K, V>: Codec,
 {
@@ -444,7 +444,7 @@ mod test {
         mmb, mmr,
         qmdb::{
             any::{
-                self, BITMAP_CHUNK_BYTES,
+                self,
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current,
@@ -1927,7 +1927,6 @@ mod test {
         OrderedIndex<TwoCap, Location<mmr::Family>>,
         Sha256,
         fixed::Update<Digest, Digest>,
-        BITMAP_CHUNK_BYTES,
         Sequential,
     >;
 

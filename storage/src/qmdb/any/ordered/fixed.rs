@@ -19,16 +19,8 @@ pub type Operation<F, K, V> = ordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S> = super::Db<
-    F,
-    E,
-    Journal<E, Operation<F, K, V>>,
-    Index<T, Location<F>>,
-    H,
-    Update<K, V>,
-    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
-    S,
->;
+pub type Db<F, E, K, V, H, T, S> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>, S>;
 
 /// Configuration for a [Db].
 pub type Config<T, S> = any::Config<T, JournalConfig, S>;
@@ -67,7 +59,6 @@ pub mod partitioned {
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
 
@@ -142,7 +133,6 @@ pub(crate) mod test {
         Index<TwoCap, GenericLocation<F>>,
         Sha256,
         crate::qmdb::any::operation::update::Ordered<Digest, FixedEncoding<Digest>>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;
 
