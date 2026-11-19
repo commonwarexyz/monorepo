@@ -1697,7 +1697,7 @@ pub(super) mod tests {
         assert!(
             matches!(
                 boundary_err,
-                Error::Journal(crate::journal::Error::ItemPruned(_))
+                Error::NoRetainedCommit(cap) if cap == oldest_retained
             ),
             "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
         );
@@ -1711,7 +1711,7 @@ pub(super) mod tests {
             panic!("expected bounded initialization to fail");
         };
         assert!(
-            matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+            matches!(err, Error::NoRetainedCommit(cap) if cap == first_start),
             "unexpected bounded initialization error: {err:?}"
         );
     }

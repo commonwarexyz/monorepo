@@ -430,8 +430,7 @@ where
     /// the latest retained commit with at most `max_size` operations, while `None` selects the
     /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
     /// if the log or bitmap has pruned the commit's inactivity floor, and with
-    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
+    /// [crate::qmdb::Error::NoRetainedCommit] if no retained commit fits under the bound.
     pub async fn init(
         context: E,
         cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
@@ -459,8 +458,7 @@ where
     /// the latest retained commit with at most `max_size` operations, while `None` selects the
     /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
     /// if the log or bitmap has pruned the commit's inactivity floor, and with
-    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
+    /// [crate::qmdb::Error::NoRetainedCommit] if no retained commit fits under the bound.
     pub async fn init(
         context: E,
         cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
@@ -3813,7 +3811,7 @@ pub mod tests {
             assert!(
                 matches!(
                     boundary_err,
-                    Error::Journal(crate::journal::Error::ItemPruned(_))
+                    Error::NoRetainedCommit(cap) if cap == oldest_retained
                 ),
                 "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
             );
@@ -3824,7 +3822,6 @@ pub mod tests {
             )
             .await
             .unwrap();
-            let expected_pruned_loc = *first_start;
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
@@ -3837,8 +3834,7 @@ pub mod tests {
             assert!(
                 matches!(
                     err,
-                    Error::Journal(crate::journal::Error::ItemPruned(loc))
-                    if loc == expected_pruned_loc
+                    Error::NoRetainedCommit(cap) if cap == first_start
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
@@ -3986,8 +3982,7 @@ pub mod tests {
             assert!(
                 matches!(
                     err,
-                    Error::Journal(crate::journal::Error::ItemPruned(loc))
-                    if loc == *history[0].size
+                    Error::NoRetainedCommit(cap) if cap == history[0].size
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );

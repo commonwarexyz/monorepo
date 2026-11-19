@@ -237,7 +237,7 @@ where
     /// # Errors
     ///
     /// - [`Error::InvalidInitializationBound`] if `max_size` is zero.
-    /// - [`Error::HistoricalFloorPruned`] if no retained witness is at or below `max_size`.
+    /// - [`Error::NoRetainedCommit`] if no retained witness is at or below `max_size`.
     /// - [`Error::Journal`] if the journal or the selected witness's commit cannot be decoded.
     /// - [`Error::DataCorrupted`] if the selected witness cannot be rebuilt, or the journal holds
     ///   an interrupted compact-sync import (re-sync to recover).
@@ -279,7 +279,7 @@ where
                     }
                 }
                 if end == bounds.start {
-                    return Err(Error::HistoricalFloorPruned(cap));
+                    return Err(Error::NoRetainedCommit(cap));
                 }
             }
             // Decode and validate only the selected witness, before discarding newer history or
@@ -3351,7 +3351,7 @@ pub(crate) mod tests {
                             cap,
                         )
                         .await,
-                        Err(Error::HistoricalFloorPruned(found)) if found == cap
+                        Err(Error::NoRetainedCommit(found)) if found == cap
                     ));
                 }
                 let db = TestDb::<O>::init(
@@ -3454,7 +3454,7 @@ pub(crate) mod tests {
             // No retained witness fits under the cap, so selection fails.
             assert!(matches!(
                 open_bounded::<O>(context.child("failed"), witness.clone(), cap).await,
-                Err(Error::HistoricalFloorPruned(found)) if found == cap
+                Err(Error::NoRetainedCommit(found)) if found == cap
             ));
 
             // Selection fails before publication, and inspection anchored at the ceiling skips the
@@ -3704,7 +3704,7 @@ pub(crate) mod tests {
 
             assert!(matches!(
                 open_bounded::<O>(context.child("pruned"), witness_cfg, sizes[0]).await,
-                Err(Error::HistoricalFloorPruned(_))
+                Err(Error::NoRetainedCommit(cap)) if cap == sizes[0]
             ));
         });
     }

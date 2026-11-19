@@ -379,10 +379,12 @@ where
             cfg.log,
             max_size.map(|size| *size),
         )
-        .await?;
+        .await
+        .map_err(|err| crate::qmdb::selection_error(err, max_size))?;
         let size = pending
             .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
-            .await?;
+            .await
+            .map_err(|err| crate::qmdb::selection_error(err, max_size))?;
         let bounds = pending.bounds();
         let commit = if size == 0 {
             None
@@ -1084,7 +1086,16 @@ mod test {
             let db = db.prune(prune_loc).await.unwrap();
             let bounds = db.bounds();
             assert!(bounds.start > *target_floor && bounds.start < *target);
+            assert!(!db.log.read(*bounds.start).await.unwrap().is_commit());
             _ = db.sync().await.unwrap();
+
+            // One cap precedes the retained operations. The other includes just the first write.
+            for cap in [Location::new(1), bounds.start + 1] {
+                assert!(matches!(
+                    TestStore::init(context.child("no_commit"), cfg.clone(), Some(cap)).await,
+                    Err(Error::NoRetainedCommit(found)) if found == cap
+                ));
+            }
             assert!(matches!(
                 TestStore::init(context.child("cap"), cfg.clone(), Some(target)).await,
                 Err(Error::HistoricalFloorPruned(size)) if size == target

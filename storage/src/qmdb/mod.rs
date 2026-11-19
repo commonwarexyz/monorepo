@@ -59,7 +59,9 @@
 //! With `Some(max_size)`, `init` opens the latest retained commit with at most `max_size`
 //! operations, counting commit records and pruned operations. `None` opens the latest retained
 //! state. Zero is invalid, and a bound above the stored size does not grow the database.
-//! Initialization fails if pruning removed history needed by the selected commit.
+//! If pruning leaves no commit at or below the bound, initialization returns
+//! [`Error::NoRetainedCommit`]. Initialization also fails if pruning removed history needed
+//! to rebuild the selected commit.
 //!
 //! Initialization durably removes later history before returning successfully. The bound does not
 //! limit future appends. To require an exact checkpoint, also check the recovered root and range.
@@ -130,6 +132,14 @@ pub(crate) fn validate_initialization_bound<F: Family>(
         return Err(Error::InvalidInitializationBound);
     }
     Ok(())
+}
+
+/// Classify pruning while selecting a commit for a bounded open.
+fn selection_error<F: Family>(error: JournalError, max_size: Option<Location<F>>) -> Error<F> {
+    match (error, max_size) {
+        (JournalError::ItemPruned(_), Some(cap)) => Error::NoRetainedCommit(cap),
+        (error, _) => error.into(),
+    }
 }
 
 /// Validate a selected commit against its retained history and return its floor.
@@ -212,12 +222,19 @@ where
     S: commonware_parallel::Strategy,
 {
     validate_initialization_bound(max_size)?;
-    Ok(crate::journal::authenticated::Journal::prepare(
-        context,
-        merkle,
+    let (journal, end) = crate::journal::authenticated::Journal::<F, E, C, H, S>::select_prefix(
+        context.child("journal"),
         journal,
         max_size.map(|size| *size),
         |op: &C::Item| op.inactivity_floor().is_some(),
+    )
+    .await
+    .map_err(|err| selection_error(err, max_size))?;
+    Ok(crate::journal::authenticated::Journal::prepare_selected(
+        context,
+        merkle,
+        journal,
+        end,
         ROOT_BAGGING,
     )
     .await?)
@@ -353,6 +370,10 @@ pub enum Error<F: Family> {
     /// A QMDB initialization bound cannot exclude its initial commit.
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
+
+    /// No retained commit is at or below the requested initialization bound.
+    #[error("no retained commit at or below size: {0}")]
+    NoRetainedCommit(Location<F>),
 
     /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]

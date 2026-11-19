@@ -515,10 +515,11 @@ fn fuzz_family<F: Family, S: Strategy>(
                             reopened
                         }
                         Err(error @ (Error::InvalidInitializationBound
-                            | Error::Journal(commonware_storage::journal::Error::ItemPruned(_)))) => {
+                            | Error::NoRetainedCommit(_))) => {
                             match error {
                                 Error::InvalidInitializationBound => assert_eq!(cap, 0),
-                                Error::Journal(_) => {
+                                Error::NoRetainedCommit(bound) => {
+                                    assert_eq!(bound, cap);
                                     assert_ne!(cap, 0);
                                     assert!(selected.is_none_or(|(end, _)| end <= before_bounds.start));
                                 }

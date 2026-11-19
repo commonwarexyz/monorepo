@@ -6836,7 +6836,7 @@ pub(crate) mod test {
             assert!(
                 matches!(
                     boundary_err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                    crate::qmdb::Error::NoRetainedCommit(cap) if cap == oldest_retained
                 ),
                 "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
             );
@@ -6861,7 +6861,7 @@ pub(crate) mod test {
             assert!(
                 matches!(
                     err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                    crate::qmdb::Error::NoRetainedCommit(cap) if cap == first_start
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );

@@ -929,7 +929,7 @@ where
     }
 
     /// Select and validate component availability before deliberately discarding history.
-    pub(crate) async fn prepare(
+    async fn prepare(
         context: E,
         merkle_cfg: merkle::full::Config<S>,
         journal_cfg: C::Config,
@@ -937,8 +937,19 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
-        // Select the operation prefix before constraining Merkle recovery to the same end.
-        let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
+        let (journal, selected_end) =
+            Self::select_prefix(context.child("journal"), journal_cfg, max_size, predicate).await?;
+        Self::prepare_selected(context, merkle_cfg, journal, selected_end, bagging).await
+    }
+
+    /// Select the retained operation prefix before opening the Merkle structure.
+    pub(crate) async fn select_prefix(
+        context: E,
+        journal_cfg: C::Config,
+        max_size: Option<u64>,
+        predicate: fn(&C::Item) -> bool,
+    ) -> Result<(C::Recovery, u64), JournalError> {
+        let journal = C::recover(context, journal_cfg, max_size).await?;
         let bounds = journal.bounds();
 
         // A fully pruned empty journal has no retained item to match, but its append position
@@ -950,6 +961,19 @@ where
                 .last_matching(max_size.unwrap_or(u64::MAX), predicate)
                 .await?
         };
+
+        Ok((journal, selected_end))
+    }
+
+    /// Prepare Merkle recovery for the selected operation prefix.
+    pub(crate) async fn prepare_selected(
+        context: E,
+        merkle_cfg: merkle::full::Config<S>,
+        journal: C::Recovery,
+        selected_end: u64,
+        bagging: merkle::Bagging,
+    ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
+        let bounds = journal.bounds();
 
         // Recover Merkle at the selected operation end and require it to cover retained
         // operations. A selection that is empty at position zero leaves the Merkle structure
