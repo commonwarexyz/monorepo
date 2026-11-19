@@ -2000,7 +2000,7 @@ mod tests {
                             if floor != 0 {
                                 assert_ne!(output.inactivePeaks, 0);
                             }
-                            let mut expected = vec![u8::from(operation != "set")];
+                            let mut expected = vec![if operation == "set" { 0x03 } else { 0x00 }];
                             if operation == "set" {
                                 expected.extend_from_slice(key(location).as_ref());
                             } else {

@@ -88,7 +88,7 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
 
     /// @dev Each of the nine fixed append padding bytes contributes to the commitment.
     function test_FixedAppendPadding() public view {
-        bytes memory operation = abi.encodePacked(hex"01", bytes32(uint256(71)), bytes9(0));
+        bytes memory operation = abi.encodePacked(hex"04", bytes32(uint256(71)), bytes9(0));
         assertEq(operation.length, 42);
         KeylessCase memory c = smallCase(operation, true);
         rejectMutations(c);
@@ -110,7 +110,7 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
             bytes memory value = abi.encodePacked(varint(payload.length), payload);
             for (uint256 kind; kind < 2; ++kind) {
                 bytes memory operation =
-                    kind == 0 ? abi.encodePacked(hex"01", value) : abi.encodePacked(hex"0001", value, hex"01");
+                    kind == 0 ? abi.encodePacked(hex"04", value) : abi.encodePacked(hex"0001", value, hex"01");
                 KeylessCase memory c = smallCase(operation, true);
                 rejectMutations(c);
                 for (uint256 j; j < varint(payload.length).length; ++j) {
