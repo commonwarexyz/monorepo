@@ -3,8 +3,8 @@
 use super::mocks::{
     application::Application,
     harness::{
-        self, BLOCKS_PER_EPOCH, CodingHarness, NAMESPACE, NUM_VALIDATORS, QUORUM, S,
-        StandardHarness, TestHarness, V, ValidatorHandle, ValidatorSetup,
+        self, BLOCKS_PER_EPOCH, CodingHarness, NAMESPACE, NUM_VALIDATORS, QUORUM, StandardHarness,
+        TestHarness, V, ValidatorHandle, ValidatorSetup,
     },
 };
 use crate::{
@@ -58,7 +58,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
 
         let validator = participants[0].clone();
         let provider = ConstantProvider::new(schemes[0].clone());
-        let application = Application::<H::ApplicationBlock, S, H::Commitment>::manual_ack();
+        let application = Application::<H::ApplicationBlock>::manual_ack();
         let setup = H::setup_validator_with(
             context.child("validator"),
             &mut oracle,

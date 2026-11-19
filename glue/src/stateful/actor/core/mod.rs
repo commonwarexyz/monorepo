@@ -176,10 +176,7 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(
-        mut context: E,
-        config: Config<E, A, V, R, T>,
-    ) -> (Self, Mailbox<E, A, V::Commitment>) {
+    pub fn new(mut context: E, config: Config<E, A, V, R, T>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -304,11 +301,12 @@ mod tests {
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb, block_update, digested},
+            mocks::{TestApp, TestBlock, TestDb, digested},
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Handoff, Reporter as _, marshal::ancestry,
+        Application as _, CertifiableBlock as _, Handoff, Reporter as _,
+        marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
     use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
@@ -619,7 +617,7 @@ mod tests {
 
             // Queue a finalization behind the verifications, then cancel every caller.
             let (acknowledgement, mut acknowledgement_waiter) = Exact::handle();
-            let _ = mailbox.report(block_update(digested(finalized), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
 
             drop(first);
             drop(second);

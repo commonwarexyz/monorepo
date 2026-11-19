@@ -11,8 +11,8 @@
 //!   the floor block from marshal. A later startup deletes the record once marshal's recovered
 //!   epoch is past the synced epoch.
 //! - The checkpoint partition holds a checkpoint for each epoch the orchestrator enters from its
-//!   boundary block. The orchestrator records the block marshal delivers at each live boundary
-//!   before it acknowledges the final block. At startup, it records the boundary block it reads
+//!   boundary block. The orchestrator reads the boundary block and its available finalization from marshal
+//!   and records them before acknowledging the final block. At startup, it records the block it reads
 //!   from marshal for an epoch without a checkpoint. Recording a checkpoint drops those of epochs
 //!   before the one recovered from marshal's processed height.
 //!

@@ -13,15 +13,14 @@ use commonware_consensus::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
-    simplex::scheme::Scheme,
     types::Height,
 };
 use commonware_cryptography::{
-    Digest, Digested, Digestible as _, Signer, bls12381::primitives::variant::Variant,
+    Digested, Digestible as _, Signer, bls12381::primitives::variant::Variant,
 };
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
-use std::{collections::VecDeque, marker::PhantomData};
+use std::collections::VecDeque;
 use tracing::{Span, debug, error, info_span};
 
 /// Response to [`Mailbox::epoch_info`].
@@ -192,34 +191,26 @@ where
 ///
 /// [`Actor`]: super::Actor
 #[derive(Clone)]
-pub struct Mailbox<B, V, C, S, D, A = Exact>
+pub struct Mailbox<B, V, C, A = Exact>
 where
     B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
     sender: ActorSender<Message<B, V, C, A>>,
-    _scheme: PhantomData<(S, D)>,
 }
 
-impl<B, V, C, S, D, A> Mailbox<B, V, C, S, D, A>
+impl<B, V, C, A> Mailbox<B, V, C, A>
 where
     B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
     /// Creates a mailbox that sends to the actor behind `sender`.
     pub const fn new(sender: ActorSender<Message<B, V, C, A>>) -> Self {
-        Self {
-            sender,
-            _scheme: PhantomData,
-        }
+        Self { sender }
     }
 
     /// Requests this node's dealer log for the block being proposed at `height`.
@@ -296,19 +287,17 @@ where
     }
 }
 
-impl<B, V, C, S, D, A> Reporter for Mailbox<B, V, C, S, D, A>
+impl<B, V, C, A> Reporter for Mailbox<B, V, C, A>
 where
     B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
-    type Activity = Update<B, S, D, A>;
+    type Activity = Update<B, A>;
 
     fn report(&mut self, update: Self::Activity) -> Feedback {
-        let Update::Block(block, _, ack_tx) = update else {
+        let Update::Block(block, ack_tx) = update else {
             return Feedback::Ok;
         };
         let span = info_span!(
@@ -370,14 +359,7 @@ mod tests {
             let (sender, receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             drop(receiver);
 
-            let mut mailbox = Mailbox::<
-                TestBlock,
-                TestBlsVariant,
-                PrivateKey,
-                mocks::TestScheme,
-                mocks::TestDigest,
-                Exact,
-            >::new(sender);
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
 
             assert!(mailbox.next_log(Height::new(1)).await.is_none());
         });
@@ -388,14 +370,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<
-                TestBlock,
-                TestBlsVariant,
-                PrivateKey,
-                mocks::TestScheme,
-                mocks::TestDigest,
-                Exact,
-            >::new(sender);
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
             let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
             let parent = Digested::precomputed(parent.clone(), parent.digest());
             let (release, gate) = oneshot::channel();
@@ -438,14 +413,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<
-                TestBlock,
-                TestBlsVariant,
-                PrivateKey,
-                mocks::TestScheme,
-                mocks::TestDigest,
-                Exact,
-            >::new(sender);
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
             let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
             let parent = Digested::precomputed(parent.clone(), parent.digest());
             let (release, gate) = oneshot::channel();

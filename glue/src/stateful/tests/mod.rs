@@ -4,7 +4,7 @@ use self::{
     common::{
         EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config, stable_leaders,
     },
-    mocks::{TestScheme, block_update, digested},
+    mocks::digested,
     multi_db_app::{
         App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,
         qmdb_config as multi_qmdb_config,
@@ -1018,10 +1018,10 @@ impl AttachableResolver<QmdbB<deterministic::Context>> for NoopCompactQmdbResolv
 struct NoopMarshalApplication;
 
 impl Reporter for NoopMarshalApplication {
-    type Activity = marshal::Update<Block, TestScheme, sha256::Digest>;
+    type Activity = marshal::Update<Block>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let marshal::Update::Block(_, _, acknowledgement) = activity {
+        if let marshal::Update::Block(_, acknowledgement) = activity {
             acknowledgement.acknowledge();
         }
         Feedback::Ok
@@ -1032,10 +1032,10 @@ impl Reporter for NoopMarshalApplication {
 struct NoopMultiMarshalApplication;
 
 impl Reporter for NoopMultiMarshalApplication {
-    type Activity = marshal::Update<MultiBlock, TestScheme, sha256::Digest>;
+    type Activity = marshal::Update<MultiBlock>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let marshal::Update::Block(_, _, acknowledgement) = activity {
+        if let marshal::Update::Block(_, acknowledgement) = activity {
             acknowledgement.acknowledge();
         }
         Feedback::Ok
@@ -1048,10 +1048,10 @@ impl Reporter for NoopMultiMarshalApplication {
 struct DispatchedMarshalApplication(mpsc::UnboundedSender<Height>);
 
 impl Reporter for DispatchedMarshalApplication {
-    type Activity = marshal::Update<Block, TestScheme, sha256::Digest>;
+    type Activity = marshal::Update<Block>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let marshal::Update::Block(block, _, acknowledgement) = activity {
+        if let marshal::Update::Block(block, acknowledgement) = activity {
             let _ = self.0.send(block.inner().height);
             acknowledgement.acknowledge();
         }
@@ -1566,7 +1566,10 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
         let mut finalizations = Vec::with_capacity(3);
         for block in &blocks[..3] {
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(block_update(digested(block.clone()), acknowledgement));
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
             finalizations.push(waiter);
         }
 
@@ -1749,7 +1752,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         let mut waiters = Vec::with_capacity(BLOCKS as usize);
         for block in &blocks {
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = stateful_mailbox.report(block_update(
+            let _ = stateful_mailbox.report(marshal::Update::Block(
                 digested(block.clone()),
                 acknowledgement,
             ));
@@ -1958,7 +1961,10 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         let mut reporter = stateful_mailbox;
         let mut finalizations = Vec::with_capacity(3);
         let (acknowledgement, waiter) = Exact::handle();
-        let _ = reporter.report(block_update(digested(blocks[0].clone()), acknowledgement));
+        let _ = reporter.report(marshal::Update::Block(
+            digested(blocks[0].clone()),
+            acknowledgement,
+        ));
         finalizations.push(waiter);
         finalize_started
             .await
@@ -1973,7 +1979,10 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         // releasing it once every finalization is durable proves none of them stopped it.
         for block in &blocks[1..3] {
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(block_update(digested(block.clone()), acknowledgement));
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
             finalizations.push(waiter);
         }
         finalize_release
@@ -1998,7 +2007,10 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         let mut descendant_finalizations = Vec::new();
         for block in &blocks[3..] {
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(block_update(digested(block.clone()), acknowledgement));
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
             descendant_finalizations.push(waiter);
         }
         for acknowledgement in futures::future::join_all(descendant_finalizations).await {
@@ -2178,7 +2190,10 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         let mut finalizations = Vec::with_capacity(3);
         for block in &blocks[..3] {
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(block_update(digested(block.clone()), acknowledgement));
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
             finalizations.push(waiter);
         }
 
@@ -2233,7 +2248,10 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         let mut descendant_finalizations = Vec::with_capacity(3);
         for block in &blocks[3..] {
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(block_update(digested(block.clone()), acknowledgement));
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
             descendant_finalizations.push(waiter);
         }
         for acknowledgement in futures::future::join_all(descendant_finalizations).await {
@@ -2391,7 +2409,10 @@ fn pruning_joins_verification_on_real_qmdbs() {
         let mut reporter = stateful_mailbox;
         for block in &blocks[..3] {
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = reporter.report(block_update(digested(block.clone()), acknowledgement));
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
             waiter
                 .await
                 .expect("priming finalization must become durable");
@@ -2425,7 +2446,10 @@ fn pruning_joins_verification_on_real_qmdbs() {
         );
 
         let (acknowledgement, finalized) = Exact::handle();
-        let _ = reporter.report(block_update(digested(blocks[3].clone()), acknowledgement));
+        let _ = reporter.report(marshal::Update::Block(
+            digested(blocks[3].clone()),
+            acknowledgement,
+        ));
         finalize_started
             .await
             .expect("block 4 finalization should reach the application gate");

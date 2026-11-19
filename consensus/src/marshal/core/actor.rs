@@ -15,7 +15,7 @@ use super::{
 use crate::{
     Block, Epochable, Heightable, Reporter,
     marshal::{
-        Config, Finality, Identifier as BlockID, Start, Update,
+        Config, Identifier as BlockID, Start, Update,
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
     },
@@ -62,20 +62,6 @@ use tracing::{Instrument as _, Span, debug, info_span, warn};
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
 type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
-
-/// The update marshal reports to its application.
-type ApplicationUpdate<V, P, A> = Update<
-    <V as Variant>::ApplicationBlock,
-    <P as Provider>::Scheme,
-    <V as Variant>::Commitment,
-    A,
->;
-
-/// A finalized block awaiting dispatch and the finalization stored with it.
-type StagedBlock<V, S> = (
-    <V as Variant>::Block,
-    Finalization<S, <V as Variant>::Commitment>,
-);
 
 // A resolver delivery plus the peer-validity response channel. Local
 // annotations on the delivery decide how accepted data is used.
@@ -157,7 +143,7 @@ where
     dispatch_gate: DispatchGate,
     // Finalized blocks awaiting dispatch, capped at twice the pending-ack
     // capacity to absorb finalization bursts while earlier blocks are processed
-    staged: Staged<StagedBlock<V, P::Scheme>>,
+    staged: Staged<V::Block>,
 
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
@@ -361,7 +347,7 @@ where
     /// Start the actor.
     pub fn start<R, Buf>(
         self,
-        application: impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
@@ -380,7 +366,7 @@ where
     /// Start the actor without a broadcast buffer.
     pub fn start_unbuffered<R>(
         self,
-        application: impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: (handler::Receiver<V::Commitment>, R),
     ) -> Handle<()>
     where
@@ -400,7 +386,7 @@ where
     /// Run the application actor.
     async fn run<R, Buf>(
         mut self: Box<Self>,
-        mut application: impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        mut application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         mut buffer: Buf,
         (mut resolver_rx, mut resolver): (handler::Receiver<V::Commitment>, R),
     ) where
@@ -581,7 +567,7 @@ where
     async fn handle_ack<Buf, R>(
         mut self: Box<Self>,
         result: <A::Waiter as Future>::Output,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: &mut Buf,
         resolver: &mut R,
     ) -> Result<Box<Self>, (Height, A::Error)>
@@ -633,7 +619,7 @@ where
         waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         syncs: &mut Pool<'_, PooledSync>,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -856,10 +842,10 @@ where
                         .expect("round floor sync must succeed");
                     let stored;
                     (self, stored) = self
-                        .store_finalization(height, &block, Some(finalization.clone()), application)
+                        .store_finalization(height, &block, Some(finalization), application)
                         .await;
                     if stored {
-                        self.staged.insert(height, (block, finalization));
+                        self.staged.insert(height, block);
 
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
@@ -1017,7 +1003,7 @@ where
         resolver: &mut R,
         syncs: &mut Pool<'_, PooledSync>,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -1263,7 +1249,7 @@ where
         resolver: &mut R,
         buffer: &mut Buf,
         waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -1344,7 +1330,7 @@ where
         block: V::Block,
         ack: oneshot::Sender<Handle<()>>,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         (self, _) = self
@@ -1374,7 +1360,7 @@ where
         mut self: Box<Self>,
         block: V::Block,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(&block);
@@ -1395,7 +1381,7 @@ where
         finalization: Finalization<P::Scheme, V::Commitment>,
         block: V::Block,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         // Floor anchors can bypass the local proposal-verification path. Check
@@ -1502,7 +1488,7 @@ where
         message: ResolverDelivery<V>,
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         let ResolverDelivery {
@@ -1710,7 +1696,7 @@ where
         mut self: Box<Self>,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         delivers.retain(|item| !item.response_closed());
@@ -1937,7 +1923,7 @@ where
     /// ```
     async fn try_dispatch_blocks(
         mut self: Box<Self>,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self> {
         // Dispatch resumes after the floor anchor is durably stored.
         if self.floor.blocks_progress() {
@@ -1956,29 +1942,19 @@ where
                 return self;
             }
 
-            // Prefer the staged block, which already carries its finalization.
-            let (block, finalization) = match self.staged.remove(next_height) {
-                Some((block, finalization)) => (block, Some(finalization)),
-                None => {
-                    let Some(stored) = self.get_finalized_block(next_height).await else {
-                        return self;
-                    };
-                    let block = V::restore_across(stored, &self.strategy).await;
-                    let finalization = match self.get_finalization_by_height(next_height).await {
-                        Some(finalization) => Some(finalization),
-                        // A crash can interrupt the height archive syncs after the
-                        // certificate is durable in the digest cache.
-                        None => self.cache.get_finalization_by_digest(block.digest()).await,
-                    };
-                    (block, finalization)
-                }
+            // Prefer the staged block and fall back to the archive
+            let block = match self.staged.remove(next_height) {
+                Some(block) => block,
+                None => match self.get_finalized_block(next_height).await {
+                    Some(stored) => V::restore_across(stored, &self.strategy).await,
+                    None => return self,
+                },
             };
             let height = block.height();
             assert_eq!(height, next_height, "finalized block height mismatch");
 
             let (ack, ack_waiter) = A::handle();
-            let finality = Finality::from_block::<V>(&block, finalization);
-            application.report(Update::Block(V::into_shared(block), finality, ack));
+            application.report(Update::Block(V::into_shared(block), ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
                 receiver: ack_waiter,
@@ -2181,7 +2157,7 @@ where
         height: Height,
         block: &V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
         let digest = block.digest();
         if height <= self.floor.processed_height() {
@@ -2269,7 +2245,7 @@ where
         round: Round,
         height: Height,
         digest: <V::Block as Digestible>::Digest,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) {
         if height <= self.tip {
             return;
@@ -2393,7 +2369,7 @@ where
         mut self: Box<Self>,
         buffer: &mut Buf,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
         // Gap repair needs a known processed floor. A floor transition may
         // jump the lower bound once its anchor block arrives.
@@ -2638,7 +2614,7 @@ where
         mut self: Box<Self>,
         height: Height,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         if let Some(finalization) = self.get_finalization_by_height(height).await {
@@ -2658,7 +2634,7 @@ where
         self: Box<Self>,
         anchor: Height,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         let Some(epoch) = closed_epoch(&self.epocher, anchor) else {
@@ -2679,7 +2655,7 @@ where
         height: Height,
         round: Round,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         if height > self.floor.processed_height() {
@@ -2709,7 +2685,7 @@ where
         mut self: Box<Self>,
         cutoff: Cutoff,
         buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = ApplicationUpdate<V, P, A>>,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         if cutoff <= self.floor.cutoff() {

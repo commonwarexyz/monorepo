@@ -324,10 +324,10 @@ mod test {
     struct NoopReporter;
 
     impl Reporter for NoopReporter {
-        type Activity = Update<Block, Scheme, Sha256Digest>;
+        type Activity = Update<Block>;
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
-            if let Update::Block(_, _, ack) = activity {
+            if let Update::Block(_, ack) = activity {
                 ack.acknowledge();
             }
             Feedback::Ok

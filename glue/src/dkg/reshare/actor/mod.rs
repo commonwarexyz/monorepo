@@ -57,10 +57,6 @@ use std::{
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
 
-/// The reshare actor's [`Mailbox`], installed as a marshal reporter.
-type MarshalReporter<B, V, C, S, MV, A> =
-    Mailbox<B, V, C, S, <MV as MarshalVariant>::Commitment, A>;
-
 /// Height and digest of the latest finalized block the actor has applied.
 #[derive(Clone, Copy)]
 struct FinalizedTip<D> {
@@ -252,7 +248,7 @@ where
     pub fn new(
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
-    ) -> (Self, MarshalReporter<B, V, C, S, MV, A>) {
+    ) -> (Self, Mailbox<B, V, C, A>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         let metrics = ReshareMetrics::new(&context);
@@ -291,7 +287,7 @@ where
         context: E,
         config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
-    ) -> (Self, MarshalReporter<B, V, C, S, MV, A>) {
+    ) -> (Self, Mailbox<B, V, C, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
         actor.mode = Mode::Dkg {
             participants: dkg.participants,

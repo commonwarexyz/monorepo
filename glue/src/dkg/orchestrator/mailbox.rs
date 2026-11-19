@@ -7,40 +7,31 @@ use commonware_actor::{
     Feedback,
     mailbox::{Policy, Sender},
 };
-use commonware_consensus::{
-    Reporter,
-    marshal::{Finality, Update},
-    simplex::scheme::Scheme,
-};
-use commonware_cryptography::{Digest, Digested};
+use commonware_consensus::{Reporter, marshal::Update};
+use commonware_cryptography::Digested;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 use std::collections::VecDeque;
 
 /// Messages that can be sent to the orchestrator.
-pub enum Message<B, S, D, A = Exact>
+pub enum Message<B, A = Exact>
 where
     B: ReshareBlock,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
-    /// A block finalized by marshal and its [`Finality`].
+    /// A block finalized by marshal.
     ///
     /// The orchestrator acknowledges the final block of the active epoch only after
     /// entering the next epoch, and every earlier block immediately. It panics on
     /// a later block, which means marshal skipped the final block.
     Finalized {
         block: Digested<B>,
-        finality: Finality<S, D>,
         acknowledgement: A,
     },
 }
 
-impl<B, S, D, A> Policy for Message<B, S, D, A>
+impl<B, A> Policy for Message<B, A>
 where
     B: ReshareBlock,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
     type Overflow = VecDeque<Self>;
@@ -54,45 +45,38 @@ where
 /// Marshal reporter that forwards finalized blocks to the orchestrator (other
 /// updates are ignored).
 #[derive(Debug, Clone)]
-pub struct Mailbox<B, S, D, A = Exact>
+pub struct Mailbox<B, A = Exact>
 where
     B: ReshareBlock,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
-    sender: Sender<Message<B, S, D, A>>,
+    sender: Sender<Message<B, A>>,
 }
 
-impl<B, S, D, A> Mailbox<B, S, D, A>
+impl<B, A> Mailbox<B, A>
 where
     B: ReshareBlock,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
     /// Creates a mailbox that sends to `sender`.
-    pub const fn new(sender: Sender<Message<B, S, D, A>>) -> Self {
+    pub const fn new(sender: Sender<Message<B, A>>) -> Self {
         Self { sender }
     }
 }
 
-impl<B, S, D, A> Reporter for Mailbox<B, S, D, A>
+impl<B, A> Reporter for Mailbox<B, A>
 where
     B: ReshareBlock,
-    S: Scheme<D>,
-    D: Digest,
     A: Acknowledgement,
 {
-    type Activity = Update<B, S, D, A>;
+    type Activity = Update<B, A>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let Update::Block(block, finality, acknowledgement) = activity else {
+        let Update::Block(block, acknowledgement) = activity else {
             return Feedback::Ok;
         };
         self.sender.enqueue(Message::Finalized {
             block,
-            finality,
             acknowledgement,
         })
     }
