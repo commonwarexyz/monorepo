@@ -537,7 +537,8 @@ where
             error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
-        let commitment = MV::commitment(&boundary);
+        let finality = Finality::from_block::<MV>(&boundary, finalization);
+        let commitment = finality.commitment;
         let block = MV::into_shared(boundary);
         let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block {height} missing epoch info");
@@ -549,10 +550,6 @@ where
             );
         }
 
-        let finality = Finality {
-            commitment,
-            finalization,
-        };
         self.record_checkpoint(epocher, epoch, block, finality)
             .await;
         Some(ResolvedStart {

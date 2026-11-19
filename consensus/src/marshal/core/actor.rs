@@ -1562,7 +1562,7 @@ where
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the block belongs in the finalized chain.
-                let finalization = self.cache.get_finalization_for(digest).await;
+                let finalization = self.cache.get_finalization_for(commitment).await;
                 if let Some(finalization) = &finalization {
                     self = self
                         .witness_round(height, finalization.round(), buffer, application, resolver)
@@ -1861,7 +1861,7 @@ where
                     // should finalize it. This could finalize the block faster when
                     // a notarization then a finalization are received via consensus
                     // and we resolve the notarization request before the block request.
-                    if let Some(finalization) = self.cache.get_finalization_for(digest).await {
+                    if let Some(finalization) = self.cache.get_finalization_for(commitment).await {
                         self = self
                             .witness_round(
                                 height,
@@ -1877,8 +1877,6 @@ where
                             .await
                             .expect("round floor sync must succeed");
 
-                        // SAFETY: `digest` identifies a unique `commitment`, so this
-                        // cached finalization payload must match `V::commitment(&block)`.
                         (self, _) = self
                             .store_finalization(height, &block, Some(finalization), application)
                             .await;
@@ -1965,7 +1963,7 @@ where
                         Some(finalization) => Some(finalization),
                         // A crash can interrupt the height archive syncs after the
                         // certificate is durable in the digest cache.
-                        None => self.cache.get_finalization_for(block.digest()).await,
+                        None => self.cache.get_finalization_by_digest(block.digest()).await,
                     };
                     (block, finalization)
                 }
@@ -1974,10 +1972,7 @@ where
             assert_eq!(height, next_height, "finalized block height mismatch");
 
             let (ack, ack_waiter) = A::handle();
-            let finality = Finality {
-                commitment: V::commitment(&block),
-                finalization,
-            };
+            let finality = Finality::from_block::<V>(&block, finalization);
             application.report(Update::Block(V::into_shared(block), finality, ack));
             self.pending_acks.enqueue(PendingAck {
                 height,
@@ -2430,11 +2425,8 @@ where
             let Some(cursor) = self.get_finalized_block(gap_end).await else {
                 panic!("gapped block missing that should exist: {gap_end}");
             };
-            let (mut height, mut parent_digest, mut parent_commitment) = (
-                cursor.height(),
-                cursor.parent(),
-                V::stored_parent_commitment(&cursor),
-            );
+            let mut height = cursor.height();
+            let mut parent_commitment = V::stored_parent_commitment(&cursor);
 
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
@@ -2447,15 +2439,15 @@ where
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
                 {
-                    let finalization = self.cache.get_finalization_for(parent_digest).await;
-                    let next = (block.height(), block.parent(), V::parent_commitment(&block));
+                    let finalization = self.cache.get_finalization_for(parent_commitment).await;
+                    let next = (block.height(), V::parent_commitment(&block));
                     let stored;
                     (self, stored) = self
                         .store_finalization(next.0, &block, finalization, application)
                         .await;
                     wrote |= stored;
                     debug!(height = %next.0, "repaired block");
-                    (height, parent_digest, parent_commitment) = next;
+                    (height, parent_commitment) = next;
                 } else {
                     // Request the next missing commitment.
                     //
@@ -2606,8 +2598,9 @@ where
             return None;
         };
         let block = V::restore_across(block, strategy).await;
-        assert!(
-            V::commitment(&block) == finalization.proposal.payload,
+        assert_eq!(
+            block.digest(),
+            V::commitment_to_inner(finalization.proposal.payload),
             "successor block does not match stored finalization"
         );
         Some((successor, finalization.round()))

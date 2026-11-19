@@ -189,7 +189,7 @@ use crate::{
     simplex::{scheme::Scheme, types::Finalization},
     types::{Height, Round},
 };
-use commonware_cryptography::{Digest, Digested};
+use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_storage::archive;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 
@@ -261,6 +261,37 @@ pub struct Finality<S: Scheme<D>, D: Digest> {
     pub commitment: D,
     /// The finalization certifying `commitment`, if available to marshal at delivery.
     pub finalization: Option<Finalization<S, D>>,
+}
+
+impl<S: Scheme<D>, D: Digest> Finality<S, D> {
+    /// Returns the finality of an archived or staged block. A verified certificate determines
+    /// the consensus commitment even if storage holds another encoding of the application block.
+    /// Without a certificate, the finalized chain authenticates the block's own commitment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the certificate commits to a different application block.
+    pub fn from_block<V: core::Variant<Commitment = D>>(
+        block: &V::Block,
+        finalization: Option<Finalization<S, D>>,
+    ) -> Self {
+        let commitment = finalization.as_ref().map_or_else(
+            || V::commitment(block),
+            |proof| {
+                let payload = proof.proposal.payload;
+                assert_eq!(
+                    block.digest(),
+                    V::commitment_to_inner(payload),
+                    "certificate does not commit to block"
+                );
+                payload
+            },
+        );
+        Self {
+            commitment,
+            finalization,
+        }
+    }
 }
 
 /// An update reported to the application, either a new finalized tip or a finalized block.

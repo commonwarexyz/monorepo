@@ -72,9 +72,8 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Extracts the block digest from a consensus commitment.
     ///
-    /// For blocks/certificates accepted by marshal in this variant instance, the digest
-    /// must uniquely determine the commitment. In other words, there should not be two accepted
-    /// commitments with the same inner digest.
+    /// Different encodings of an application block may share its digest. Match the full
+    /// commitment when checking which encoding a certificate authenticates.
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest;
 
     /// Returns the parent commitment referenced by `block`.
