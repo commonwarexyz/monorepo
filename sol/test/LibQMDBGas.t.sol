@@ -119,7 +119,7 @@ abstract contract LibQMDBGasTest is QMDBTest {
     }
 
     function test_GasCurrent() public {
-        bytes memory operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), bytes32(uint256(20)));
+        bytes memory operation = abi.encodePacked(bytes1(0x01), bytes32(uint256(10)), bytes32(uint256(20)));
         QMDBCase memory single = currentBuilder.build(383, 1, operation, true, 32);
         bool valid = this.verifyCurrent(single);
         vm.snapshotGasLastFrame(_currentGroup(), "active-singleton-383-grafted-opaque-65-byte-operation");
@@ -139,7 +139,7 @@ abstract contract LibQMDBGasTest is QMDBTest {
 
         bytes memory key = abi.encodePacked(bytes32(uint256(15)));
         LibQMDBCurrent.Schema memory schema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, 32);
-        operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), bytes32(uint256(1)), bytes32(uint256(20)));
+        operation = abi.encodePacked(bytes1(0x01), bytes32(uint256(10)), bytes32(uint256(1)), bytes32(uint256(20)));
         single = currentBuilder.build(383, 1, operation, true, 32);
         valid = this.verifyCurrentExclusion(single, key, schema);
         vm.snapshotGasLastFrame(_currentGroup(), "fixed-k32-v32-exclusion-383-grafted-interval-97-byte-operation");
@@ -147,7 +147,7 @@ abstract contract LibQMDBGasTest is QMDBTest {
 
         schema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Variable, type(uint256).max, type(uint256).max);
         operation = abi.encodePacked(
-            bytes1(0xd2),
+            bytes1(0x01),
             bytes1(0x20),
             bytes32(uint256(10)),
             bytes1(0x20),
@@ -164,13 +164,13 @@ abstract contract LibQMDBGasTest is QMDBTest {
 
         key = abi.encodePacked(bytes32(uint256(7)));
         schema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, 0);
-        single = currentBuilder.build(1, 0, abi.encodePacked(hex"d300", uint64(0), new bytes(55)), true, 32);
+        single = currentBuilder.build(1, 0, abi.encodePacked(hex"0000", uint64(0), new bytes(55)), true, 32);
         valid = this.verifyCurrentExclusion(single, key, schema);
         vm.snapshotGasLastFrame(_currentGroup(), "fixed-k32-v0-exclusion-empty-database-commit-65-byte-operation");
         assertTrue(valid);
 
         schema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Variable, type(uint256).max, type(uint256).max);
-        single = currentBuilder.build(1, 0, hex"d30000", true, 32);
+        single = currentBuilder.build(1, 0, hex"000000", true, 32);
         valid = this.verifyCurrentExclusion(single, key, schema);
         vm.snapshotGasLastFrame(
             _currentGroup(), "variable-vector-k32-v0-exclusion-empty-database-commit-3-byte-operation"

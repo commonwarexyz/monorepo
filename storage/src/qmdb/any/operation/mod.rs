@@ -10,14 +10,8 @@ use std::fmt;
 pub(crate) mod fixed;
 pub(crate) mod update;
 pub(crate) mod variable;
+pub use crate::qmdb::operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub use update::Update;
-
-/// Wire tag for [Operation::Delete].
-pub const DELETE_CONTEXT: u8 = 0xD1;
-/// Wire tag for [Operation::Update].
-pub const UPDATE_CONTEXT: u8 = 0xD2;
-/// Wire tag for [Operation::Commit].
-pub const COMMIT_CONTEXT: u8 = 0xD3;
 
 pub type Ordered<F, K, V> = Operation<F, update::Ordered<K, V>>;
 pub type Unordered<F, K, V> = Operation<F, update::Unordered<K, V>>;
@@ -131,7 +125,7 @@ where
 impl<F: Family, S: Update> fmt::Display for Operation<F, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
+            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key.as_ref())),
             Self::Update(payload) => payload.fmt(f),
             Self::Commit(value, floor) => {
                 if let Some(value) = value {

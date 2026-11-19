@@ -9,6 +9,7 @@
 pub(crate) mod fixed;
 pub(crate) mod variable;
 
+pub use crate::qmdb::operation::{COMMIT_CONTEXT, SET_CONTEXT};
 use crate::{
     merkle::{Family, Location},
     qmdb::{
@@ -19,11 +20,6 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use core::fmt::Display;
-
-/// Wire tag for [Operation::Set].
-pub const SET_CONTEXT: u8 = 0;
-/// Wire tag for [Operation::Commit].
-pub const COMMIT_CONTEXT: u8 = 1;
 
 /// An operation applied to an immutable authenticated database.
 ///
@@ -80,7 +76,12 @@ impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => {
-                write!(f, "[key:{} value:{}]", hex(key), hex(&value.encode()))
+                write!(
+                    f,
+                    "[key:{} value:{}]",
+                    hex(key.as_ref()),
+                    hex(&value.encode())
+                )
             }
             Self::Commit(value, floor) => {
                 if let Some(value) = value {

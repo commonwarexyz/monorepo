@@ -66,6 +66,12 @@ library LibQMDBCurrent {
     /// @dev Select a length-prefixed byte vector in `Schema`.
     uint256 internal constant VARIABLE_SIZE = type(uint256).max;
 
+    /// @dev Tag that opens an encoded commit operation.
+    bytes1 private constant COMMIT = 0x00;
+
+    /// @dev Tag that opens an encoded update operation.
+    bytes1 private constant UPDATE = 0x01;
+
     /// @notice Verify ordered key exclusion in a current QMDB.
     /// @dev Fixed commits reserve metadata bytes, encode the floor as a big-endian uint64, and pad with zeros.
     /// Variable commits omit absent metadata and encode the floor as a canonical unsigned 64-bit varint.
@@ -291,7 +297,7 @@ library LibQMDBCurrent {
     /// The caller validates the fixed schema and exact operation length before parsing.
     function _excludesFixed(bytes32 key, bytes memory operation, uint256 location) private pure returns (bool) {
         uint256 length = operation.length;
-        if (operation[0] == 0xd2) {
+        if (operation[0] == UPDATE) {
             bytes32 start;
             bytes32 end;
             assembly ("memory-safe") {
@@ -300,7 +306,7 @@ library LibQMDBCurrent {
             }
             return start < end ? key > start && key < end : key > start || key < end;
         }
-        if (operation[0] != 0xd3 || uint8(operation[1]) > 1) return false;
+        if (operation[0] != COMMIT || uint8(operation[1]) > 1) return false;
         uint256 floor;
         uint256 padding;
         assembly ("memory-safe") {
@@ -329,7 +335,7 @@ library LibQMDBCurrent {
         } else if (key.length != schema.keySize) {
             return false;
         }
-        if (operation[0] == 0xd2) {
+        if (operation[0] == UPDATE) {
             (uint256 left, uint256 leftEnd, bool valid) = _field(operation, 1, schema.keySize);
             if (!valid) return false;
             (, uint256 valueEnd, bool valueValid) = _field(operation, leftEnd, schema.valueSize);
@@ -343,7 +349,7 @@ library LibQMDBCurrent {
                 ? afterLeft > 0 && beforeRight < 0
                 : afterLeft != 0 && _compare(operation, left, leftEnd, operation, right, rightEnd) >= 0;
         }
-        if (operation[0] != 0xd3 || operation.length < 2 || uint8(operation[1]) > 1) return false;
+        if (operation[0] != COMMIT || operation.length < 2 || uint8(operation[1]) > 1) return false;
         uint256 cursor = 2;
         if (operation[1] == 0x01) {
             bool valid;

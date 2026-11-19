@@ -115,7 +115,7 @@ where
     R::Item: Operation<F>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut(key) else {
+    let Some(cursor) = snapshot.get_mut(key.as_ref()) else {
         return Ok(None);
     };
     delete_at_cursor::<F, _, _>(cursor, reader, key, cache).await
@@ -168,7 +168,7 @@ where
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+    let Some(cursor) = snapshot.get_mut_or_insert(key.as_ref(), new_loc) else {
         return Ok(None);
     };
     update_at_cursor::<F, _, _>(cursor, reader, key, new_loc, cache).await
@@ -496,12 +496,12 @@ where
             };
 
             if is_delete {
-                if let Some(cursor) = index.get_mut(&key) {
+                if let Some(cursor) = index.get_mut(key.as_ref()) {
                     delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
                 }
             } else {
                 let new_loc = Location::new(loc);
-                if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
+                if let Some(cursor) = index.get_mut_or_insert(key.as_ref(), new_loc) {
                     update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
                         .await?;
                 }

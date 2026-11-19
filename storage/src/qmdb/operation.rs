@@ -6,19 +6,31 @@ use commonware_codec::{
     util::ensure_zeros,
 };
 use commonware_runtime::BufMut;
-use core::{fmt::Debug, hash::Hash, ops::Deref};
+use core::{fmt::Debug, hash::Hash};
 
-/// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys
-/// (`Array` types) and variable-length keys (`Vec<u8>`).
-pub trait Key:
-    CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
-{
-}
+/// Wire tag for a commit operation. Every database tags its commits alike.
+///
+/// An encoded operation opens with its tag. One table serves every database, so no tag stands
+/// for two kinds of operation.
+pub const COMMIT_CONTEXT: u8 = 0;
+/// Wire tag for an update operation of an [any](crate::qmdb::any) or
+/// [current](crate::qmdb::current) database.
+pub const UPDATE_CONTEXT: u8 = 1;
+/// Wire tag for a delete operation of an [any](crate::qmdb::any) or
+/// [current](crate::qmdb::current) database.
+pub const DELETE_CONTEXT: u8 = 2;
+/// Wire tag for a set operation of an [immutable](crate::qmdb::immutable) database.
+pub const SET_CONTEXT: u8 = 3;
+/// Wire tag for an append operation of a [keyless](crate::qmdb::keyless) database.
+pub const APPEND_CONTEXT: u8 = 4;
 
-impl<T> Key for T where
-    T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
-{
-}
+/// A QMDB key, indexed by its `AsRef<[u8]>` bytes.
+///
+/// For any two keys, `a.cmp(b)` must equal `a.as_ref().cmp(b.as_ref())`. This implies
+/// that two keys are equal exactly when their index bytes are equal.
+pub trait Key: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}
+
+impl<T> Key for T where T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}
 
 /// An operation that may be a commit. Commits declare an inactivity floor.
 pub trait Committable<F: Family> {
