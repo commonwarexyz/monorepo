@@ -189,8 +189,8 @@ mod cell {
     // SAFETY: The field is private to this module and `FutureCell::new` requires `F: Send`, so
     // every cell holds a `Send` future. Implementing `Send` for any `F` ends a proof that a
     // spawned task is `Send` at its cell. Otherwise each crate that instantiates a spawn proves it
-    // again over the whole future when it erases the task to `dyn Future + Send`, and a deep
-    // future exceeds the recursion limit (rust-lang/rust#159228).
+    // again over the whole future when it hands the task to an executor, and a deep future
+    // exceeds the recursion limit (rust-lang/rust#159228).
     unsafe impl<F> Send for FutureCell<F> {}
 
     impl<F: Future> Future for FutureCell<F> {
@@ -242,11 +242,11 @@ where
         // and a proof that the task is `Send` stops at the cell.
         let cell = cell::FutureCell::new(f);
 
-        // Wrap the future with panic catching, abort support, and cleanup.
+        // Add abort support and cleanup around the cell.
         //
-        // Everything is done in a single async block (and the function is marked
-        // #[inline(always)]) so that stack usage is `size_of(F) + constant` rather than
-        // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
+        // Both live in a single async block (and the function is marked #[inline(always)])
+        // rather than a combinator chain, which in debug builds adds a stack slot the size of
+        // the future for every wrapper.
         let task = async move {
             // Cancellation can destroy the user future during this poll. Close
             // its supervision subtree even if that destruction unwinds.
