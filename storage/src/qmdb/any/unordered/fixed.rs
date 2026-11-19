@@ -96,7 +96,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            Error, ProofExt as _, SnapshotBuild as _,
+            Error, ProofExt as _,
             any::{
                 batch::Slot,
                 test::{
@@ -107,7 +107,7 @@ pub(crate) mod test {
             },
             cache::Cache,
             floor::{Bounded, Proportional},
-            snapshot::{delete_key, update_key},
+            snapshot::{Rebuild as _, delete_key, update_key},
         },
         translator::{OneCap, TwoCap},
     };
@@ -978,7 +978,7 @@ pub(crate) mod test {
 
     /// A replay failure during a parallel build must join every worker before surfacing the
     /// error: no worker may outlive the failed build, retaining a clone of the log and its
-    /// partition-range allocation (the [crate::qmdb::SnapshotBuild] cleanup invariant).
+    /// partition-range allocation.
     #[test_traced("WARN")]
     fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
