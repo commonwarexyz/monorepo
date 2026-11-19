@@ -19,7 +19,8 @@ use crate::{
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
         operation::{Committable as _, Key, Operation as _},
-        update_known_loc,
+        selection_error, update_known_loc, validate_initialization_bound,
+        validate_initialization_commit,
         value::{VariableEncoding, VariableValue},
     },
     translator::Translator,
@@ -373,25 +374,25 @@ where
     ) -> Result<Self, Error> {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
         // recovery owner unpublished until that commit and its replay floor are validated.
-        crate::qmdb::validate_initialization_bound(max_size)?;
+        validate_initialization_bound(max_size)?;
         let pending = Journal::<E, Operation<crate::mmr::Family, K, V>>::recover(
             context.child("log"),
             cfg.log,
             max_size.map(|size| *size),
         )
         .await
-        .map_err(|err| crate::qmdb::selection_error(err, max_size))?;
+        .map_err(|err| selection_error(err, max_size))?;
         let size = pending
             .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
             .await
-            .map_err(|err| crate::qmdb::selection_error(err, max_size))?;
+            .map_err(|err| selection_error(err, max_size))?;
         let bounds = pending.bounds();
         let commit = if size == 0 {
             None
         } else {
             Some(pending.read(size - 1).await?)
         };
-        crate::qmdb::validate_initialization_commit(
+        validate_initialization_commit(
             bounds.start,
             size,
             bounds == (0..0),

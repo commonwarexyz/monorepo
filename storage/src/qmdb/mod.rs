@@ -89,16 +89,23 @@
 //!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
+    Context,
     index::{Cursor, Unordered as Index},
-    journal::{Error as JournalError, contiguous::Contiguous},
+    journal::{
+        Error as JournalError,
+        authenticated::{self, Backing, Journal, Recovery},
+        contiguous::Contiguous,
+    },
     merkle::{
         Bagging, Family, Location,
+        full::Config as MerkleConfig,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::Committable,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use thiserror::Error;
 
 pub mod any;
@@ -176,18 +183,15 @@ fn validate_initialization_commit<F: Family>(
 /// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
-    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    pending: &Recovery<F, E, C, H, S>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<
-            E,
-            Item: Committable<F> + commonware_codec::EncodeShared,
-        >,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     let bounds = pending.bounds();
     let commit = if bounds.end == 0 {
@@ -207,22 +211,19 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: MerkleConfig<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
-) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+) -> Result<Recovery<F, E, C, H, S>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<
-            E,
-            Item: Committable<F> + commonware_codec::EncodeShared,
-        >,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     validate_initialization_bound(max_size)?;
-    let (journal, end) = crate::journal::authenticated::Journal::<F, E, C, H, S>::select_prefix(
+    let (journal, end) = Journal::<F, E, C, H, S>::select_prefix(
         context.child("journal"),
         journal,
         max_size.map(|size| *size),
@@ -230,34 +231,24 @@ where
     )
     .await
     .map_err(|err| selection_error(err, max_size))?;
-    Ok(crate::journal::authenticated::Journal::prepare_selected(
-        context,
-        merkle,
-        journal,
-        end,
-        ROOT_BAGGING,
-    )
-    .await?)
+    Ok(Journal::prepare_selected(context, merkle, journal, end, ROOT_BAGGING).await?)
 }
 
 /// Publish a standard QMDB journal after validating the retained commit.
 #[commonware_macros::boxed]
 pub(crate) async fn init_journal<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: MerkleConfig<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
     replay_from_floor: bool,
-) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
+) -> Result<Journal<F, E, C, H, S>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<
-            E,
-            Item: Committable<F> + commonware_codec::EncodeShared,
-        >,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     let pending = prepare_initialization(context, merkle, journal, max_size).await?;
     validate_initialization(&pending, replay_from_floor).await?;
@@ -389,7 +380,7 @@ pub enum Error<F: Family> {
 
     /// An error from an underlying journal.
     #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
+    Journal(#[from] JournalError),
 
     /// An error from the runtime.
     #[error("runtime error: {0}")]
@@ -476,11 +467,11 @@ pub enum Error<F: Family> {
     HistoricalFloorPruned(Location<F>),
 }
 
-impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
-    fn from(e: crate::journal::authenticated::Error<F>) -> Self {
+impl<F: Family> From<authenticated::Error<F>> for Error<F> {
+    fn from(e: authenticated::Error<F>) -> Self {
         match e {
-            crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
-            crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
+            authenticated::Error::Journal(j) => Self::Journal(j),
+            authenticated::Error::Merkle(m) => Self::Merkle(m),
         }
     }
 }
