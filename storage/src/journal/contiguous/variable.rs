@@ -403,7 +403,10 @@ pub struct Config<C> {
     /// Only the compression level may change between initializations when compression is enabled.
     pub compression: Option<u8>,
 
-    /// [Codec] configuration for encoding/decoding items.
+    /// [Codec] configuration for decoding stored items.
+    ///
+    /// Appends encode items without consulting this configuration. Callers must ensure it can
+    /// decode every item they append. On reopen, it must still accept all retained items.
     pub codec_config: C,
 
     /// Page cache for buffering reads from the underlying storage.

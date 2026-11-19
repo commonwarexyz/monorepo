@@ -128,7 +128,7 @@ where
         let size = journal.size();
         let inactivity_floor_loc = crate::qmdb::commit_floor_at(&journal, size)
             .await?
-            .ok_or(Error::UnexpectedData(size - 1))?;
+            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 

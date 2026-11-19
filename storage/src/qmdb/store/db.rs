@@ -20,7 +20,8 @@ use crate::{
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
         operation::{Committable as _, Key, Operation as _, same_key},
-        update_known_loc,
+        selection_error, update_known_loc, validate_initialization_bound,
+        validate_initialization_commit,
         value::{VariableEncoding, VariableValue},
     },
     translator::Translator,
@@ -382,23 +383,25 @@ where
     {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
         // recovery owner unpublished until that commit and its replay floor are validated.
-        crate::qmdb::validate_initialization_bound(max_size)?;
+        validate_initialization_bound(max_size)?;
         let pending = Journal::<E, Operation<crate::mmr::Family, K, V>>::recover(
             context.child("log"),
             cfg.log,
             max_size.map(|size| *size),
         )
-        .await?;
+        .await
+        .map_err(|err| selection_error(err, max_size))?;
         let size = pending
             .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
-            .await?;
+            .await
+            .map_err(|err| selection_error(err, max_size))?;
         let bounds = pending.bounds();
         let commit = if size == 0 {
             None
         } else {
             Some(pending.read(size - 1).await?)
         };
-        crate::qmdb::validate_initialization_commit(
+        validate_initialization_commit(
             bounds.start,
             size,
             bounds == (0..0),
@@ -427,7 +430,7 @@ where
         let size = Location::new(log.size());
         let inactivity_floor_loc = crate::qmdb::commit_floor_at(&log, size)
             .await?
-            .ok_or(Error::UnexpectedData(size - 1))?;
+            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
 
         // Build the snapshot only from the durable selected prefix.
         let init_buffer = cfg.init_buffer;
@@ -1091,7 +1094,16 @@ mod test {
             let db = db.prune(prune_loc).await.unwrap();
             let bounds = db.bounds();
             assert!(bounds.start > *target_floor && bounds.start < *target);
+            assert!(!db.log.read(*bounds.start).await.unwrap().is_commit());
             _ = db.sync().await.unwrap();
+
+            // One cap precedes the retained operations. The other includes just the first write.
+            for cap in [Location::new(1), bounds.start + 1] {
+                assert!(matches!(
+                    TestStore::init(context.child("no_commit"), cfg.clone(), Some(cap)).await,
+                    Err(Error::NoRetainedCommit(found)) if found == cap
+                ));
+            }
             assert!(matches!(
                 TestStore::init(context.child("cap"), cfg.clone(), Some(target)).await,
                 Err(Error::HistoricalFloorPruned(size)) if size == target

@@ -29,6 +29,7 @@ mod metrics;
 pub use metrics::Metrics;
 
 mod database;
+pub(in crate::qmdb) use database::Hooks;
 pub(crate) use database::{
     Config as DatabaseConfig, discard_local_state, journal_covers_range, local_pinned_nodes,
 };

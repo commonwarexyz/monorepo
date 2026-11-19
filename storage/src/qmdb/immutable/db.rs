@@ -183,7 +183,7 @@ where
         let size = journal.size();
         let inactivity_floor_loc = crate::qmdb::commit_floor_at(&journal, size)
             .await?
-            .ok_or(Error::UnexpectedData(size - 1))?;
+            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
 
         // Replay the log from the inactivity floor to build the snapshot.
         let snapshot = build_snapshot(
