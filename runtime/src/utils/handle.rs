@@ -17,9 +17,8 @@ use futures::{
 };
 use std::{
     any::Any,
-    cell::UnsafeCell,
     future::Future,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    panic::resume_unwind,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -159,39 +158,54 @@ where
     }
 }
 
-/// Polls a task's future, catching any panic it raises.
-///
-/// The future lives in an [`UnsafeCell`], which has the same layout as `F`, so the shared
-/// reference [`Abortable`] takes to check for cancellation does not invalidate borrows the future
-/// holds into its own state. Catching panics here spares a task separate wrappers for that, each
-/// of which would add a stack slot the size of the future to every poll in unoptimized builds.
-// Miri treats creating a shared reference as a read of everything outside an `UnsafeCell`, which
-// conflicts with a suspended future's borrows of itself (rust-lang/rust#137750) until coroutines
-// are built on `UnsafePinned` (rust-lang/rust#125735).
-struct FutureCell<F>(UnsafeCell<F>);
+mod cell {
+    //! Keeps [`FutureCell`]'s field private, so [`FutureCell::new`] is the only way to build a
+    //! cell.
 
-impl<F: Send> FutureCell<F> {
-    /// Wraps a future already proven [`Send`], which the cell's [`Send`] impl relies on.
-    const fn new(future: F) -> Self {
-        Self(UnsafeCell::new(future))
+    use std::{
+        cell::UnsafeCell,
+        future::Future,
+        panic::{AssertUnwindSafe, catch_unwind},
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    /// Polls a task's future, catching any panic it raises.
+    ///
+    /// The future lives in an [`UnsafeCell`], which has the same layout as `F`, so the shared
+    /// reference [`Abortable`](crate::utils::abort::Abortable) takes to check for cancellation
+    /// does not invalidate borrows the future holds into its own state. Catching panics here
+    /// spares a task separate wrappers for that, each of which would add a stack slot the size of
+    /// the future to every poll in unoptimized builds.
+    // Miri treats creating a shared reference as a read of everything outside an `UnsafeCell`,
+    // which conflicts with a suspended future's borrows of itself (rust-lang/rust#137750) until
+    // coroutines are built on `UnsafePinned` (rust-lang/rust#125735).
+    pub(super) struct FutureCell<F>(UnsafeCell<F>);
+
+    impl<F: Send> FutureCell<F> {
+        /// Wraps a future already proven [`Send`], which the cell's [`Send`] impl relies on.
+        pub(super) const fn new(future: F) -> Self {
+            Self(UnsafeCell::new(future))
+        }
     }
-}
 
-// SAFETY: Cells are only built by `FutureCell::new`, which requires `F: Send`, so every cell holds
-// a `Send` future. Implementing `Send` for any `F` ends a proof that a spawned task is `Send` at
-// its cell. Otherwise each crate that instantiates a spawn proves it again over the whole future
-// when it erases the task to `dyn Future + Send`, and a deep future exceeds the recursion limit
-// (rust-lang/rust#159228).
-unsafe impl<F> Send for FutureCell<F> {}
+    // SAFETY: The field is private to this module and `FutureCell::new` requires `F: Send`, so
+    // every cell holds a `Send` future. Implementing `Send` for any `F` ends a proof that a
+    // spawned task is `Send` at its cell. Otherwise each crate that instantiates a spawn proves it
+    // again over the whole future when it erases the task to `dyn Future + Send`, and a deep
+    // future exceeds the recursion limit (rust-lang/rust#159228).
+    unsafe impl<F> Send for FutureCell<F> {}
 
-impl<F: Future> Future for FutureCell<F> {
-    type Output = std::thread::Result<F::Output>;
+    impl<F: Future> Future for FutureCell<F> {
+        type Output = std::thread::Result<F::Output>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: The future is structurally pinned: `FutureCell` has no `Drop` impl, is `Unpin`
-        // only when `F` is, and reaches the future only through this pinned projection.
-        let future = unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) };
-        catch_unwind(AssertUnwindSafe(|| future.poll(cx)))?.map(Ok)
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            // SAFETY: The future is structurally pinned: `FutureCell` has no `Drop` impl, is
+            // `Unpin` only when `F` is, and reaches the future only through this pinned
+            // projection.
+            let future = unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) };
+            catch_unwind(AssertUnwindSafe(|| future.poll(cx)))?.map(Ok)
+        }
     }
 }
 
@@ -229,7 +243,7 @@ where
 
         // Build the cell before the task captures it, so the task holds the cell rather than `f`
         // and a proof that the task is `Send` stops at the cell.
-        let cell = FutureCell::new(f);
+        let cell = cell::FutureCell::new(f);
 
         // Wrap the future with panic catching, abort support, and cleanup.
         //
