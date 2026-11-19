@@ -159,9 +159,6 @@ where
 }
 
 mod cell {
-    //! Keeps [`FutureCell`]'s field private, so [`FutureCell::new`] is the only way to build a
-    //! cell.
-
     use std::{
         cell::UnsafeCell,
         future::Future,
