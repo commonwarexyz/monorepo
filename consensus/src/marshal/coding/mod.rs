@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn cached_finalization_identifies_the_signed_encoding() {
-        deterministic::Runner::default().start(|mut context| async move {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let Fixture {
                 schemes,
                 participants,
@@ -216,28 +216,61 @@ mod tests {
 
             drop(cache);
 
-            // Reopen an archive holding another encoding of the signed application block.
+            // Only the cache holds the certificate; the block archive holds another encoding.
             let provider = ConstantProvider::new(schemes[0].clone());
             let config = test_config(partition, provider.clone());
-            let (_, blocks) = immutable_finalized_stores(&context, partition, &config).await;
+            let (proofs, blocks) = immutable_finalized_stores(&context, partition, &config).await;
             let height = other.height();
-            blocks
+            let blocks = blocks
                 .put(height.get(), other.digest(), &other.into())
                 .await
                 .unwrap()
                 .sync()
                 .await
                 .unwrap();
-            let (mailbox, _, _handle) = start_coding_actor_with_recording(
-                context.child("restart"),
-                partition,
-                provider,
-                RecordingCodingBuffer::default(),
+            let (actor, mailbox, _) = core::Actor::<_, TestCodingVariant, _, _, _, _, _>::init(
+                context.child("actor"),
+                proofs,
+                blocks,
+                config,
             )
             .await;
+            let application = Application::<CodingB>::manual_ack();
+            let (rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let handle = actor.start_unbuffered(application.clone(), (rx, resolver));
             let (block, proof) = mailbox.get_block_with_finalization(height).await.unwrap();
             assert_eq!(block.commitment(), signed.commitment());
-            assert_eq!(proof, Some(certificate));
+            assert_eq!(proof.as_ref(), Some(&certificate));
+
+            // Leave the alternate encoding as the first unacknowledged block.
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
+                reschedule().await;
+            }
+            handle.abort();
+            let _ = handle.await;
+
+            // Once the certificate is also durable by height, restart must recover its round
+            // from that successor even though the archived coding envelope differs.
+            let config = test_config(partition, provider);
+            let (proofs, blocks) =
+                immutable_finalized_stores(&context.child("restart_stores"), partition, &config)
+                    .await;
+            let proofs = proofs
+                .put(height.get(), signed.digest(), &certificate)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
+            let (_, _, floor) = core::Actor::<_, TestCodingVariant, _, _, _, _, _>::init(
+                context.child("restart"),
+                proofs,
+                blocks,
+                config,
+            )
+            .await;
+            assert_eq!(floor.cutoff(), core::Cutoff::Round(ctx.round));
         });
     }
 
