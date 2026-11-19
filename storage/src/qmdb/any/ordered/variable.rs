@@ -36,13 +36,11 @@ pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S>;
 /// than 130,816 entries (see [`crate::index::partitioned::ordered`]); prefer `p64k` to keep ordered
 /// access mostly inline at larger scale.
 pub mod partitioned {
-    use super::{JournalConfig, any};
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::{
         index::partitioned::ordered::Index, journal::contiguous::variable::Journal,
         merkle::Location,
     };
-    use core::num::NonZeroUsize;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -63,9 +61,6 @@ pub mod partitioned {
         Update<K, V>,
         S,
     >;
-
-    /// Configuration for a [Db].
-    pub type Config<T, C, S> = any::Config<T, JournalConfig<C>, S, NonZeroUsize>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -111,33 +106,30 @@ pub(crate) mod test {
         deterministic::{self, Context},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, sequence::FixedBytes};
+    use core::num::NonZeroUsize;
     use rand::Rng;
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: u16 = 103;
     const PAGE_CACHE_SIZE: usize = 13;
 
-    pub(crate) type VarConfig<B = ()> = any::Config<
+    pub(crate) type VarConfig = any::Config<
         TwoCap,
         JournalConfig<((), (commonware_codec::RangeCfg<usize>, ()))>,
         Sequential,
-        B,
     >;
 
     /// Type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
-    pub(crate) fn create_test_config<B>(seed: u64, init_concurrency: B) -> VarConfig<B> {
+    pub(crate) fn create_test_config(seed: u64, init_concurrency: NonZeroUsize) -> VarConfig {
         let page_cache = CacheRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         any::Config {
-            merkle: crate::mmr::full::Config {
-                journal_partition: format!("mmr-journal-{seed}"),
-                metadata_partition: format!("mmr-metadata-{seed}"),
-                items_per_blob: NZU64!(12), // intentionally small and janky size
-                write_buffer: NZUsize!(64),
+            merkle: crate::journal::authenticated::Config {
+                partition: format!("mmr-metadata-{seed}"),
                 replay_buffer: NZUsize!(64),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
@@ -158,7 +150,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, ());
+        let config = create_test_config(seed, NZUsize!(2));
         AnyTest::init(context, config, None).await.unwrap()
     }
 
@@ -901,26 +893,22 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{Family, Location, full::Merkle},
+            merkle::{Family, Location},
             qmdb::any::sync::tests::FromSyncTestable,
         };
-        use futures::future::join_all;
 
         impl<F: Family> FromSyncTestable
             for Db<F, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>
         {
-            type Merkle = Merkle<F, deterministic::Context, Digest, Sequential>;
+            type Frontier =
+                crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
-            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+            fn into_log_components(self) -> (Self::Frontier, Self::Journal) {
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
-                join_all(F::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }

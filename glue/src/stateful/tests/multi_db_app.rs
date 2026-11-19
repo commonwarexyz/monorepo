@@ -53,8 +53,11 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
-    mmr::{self, Location, full::Config as MmrJournalConfig},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
+    },
+    mmr::{self, Location},
     qmdb::{any::unordered::fixed, immutable, sync::Target},
     translator::TwoCap,
 };
@@ -88,14 +91,11 @@ pub(super) fn qmdb_config(
     immutable::fixed::CompactConfig<Sequential>,
 ) {
     let db_a = fixed::Config {
-        merkle: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
-            metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
-            items_per_blob: NZU64!(11),
-            write_buffer: IO_BUFFER_SIZE,
+        merkle: MerkleConfig {
+            partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: Default::default(),
         },
         log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),
@@ -107,7 +107,7 @@ pub(super) fn qmdb_config(
         translator: TwoCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     };
 
     // One witness entry per section so periodic pruning drops entries.

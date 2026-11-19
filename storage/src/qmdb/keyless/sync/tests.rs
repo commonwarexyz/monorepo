@@ -5,8 +5,8 @@
 //! modules the shared macro generates.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{Family, Location, Proof, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous},
+    merkle::{Family, Location, Proof, mmb, mmr},
     qmdb::{
         self,
         keyless::{self, Operation, fixed, variable},
@@ -507,7 +507,6 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let fine_config = |sfx: &str| {
             let mut config = harnesses::VariableHarness::<F>::config(sfx);
             config.log.items_per_section = NZU64!(1);
-            config.merkle.items_per_blob = NZU64!(1);
             config
         };
         let source = DbOf::<harnesses::VariableHarness<F>>::init(
@@ -737,13 +736,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -754,6 +750,7 @@ pub(crate) mod harnesses {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -836,10 +833,6 @@ pub(crate) mod harnesses {
         #[boxed]
         async fn try_destroy(db: Self::Db) -> Result<(), qmdb::Error<Self::Family>> {
             db.destroy().await
-        }
-
-        fn merkle_config(config: &ConfigOf<Self>) -> MerkleConfig<Sequential> {
-            config.merkle.clone()
         }
 
         async fn db_sync(db: Self::Db) -> Self::Db {
@@ -943,13 +936,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),
@@ -958,6 +948,7 @@ pub(crate) mod harnesses {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -1044,10 +1035,9 @@ pub(crate) mod harnesses {
     {
         let hasher = qmdb::hasher::<Sha256>();
         let size = db.bounds().end;
-        let proof = db
+        let (proof, _) = db
             .journal
-            .merkle
-            .historical_proof(&hasher, size, size - 1, inactive_peaks)
+            .historical_proof(size, size - 1, NZU64!(1), inactive_peaks)
             .await
             .unwrap();
         let root = db.journal.merkle.root(&hasher, inactive_peaks).unwrap();

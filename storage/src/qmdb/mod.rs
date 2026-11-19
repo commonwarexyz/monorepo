@@ -62,7 +62,8 @@
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
-//! durable and guarantees no recovery is needed on startup after a crash.
+//! durable and advances the operation journal's recovery watermark. Full databases rebuild their
+//! Merkle digests from retained operations at every startup.
 //!
 //! # Initialization bounds
 //!
@@ -103,12 +104,11 @@ use crate::{
     index::{Cursor, Unordered as Index},
     journal::{
         Error as JournalError,
-        authenticated::{self, Backing, Journal, Recovery},
+        authenticated::{self, Backing, Config as MerkleConfig, Journal, Recovery},
         contiguous::Contiguous,
     },
     merkle::{
         Bagging, Family, Location,
-        full::Config as MerkleConfig,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
     qmdb::operation::Committable,
@@ -233,36 +233,20 @@ where
     S: Strategy,
 {
     validate_initialization_bound(max_size)?;
-    let (journal, end) = Journal::<F, E, C, H, S>::select_prefix(
-        context.child("journal"),
+    Journal::prepare(
+        context,
+        merkle,
         journal,
         max_size.map(|size| *size),
         |op: &C::Item| op.inactivity_floor().is_some(),
+        ROOT_BAGGING,
     )
     .await
-    .map_err(|err| selection_error(err, max_size))?;
-    Ok(Journal::prepare_selected(context, merkle, journal, end, ROOT_BAGGING).await?)
-}
-
-/// Publish a standard QMDB journal after validating the retained commit.
-#[commonware_macros::boxed]
-pub(crate) async fn init_journal<F, E, C, H, S>(
-    context: E,
-    merkle: MerkleConfig<S>,
-    journal: C::Config,
-    max_size: Option<Location<F>>,
-    replay_from_floor: bool,
-) -> Result<Journal<F, E, C, H, S>, Error<F>>
-where
-    F: Family,
-    E: Context,
-    C: Backing<E, Item: Committable<F> + EncodeShared>,
-    H: Hasher,
-    S: Strategy,
-{
-    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
-    validate_initialization(&pending, replay_from_floor).await?;
-    Ok(pending.finish().await?)
+    // Every pruning error from this step means the selection found no usable commit.
+    .map_err(|err| match err {
+        authenticated::Error::Journal(err) => selection_error(err, max_size),
+        err => err.into(),
+    })
 }
 
 /// Merkle peak bagging policy used by QMDB operation roots.
