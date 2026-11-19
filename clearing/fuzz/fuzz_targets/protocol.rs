@@ -100,6 +100,7 @@ use rand_core::Rng as _;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Debug,
+    iter,
     num::NonZeroU64,
 };
 
@@ -170,8 +171,10 @@ const LIMITS: Limits = Limits {
 const MAX_BATCH: usize = 4;
 
 /// Most actions in a plan. A few closes with a few payments each reach every stage of the
-/// protocol, and each close writes to two databases, so longer plans only cost throughput.
-const MAX_OPS: usize = 32;
+/// protocol, and each close writes to two databases, so longer plans cost throughput. The bound is
+/// still twice that, so the few inputs a run from an empty corpus starts with draw the rare
+/// actions more often.
+const MAX_OPS: usize = 64;
 
 /// Bytes of runtime randomness one arbitrary value is drawn from. A digest alone draws up to 257
 /// bytes, so a summary with five of them needs over a kilobyte to be drawn whole.
@@ -194,6 +197,49 @@ const STREAM_BYTES: usize = 1 << 12;
 const SEED_BYTES: usize = 8;
 const ENTROPY_BYTES: usize = 32;
 
+/// Weights of the amount kinds, in the order Few, Share, Over, Huge. A batch overspends if any of
+/// its entries does, so overspends are drawn rarely.
+const SIZE_WEIGHTS: [u8; 4] = [6, 8, 1, 1];
+
+/// Units a few-units amount spans, starting at zero.
+const FEW_SPAN: u8 = 16;
+
+/// Units past the base an overspend spans.
+const OVER_SPAN: u8 = 8;
+
+/// Units below the largest amount a near-largest amount spans.
+const HUGE_SPAN: u8 = 16;
+
+/// Weights of the actions, in the order of the [`Op`] variants: Deposit, Force, Pay, Withdraw,
+/// Cut, Close, Audit, Payout, Challenge, Halt, Claim, Restart, Garbage, Mutate. Closes and
+/// payments drive the protocol, so they are drawn most often, and a halt, which ends posting for
+/// good, least often.
+const OP_WEIGHTS: [u8; 14] = [14, 6, 20, 6, 6, 16, 2, 7, 4, 1, 5, 2, 5, 6];
+
+/// One action in this many is honest, and the others carry an attack.
+const ATTACK_ONE_IN: u8 = 2;
+
+/// One cut in this many omits a row. An omission halts the ledger at the post, so it is drawn
+/// rarely.
+const OMIT_ONE_IN: u8 = 16;
+
+/// One close in this many leaves its audits for later.
+const DEFER_ONE_IN: u8 = 4;
+
+/// Returns the index of an entry of `weights`, drawn in proportion to the entry.
+fn weighted(u: &mut Unstructured<'_>, weights: &[u8]) -> arbitrary::Result<usize> {
+    let sum: u8 = weights.iter().sum();
+    let draw = u.int_in_range(0..=sum - 1)?;
+    let mut total = 0;
+    Ok(weights
+        .iter()
+        .position(|weight| {
+            total += weight;
+            draw < total
+        })
+        .expect("the draw is below the sum"))
+}
+
 /// An amount relative to what the account involved holds.
 #[derive(Clone, Copy, Debug)]
 enum Size {
@@ -209,11 +255,10 @@ enum Size {
 
 impl<'a> Arbitrary<'a> for Size {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        // A batch overspends if any of its entries does, so overspends are drawn rarely.
-        Ok(match u.int_in_range(0..=15u8)? {
-            0..=5 => Self::Few(u.arbitrary()?),
-            6..=13 => Self::Share(u.arbitrary()?),
-            14 => Self::Over(u.arbitrary()?),
+        Ok(match weighted(u, &SIZE_WEIGHTS)? {
+            0 => Self::Few(u.arbitrary()?),
+            1 => Self::Share(u.arbitrary()?),
+            2 => Self::Over(u.arbitrary()?),
             _ => Self::Huge(u.arbitrary()?),
         })
     }
@@ -223,12 +268,11 @@ impl Size {
     /// Returns the amount relative to `base`.
     fn resolve(self, base: u64) -> u64 {
         match self {
-            Self::Few(x) => u64::from(x % 16),
-            Self::Share(x) => {
-                u64::try_from(u128::from(base) * u128::from(x) / 255).expect("a share fits")
-            }
-            Self::Over(x) => base.saturating_add(1 + u64::from(x % 8)),
-            Self::Huge(x) => u64::MAX - u64::from(x % 16),
+            Self::Few(x) => u64::from(x % FEW_SPAN),
+            Self::Share(x) => u64::try_from(u128::from(base) * u128::from(x) / u128::from(u8::MAX))
+                .expect("a share fits"),
+            Self::Over(x) => base.saturating_add(1 + u64::from(x % OVER_SPAN)),
+            Self::Huge(x) => u64::MAX - u64::from(x % HUGE_SPAN),
         }
     }
 }
@@ -517,7 +561,7 @@ enum Op {
 
 /// Returns an attack half the time, and `None` for the honest action otherwise.
 fn attack<'a, T: Arbitrary<'a>>(u: &mut Unstructured<'a>) -> arbitrary::Result<Option<T>> {
-    Ok(if u.ratio(1u8, 2)? {
+    Ok(if u.ratio(1u8, ATTACK_ONE_IN)? {
         None
     } else {
         Some(u.arbitrary()?)
@@ -526,62 +570,59 @@ fn attack<'a, T: Arbitrary<'a>>(u: &mut Unstructured<'a>) -> arbitrary::Result<O
 
 impl<'a> Arbitrary<'a> for Op {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        // Closes and payments drive the protocol, so they are drawn most often, and a halt, which
-        // ends posting for good, least often.
-        Ok(match u.int_in_range(0..=99u8)? {
-            0..=13 => Self::Deposit {
+        Ok(match weighted(u, &OP_WEIGHTS)? {
+            0 => Self::Deposit {
                 user: u.arbitrary()?,
                 amount: u.arbitrary()?,
             },
-            14..=19 => Self::Force {
+            1 => Self::Force {
                 user: u.arbitrary()?,
                 amount: u.arbitrary()?,
             },
-            20..=39 => Self::Pay {
+            2 => Self::Pay {
                 sender: u.arbitrary()?,
                 batch: (0..u.int_in_range(1..=MAX_BATCH)?)
                     .map(|_| Ok((u.arbitrary()?, u.arbitrary()?)))
                     .collect::<arbitrary::Result<_>>()?,
                 attack: attack(u)?,
             },
-            40..=45 => Self::Withdraw {
+            3 => Self::Withdraw {
                 user: u.arbitrary()?,
                 amount: u.arbitrary()?,
                 tag: u.arbitrary()?,
                 attack: attack(u)?,
             },
-            // An omission halts the ledger at the post, so it is drawn rarely.
-            46..=51 => Self::Cut {
+            4 => Self::Cut {
                 deposits: u.arbitrary()?,
                 forced: u.arbitrary()?,
-                omit: if u.ratio(1u8, 16)? {
+                omit: if u.ratio(1u8, OMIT_ONE_IN)? {
                     Some(u.arbitrary()?)
                 } else {
                     None
                 },
             },
-            52..=67 => Self::Close {
+            5 => Self::Close {
                 deposits: u.arbitrary()?,
                 forced: u.arbitrary()?,
                 attack: attack(u)?,
-                defer: u.ratio(1u8, 4)?,
+                defer: u.ratio(1u8, DEFER_ONE_IN)?,
             },
-            68..=69 => Self::Audit,
-            70..=76 => Self::Payout {
+            6 => Self::Audit,
+            7 => Self::Payout {
                 pick: u.arbitrary()?,
                 attack: attack(u)?,
             },
-            77..=80 => Self::Challenge {
+            8 => Self::Challenge {
                 pick: u.arbitrary()?,
                 attack: u.arbitrary()?,
             },
-            81 => Self::Halt,
-            82..=86 => Self::Claim {
+            9 => Self::Halt,
+            10 => Self::Claim {
                 user: u.arbitrary()?,
                 attack: attack(u)?,
             },
-            87..=88 => Self::Restart,
-            89..=93 => Self::Garbage {
+            11 => Self::Restart,
+            12 => Self::Garbage {
                 kind: u.arbitrary()?,
             },
             _ => Self::Mutate {
@@ -596,13 +637,13 @@ impl<'a> Arbitrary<'a> for Op {
 }
 
 #[derive(Debug)]
-struct Plan {
+struct FuzzInput {
     users: usize,
     ops: Vec<Op>,
     entropy: Entropy,
 }
 
-impl<'a> Arbitrary<'a> for Plan {
+impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         // libFuzzer starts from inputs of a few bytes and lengthens them slowly, and a plan
         // sampled from so few bytes would hold one action on the first user. The input's head
@@ -612,10 +653,14 @@ impl<'a> Arbitrary<'a> for Plan {
         //
         // The head's even bytes seed the plan's stream and its odd bytes seed the runtime's
         // entropy, which orders accounts and draws keys, shuffles and signers. A mutated byte of
-        // even the shortest input therefore changes the actions or their schedule, never both.
+        // even the shortest input therefore changes the actions or their schedule, never both,
+        // except an input of one byte, which has no odd byte and seeds both with it.
         let head = u.bytes(u.len().min(2 * SEED_BYTES))?;
         let seed: Vec<_> = head.iter().step_by(2).copied().collect();
-        let schedule: Vec<_> = head.iter().skip(1).step_by(2).copied().collect();
+        let mut schedule: Vec<_> = head.iter().skip(1).step_by(2).copied().collect();
+        if schedule.is_empty() {
+            schedule.clone_from(&seed);
+        }
         let mut stream = vec![0; STREAM_BYTES.max(u.len())];
         FuzzRng::new(seed).fill_bytes(&mut stream);
         let literal = u.bytes(u.len())?;
@@ -5119,16 +5164,33 @@ impl Harness {
                     assert_eq!(proof.balance, honest.balance);
                 }
             }
-            Target::Malformed(kind) => self.malformed(kind),
+            Target::Malformed(kind) => self.malformed(kind, pick, mutations),
         }
 
         // I10: no mutated message changes anything.
         assert_eq!(self.snapshot(), before);
     }
 
-    /// Checks that encodings breaking a canonical form do not decode.
-    fn malformed(&self, kind: u8) {
-        let (first, second) = (self.accounts[0].clone(), self.accounts[1].clone());
+    /// Checks that encodings breaking a canonical form do not decode. The accounts come from
+    /// `pick`, and the amounts and the tag from the bytes of `mutations`, then from `pick`.
+    fn malformed(&self, kind: u8, pick: u8, mutations: &[Mutation]) {
+        let user = self.user(pick);
+        let (first, second) = (
+            self.accounts[user].clone(),
+            self.accounts[self.other(user)].clone(),
+        );
+        let mut bytes = mutations
+            .iter()
+            .map(|mutation| match *mutation {
+                Mutation::Insert { value, .. } | Mutation::Replace { value, .. } => value,
+                Mutation::Flip { position, .. } | Mutation::Delete { position } => {
+                    position.to_le_bytes()[0]
+                }
+                Mutation::Swap { first, .. } => first.to_le_bytes()[0],
+            })
+            .chain(iter::repeat(pick));
+        let mut byte = || bytes.next().expect("the bytes never run out");
+        let mut amount = || 1 + u64::from(byte());
         let (low, high) = if first < second {
             (first, second)
         } else {
@@ -5138,8 +5200,8 @@ impl Harness {
             0..=2 => {
                 // Unsorted, repeated or zero entries are not amounts.
                 let entries: Vec<(PublicKey, u64)> = match kind % 5 {
-                    0 => vec![(high, 1), (low, 1)],
-                    1 => vec![(low.clone(), 1), (low, 2)],
+                    0 => vec![(high, amount()), (low, amount())],
+                    1 => vec![(low.clone(), amount()), (low, amount())],
                     _ => vec![(low, 0)],
                 };
                 let range = RangeCfg::new(..=MAX_USERS);
@@ -5147,31 +5209,31 @@ impl Harness {
             }
             3 => {
                 // Rows out of account order are not a close.
-                let row = |account: PublicKey| Row {
-                    payments: Amounts::new([(account.clone(), 1)]).expect("nonzero"),
+                let row = |account: PublicKey, amount: u64| Row {
+                    payments: Amounts::new([(account.clone(), amount)]).expect("nonzero"),
                     account,
                     signature: self.rogue.sign(b"row", b"row"),
                 };
-                let rows = [row(high), row(low)];
+                let rows = [row(high, amount()), row(low, amount())];
                 let bytes = close_bytes(1, &rows, &[], 0, 0, &self.rogue.sign(b"c", b"c"));
                 assert!(TestClose::decode_cfg(bytes, &LIMITS).is_err());
             }
             _ => {
                 // An opening's row tag names neither a member nor a non-member.
                 let mut bytes = self.parent.matrix.open(&low, &high).encode().to_vec();
-                bytes[0] = 2;
+                bytes[0] = 2 + byte() % 254;
                 assert!(TestOpening::decode(bytes).is_err());
             }
         }
     }
 }
 
-fn run(plan: Plan) {
-    let Plan {
+fn fuzz(input: FuzzInput) {
+    let FuzzInput {
         users,
         ops,
         entropy,
-    } = plan;
+    } = input;
     let cfg = deterministic::Config::new().with_rng(FuzzRng::from(entropy));
     let mut runner = deterministic::Runner::new(cfg);
 
@@ -5199,6 +5261,6 @@ fn run(plan: Plan) {
     }
 }
 
-fuzz_target!(|plan: Plan| {
-    run(plan);
+fuzz_target!(|input: FuzzInput| {
+    fuzz(input);
 });
