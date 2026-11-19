@@ -889,15 +889,10 @@ where
                     response.send_lossy(block);
                 }
             },
-            Message::GetBlockWithFinalization {
-                height, response, ..
-            } => {
-                response.send_lossy(self.get_block_with_finalization(height).await);
-            }
             Message::GetFinalization {
                 height, response, ..
             } => {
-                let finalization = self.get_finalization_by_height(height).await;
+                let finalization = self.find_finalization(height).await;
                 response.send_lossy(finalization);
             }
             Message::GetProcessed { response, .. } => {
@@ -2062,32 +2057,6 @@ where
         }
     }
 
-    /// Returns the archived block and its finalization, if available.
-    async fn get_block_with_finalization(
-        &self,
-        height: Height,
-    ) -> Option<(V::Block, Option<Finalization<P::Scheme, V::Commitment>>)> {
-        let stored = self.get_finalized_block(height).await?;
-        let block = V::restore_across(stored, &self.strategy).await;
-        let commitment = V::commitment(&block);
-        let finalization = match self.get_finalization_by_height(height).await {
-            Some(proof) => {
-                assert!(
-                    commitment == proof.proposal.payload,
-                    "archived block does not match stored finalization"
-                );
-                Some(proof)
-            }
-            // A crash between the two height archive syncs can leave the proof only in the cache.
-            None => self
-                .cache
-                .get_finalization_for(block.digest())
-                .await
-                .filter(|proof| proof.proposal.payload == commitment),
-        };
-        Some((block, finalization))
-    }
-
     /// Check whether a finalized block exists in the archive at `height` without
     /// fetching it.
     fn has_finalized_block(&self, height: Height) -> bool {
@@ -2116,6 +2085,24 @@ where
             Ok(has) => has,
             Err(e) => panic!("failed to check finalization: {e}"),
         }
+    }
+
+    /// Finds the finalization for `height` in the height archive or the digest cache.
+    async fn find_finalization(
+        &self,
+        height: Height,
+    ) -> Option<Finalization<P::Scheme, V::Commitment>> {
+        if let Some(proof) = self.get_finalization_by_height(height).await {
+            return Some(proof);
+        }
+
+        // A crash can leave the block archived by height and its proof only in the digest cache.
+        let stored = self.get_finalized_block(height).await?;
+        let block = V::restore_across(stored, &self.strategy).await;
+        self.cache
+            .get_finalization_for(block.digest())
+            .await
+            .filter(|proof| proof.proposal.payload == V::commitment(&block))
     }
 
     /// Get finalized block information from either the finalization archive or

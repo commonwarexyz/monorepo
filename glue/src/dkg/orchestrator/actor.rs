@@ -476,11 +476,15 @@ where
             .previous()
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
-        let Some((boundary, finalization)) = self.marshal.get_block_with_finalization(height).await
-        else {
+
+        // Read the optional certificate first so shutdown between requests fails the block lookup
+        // before we record a checkpoint.
+        let finalization = self.marshal.get_finalization(height).await;
+        let Some(boundary) = self.marshal.get_block(height).await else {
             error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
+
         let checkpoint = Checkpoint::new(boundary, finalization);
         let commitment = checkpoint.commitment();
         let info = checkpoint.info();

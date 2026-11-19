@@ -269,6 +269,12 @@ where
         finalization: Option<Finalization<S, MV::Commitment>>,
     ) -> Self {
         let commitment = MV::commitment(&block);
+        if let Some(proof) = &finalization {
+            assert_eq!(
+                proof.proposal.payload, commitment,
+                "boundary block does not match its finalization"
+            );
+        }
         Self {
             block: block.into(),
             commitment,

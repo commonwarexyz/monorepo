@@ -26,10 +26,9 @@
 //!
 //! - If it is below the active epoch's final block, acknowledge it.
 //! - If it is above the active epoch's final block, panic.
-//! - Otherwise, read the boundary block and its available finalization together from marshal
-//!   and record them as the next epoch's checkpoint in the [`state_sync::Plan`]. Then enter the next
-//!   epoch from the block's commitment, stop the previous engine, and only then
-//!   acknowledge the block.
+//! - Otherwise, read the boundary block and its finalization, if available, from marshal.
+//!   Record them as the next epoch's checkpoint in the [`state_sync::Plan`]. Then enter the
+//!   next epoch from the block's commitment, stop the previous engine, and acknowledge the block.
 //!
 //! ```text
 //! state-sync artifact, checkpoint, or finalized boundary: EpochInfo(N)

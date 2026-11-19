@@ -1208,10 +1208,7 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.get_finalization(height).await.is_none());
-            let (archived, proof) = mailbox.get_block_with_finalization(height).await.unwrap();
-            assert_eq!(archived.digest(), digest);
-            assert_eq!(proof, Some(finalization));
+            assert_eq!(mailbox.get_finalization(height).await, Some(finalization));
         });
     }
 
@@ -7817,12 +7814,10 @@ mod tests {
             )
             .await;
 
-            let (pending, proof) = mailbox
-                .get_block_with_finalization(block1.height())
-                .await
-                .unwrap();
-            assert_eq!(pending.digest(), block1.digest());
-            assert_eq!(proof, Some(block1_finalization));
+            assert_eq!(
+                mailbox.get_finalization(block1.height()).await,
+                Some(block1_finalization)
+            );
 
             let floor_round = Round::new(Epoch::zero(), View::new(15));
             let floor_block =
@@ -7835,7 +7830,7 @@ mod tests {
 
             // The anchor is not local yet, so SetFloor must install a pending
             // floor before the old height 1 ack can be released.
-            mailbox.set_floor(floor_finalization.clone());
+            mailbox.set_floor(floor_finalization);
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -7857,20 +7852,18 @@ mod tests {
                     .verified(floor_round, ready(floor_block.clone()))
                     .await
             );
-            let (anchor, proof) = mailbox
-                .get_block_with_finalization(floor_block.height())
-                .await
-                .unwrap();
-            assert_eq!(anchor.digest(), floor_block.digest());
-            assert_eq!(proof, Some(floor_finalization));
-
-            // The old block's section has been pruned, even though its ack is still held.
-            assert!(
+            assert_eq!(
                 mailbox
-                    .get_block_with_finalization(block1.height())
+                    .get_block(floor_block.height())
                     .await
-                    .is_none()
+                    .expect("floor block missing")
+                    .digest(),
+                floor_block.digest()
             );
+
+            // The old height has been pruned, even though its ack is still held.
+            assert!(mailbox.get_block(block1.height()).await.is_none());
+            assert!(mailbox.get_finalization(block1.height()).await.is_none());
 
             // Release the stale ack after the remote floor has been applied.
             // It must not lower the processed floor back below the new floor.
@@ -10826,7 +10819,7 @@ mod tests {
             .await;
 
             assert!(mailbox.verified(round, ready(block.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             select! {
                 height = started => {
@@ -10867,13 +10860,9 @@ mod tests {
                 "restart should recover the delivered finalized block by height"
             );
             assert_eq!(
-                mailbox
-                    .get_finalization(Height::new(1))
-                    .await
-                    .expect("finalization must be durable before delivery")
-                    .round(),
-                round,
-                "restart should recover the delivered finalization by height"
+                mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(1), block.digest())),
+                "the delivered finalization must survive restart in the height archive"
             );
         });
     }
