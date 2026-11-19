@@ -15,16 +15,8 @@ pub type Operation<F, K, V> = unordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S> = super::Db<
-    F,
-    E,
-    Journal<E, Operation<F, K, V>>,
-    Index<T, Location<F>>,
-    H,
-    Update<K, V>,
-    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
-    S,
->;
+pub type Db<F, E, K, V, H, T, S> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>, S>;
 
 /// Configuration for a [Db].
 pub type Config<T, S> = any::Config<T, JournalConfig, S>;
@@ -57,7 +49,6 @@ pub mod partitioned {
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
 
@@ -91,7 +82,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            Error, ProofExt as _, SnapshotBuild as _,
+            Error, ProofExt as _,
             any::{
                 batch::Slot,
                 test::{
@@ -102,7 +93,7 @@ pub(crate) mod test {
             },
             cache::Cache,
             floor::{Bounded, Proportional},
-            snapshot::{delete_key, update_key},
+            snapshot::{Rebuild, delete_key, update_key},
         },
         translator::{OneCap, TwoCap},
     };
@@ -140,7 +131,6 @@ pub(crate) mod test {
         Index<TwoCap, GenericLocation<F>>,
         Sha256,
         crate::qmdb::any::operation::update::Unordered<Digest, FixedEncoding<Digest>>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;
 
@@ -976,9 +966,8 @@ pub(crate) mod test {
         });
     }
 
-    /// A replay failure during a parallel build must join every worker before surfacing the
-    /// error: no worker may outlive the failed build, retaining a clone of the log and its
-    /// partition-range allocation (the [crate::qmdb::SnapshotBuild] cleanup invariant).
+    /// On replay failure, a parallel build must join its workers and release their partition
+    /// ranges. Every log clone must be dropped before returning, as required by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {

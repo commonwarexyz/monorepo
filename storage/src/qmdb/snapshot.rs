@@ -528,7 +528,7 @@ where
 
 /// Build a snapshot serially on the calling task via [build_snapshot_from_log], collecting each
 /// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
-/// activity bitmap (see [SnapshotBuild::build_snapshot]).
+/// activity bitmap (see [Rebuild::build_snapshot]).
 async fn build_snapshot_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
@@ -649,7 +649,7 @@ impl ParallelPlan {
 /// Build a snapshot by decoding the log replay in contiguous chunks on concurrent decode tasks
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
-/// [SnapshotBuild::build_snapshot]).
+/// [Rebuild::build_snapshot]).
 async fn build_snapshot_parallel<F, E, C, I, S>(
     snapshot: &mut I,
     plan: ParallelPlan,
@@ -829,17 +829,21 @@ where
     Ok((total_items, active))
 }
 
-/// Builds a database's snapshot index from the operations log.
+/// Configures snapshot rebuilding during QMDB initialization.
 ///
-/// Generic over the `Index` type so each index controls how it builds: serially with the default
-/// method body, or split across parallel workers with an override.
-///
-/// Sealed: only in-crate index types implement this, so internal invariants (e.g. builds must
-/// drop every clone of the shared log before returning) are enforced by the implementations
-/// rather than the public contract.
+/// This trait is sealed to the index types provided by this crate.
+#[expect(
+    private_bounds,
+    reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
+)]
 pub trait SnapshotBuild<F: Family>:
-    sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
+    Index<Value = Location<F>> + Rebuild<F> + Sized + 'static
 {
+}
+
+/// Replays the log into an index owned by initialization. Implementations must drop all log
+/// clones before returning, including on error.
+pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
@@ -895,69 +899,60 @@ pub trait SnapshotBuild<F: Family>:
         H: MerkleHasher<F> + 'static;
 }
 
-mod sealed {
-    use crate::translator::Translator;
-
-    pub trait SnapshotBuildSealed {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::ordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::unordered::Index<T, V, P>
-    {
-    }
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::ordered::Index<T, V, P>
-    {
-    }
-}
-
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
-    type HashingPlan = Infallible;
-
-    async fn build_snapshot_hashing<E, C, H>(
-        &mut self,
-        _context: E,
-        _inactivity_floor_loc: Location<F>,
-        _log: &Arc<C>,
-        plan: Infallible,
-        _init_buffer: NonZeroUsize,
-        _leaves: LeafSink<F, H>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F> + Encode> + 'static,
-        H: MerkleHasher<F> + 'static,
-    {
-        match plan {}
-    }
-}
-
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
-    type HashingPlan = Infallible;
-
-    async fn build_snapshot_hashing<E, C, H>(
-        &mut self,
-        _context: E,
-        _inactivity_floor_loc: Location<F>,
-        _log: &Arc<C>,
-        plan: Infallible,
-        _init_buffer: NonZeroUsize,
-        _leaves: LeafSink<F, H>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F> + Encode> + 'static,
-        H: MerkleHasher<F> + 'static,
-    {
-        match plan {}
-    }
-}
-
-impl<F, I> SnapshotBuild<F> for I
-where
-    F: Family,
-    I: Partitioned + Index<Value = Location<F>> + sealed::SnapshotBuildSealed + 'static,
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+    for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
+}
+impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
+{
+}
+
+impl<F: Family, T: Translator> Rebuild<F> for crate::index::unordered::Index<T, Location<F>> {
+    type HashingPlan = Infallible;
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        _context: E,
+        _inactivity_floor_loc: Location<F>,
+        _log: &Arc<C>,
+        plan: Infallible,
+        _init_buffer: NonZeroUsize,
+        _leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        match plan {}
+    }
+}
+
+impl<F: Family, T: Translator> Rebuild<F> for crate::index::ordered::Index<T, Location<F>> {
+    type HashingPlan = Infallible;
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        _context: E,
+        _inactivity_floor_loc: Location<F>,
+        _log: &Arc<C>,
+        plan: Infallible,
+        _init_buffer: NonZeroUsize,
+        _leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        match plan {}
+    }
+}
+
+impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
     type HashingPlan = ParallelPlan;
 
     async fn build_snapshot<E, C>(

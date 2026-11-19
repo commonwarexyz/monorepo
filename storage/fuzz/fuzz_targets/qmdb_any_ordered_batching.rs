@@ -32,7 +32,6 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
-const BITMAP_CHUNK_BYTES: usize = 64;
 
 type GenericDb<F> = AnyDb<
     F,
@@ -41,7 +40,6 @@ type GenericDb<F> = AnyDb<
     Index<EightCap, Location<F>>,
     Sha256,
     Update<Key, FixedEncoding<Value>>,
-    BITMAP_CHUNK_BYTES,
     Sequential,
 >;
 

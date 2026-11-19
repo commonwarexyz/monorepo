@@ -561,7 +561,7 @@ where
     Operation<F, U>: Codec,
 {
     /// The database the batch was validated against.
-    db: Compatible<'a, Db<F, E, C, I, H, U, N, S>>,
+    db: Compatible<'a, Db<F, E, C, I, H, U, S, N>>,
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
     /// Metadata for this batch's commit.
@@ -1075,7 +1075,7 @@ where
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
     ) -> Vec<Location<F>>
     where
         E: Context,
@@ -1224,7 +1224,7 @@ where
         policy: &mut P,
         mut prefetched: Option<Prefetched<F, U>>,
         mut source: impl Candidates<F>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
     ) -> Result<(Location<F>, Vec<Decided<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1437,7 +1437,7 @@ where
         walked: Walked<F, U>,
         mut floor: Location<F>,
         metadata: Option<U::Value>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
     ) -> MerkleizeResult<F, H::Digest, U, S>
     where
         E: Context,
@@ -1593,7 +1593,7 @@ where
     pub async fn expand<E, C, I, const N: usize>(
         mut self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<(Self, Range<usize>, Vec<Option<U::Value>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1785,7 +1785,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
@@ -1808,7 +1808,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
@@ -1846,7 +1846,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &'a Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &'a Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
         policy: &impl Policy<F, K, V::Value>,
         mut source: impl Candidates<F>,
     ) -> Result<
@@ -1971,7 +1971,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
@@ -1994,7 +1994,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
@@ -2064,8 +2064,8 @@ where
     #[allow(clippy::type_complexity)]
     pub(crate) fn compatible<'a, E, C, I, const N: usize>(
         &self,
-        db: &'a Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Compatible<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
+        db: &'a Db<F, E, C, I, H, U, S, N>,
+    ) -> Result<Compatible<'a, Db<F, E, C, I, H, U, S, N>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -2081,7 +2081,7 @@ where
     /// subsequent merkleization reads.
     pub(crate) fn prepare<'a, E, C, I, const N: usize>(
         self,
-        db: &'a Db<F, E, C, I, H, U, N, S>,
+        db: &'a Db<F, E, C, I, H, U, S, N>,
     ) -> PrepareResult<'a, F, E, C, I, H, U, N, S>
     where
         E: Context,
@@ -2141,7 +2141,7 @@ where
     /// Read unresolved slots from the database and merge them back into `results`.
     async fn fill_committed_reads<E, C, I, T: Send, const N: usize>(
         unresolved: Vec<PendingRead<'_, U::Key>>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
         results: &mut [Option<U::Value>],
         map: impl Fn(U, Location<F>) -> T + Send + Sync,
         mut apply: impl FnMut(usize, T) -> U::Value,
@@ -2171,7 +2171,7 @@ where
     pub async fn get<E, C, I, const N: usize>(
         &self,
         key: &U::Key,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2197,7 +2197,7 @@ where
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2246,7 +2246,7 @@ where
     pub async fn stage<E, C, I, const N: usize>(
         self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<(Staged<F, H, U, S>, Vec<Option<U::Value>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2275,7 +2275,7 @@ where
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[U::Key],
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
     ) -> Result<(Vec<Option<U::Value>>, Vec<StagedResolution<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2346,7 +2346,7 @@ where
     /// or an unapplied ancestor was dropped.
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
@@ -2366,7 +2366,7 @@ where
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
@@ -2537,7 +2537,7 @@ where
     /// or an unapplied ancestor was dropped.
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
@@ -2557,7 +2557,7 @@ where
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
@@ -2896,7 +2896,7 @@ where
         &self,
         walked: &Walked<F, update::Ordered<K, V>>,
         mut decided: Vec<Decided<F, update::Ordered<K, V>>>,
-        db: Compatible<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, update::Ordered<K, V>, S, N>>,
     ) -> Result<Vec<Decided<F, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3025,7 +3025,7 @@ where
     pub async fn get_next_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> Result<Option<K>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3054,7 +3054,7 @@ where
     pub async fn get_prev_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> Result<Option<K>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3264,7 +3264,7 @@ where
     /// [`Db::to_batch`]).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Proof<F, D>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3295,7 +3295,7 @@ where
     /// and [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub fn pinned_nodes<E, C, I, H, const N: usize>(
         &self,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Vec<D>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3317,7 +3317,7 @@ where
     pub async fn get<E, C, I, H, const N: usize>(
         &self,
         key: &U::Key,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3344,7 +3344,7 @@ where
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3378,7 +3378,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,

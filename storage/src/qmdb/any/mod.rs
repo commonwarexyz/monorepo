@@ -203,7 +203,7 @@ pub struct Config<T: Translator, J, S: Strategy> {
     pub init_concurrency: NonZeroUsize,
 }
 
-impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
+impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, S>
 where
     F: Family,
     E: Context + Spawner,
@@ -230,7 +230,7 @@ where
     }
 }
 
-impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
+impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, S>
 where
     F: Family,
     E: Context + Spawner,
@@ -266,7 +266,7 @@ pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     bitmap: Option<Arc<Shared<N>>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
-) -> Result<db::Db<F, E, J, I, H, U, N, S>, QmdbError<F>>
+) -> Result<db::Db<F, E, J, I, H, U, S, N>, QmdbError<F>>
 where
     F: Family,
     E: Context + Spawner,
@@ -1429,7 +1429,7 @@ pub(crate) mod test {
 
     /// Observe the state of `db` for `keys`.
     async fn observe<F, C, I, H, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, H, U, N, S>,
+        db: &Db<F, Context, C, I, H, U, S, N>,
         keys: &[U::Key],
     ) -> Observed<F, H::Digest, U::Value>
     where
@@ -1475,10 +1475,10 @@ pub(crate) mod test {
     /// lies below the live prefix after a prune whose chunk floor exceeds the retained start.
     #[boxed]
     pub(crate) async fn assert_rebuild_matches<F, C, I, H, U, const N: usize, S>(
-        db: Db<F, Context, C, I, H, U, N, S>,
-        reopen: impl Future<Output = Db<F, Context, C, I, H, U, N, S>>,
+        db: Db<F, Context, C, I, H, U, S, N>,
+        reopen: impl Future<Output = Db<F, Context, C, I, H, U, S, N>>,
         keys: &[U::Key],
-    ) -> Db<F, Context, C, I, H, U, N, S>
+    ) -> Db<F, Context, C, I, H, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -1561,7 +1561,7 @@ pub(crate) mod test {
 
     /// Replay the retained log of `db` and return the location of every live key's update.
     pub(crate) async fn live<F, C, I, H, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, H, U, N, S>,
+        db: &Db<F, Context, C, I, H, U, S, N>,
     ) -> BTreeMap<U::Key, GenericLocation<F>>
     where
         F: Family,
@@ -1586,7 +1586,7 @@ pub(crate) mod test {
     /// floor. The active key count matches the live keys, and the snapshot maps each live key to
     /// its update and holds no other entry.
     pub(crate) async fn assert_exact<F, C, I, H, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, H, U, N, S>,
+        db: &Db<F, Context, C, I, H, U, S, N>,
     ) where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -1897,10 +1897,10 @@ pub(crate) mod test {
     /// the live state. Returns the rebuilt db.
     #[boxed]
     async fn assert_model_rebuild<F, C, I, U, const N: usize, S>(
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         model: &Model,
-        reopen: impl Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
-    ) -> Db<F, Context, C, I, Sha256, U, N, S>
+        reopen: impl Future<Output = Db<F, Context, C, I, Sha256, U, S, N>>,
+    ) -> Db<F, Context, C, I, Sha256, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -1930,7 +1930,7 @@ pub(crate) mod test {
     /// misresolved to `None` leaves a duplicate snapshot entry and a stale bitmap bit.
     pub(crate) async fn test_any_db_chained_rebuild<F, C, I, U, const N: usize, S, Fut>(
         context: Context,
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         reopen: impl Fn(Context) -> Fut,
         make_value: impl Fn(u64) -> Digest,
     ) where
@@ -1940,7 +1940,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -1948,7 +1948,7 @@ pub(crate) mod test {
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
-        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
+        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, S, N>>,
     {
         // Shape 1: A is applied and dropped before C is merkleized on B.
         let mut model = Model::default();
@@ -2157,7 +2157,6 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, FixedEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
 
@@ -2171,7 +2170,6 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, VariableEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
 
@@ -2185,7 +2183,6 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, FixedEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
 
@@ -2199,7 +2196,6 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, VariableEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
     }
@@ -3769,7 +3765,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S>
-        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, N, S>, F>
+        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, S, N>, F>
         for batch::Staged<F, Sha256, operation::update::Unordered<Digest, V>, S>
     where
         F: Family,
@@ -3786,7 +3782,7 @@ pub(crate) mod test {
             self,
             slots: Vec<Slot<Digest>>,
             unstaged: Vec<(Digest, Option<Digest>)>,
-            db: &Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, N, S>,
+            db: &Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, S, N>,
             policy: &mut P,
         ) -> Self::Merkleized {
             self.merkleize_with(slots, unstaged, db, policy)
@@ -3796,7 +3792,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S>
-        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>, F>
+        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>, F>
         for batch::Staged<F, Sha256, operation::update::Ordered<Digest, V>, S>
     where
         F: Family,
@@ -3813,7 +3809,7 @@ pub(crate) mod test {
             self,
             slots: Vec<Slot<Digest>>,
             unstaged: Vec<(Digest, Option<Digest>)>,
-            db: &Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>,
+            db: &Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>,
             policy: &mut P,
         ) -> Self::Merkleized {
             self.merkleize_with(slots, unstaged, db, policy)
@@ -3828,7 +3824,7 @@ pub(crate) mod test {
     /// same writes and policy. A staged key resolves in the applied snapshot or in a live parent.
     pub(crate) async fn test_any_policy_after_staged_writes<F, C, I, U, const N: usize, S>(
         _context: Context,
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         make_value: impl Fn(u64) -> Digest,
     ) where
         F: Family,
@@ -3837,7 +3833,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -3846,7 +3842,7 @@ pub(crate) mod test {
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
         batch::Staged<F, Sha256, U, S>: StagedPolicy<
-                Db<F, Context, C, I, Sha256, U, N, S>,
+                Db<F, Context, C, I, Sha256, U, S, N>,
                 F,
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
             >,
@@ -3897,7 +3893,7 @@ pub(crate) mod test {
     /// serves the decided values, and that it matches an unstaged batch with the same writes and
     /// policy. Returns the decided locations.
     async fn staged_matches_writes<F, C, I, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, Sha256, U, N, S>,
+        db: &Db<F, Context, C, I, Sha256, U, S, N>,
         ancestors: &[&Arc<batch::MerkleizedBatch<F, Digest, U, S>>],
         make: impl Fn() -> batch::UnmerkleizedBatch<F, Sha256, U, S>,
         writes: &[(Digest, Option<Digest>); 3],
@@ -3910,7 +3906,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -3919,7 +3915,7 @@ pub(crate) mod test {
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
         batch::Staged<F, Sha256, U, S>: StagedPolicy<
-                Db<F, Context, C, I, Sha256, U, N, S>,
+                Db<F, Context, C, I, Sha256, U, S, N>,
                 F,
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
             >,
@@ -3982,7 +3978,7 @@ pub(crate) mod test {
     /// deciding any update.
     pub(crate) async fn test_any_policy_after_ancestor_applied<F, C, I, U, const N: usize, S, Fut>(
         context: Context,
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         reopen: impl Fn(Context) -> Fut,
         make_value: impl Fn(u64) -> Digest,
     ) where
@@ -3992,7 +3988,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -4000,7 +3996,7 @@ pub(crate) mod test {
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
-        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
+        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, S, N>>,
     {
         // Seed eight updates in key order at locations 1..9 with a held floor.
         let mut keys: Vec<_> = (0..8).map(to_digest).collect();
@@ -4093,7 +4089,7 @@ pub(crate) mod test {
         async fn read(&self, batch: &Self::Merkleized, key: &Digest) -> Option<Digest>;
     }
 
-    impl<F, C, I, U, const N: usize, S> Inspect<F> for Db<F, Context, C, I, Sha256, U, N, S>
+    impl<F, C, I, U, const N: usize, S> Inspect<F> for Db<F, Context, C, I, Sha256, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -4147,7 +4143,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S> Links<F>
-        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>
+        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, operation::update::Ordered<Digest, V>>>,
@@ -5093,7 +5089,7 @@ pub(crate) mod test {
             .collect()
     }
 
-    impl<F, C, I, U, const N: usize, S> Changes<F> for Db<F, Context, C, I, Sha256, U, N, S>
+    impl<F, C, I, U, const N: usize, S> Changes<F> for Db<F, Context, C, I, Sha256, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -5149,7 +5145,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S> Neighbors<F>
-        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>
+        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, operation::update::Ordered<Digest, V>>>,
@@ -7333,7 +7329,6 @@ pub(crate) mod test {
         crate::index::unordered::Index<OneCap, crate::merkle::Location<crate::merkle::mmb::Family>>,
         Sha256,
         super::operation::update::Unordered<Digest, crate::qmdb::value::VariableEncoding<Digest>>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;
 

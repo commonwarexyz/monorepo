@@ -217,8 +217,8 @@ pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
 ///
-/// `N` is the bitmap chunk size in bytes; defaults to `BITMAP_CHUNK_BYTES`. `current::Db`
-/// overrides `N` to match its grafted-tree configuration.
+/// `N` is the activity bitmap's chunk size in bytes. Leave it at its default. A database can
+/// only be opened with that chunk size.
 pub struct Db<
     F: Family,
     E: Context,
@@ -226,8 +226,8 @@ pub struct Db<
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Send + Sync,
-    const N: usize,
     S: Strategy,
+    const N: usize = { crate::qmdb::any::BITMAP_CHUNK_BYTES },
 > {
     /// A (pruned) log of all operations in order of their application. The index of each
     /// operation in the log is called its _location_, which is a stable identifier.
@@ -274,7 +274,7 @@ pub struct Db<
     pub(crate) _update: core::marker::PhantomData<U>,
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,
@@ -294,7 +294,7 @@ where
 }
 
 // Shared read-only functionality.
-impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,
@@ -443,7 +443,7 @@ where
 }
 
 // Functionality requiring a mutable journal.
-impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,

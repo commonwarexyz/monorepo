@@ -32,7 +32,7 @@ pub(crate) mod tests;
 
 /// Shared helper to build a [Db] from sync components.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, C, const N: usize, S>(
+async fn build_db<F, E, U, I, H, C, S>(
     context: E,
     merkle_config: authenticated::Config<S>,
     log: C,
@@ -43,7 +43,7 @@ async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
-) -> Result<Db<F, E, C, I, H, U, N, S>, qmdb::Error<F>>
+) -> Result<Db<F, E, C, I, H, U, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
     E: Context + Spawner,
@@ -85,7 +85,7 @@ where
     Ok(db)
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> sync::Database for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, S> sync::Database for Db<F, E, C, I, H, U, S>
 where
     F: merkle::Family,
     E: Context + Spawner,
@@ -114,10 +114,7 @@ where
         config: Self::Config,
         max_size: Option<Location<F>>,
     ) -> Result<Self, qmdb::Error<F>> {
-        crate::qmdb::any::init_with_bitmap::<F, E, U, H, I, C, S, N>(
-            context, config, None, max_size, None,
-        )
-        .await
+        crate::qmdb::any::init_with_bitmap(context, config, None, max_size, None).await
     }
 
     fn target(&self) -> sync::Target<F, H::Digest> {
@@ -135,7 +132,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> sync::Hooks<Self> for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, S> sync::Hooks<Self> for Db<F, E, C, I, H, U, S>
 where
     F: merkle::Family,
     E: Context + Spawner,
@@ -159,7 +156,7 @@ where
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
-        build_db::<F, _, U, _, H, _, N, _>(
+        build_db::<F, _, U, _, H, _, _>(
             context,
             config.merkle,
             log,
