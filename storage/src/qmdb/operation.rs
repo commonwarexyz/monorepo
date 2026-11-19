@@ -8,9 +8,10 @@ use commonware_codec::{
 use commonware_runtime::BufMut;
 use core::{fmt::Debug, hash::Hash};
 
-/// A QMDB key. Its `AsRef<[u8]>` bytes identify the key in the index: two keys must be
-/// equal exactly when their bytes are equal. For ordered databases, key ordering must also
-/// match the lexicographic ordering of those bytes.
+/// A QMDB key, indexed by its `AsRef<[u8]>` bytes.
+///
+/// For any two keys, `a.cmp(b)` must equal `a.as_ref().cmp(b.as_ref())`. This implies
+/// that two keys are equal exactly when their index bytes are equal.
 pub trait Key: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}
 
 impl<T> Key for T where T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}

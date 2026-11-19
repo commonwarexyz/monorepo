@@ -2,11 +2,10 @@
 //! key.
 //!
 //! The specific variants provided within this module include:
-//! - Unordered: The database does not maintain or require any ordering over the key space.
+//! - Unordered: The database does not track the order of active keys.
 //!   - Fixed-size values
 //!   - Variable-size values
-//! - Ordered: Active [keys](crate::qmdb::operation::Key) must sort in the same order as their
-//!   `AsRef<[u8]>` bytes.
+//! - Ordered: The database maintains a total order over active keys.
 //!   - Fixed-size values
 //!   - Variable-size values
 //!

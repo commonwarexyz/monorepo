@@ -1,3 +1,8 @@
+//! Ordered variants of the [Any database](crate::qmdb::any).
+//!
+//! Span lookups use the lexicographic byte order defined by [`Key`], including when the
+//! queried key is absent.
+
 use crate::{
     Context,
     index::Ordered as Index,
