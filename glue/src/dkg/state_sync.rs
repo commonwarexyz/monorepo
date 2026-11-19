@@ -763,6 +763,8 @@ where
     /// Durably records `checkpoint` for `epoch` and drops every other checkpoint for an epoch
     /// before `retained_from`, in storage and then in memory.
     ///
+    /// Redelivery of the same boundary without a finalization keeps the one already recorded.
+    ///
     /// `retained_from` must not be later than the epoch any later restart recovers from marshal's
     /// processed height. A disabled plan records nothing.
     ///
@@ -771,7 +773,7 @@ where
         &self,
         context: E,
         epoch: Epoch,
-        checkpoint: Checkpoint<S, MV>,
+        mut checkpoint: Checkpoint<S, MV>,
         retained_from: Epoch,
     ) {
         let Some(storage) = &self.storage else {
@@ -781,6 +783,12 @@ where
         // Opening a metadata store repairs a copy that fails validation, so the lock keeps clones
         // from opening the partition while another clone writes it.
         let mut state = self.state.lock().await;
+        if checkpoint.finalization.is_none()
+            && let Some(previous) = state.checkpoints.get(&epoch)
+            && previous.commitment == checkpoint.commitment
+        {
+            checkpoint.finalization.clone_from(&previous.finalization);
+        }
         let mut store = open_checkpoints::<E, S, MV>(context, storage).await;
         store.retain(|key, _| Epoch::new(u64::from(key)) >= retained_from);
         store.put(U64::new(epoch.get()), checkpoint.clone());
@@ -999,6 +1007,39 @@ mod tests {
         let block = boundary_block(epoch, state_sync(context, epoch).info);
         let digest = block.digest();
         Checkpoint::new(Digested::precomputed(block, digest), None)
+    }
+
+    #[test]
+    fn checkpoint_redelivery_keeps_recorded_finalization() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let epoch = Epoch::new(3);
+            let boundary = checkpoint(&mut context, epoch);
+            let schemes = mocks::scheme_fixture_n(&mut context, 4).schemes;
+            let proof = finalization(&schemes, epoch.previous().unwrap(), boundary.commitment());
+            let certified = Checkpoint::new(boundary.block(), Some(proof.clone()));
+            let partition = "checkpoint_redelivery";
+            let recorder = plan(context.child("record"), partition, None).await;
+            recorder
+                .record(context.child("certified"), epoch, certified, epoch)
+                .await;
+            drop(recorder);
+
+            let replay = plan(context.child("replay"), partition, None).await;
+            replay
+                .record(context.child("uncertified"), epoch, boundary, epoch)
+                .await;
+            assert_eq!(
+                replay.checkpoint(epoch).await.unwrap().finalization(),
+                Some(&proof)
+            );
+            drop(replay);
+
+            let reopened = plan(context.child("reopen"), partition, None).await;
+            assert_eq!(
+                reopened.checkpoint(epoch).await.unwrap().finalization(),
+                Some(&proof)
+            );
+        });
     }
 
     /// Checkpoints survive reopening the plan, and each record keeps only the checkpoints
