@@ -424,7 +424,7 @@ where
 
 /// Build a snapshot serially on the calling task via [build_snapshot_from_log], collecting each
 /// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
-/// activity bitmap (see [SnapshotBuild::build_snapshot]).
+/// activity bitmap (see [Rebuild::build_snapshot]).
 async fn build_snapshot_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
@@ -530,7 +530,7 @@ impl ParallelPlan {
 /// Build a snapshot by decoding the log replay in contiguous chunks on concurrent decode tasks
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
-/// [SnapshotBuild::build_snapshot]).
+/// [Rebuild::build_snapshot]).
 async fn build_snapshot_parallel<F, E, C, I>(
     snapshot: &mut I,
     context: E,
@@ -709,21 +709,24 @@ where
     Ok((total_items, active))
 }
 
-/// Builds a database's snapshot index from the operations log.
+/// Configures snapshot rebuilding during QMDB initialization.
 ///
-/// Generic over the `Index` type so each index controls how it builds: serially with the default
-/// method body, or split across parallel workers with an override.
-///
-/// Sealed: only in-crate index types implement this, so internal invariants (e.g. builds must
-/// drop every clone of the shared log before returning) are enforced by the implementations
-/// rather than the public contract.
+/// This trait is sealed to the index types provided by this crate.
+#[expect(
+    private_bounds,
+    reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
+)]
 pub trait SnapshotBuild<F: Family>:
-    sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
+    Index<Value = Location<F>> + Rebuild<F, Self::Concurrency> + Sized + 'static
 {
-    /// The concurrency configuration the build consumes. Index types that always build serially
-    /// declare `()`, so a setting they cannot use is unrepresentable.
+    /// The concurrency setting for this index: `()` for unpartitioned indexes or
+    /// [`NonZeroUsize`] for partitioned indexes.
     type Concurrency: Copy + Send + Sync + 'static;
+}
 
+/// Replays the log into an index owned by initialization. Implementations must drop all log
+/// clones before returning, including on error.
+pub(super) trait Rebuild<F: Family, B>: Index<Value = Location<F>> + Sized {
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
@@ -735,7 +738,7 @@ pub trait SnapshotBuild<F: Family>:
         _context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        _init_concurrency: Self::Concurrency,
+        _init_concurrency: B,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
@@ -746,22 +749,6 @@ pub trait SnapshotBuild<F: Family>:
         async move {
             build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
         }
-    }
-}
-
-mod sealed {
-    use crate::translator::Translator;
-
-    pub trait SnapshotBuildSealed {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::ordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::unordered::Index<T, V, P>
-    {
-    }
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::ordered::Index<T, V, P>
-    {
     }
 }
 
@@ -776,38 +763,18 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
     type Concurrency = NonZeroUsize;
-
-    async fn build_snapshot<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
-        init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build_snapshot_parallel(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            init_concurrency,
-            init_buffer,
-            cache_size,
-        )
-        .await
-    }
 }
 
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
     type Concurrency = NonZeroUsize;
+}
 
+impl<F: Family, T: Translator> Rebuild<F, ()> for crate::index::unordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator> Rebuild<F, ()> for crate::index::ordered::Index<T, Location<F>> {}
+
+impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F, NonZeroUsize> for I {
     async fn build_snapshot<E, C>(
         &mut self,
         context: E,
