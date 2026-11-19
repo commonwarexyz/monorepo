@@ -181,7 +181,7 @@ where
     // Probe the in-memory index with the bytes a write indexes each key by. Each key may map
     // to multiple locations due to hash collisions.
     let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-    snapshot.get_many(keys.iter().map(|key| &**key.borrow()), |key_idx, &loc| {
+    snapshot.get_many(keys.iter().map(Borrow::borrow), |key_idx, &loc| {
         candidates.push((key_idx, *loc))
     });
 
@@ -369,7 +369,7 @@ where
     ) -> impl Future<Output = Result<Option<(U, Location<F>)>, crate::qmdb::Error<F>>> + Send {
         async move {
             // Translated keys can collide, so read candidates until the full key matches.
-            for loc in self.snapshot.get(key).copied() {
+            for loc in self.snapshot.get(key.as_ref()).copied() {
                 let update = self.read_update(loc).await?;
                 if update.key() == key {
                     return Ok(Some((update, loc)));

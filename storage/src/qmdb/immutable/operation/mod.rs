@@ -80,7 +80,12 @@ impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => {
-                write!(f, "[key:{} value:{}]", hex(key), hex(&value.encode()))
+                write!(
+                    f,
+                    "[key:{} value:{}]",
+                    hex(key.as_ref()),
+                    hex(&value.encode())
+                )
             }
             Self::Commit(value, floor) => {
                 if let Some(value) = value {

@@ -131,7 +131,7 @@ where
 impl<F: Family, S: Update> fmt::Display for Operation<F, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key)),
+            Self::Delete(key) => write!(f, "[key:{} <deleted>]", hex(key.as_ref())),
             Self::Update(payload) => payload.fmt(f),
             Self::Commit(value, floor) => {
                 if let Some(value) = value {

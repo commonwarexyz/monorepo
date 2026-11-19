@@ -5,7 +5,8 @@
 //! - Unordered: The database does not maintain or require any ordering over the key space.
 //!   - Fixed-size values
 //!   - Variable-size values
-//! - Ordered: The database maintains a total order over active keys.
+//! - Ordered: Active [keys](crate::qmdb::operation::Key) must sort in the same order as their
+//!   `AsRef<[u8]>` bytes.
 //!   - Fixed-size values
 //!   - Variable-size values
 //!
@@ -1412,7 +1413,7 @@ pub(crate) mod test {
             locs: keys
                 .iter()
                 .map(|key| {
-                    let mut locs: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locs: Vec<_> = db.snapshot.get(key.as_ref()).copied().collect();
                     locs.sort();
                     locs
                 })
@@ -1578,7 +1579,7 @@ pub(crate) mod test {
         );
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
+                db.snapshot.get(key.as_ref()).any(|entry| entry == loc),
                 "snapshot misses the live update at {loc}",
             );
         }
