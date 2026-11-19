@@ -233,7 +233,7 @@ mod tests {
         // Syncing to 6..8 imports the operations at start 6. The target commit's floor 5 lies
         // in the retained blob but before that start, so the snapshot replay finds it pruned.
         if from_sync {
-            let result = <Db<F, _, Digest, Digest, Sha256, _, _> as crate::qmdb::sync::Database>::from_sync_result(
+            let result = <Db<F, _, Digest, Digest, Sha256, _, _> as crate::qmdb::sync::Hooks<_>>::from_sync_result(
                 context.child("sync"),
                 cfg,
                 journal,

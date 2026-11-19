@@ -658,7 +658,7 @@ where
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
         let (_, journal) = db.into_log_components();
 
-        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             context.child("synced"),
             db_config,
             journal,
@@ -731,7 +731,7 @@ where
         let (frontier, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
-        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             client_context.child("synced"),
             sync_db_config,
             journal,
@@ -791,7 +791,7 @@ where
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string());
 
-        let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
@@ -837,7 +837,7 @@ where
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string());
 
-        let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
@@ -1511,7 +1511,7 @@ pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
         )
         .await
         .unwrap();
-        let pinned = <DbOf<H> as sync::Database>::local_pinned_nodes(
+        let pinned = <DbOf<H> as sync::Hooks<_>>::local_pinned_nodes(
             context.child("probe"),
             &config,
             &target,

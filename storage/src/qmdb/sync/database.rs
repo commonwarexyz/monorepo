@@ -58,14 +58,17 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 /// A database that [`sync`](super::sync) can build from operations fetched from a [`Source`].
 ///
 /// Every authenticated QMDB variant implements this trait, and callers drive it through
-/// [`sync`](super::sync): the engine calls [`Self::discard_local_state`] when the sync journal
-/// left on disk holds no operation of the target's range and [`Self::local_pinned_nodes`] when
-/// it already reaches the target. The engine fetches and verifies the remaining operations.
-/// It builds the database with [`Self::from_sync_result`], checks the root of [`Self::target`]
-/// against the target, and only then calls [`Self::persist_sync_result`].
+/// [`sync`](super::sync). The steps the engine takes to build the database are private to this
+/// crate.
+///
+/// This trait is sealed to the databases provided by this crate.
 ///
 /// [`Source`]: super::Source
-pub trait Database: Sized + Send {
+#[expect(
+    private_bounds,
+    reason = "the Hooks supertrait is private so only the sync engine can call its methods"
+)]
+pub trait Database: Hooks<Self> + Sized {
     /// The Merkle family of the operations log.
     type Family: Family;
 
@@ -97,47 +100,6 @@ pub trait Database: Sized + Send {
         max_size: Option<Location<Self::Family>>,
     ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 
-    /// Build a database from the journal and pinned nodes populated by the sync engine.
-    fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        journal: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: NonEmptyRange<Location<Self::Family>>,
-        apply_batch_size: NonZeroU64,
-    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
-
-    /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
-    ///
-    /// The engine calls this only after the root of [`Self::target`] matches the requested target.
-    /// Implementations that persist everything in [`Self::from_sync_result`] must explicitly
-    /// return `Ok(self)`.
-    fn persist_sync_result(self) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
-
-    /// Durably discard persisted state derived from the operations of the sync journal.
-    ///
-    /// The engine calls this when the sync journal it opens holds no operation of the target's
-    /// range, before it appends any fetched operation. State derived from operations the journal
-    /// held earlier would otherwise be read as describing the operations fetched in their place.
-    /// Implementations with no persisted state that would be read that way must explicitly
-    /// return `Ok(())`.
-    fn discard_local_state(
-        context: Self::Context,
-        config: &Self::Config,
-    ) -> impl Future<Output = Result<(), Error<Self::Family>>> + Send;
-
-    /// Return pinned nodes for the target computed from local state, if it can provide them.
-    ///
-    /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
-    /// database instead of fetching them from peers. The sync checks the resulting root against
-    /// the target's. Returning `None` always falls back to fetching from peers.
-    fn local_pinned_nodes(
-        context: Self::Context,
-        config: &Self::Config,
-        target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
-        journal: &Self::Journal,
-    ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, Error<Self::Family>>> + Send;
-
     /// Sync target of a freshly initialized database.
     fn initial_target() -> Target<Self::Family, Self::Digest> {
         Target {
@@ -157,13 +119,66 @@ pub trait Database: Sized + Send {
         self,
         target: &Target<Self::Family, Self::Digest>,
     ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
+}
+
+/// The steps the sync engine takes to build a [`Database`].
+///
+/// `DB` is the database the steps build. [`Database`] requires `Hooks<Self>`.
+///
+/// The engine calls [`Self::validate_target`] on the initial target and on every update it
+/// adopts. If the sync journal it opens holds no operation of the target's range, the engine
+/// calls [`Self::discard_local_state`]. If the journal already reaches the target, the engine
+/// calls [`Self::local_pinned_nodes`]. It fetches and verifies any remaining operations, builds
+/// the database with [`Self::from_sync_result`], and calls [`Self::persist_sync_result`] once the
+/// root of [`Database::target`] matches the requested root.
+pub(in crate::qmdb) trait Hooks<DB: Database>: Sized + Send {
+    /// Build a database from the journal and pinned nodes populated by the sync engine.
+    fn from_sync_result(
+        context: DB::Context,
+        config: DB::Config,
+        journal: DB::Journal,
+        pinned_nodes: Option<Vec<DB::Digest>>,
+        range: NonEmptyRange<Location<DB::Family>>,
+        apply_batch_size: NonZeroU64,
+    ) -> impl Future<Output = Result<Self, Error<DB::Family>>> + Send;
+
+    /// Persist any state that must remain provisional until the engine verifies the rebuilt root.
+    ///
+    /// The engine calls this only after the root of [`Database::target`] matches the requested
+    /// target. Implementations that persist everything in [`Self::from_sync_result`] must
+    /// explicitly return `Ok(self)`.
+    fn persist_sync_result(self) -> impl Future<Output = Result<Self, Error<DB::Family>>> + Send;
+
+    /// Durably discard persisted state derived from the operations of the sync journal.
+    ///
+    /// The engine calls this when the sync journal it opens holds no operation of the target's
+    /// range, before it appends any fetched operation. State derived from operations the journal
+    /// held earlier would otherwise be read as describing the operations fetched in their place.
+    /// Implementations with no persisted state that would be read that way must explicitly
+    /// return `Ok(())`.
+    fn discard_local_state(
+        context: DB::Context,
+        config: &DB::Config,
+    ) -> impl Future<Output = Result<(), Error<DB::Family>>> + Send;
+
+    /// Return pinned nodes for the target computed from local state, if it can provide them.
+    ///
+    /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
+    /// database instead of fetching them from peers. The sync checks the resulting root against
+    /// the target's. Returning `None` always falls back to fetching from peers.
+    fn local_pinned_nodes(
+        context: DB::Context,
+        config: &DB::Config,
+        target: &Target<DB::Family, DB::Digest>,
+        journal: &DB::Journal,
+    ) -> impl Future<Output = Result<Option<Vec<DB::Digest>>, Error<DB::Family>>> + Send;
 
     /// Reject a target this database cannot sync to. The engine checks the initial target and
     /// every adopted update, and a rejected target fails the sync, since a malformed target is a
     /// caller bug. The default accepts any target.
     fn validate_target(
-        _target: &Target<Self::Family, Self::Digest>,
-    ) -> Result<(), EngineError<Self::Family, Self::Digest>> {
+        _target: &Target<DB::Family, DB::Digest>,
+    ) -> Result<(), EngineError<DB::Family, DB::Digest>> {
         Ok(())
     }
 }
@@ -192,7 +207,7 @@ pub(crate) fn journal_covers_range<F: Family>(
     Location::new(bounds.start) <= range.start() && Location::new(bounds.end) == range.end()
 }
 
-/// Shared body for [`Database::local_pinned_nodes`] implementations backed by an authenticated
+/// Shared body for [`Hooks::local_pinned_nodes`] implementations backed by an authenticated
 /// journal. Returns the pinned nodes at `target.range.start()`, rebuilt by replaying `journal`
 /// from the boundary of the frontier read from `config` through its end. Returns `None`
 /// if that boundary lies after the target start, `journal` does not hold the operations from the

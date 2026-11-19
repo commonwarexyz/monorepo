@@ -23,8 +23,6 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
-rand.workspace = true
-thiserror.workspace = true
 
 [[bin]]
 name = "collector"

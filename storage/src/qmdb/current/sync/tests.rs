@@ -625,7 +625,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
+            <Db as crate::qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -641,7 +641,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
+            <Db as crate::qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,

@@ -39,7 +39,7 @@ use crate::{
         bitmap::Shared,
         current::{db, grafting},
         metrics::Metrics as AnyMetrics,
-        sync::{Database, DatabaseConfig as Config, Request, source},
+        sync::{Database, DatabaseConfig as Config, Hooks, Request, source},
     },
     translator::Translator,
 };
@@ -225,11 +225,44 @@ where
         crate::qmdb::current::init_db(context, config, max_size).await
     }
 
+    /// The root is the ops root (not the canonical root), since the sync engine verifies
+    /// batches against the ops tree.
+    fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
+        qmdb::sync::Target {
+            root: Self::ops_root(self),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &qmdb::sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Hooks<Self> for db::Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context + Spawner,
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as crate::qmdb::sync::Journal<F>>::Config,
+        > + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
+        + 'static,
+    I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
     async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        context: E,
+        config: <Self as Database>::Config,
+        log: C,
+        pinned_nodes: Option<Vec<H::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
@@ -267,8 +300,8 @@ where
     }
 
     async fn discard_local_state(
-        context: Self::Context,
-        config: &Self::Config,
+        context: E,
+        config: &<Self as Database>::Config,
     ) -> Result<(), qmdb::Error<F>> {
         authenticated::discard_frontier::<F, _, H, S>(context.child("merkle"), &config.merkle)
             .await?;
@@ -288,11 +321,11 @@ where
     }
 
     async fn local_pinned_nodes(
-        context: Self::Context,
-        config: &Self::Config,
-        target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-        journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+        context: E,
+        config: &<Self as Database>::Config,
+        target: &qmdb::sync::Target<F, H::Digest>,
+        journal: &C,
+    ) -> Result<Option<Vec<H::Digest>>, qmdb::Error<F>> {
         if target.range.start() == Location::new(0)
             || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
         {
@@ -306,22 +339,6 @@ where
             journal,
         )
         .await
-    }
-
-    /// The root is the ops root (not the canonical root), since the sync engine verifies
-    /// batches against the ops tree.
-    fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
-        qmdb::sync::Target {
-            root: Self::ops_root(self),
-            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
-        }
-    }
-
-    async fn prune_to_target(
-        self,
-        target: &qmdb::sync::Target<F, H::Digest>,
-    ) -> Result<Self, qmdb::Error<F>> {
-        self.prune(target.range.start()).await
     }
 }
 
