@@ -9,6 +9,7 @@
 pub(crate) mod fixed;
 pub(crate) mod variable;
 
+pub use crate::qmdb::operation::{COMMIT_CONTEXT, SET_CONTEXT};
 use crate::{
     merkle::{Family, Location},
     qmdb::{
@@ -19,11 +20,6 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use core::fmt::Display;
-
-/// Wire tag for [Operation::Set].
-pub const SET_CONTEXT: u8 = 0;
-/// Wire tag for [Operation::Commit].
-pub const COMMIT_CONTEXT: u8 = 1;
 
 /// An operation applied to an immutable authenticated database.
 ///

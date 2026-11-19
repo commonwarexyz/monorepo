@@ -1870,13 +1870,17 @@ dependencies = [
 name = "commonware-collector"
 version = "2026.10.1"
 dependencies = [
+ "ahash",
+ "arbitrary",
  "commonware-actor",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",
+ "rstest",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1895,8 +1899,6 @@ dependencies = [
  "commonware-utils",
  "futures",
  "libfuzzer-sys",
- "rand 0.10.2",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2522,7 +2524,6 @@ name = "commonware-storage"
 version = "2026.10.1"
 dependencies = [
  "ahash",
- "anyhow",
  "arbitrary",
  "bytes",
  "cfg-if",

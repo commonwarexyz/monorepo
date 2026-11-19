@@ -258,8 +258,8 @@ mod tests {
                 assert_eq!(fixture.after.root, fixture.excluded.root);
                 assert_ne!(fixture.after.root, fixture.empty.root);
                 assert!(fixture.retainedStart > Uint256::ZERO);
-                assert_eq!(fixture.before.operation[0], 0xd2);
-                assert_eq!(fixture.empty.operation[0], 0xd3);
+                assert_eq!(fixture.before.operation[0], 0x01);
+                assert_eq!(fixture.empty.operation[0], 0x00);
             }
         }
     }
