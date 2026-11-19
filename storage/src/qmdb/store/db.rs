@@ -244,7 +244,7 @@ where
         self.metrics.lookups_requested.inc();
 
         // Translated keys can collide, so read candidates until the full key matches.
-        for &loc in self.snapshot.get(key) {
+        for &loc in self.snapshot.get(key.as_ref()) {
             let Operation::Update(Update(k, v)) = self.log.read(*loc).await? else {
                 unreachable!("location does not reference update operation. loc={loc}");
             };
@@ -528,7 +528,7 @@ where
             let old_loc = resolved.remove(&key);
             let matches = |loc: &Location| Some(*loc) == old_loc;
             if let Some(value) = value {
-                if let Some(mut cursor) = self.snapshot.get_mut_or_insert(&key, new_loc) {
+                if let Some(mut cursor) = self.snapshot.get_mut_or_insert(key.as_ref(), new_loc) {
                     if cursor.find(matches) {
                         cursor.update(new_loc);
                     } else {
@@ -544,7 +544,7 @@ where
                 self.bitmap.push(true);
                 ops.push(Operation::Update(Update(key, value)));
             } else if let Some(old_loc) = old_loc {
-                delete_known_loc(&mut self.snapshot, &key, old_loc);
+                delete_known_loc(&mut self.snapshot, key.as_ref(), old_loc);
                 self.bitmap.set_bit(*old_loc, false);
                 self.bitmap.push(false);
                 ops.push(Operation::Delete(key));
@@ -602,7 +602,7 @@ where
         let mut indices = HashMap::<Location, usize>::new();
         let mut buckets: Vec<Bucket<_>> = Vec::new();
         for key in diff.keys() {
-            let mut locations = self.snapshot.get(key);
+            let mut locations = self.snapshot.get(key.as_ref());
             let Some(&first) = locations.next() else {
                 continue;
             };
@@ -718,12 +718,17 @@ where
                 .into_action();
             let op = match action {
                 Action::Write(value) => {
-                    update_known_loc(&mut self.snapshot, &key, Location::new(loc), new_loc);
+                    update_known_loc(
+                        &mut self.snapshot,
+                        key.as_ref(),
+                        Location::new(loc),
+                        new_loc,
+                    );
                     self.bitmap.push(true);
                     Operation::Update(Update(key, value))
                 }
                 Action::Evict => {
-                    delete_known_loc(&mut self.snapshot, &key, Location::new(loc));
+                    delete_known_loc(&mut self.snapshot, key.as_ref(), Location::new(loc));
                     self.active_keys -= 1;
                     self.bitmap.push(false);
                     Operation::Delete(key)
@@ -3079,7 +3084,7 @@ mod test {
         assert_eq!(db.snapshot.items(), live.len());
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
+                db.snapshot.get(key.as_ref()).any(|entry| entry == loc),
                 "snapshot misses the live update at {loc}",
             );
         }
