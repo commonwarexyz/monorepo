@@ -265,43 +265,14 @@ impl crate::Storage for Storage {
     }
 }
 
-/// Extent limits for the backing vector, including this blob's actual header size.
-#[derive(Clone, Copy)]
-pub(super) struct Extent(u64);
-
-impl Extent {
-    pub(super) fn read_offset(&self, offset: u64, len: usize) -> Result<u64, crate::Error> {
-        super::read_offset(self.0, offset, len).ok_or(crate::Error::OffsetOverflow)
-    }
-
-    /// Resolve a write range in the backing vector. An empty write only checks its start.
-    pub(super) fn write_range(
-        &self,
-        offset: u64,
-        len: u64,
-    ) -> Result<Option<Range<usize>>, crate::Error> {
-        let range = physical_range(self.0, offset, len).ok_or(crate::Error::OffsetOverflow)?;
-        if range.is_empty() {
-            return Ok(None);
-        }
-        let end = memory_len(range.end)?;
-        Ok(Some(range.start as usize..end))
-    }
-
-    /// Resolve a resize length in the backing vector.
-    pub(super) fn resize_len(&self, len: u64) -> Result<usize, crate::Error> {
-        let len = physical_end(self.0, len).ok_or(crate::Error::OffsetOverflow)?;
-        memory_len(len)
-    }
-}
-
 pub struct Blob {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
     partition: String,
     name: Vec<u8>,
     content: RwLock<Vec<u8>>,
-    extent: Extent,
+    /// Physical offset where logical offset 0 begins (the size of the header region).
+    data_offset: u64,
     /// Namespace generation captured when this handle was opened.
     generation: u64,
 }
@@ -321,13 +292,34 @@ impl Blob {
             partition,
             name,
             content: RwLock::new(content),
-            extent: Extent(data_offset),
+            data_offset,
             generation,
         }
     }
 
-    pub(super) const fn extent(&self) -> Extent {
-        self.extent
+    pub(super) fn read_offset(&self, offset: u64, len: usize) -> Result<u64, crate::Error> {
+        super::read_offset(self.data_offset, offset, len).ok_or(crate::Error::OffsetOverflow)
+    }
+
+    /// Resolve a write range in the backing vector. An empty write only checks its start.
+    pub(super) fn write_range(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<Option<Range<usize>>, crate::Error> {
+        let range =
+            physical_range(self.data_offset, offset, len).ok_or(crate::Error::OffsetOverflow)?;
+        if range.is_empty() {
+            return Ok(None);
+        }
+        let end = memory_len(range.end)?;
+        Ok(Some(range.start as usize..end))
+    }
+
+    /// Resolve a resize length in the backing vector.
+    pub(super) fn resize_len(&self, len: u64) -> Result<usize, crate::Error> {
+        let len = physical_end(self.data_offset, len).ok_or(crate::Error::OffsetOverflow)?;
+        memory_len(len)
     }
 
     fn ensure_current(&self, generations: &Generations) -> Result<(), crate::Error> {
@@ -378,7 +370,7 @@ impl Blob {
         options: WriteOptions,
         #[cfg(test)] before_publication: impl FnOnce(),
     ) -> Result<(), crate::Error> {
-        let Some(range) = self.extent.write_range(offset, bufs.len() as u64)? else {
+        let Some(range) = self.write_range(offset, bufs.len() as u64)? else {
             return Ok(());
         };
         let buf = bufs.coalesce();
@@ -422,7 +414,7 @@ impl Blob {
         len: usize,
         copy: impl FnOnce(&[u8]) -> T,
     ) -> Result<T, crate::Error> {
-        let start = self.extent.read_offset(offset, len)?;
+        let start = self.read_offset(offset, len)?;
         if len == 0 {
             return Ok(copy(&[]));
         }
@@ -445,7 +437,7 @@ impl Blob {
         mut bufs: IoBufs,
         mut keep: impl FnMut() -> bool,
     ) -> Result<(), crate::Error> {
-        let Some(range) = self.extent.write_range(offset, bufs.remaining() as u64)? else {
+        let Some(range) = self.write_range(offset, bufs.remaining() as u64)? else {
             return Ok(());
         };
         let offset = range.start;
@@ -496,7 +488,7 @@ impl Blob {
 
     /// Apply a retained resize to durable storage without changing this handle's live contents.
     pub(crate) fn retain_crash_resize(&self, len: u64) -> Result<(), crate::Error> {
-        let len = self.extent.resize_len(len)?;
+        let len = self.resize_len(len)?;
 
         let generations = self.generations.lock();
         if self.ensure_current(&generations).is_err() {
@@ -554,7 +546,7 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
-        let len = self.extent.resize_len(len)?;
+        let len = self.resize_len(len)?;
         resize_vec(&mut self.content.write(), len);
         Ok(())
     }

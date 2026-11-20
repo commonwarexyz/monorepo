@@ -616,7 +616,6 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 /// A blob wrapper that injects deterministic faults based on configuration.
 pub struct Blob<B: crate::Blob> {
     inner: Arc<B>,
-    extent: Option<memory::Extent>,
     ctx: Oracle,
     pending: PendingMutations<B>,
     generation: Arc<FileGeneration>,
@@ -632,12 +631,8 @@ impl<B: crate::Blob> Blob<B> {
         inner: B,
         size: u64,
     ) -> Self {
-        let extent = (&inner as &dyn Any)
-            .downcast_ref::<memory::Blob>()
-            .map(memory::Blob::extent);
         Self {
             inner: Arc::new(inner),
-            extent,
             ctx,
             pending,
             generation,
@@ -645,12 +640,16 @@ impl<B: crate::Blob> Blob<B> {
         }
     }
 
+    fn memory_blob(&self) -> Option<&memory::Blob> {
+        (self.inner.as_ref() as &dyn Any).downcast_ref()
+    }
+
     fn preflight_read(&self, offset: u64, len: usize) -> Result<(), Error> {
         if len == 0 {
             return Ok(());
         }
-        if let Some(extent) = self.extent {
-            extent.read_offset(offset, len)?;
+        if let Some(blob) = self.memory_blob() {
+            blob.read_offset(offset, len)?;
         }
         if self.ctx.should_fail(Op::Read) {
             return Err(injected_io_error().into());
@@ -833,8 +832,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return self.inner.write_at(offset, bufs, options).await;
         }
         let sync = options.contains(WriteOptions::SYNC);
-        if let Some(extent) = self.extent {
-            extent.write_range(offset, total_bytes)?;
+        if let Some(blob) = self.memory_blob() {
+            blob.write_range(offset, total_bytes)?;
         } else {
             offset
                 .checked_add(total_bytes)
@@ -907,8 +906,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        if let Some(extent) = self.extent {
-            extent.resize_len(len)?;
+        if let Some(blob) = self.memory_blob() {
+            blob.resize_len(len)?;
         }
         let (should_fail, partial_rate, retain) = self.ctx.check_resize_fault();
         let _mutation = self.generation.mutation.lock().await;
