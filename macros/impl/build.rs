@@ -1,7 +1,11 @@
 use std::env;
 
 /// Stability levels in order of increasing stability.
-const LEVELS: [&str; 5] = ["ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
+const LEVELS: [&str; 6] = ["WIP", "ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
+
+/// `WIP` is additive (it is compiled only when its cfg is set) and the monorepo enables it by
+/// default, so it may be set alongside one other level (which takes precedence).
+const WIP_LEVEL: &str = "WIP";
 
 /// `RESERVED` is a special level that excludes ALL stability-marked items, used for finding unmarked public API.
 const RESERVED_LEVEL: &str = "RESERVED";
@@ -14,46 +18,36 @@ fn all_levels() -> impl Iterator<Item = &'static str> {
         .chain(std::iter::once(RESERVED_LEVEL))
 }
 
-/// Counts the number of stability cfgs in the environment.
-fn count_stability_cfgs() -> usize {
-    let mut count = 0;
-
+/// Returns the stability levels whose cfgs are set in the environment.
+fn stability_cfgs() -> Vec<&'static str> {
     // Check CARGO_CFG_* env vars (set by cargo for --cfg flags)
-    for level in all_levels() {
-        let var = format!("CARGO_CFG_COMMONWARE_STABILITY_{}", level);
-        if env::var_os(var).is_some() {
-            count += 1;
-        }
-    }
-
-    // If we found any via CARGO_CFG_*, return that count
-    if count > 0 {
-        return count;
+    let found: Vec<_> = all_levels()
+        .filter(|level| {
+            let var = format!("CARGO_CFG_COMMONWARE_STABILITY_{}", level);
+            env::var_os(var).is_some()
+        })
+        .collect();
+    if !found.is_empty() {
+        return found;
     }
 
     // Check RUSTFLAGS directly
     let rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    for level in all_levels() {
-        let cfg = format!("commonware_stability_{}", level);
-        if rustflags.contains(&cfg) {
-            count += 1;
-        }
-    }
-
-    if count > 0 {
-        return count;
+    let found: Vec<_> = all_levels()
+        .filter(|level| rustflags.contains(&format!("commonware_stability_{}", level)))
+        .collect();
+    if !found.is_empty() {
+        return found;
     }
 
     // Check CARGO_ENCODED_RUSTFLAGS
     let encoded = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
-    for level in all_levels() {
-        let cfg = format!("commonware_stability_{}", level);
-        if encoded.split('\u{1f}').any(|flag| flag.contains(&cfg)) {
-            count += 1;
-        }
-    }
-
-    count
+    all_levels()
+        .filter(|level| {
+            let cfg = format!("commonware_stability_{}", level);
+            encoded.split('\u{1f}').any(|flag| flag.contains(&cfg))
+        })
+        .collect()
 }
 
 fn main() {
@@ -66,12 +60,13 @@ fn main() {
     let is_dev_profile = matches!(profile.as_str(), "debug" | "test");
 
     // Print a warning if no stability cfg is set or if multiple stability cfgs are set.
-    let count = count_stability_cfgs();
-    if count == 0 && !is_dev_profile {
+    let cfgs = stability_cfgs();
+    let explicit = cfgs.iter().filter(|level| **level != WIP_LEVEL).count();
+    if cfgs.is_empty() && !is_dev_profile {
         println!(
-            "cargo:warning=stability cfg not set; set RUSTFLAGS=\"--cfg commonware_stability_X\" (ALPHA/BETA/GAMMA/DELTA/EPSILON) to enforce stability gating"
+            "cargo:warning=stability cfg not set (defaulting to ALPHA); set RUSTFLAGS=\"--cfg commonware_stability_X\" (ALPHA/BETA/GAMMA/DELTA/EPSILON) to enforce stability gating"
         );
-    } else if count > 1 {
+    } else if explicit > 1 {
         println!(
             "cargo:warning=multiple stability cfgs detected; only one stability level (ALPHA/BETA/GAMMA/DELTA/EPSILON) should be set at a time"
         );

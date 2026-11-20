@@ -17,9 +17,10 @@ Commonware is a Rust workspace of high-performance distributed-systems primitive
 
 ## Public API and compatibility
 
-All public APIs need a stability annotation. Use `#[stability(LEVEL)]`, `stability_scope!`, or `stability_mod!`; exported macros require the manual `cfg(not(any(..., commonware_stability_RESERVED)))` form.
+All public APIs need a stability annotation. Use `#[stability(LEVEL)]`, `stability_scope!`, or `stability_mod!`; exported macros require the manual `cfg(not(any(..., commonware_stability_RESERVED)))` form (`WIP` also requires `commonware_stability_WIP`).
 
-- At ALPHA, breaking API, wire, and storage changes are allowed. Do not add compatibility shims.
+- `WIP` sits below `ALPHA` and is compiled only inside the monorepo (`.cargo/config.toml` sets `--cfg commonware_stability_WIP`), so consumers get `ALPHA` by default. Anything that overrides `RUSTFLAGS`/`RUSTDOCFLAGS` (or `CARGO_TARGET_*_RUSTFLAGS`) must also pass that cfg.
+- At WIP and ALPHA, breaking API, wire, and storage changes are allowed. Do not add compatibility shims.
 - At BETA and above, wire and storage changes require a migration path.
 - Run `just check-stability` and, when useful, `just unstable-public` after changing public APIs.
 - Add codec conformance coverage for new encoded public types, and regenerate fixtures only for deliberate format changes.

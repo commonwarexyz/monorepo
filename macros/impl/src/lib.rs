@@ -21,11 +21,16 @@ use syn::{
 
 mod nextest;
 
-/// Stability level input that accepts either a literal integer (0-4) or a named constant
-/// (ALPHA, BETA, GAMMA, DELTA, EPSILON).
+/// Highest stability level index (`EPSILON`).
+const MAX_LEVEL: u8 = 5;
+
+/// Stability level input that accepts either a literal integer (0-5) or a named constant
+/// (WIP, ALPHA, BETA, GAMMA, DELTA, EPSILON).
 struct StabilityLevel {
     value: u8,
 }
+
+const LEVEL_RANGE_ERROR: &str = "stability level must be 0, 1, 2, 3, 4, or 5";
 
 impl Parse for StabilityLevel {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
@@ -34,26 +39,24 @@ impl Parse for StabilityLevel {
             let lit: LitInt = input.parse()?;
             let value: u8 = lit
                 .base10_parse()
-                .map_err(|_| Error::new(lit.span(), "stability level must be 0, 1, 2, 3, or 4"))?;
-            if value > 4 {
-                return Err(Error::new(
-                    lit.span(),
-                    "stability level must be 0, 1, 2, 3, or 4",
-                ));
+                .map_err(|_| Error::new(lit.span(), LEVEL_RANGE_ERROR))?;
+            if value > MAX_LEVEL {
+                return Err(Error::new(lit.span(), LEVEL_RANGE_ERROR));
             }
             Ok(Self { value })
         } else if lookahead.peek(Ident) {
             let ident: Ident = input.parse()?;
             let value = match ident.to_string().as_str() {
-                "ALPHA" => 0,
-                "BETA" => 1,
-                "GAMMA" => 2,
-                "DELTA" => 3,
-                "EPSILON" => 4,
+                "WIP" => 0,
+                "ALPHA" => 1,
+                "BETA" => 2,
+                "GAMMA" => 3,
+                "DELTA" => 4,
+                "EPSILON" => 5,
                 _ => {
                     return Err(Error::new(
                         ident.span(),
-                        "expected stability level: ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-4",
+                        "expected stability level: WIP, ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-5",
                     ));
                 }
             };
@@ -66,11 +69,12 @@ impl Parse for StabilityLevel {
 
 fn level_name(level: u8) -> &'static str {
     match level {
-        0 => "ALPHA",
-        1 => "BETA",
-        2 => "GAMMA",
-        3 => "DELTA",
-        4 => "EPSILON",
+        0 => "WIP",
+        1 => "ALPHA",
+        2 => "BETA",
+        3 => "GAMMA",
+        4 => "DELTA",
+        5 => "EPSILON",
         _ => unreachable!(),
     }
 }
@@ -78,25 +82,24 @@ fn level_name(level: u8) -> &'static str {
 /// Generates cfg identifiers that should exclude an item at the given stability level.
 ///
 /// The stability system works by excluding items when building at higher stability levels.
-/// For example, an item marked `#[stability(BETA)]` (level 1) should be excluded when
-/// building with `--cfg commonware_stability_GAMMA` (level 2) or higher.
+/// For example, an item marked `#[stability(BETA)]` (level 2) should be excluded when
+/// building with `--cfg commonware_stability_GAMMA` (level 3) or higher.
 ///
 /// This function returns identifiers for all levels above the given level, plus `RESERVED`.
-/// The generated `#[cfg(not(any(...)))]` attribute ensures the item is included only when
-/// none of the higher-level cfgs are set.
 ///
 /// ```text
-/// Level 0 (ALPHA)   -> excludes at: BETA, GAMMA, DELTA, EPSILON, RESERVED
-/// Level 1 (BETA)    -> excludes at: GAMMA, DELTA, EPSILON, RESERVED
-/// Level 2 (GAMMA)   -> excludes at: DELTA, EPSILON, RESERVED
-/// Level 3 (DELTA)   -> excludes at: EPSILON, RESERVED
-/// Level 4 (EPSILON) -> excludes at: RESERVED
+/// Level 0 (WIP)     -> excludes at: ALPHA, BETA, GAMMA, DELTA, EPSILON, RESERVED
+/// Level 1 (ALPHA)   -> excludes at: BETA, GAMMA, DELTA, EPSILON, RESERVED
+/// Level 2 (BETA)    -> excludes at: GAMMA, DELTA, EPSILON, RESERVED
+/// Level 3 (GAMMA)   -> excludes at: DELTA, EPSILON, RESERVED
+/// Level 4 (DELTA)   -> excludes at: EPSILON, RESERVED
+/// Level 5 (EPSILON) -> excludes at: RESERVED
 /// ```
 ///
 /// `RESERVED` is a special level used by `scripts/find_unstable_public.sh` to exclude ALL
 /// stability-marked items, leaving only unmarked public items visible in rustdoc output.
 fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
-    let mut names: Vec<_> = ((level + 1)..=4)
+    let mut names: Vec<_> = ((level + 1)..=MAX_LEVEL)
         .map(|l| format_ident!("commonware_stability_{}", level_name(l)))
         .collect();
 
@@ -104,14 +107,32 @@ fn exclusion_cfg_names(level: u8) -> Vec<proc_macro2::Ident> {
     names
 }
 
+/// Generates the cfg predicate under which an item at the given stability level is compiled.
+///
+/// Levels at or above `ALPHA` are subtractive: they are compiled unless a higher level is
+/// selected, so a build that selects no level compiles them (ALPHA is the default).
+///
+/// `WIP` is additive: it is compiled only when `commonware_stability_WIP` is set (the
+/// monorepo does so in `.cargo/config.toml`) and no other level is selected. Consumers of the
+/// library select nothing and therefore never compile `WIP` items.
+fn inclusion_cfg(level: u8) -> proc_macro2::TokenStream {
+    let exclude_names = exclusion_cfg_names(level);
+    if level == 0 {
+        let wip = format_ident!("commonware_stability_{}", level_name(0));
+        quote! { all(#wip, not(any(#(#exclude_names),*))) }
+    } else {
+        quote! { not(any(#(#exclude_names),*)) }
+    }
+}
+
 #[proc_macro_attribute]
 pub fn stability(attr: TokenStream, item: TokenStream) -> TokenStream {
     let level = parse_macro_input!(attr as StabilityLevel);
-    let exclude_names = exclusion_cfg_names(level.value);
+    let cfg = inclusion_cfg(level.value);
 
     let item2: proc_macro2::TokenStream = item.into();
     let expanded = quote! {
-        #[cfg(not(any(#(#exclude_names),*)))]
+        #[cfg(#cfg)]
         #item2
     };
 
@@ -148,10 +169,10 @@ pub fn stability_mod(input: TokenStream) -> TokenStream {
         name,
     } = parse_macro_input!(input as StabilityModInput);
 
-    let exclude_names = exclusion_cfg_names(level.value);
+    let cfg = inclusion_cfg(level.value);
 
     let expanded = quote! {
-        #[cfg(not(any(#(#exclude_names),*)))]
+        #[cfg(#cfg)]
         #visibility mod #name;
     };
 
@@ -209,11 +230,11 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
         items,
     } = parse_macro_input!(input as StabilityScopeInput);
 
-    let exclude_names = exclusion_cfg_names(level.value);
+    let cfg = inclusion_cfg(level.value);
 
     let cfg_attr = predicate.map_or_else(
-        || quote! { #[cfg(not(any(#(#exclude_names),*)))] },
-        |pred| quote! { #[cfg(all(#pred, not(any(#(#exclude_names),*))))] },
+        || quote! { #[cfg(#cfg)] },
+        |pred| quote! { #[cfg(all(#pred, #cfg))] },
     );
 
     let expanded_items: Vec<_> = items
