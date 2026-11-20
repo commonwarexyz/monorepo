@@ -9,14 +9,14 @@
 //! for its length, and a forward jump refills at most one burst.
 
 use crate::Clock;
+use commonware_utils::{DurationExt as _, SystemTimeExt as _, time::NANOS_PER_SEC};
 use std::{
     collections::HashMap,
+    future::pending,
     hash::Hash,
     num::NonZeroU32,
     time::{Duration, SystemTime},
 };
-
-const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
 /// The rate and burst size admitted by a rate limiter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,7 +29,7 @@ impl Quota {
     /// Admits `max_burst` cells per `seconds` with a burst of `max_burst`, replenishing at most
     /// one cell per nanosecond.
     const fn per_period(seconds: u64, max_burst: NonZeroU32) -> Self {
-        let mut nanos = seconds as u128 * NANOS_PER_SECOND / max_burst.get() as u128;
+        let mut nanos = seconds as u128 * NANOS_PER_SEC / max_burst.get() as u128;
         if nanos == 0 {
             nanos = 1;
         }
@@ -88,24 +88,6 @@ impl Quota {
     }
 }
 
-/// Converts nanoseconds to a [Duration], saturating at [Duration::MAX].
-fn duration_from_nanos(nanos: u128) -> Duration {
-    let Ok(seconds) = u64::try_from(nanos / NANOS_PER_SECOND) else {
-        return Duration::MAX;
-    };
-    Duration::new(seconds, (nanos % NANOS_PER_SECOND) as u32)
-}
-
-/// Returns `time + delay`, halving `delay` until the sum is representable.
-fn saturating_add(time: SystemTime, mut delay: Duration) -> SystemTime {
-    loop {
-        if let Some(later) = time.checked_add(delay) {
-            return later;
-        }
-        delay /= 2;
-    }
-}
-
 /// Clock reads and GCRA parameters shared by direct and keyed limiters.
 ///
 /// Times are nanoseconds of accumulated elapsed time since creation.
@@ -153,12 +135,12 @@ impl<C: Clock> Gcra<C> {
         if next <= allowed {
             return Ok(next);
         }
-        Err(duration_from_nanos(next - allowed))
+        Err(Duration::from_nanos_saturating(next - allowed))
     }
 
-    /// Converts a wait from the last clock read to the earliest time a cell can be admitted.
+    /// Converts a wait from the last clock read to a retry time, saturating at the clock limit.
     fn not_until(&self, wait: Duration) -> SystemTime {
-        saturating_add(self.last, wait)
+        self.last.saturating_add_ext(wait)
     }
 }
 
@@ -185,20 +167,29 @@ impl<C: Clock> RateLimiter<C> {
 
     /// Admits and charges one cell, or returns the earliest time one can be admitted.
     ///
-    /// A rejected check charges nothing.
+    /// A rejected check charges nothing. The retry time saturates at the clock limit.
     pub fn check(&mut self) -> Result<(), SystemTime> {
         self.admit().map_err(|wait| self.gcra.not_until(wait))
     }
 
     /// Waits until one cell can be admitted and charges it.
+    ///
+    /// If the clock reaches its maximum representable time before a cell is ready, this
+    /// future stays pending. Cancel it and retry to observe any subsequent clock correction.
     pub async fn until_ready(&mut self) {
         while let Err(wait) = self.admit() {
-            // Bound the wait so the runtime can represent its deadline
-            let current = self.gcra.clock.current();
-            let wait = saturating_add(current, wait)
-                .duration_since(current)
-                .unwrap_or_default();
-            self.gcra.clock.sleep(wait).await;
+            let now = self.gcra.last;
+            let clock = &self.gcra.clock;
+            if now.checked_add(wait).is_some() {
+                clock.sleep(wait).await;
+            } else {
+                let limit = SystemTime::limit();
+                if now >= limit {
+                    return pending().await;
+                }
+                // Pass the limit directly so a fresh clock read cannot overflow a relative sleep.
+                clock.sleep_until(limit).await;
+            }
         }
     }
 }
@@ -223,7 +214,7 @@ impl<K: Hash + Eq + Clone, C: Clock> KeyedRateLimiter<K, C> {
 
     /// Admits and charges one cell for `key`, or returns the earliest time one can be admitted.
     ///
-    /// A rejected check charges nothing.
+    /// A rejected check charges nothing. The retry time saturates at the clock limit.
     pub fn check_key(&mut self, key: &K) -> Result<(), SystemTime> {
         let now = self.gcra.now();
         let gcra = &self.gcra;
@@ -272,11 +263,13 @@ impl<K: Hash + Eq + Clone, C: Clock> KeyedRateLimiter<K, C> {
 mod tests {
     use super::*;
     use crate::{Runner as _, Supervisor as _, deterministic};
-    use commonware_macros::select;
     use commonware_utils::{NZU32, sync::Mutex};
+    use rstest::rstest;
     use std::{
         future::{Future, ready},
+        pin::pin,
         sync::Arc,
+        task::{Context, Waker},
     };
 
     /// A clock that only moves when set.
@@ -309,6 +302,10 @@ mod tests {
         }
 
         fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
+            assert!(
+                !duration.is_zero(),
+                "a rejected admission must not request a zero sleep"
+            );
             self.advance(duration);
             ready(())
         }
@@ -317,9 +314,11 @@ mod tests {
             &self,
             deadline: SystemTime,
         ) -> impl Future<Output = ()> + Send + 'static + use<> {
-            if deadline > self.current() {
-                self.set(deadline);
-            }
+            assert!(
+                deadline > self.current(),
+                "a rejected admission must sleep until a future deadline"
+            );
+            self.set(deadline);
             ready(())
         }
     }
@@ -454,19 +453,26 @@ mod tests {
 
         // The earliest time saturates when it is not representable
         let quota = Quota::with_period(Duration::MAX).unwrap();
+        let mut limiter = RateLimiter::new(quota, clock);
+        limiter.check().unwrap();
+        assert_eq!(limiter.check(), Err(SystemTime::limit()));
+    }
+
+    #[test]
+    fn test_large_elapsed_time_refills_one_burst() {
+        let clock = ManualClock::new(START);
+        let interval = Duration::from_nanos(u64::MAX) + Duration::from_nanos(2);
+        let quota = Quota::with_period(interval).unwrap().allow_burst(NZU32!(2));
         let mut limiter = RateLimiter::new(quota, clock.clone());
         limiter.check().unwrap();
-        let earliest = limiter.check().unwrap_err();
-        assert!(earliest > START + Duration::from_secs(u32::MAX as u64));
-
-        // Elapsed time far beyond the nanosecond range of a u64 is tracked
-        clock.advance(Duration::from_secs(u64::MAX / 4));
-        clock.advance(Duration::from_secs(u64::MAX / 4));
-        let mut limiter = RateLimiter::new(Quota::per_second(NZU32!(1)), clock.clone());
-        limiter.check().unwrap();
-        clock.advance(Duration::from_secs(1));
         limiter.check().unwrap();
         limiter.check().unwrap_err();
+
+        // Advance the same limiter by more than a u64 can represent in nanoseconds.
+        clock.advance(interval * 2);
+        limiter.check().unwrap();
+        limiter.check().unwrap();
+        assert_eq!(limiter.check(), Err(START + interval * 3));
     }
 
     #[test]
@@ -557,19 +563,55 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_until_ready_bounds_unrepresentable_wait() {
-        let executor = deterministic::Runner::default();
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[cfg_attr(not(target_arch = "wasm32"), case::tokio(crate::tokio::Runner::default()))]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
+    fn test_until_ready_bounds_unrepresentable_wait<R: crate::Runner>(#[case] executor: R)
+    where
+        R::Context: Clock,
+    {
         executor.start(|context| async move {
             let quota = Quota::with_period(Duration::MAX).unwrap();
-            let mut limiter = RateLimiter::new(quota, context.child("limiter"));
+            let mut limiter = RateLimiter::new(quota, context);
             limiter.until_ready().await;
 
-            // The second wait cannot complete, but must not panic computing its deadline
-            select! {
-                _ = limiter.until_ready() => panic!("admitted before replenishing"),
-                _ = context.sleep(Duration::from_secs(1)) => {},
-            }
+            let mut wait = pin!(limiter.until_ready());
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
         });
+    }
+
+    #[test]
+    fn test_until_ready_parks_at_clock_limit_without_charge() {
+        let ceiling = SystemTime::limit();
+        let period = Duration::from_nanos(5);
+        let clock = ManualClock::new(ceiling - Duration::from_nanos(3));
+        let mut limiter = RateLimiter::new(Quota::with_period(period).unwrap(), clock.clone());
+        limiter.check().unwrap();
+        assert_eq!(limiter.check(), Err(ceiling));
+
+        // A ready test sleeper takes the wait to the ceiling in the first poll. Its
+        // assertions fail if the limiter tries to sleep again without making progress.
+        {
+            let mut wait = pin!(limiter.until_ready());
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            assert_eq!(clock.current(), ceiling);
+        }
+
+        // Dropping the pending wait leaves only the original charge in place.
+        assert_eq!(limiter.check(), Err(ceiling));
+        clock.rewind(Duration::from_nanos(2));
+        limiter.check().unwrap_err();
+        clock.set(ceiling);
+        limiter.check().unwrap();
+        assert_eq!(limiter.check(), Err(ceiling));
     }
 }
