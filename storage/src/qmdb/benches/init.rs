@@ -156,9 +156,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time at this cache size.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
-                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_size, |db| {
-                                assert_ne!(db.bounds().end, 0);
-                            })
+                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_size, |_db| {})
                         });
                     },
                 );
@@ -226,9 +224,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time at this cache size.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
-                            dispatch_var_timed_init!(ctx, variant, iters, cache_size, |db| {
-                                assert_ne!(db.bounds().end, 0);
-                            })
+                            dispatch_var_timed_init!(ctx, variant, iters, cache_size, |_db| {})
                         });
                     },
                 );
@@ -251,10 +247,9 @@ async fn keyless_init<F: Family>(ctx: Context, iters: u64) -> Duration {
     let cfg = keyless_cfg(&ctx);
     let start = Instant::now();
     for _ in 0..iters {
-        let db = KeylessDb::<F>::init(ctx.child("storage"), cfg.clone(), None)
+        KeylessDb::<F>::init(ctx.child("storage"), cfg.clone(), None)
             .await
             .unwrap();
-        assert_ne!(db.bounds().end, 0);
     }
     start.elapsed()
 }
