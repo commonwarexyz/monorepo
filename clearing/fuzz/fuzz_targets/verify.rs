@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_clearing::bajillion::{
-    Amounts, BalanceProof, Challenge, ChallengeError, Close, Epoch, Namespace, Opening,
+    Amounts, BalanceProof, Challenge, ChallengeError, Close, Epoch, Lookup, Namespace, Opening,
     PayoutProof, Queue, Receipt, Row, State,
 };
 use commonware_codec::{DecodeExt, Encode};
@@ -12,8 +12,9 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_parallel::Sequential;
+use commonware_storage::bmt::Proof;
 use libfuzzer_sys::fuzz_target;
-use std::sync::LazyLock;
+use std::{iter, sync::LazyLock};
 
 type TestOpening = Opening<PublicKey, Digest, u64>;
 type TestReceipt = Receipt<PublicKey, PublicKey, Digest, u64>;
@@ -198,6 +199,18 @@ impl Case {
         true
     }
 
+    /// Checks `opening` as [Self::check_opening] does, and as the opening of a challenge with
+    /// `receipt`, if any.
+    fn check_forged(&self, opening: TestOpening, receipt: Option<&TestReceipt>) {
+        self.check_opening(&opening);
+        if let Some(receipt) = receipt {
+            self.check_challenge(&Challenge {
+                receipt: receipt.clone(),
+                opening,
+            });
+        }
+    }
+
     /// Checks that `challenge` verifies against the posted matrix only with a receipt its sender
     /// issued for more than the close credits.
     fn check_challenge(&self, challenge: &TestChallenge) {
@@ -212,6 +225,60 @@ impl Case {
         let receiver = self.index(&receipt.receiver);
         assert!(self.posted[sender][receiver] < receipt.amount);
     }
+}
+
+/// Returns non-member openings of a list built from the parts of honest ones: at every position of
+/// the list, one with only the entry before the position and that entry's own proof, one with only
+/// the entry at the position and its own proof, and one with neither entry and the empty proof.
+/// Byte changes rarely build them, because each one is a valid encoding with a proof that opens.
+/// Only three are honest: the one with only the last entry after it, the one with only the first
+/// entry before it, and, for an empty list, the one with the empty proof.
+///
+/// `open` opens a key under the list's root, and each entry of the list is the key of one of
+/// `keys`, so the member openings of `keys` give every entry with its own proof.
+fn forgeries<V: Clone>(
+    keys: &[PublicKey],
+    open: impl Fn(&PublicKey) -> Lookup<PublicKey, V, Digest>,
+) -> Vec<Lookup<PublicKey, V, Digest>> {
+    let mut entries: Vec<_> = keys
+        .iter()
+        .filter_map(|key| match open(key) {
+            Lookup::Member {
+                position,
+                value,
+                proof,
+            } => Some((position, (key.clone(), value), proof)),
+            Lookup::NonMember { .. } => None,
+        })
+        .collect();
+    entries.sort_by_key(|(position, ..)| *position);
+    let mut forged = Vec::new();
+    for (position, at) in (0..=entries.len()).zip(0u32..) {
+        let lower = position.checked_sub(1).map(|lower| &entries[lower]);
+        if let Some((_, entry, proof)) = lower {
+            forged.push(Lookup::NonMember {
+                position: at,
+                lower: Some(entry.clone()),
+                upper: None,
+                proof: proof.clone(),
+            });
+        }
+        if let Some((_, entry, proof)) = entries.get(position) {
+            forged.push(Lookup::NonMember {
+                position: at,
+                lower: None,
+                upper: Some(entry.clone()),
+                proof: proof.clone(),
+            });
+        }
+        forged.push(Lookup::NonMember {
+            position: at,
+            lower: None,
+            upper: None,
+            proof: Proof::default(),
+        });
+    }
+    forged
 }
 
 /// Builds the honest proofs of a case and checks them, then checks that no change to the proofs of
@@ -356,7 +423,7 @@ fn payments(input: Payments) {
     }
 
     // Proofs spliced from the parts of two honest ones verify only as the case holds.
-    let (_, _, other, issued) = pick(input.other);
+    let (spliced, _, other, issued) = pick(input.other);
     for spliced in [
         TestOpening {
             row: opening.row.clone(),
@@ -390,6 +457,30 @@ fn payments(input: Payments) {
             acknowledgement: issued.acknowledgement,
             ..receipt.clone()
         });
+    }
+
+    // Non-member openings forged from the parts of honest ones verify only as the case holds: rows
+    // of the posted matrix, and receivers of the pair's sender and of the other sender.
+    for row in forgeries(&case.accounts, |account| matrix.open(account, account).row) {
+        case.check_forged(TestOpening { row, entry: None }, receipt.as_ref());
+    }
+    let payers = iter::once(sender).chain((spliced != sender).then_some(spliced));
+    for payer in payers.filter(|payer| case.rows[*payer].is_some()) {
+        let account = &case.accounts[payer];
+        let row = matrix.open(account, account).row;
+        let open = |paid: &PublicKey| {
+            matrix
+                .open(account, paid)
+                .entry
+                .expect("a sender with a row opens every receiver")
+        };
+        for entry in forgeries(&case.accounts, open) {
+            let opening = TestOpening {
+                row: row.clone(),
+                entry: Some(entry),
+            };
+            case.check_forged(opening, receipt.as_ref());
+        }
     }
 
     // Each change to bytes keeps what still decodes, and whatever then verifies must agree with

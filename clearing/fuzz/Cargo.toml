@@ -14,6 +14,7 @@ unused_dependencies = "allow"
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+bytes.workspace = true
 commonware-clearing = { workspace = true, features = ["arbitrary"] }
 commonware-codec.workspace = true
 commonware-cryptography = { workspace = true, features = ["arbitrary", "mocks"] }
@@ -23,6 +24,10 @@ commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["arbitrary", "std"] }
 libfuzzer-sys.workspace = true
 rand_core.workspace = true
+thiserror.workspace = true
+
+[lib]
+bench = false
 
 [[bin]]
 name = "decode"
@@ -41,6 +46,20 @@ bench = false
 [[bin]]
 name = "protocol"
 path = "fuzz_targets/protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "functionality"
+path = "fuzz_targets/functionality.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "twins"
+path = "fuzz_targets/twins.rs"
 test = false
 doc = false
 bench = false

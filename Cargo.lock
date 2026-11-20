@@ -1808,6 +1808,7 @@ name = "commonware-clearing-fuzz"
 version = "2026.10.0"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-clearing",
  "commonware-codec",
  "commonware-cryptography",
@@ -1817,6 +1818,7 @@ dependencies = [
  "commonware-utils",
  "libfuzzer-sys",
  "rand_core 0.10.1",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
