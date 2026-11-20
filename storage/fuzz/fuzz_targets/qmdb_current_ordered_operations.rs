@@ -5,8 +5,8 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
+    merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
         current::ordered::fixed::{Config, Db as CurrentDb},
         value::FixedEncoding,
@@ -100,7 +100,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(91);
 const PAGE_CACHE_SIZE: usize = 8;
-const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
@@ -181,13 +180,10 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
             merkle: MerkleConfig {
-                journal_partition: format!("fuzz-current-ord-{suffix}-merkle-journal"),
-                metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
-                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: commonware_storage_fuzz::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("fuzz-current-ord-{suffix}-log-journal"),
@@ -200,7 +196,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             translator: TwoCap,
             init_cache: Some(NZUsize!(3)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         };
 
         let mut db: Db<F> = Db::init(context.child("storage"), cfg, None)

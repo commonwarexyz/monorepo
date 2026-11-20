@@ -19,16 +19,8 @@ pub type Operation<F, K, V> = ordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S> = super::Db<
-    F,
-    E,
-    Journal<E, Operation<F, K, V>>,
-    Index<T, Location<F>>,
-    H,
-    Update<K, V>,
-    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
-    S,
->;
+pub type Db<F, E, K, V, H, T, S> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>, S>;
 
 /// Configuration for a [Db].
 pub type Config<T, S> = any::Config<T, JournalConfig, S>;
@@ -43,12 +35,10 @@ pub type Config<T, S> = any::Config<T, JournalConfig, S>;
 /// than 130,816 entries (see [`crate::index::partitioned::ordered`]); prefer `p64k` to keep ordered
 /// access mostly inline at larger scale.
 pub mod partitioned {
-    use super::{JournalConfig, any};
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::{
         index::partitioned::ordered::Index, journal::contiguous::fixed::Journal, merkle::Location,
     };
-    use core::num::NonZeroUsize;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
     ///
@@ -67,12 +57,8 @@ pub mod partitioned {
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
-
-    /// Configuration for a [Db].
-    pub type Config<T, S> = any::Config<T, JournalConfig, S, NonZeroUsize>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -100,7 +86,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            ProofExt as _, SnapshotBuild as _,
+            ProofExt as _,
             any::{
                 batch::Slot,
                 ordered::{
@@ -113,6 +99,7 @@ pub(crate) mod test {
                 test::{fixed_db_config, fixed_db_config_partitioned},
             },
             floor::{Bounded, Policy, Proportional},
+            snapshot::Rebuild,
         },
         translator::{OneCap, OrderedTranslator, TwoCap},
     };
@@ -142,7 +129,6 @@ pub(crate) mod test {
         Index<TwoCap, GenericLocation<F>>,
         Sha256,
         crate::qmdb::any::operation::update::Ordered<Digest, FixedEncoding<Digest>>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;
 
@@ -703,9 +689,66 @@ pub(crate) mod test {
         });
     }
 
-    /// A replay failure during a parallel build must join every worker before surfacing the
-    /// error: no worker may outlive the failed build, retaining a clone of the log and its
-    /// partition-range allocation (the [crate::qmdb::SnapshotBuild] cleanup invariant).
+    /// A reopen bounded one operation past an older commit, through a build that hashes the
+    /// journal's operations on its decode tasks, rewinds to that commit and rebuilds its state.
+    #[test_traced("WARN")]
+    fn test_ordered_partitioned_bounded_reopen_hashes_older_commit() {
+        deterministic::Runner::default().start(|context| async move {
+            type PartitionedDb<S> =
+                partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
+            const KEYS: u64 = 2000;
+            let partition = "bounded_hashing";
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let value = |i: u64, generation: u64| {
+                Sha256::hash(&[&i.to_be_bytes(), &generation.to_be_bytes()])
+            };
+
+            // Write every key, then update a few in each later synced generation.
+            let cfg = fixed_db_config_partitioned::<OneCap>(partition);
+            let mut db = PartitionedDb::<Sequential>::init(context.child("populate"), cfg, None)
+                .await
+                .unwrap();
+            let mut latest = vec![0u64; KEYS as usize];
+            let mut generations = Vec::new();
+            for generation in 0..3u64 {
+                let mut batch = db.new_batch();
+                let updated = if generation == 0 { 0..KEYS } else { 0..100 };
+                for j in updated {
+                    let i = (j * 17 + generation * 101) % KEYS;
+                    latest[i as usize] = generation;
+                    batch = batch.write(key(i), Some(value(i, generation)));
+                }
+                let merkleized = batch.merkleize(&db).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.sync().await.unwrap();
+                generations.push((db.bounds().end, db.root(), db.active_keys, latest.clone()));
+            }
+            drop(db);
+
+            // A budget of four makes the build hash the operations on its decode tasks. The bound
+            // admits one operation past the commit, so the reopen rewinds before it plans chunks.
+            let (size, root, active_keys, latest) = generations[1].clone();
+            let mut cfg = fixed_db_config_partitioned::<OneCap>(partition);
+            cfg.init_concurrency = NZUsize!(4);
+            let db =
+                PartitionedDb::<Sequential>::init(context.child("bounded"), cfg, Some(size + 1))
+                    .await
+                    .unwrap();
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.active_keys, active_keys);
+            for i in 0..KEYS {
+                assert_eq!(
+                    db.get(&key(i)).await.unwrap(),
+                    Some(value(i, latest[i as usize]))
+                );
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// On replay failure, a parallel build must join its workers and release their partition
+    /// ranges. Every log clone must be dropped before returning, as required by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_ordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
@@ -1360,11 +1403,7 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(proof.verify::<Sha256, _>(
-                Location::new(1),
-                &proof_ops,
-                &root
-            ));
+            assert!(proof.verify::<Sha256, _>(Location::new(1), &proof_ops, &root));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -1391,14 +1430,16 @@ pub(crate) mod test {
             assert_eq!(min_proof.leaves, Location::new(1));
             assert_eq!(min_ops.len(), 1);
 
-            // Non-commit-boundary historical sizes are rejected.
-            let result = db
-                .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
-                .await;
-            assert!(
-                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
-                "expected HistoricalFloorPruned(5), got {result:?}"
-            );
+            for size in [Location::new(0), Location::new(5)] {
+                let result = db.historical_proof(size, Location::new(0), NZU64!(1)).await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::qmdb::Error::NotCommitBoundary(actual)) if actual == size
+                    ),
+                    "expected NotCommitBoundary({size}), got {result:?}"
+                );
+            }
 
             db.destroy().await.unwrap();
         });
@@ -2144,26 +2185,22 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{Family, Location, full::Merkle},
+            merkle::{Family, Location},
             qmdb::any::sync::tests::FromSyncTestable,
         };
-        use futures::future::join_all;
 
         impl<F: Family> FromSyncTestable
             for Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>
         {
-            type Merkle = Merkle<F, deterministic::Context, Digest, Sequential>;
+            type Frontier =
+                crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
-            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+            fn into_log_components(self) -> (Self::Frontier, Self::Journal) {
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
-                join_all(F::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }

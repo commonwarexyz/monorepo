@@ -5,7 +5,8 @@
 //! the modules the shared macro generates.
 
 use crate::{
-    merkle::{Location, full::Config as MerkleConfig},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::Location,
     qmdb::{
         self,
         immutable::{self, variable::Operation},
@@ -47,6 +48,8 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
     fn commit(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
     /// Returns the key and value an operation sets, or `None` for a commit.
     fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)>;
+    /// Number of set operations in the in-memory index.
+    fn snapshot_len(db: &Self::Db) -> usize;
     /// Returns the value stored under `key`, if any.
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
@@ -107,6 +110,7 @@ where
 
         assert_eq!(H::ops_root(&synced_db), target_root);
         assert_eq!(H::inactivity_floor(&synced_db), first_commit_end);
+        assert_eq!(H::snapshot_len(&synced_db), late_ops.len());
 
         // Keys from the second batch (after the floor) should be findable.
         for op in &late_ops {
@@ -115,14 +119,11 @@ where
             }
         }
 
-        // Keys from the first batch (before the floor) should NOT be in the snapshot.
+        // The source still indexes the first batch, but both databases hide its keys.
         for op in &early_ops {
             if let Some((key, _)) = H::op_kv(op) {
-                assert_eq!(
-                    H::lookup(&synced_db, key).await,
-                    None,
-                    "key from before floor should not be in synced snapshot"
-                );
+                assert_eq!(H::lookup(&target_db, key).await, None);
+                assert_eq!(H::lookup(&synced_db, key).await, None);
             }
         }
 
@@ -159,13 +160,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -178,6 +176,7 @@ pub(crate) mod harnesses {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -279,10 +278,6 @@ pub(crate) mod harnesses {
             db.destroy().await
         }
 
-        fn merkle_config(config: &ConfigOf<Self>) -> MerkleConfig<Sequential> {
-            config.merkle.clone()
-        }
-
         async fn db_sync(db: Self::Db) -> Self::Db {
             db.sync().await.unwrap()
         }
@@ -371,6 +366,10 @@ pub(crate) mod harnesses {
             }
         }
 
+        fn snapshot_len(db: &Self::Db) -> usize {
+            db.snapshot.len()
+        }
+
         async fn lookup(db: &Self::Db, key: &Self::Key) -> Option<Self::Value> {
             db.get(key).await.unwrap()
         }
@@ -427,13 +426,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -446,6 +442,7 @@ pub(crate) mod harnesses {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -453,13 +450,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),
@@ -470,6 +464,7 @@ pub(crate) mod harnesses {
             },
             translator: TwoCap,
             init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -648,7 +643,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -766,7 +761,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -870,12 +865,12 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         .await
         .unwrap();
 
-        let stale_target = Target {
+        let stale_target = sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -886,12 +881,12 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             .is_none()
         );
 
-        let matching_target = Target {
+        let matching_target = sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,

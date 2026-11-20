@@ -6,13 +6,16 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, chain, metrics::Metrics, sync::source, value::ValueEncoding},
+    qmdb::{
+        Error, chain, metrics::Metrics, operation::Committable as _, sync::source,
+        value::ValueEncoding,
+    },
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -24,7 +27,7 @@ pub(super) fn check_locations<F: Family>(
     if let Some(pair) = locs.windows(2).find(|pair| pair[0] >= pair[1]) {
         return Err(Error::LocationOutOfOrder(pair[0], pair[1]));
     }
-    // Strictly increasing, so only the last location can reach `end`.
+    // The last location is the largest, so checking it against `end` is sufficient.
     if let Some(&last) = locs.last()
         && last >= end
     {
@@ -91,11 +94,11 @@ where
     /// `None` selects the latest retained state.
     ///
     /// After a bounded initialization past a prune, or a sync of a range that starts above the
-    /// floor, the selected commit's inactivity floor can be below the retained start. A batch
-    /// read of a location between the two that no batch chain holds then returns
+    /// floor, the selected commit's inactivity floor can be below the retained start. A read of a
+    /// location between the two that no batch chain holds then returns
     /// [`crate::journal::Error::ItemPruned`], while a database that retains the location answers
-    /// it. Databases at the same commitment therefore answer batch reads alike only when each
-    /// retains every operation from its floor onward.
+    /// it. Databases at the same commitment therefore answer reads alike only when each retains
+    /// every operation from its floor onward.
     #[boxed]
     pub async fn init(
         context: E,
@@ -103,42 +106,33 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>>
     where
-        C: authenticated::Backing<E>,
+        E: Spawner,
+        C: authenticated::Backing<E> + 'static,
     {
         // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
         // may precede the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
             max_size,
-            false,
         )
         .await?;
+        let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, false)
+            .await?
+            .unwrap_or(Location::new(0));
+        // With no snapshot to build, the Merkle replay is all of initialization's work.
+        let (mut journal, ()) = pending
+            .finish_with(cfg.init_concurrency, |_| async { Ok::<_, Error<F>>(()) })
+            .await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .expect("at least one commit should exist"),
-            );
-            let op = journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op
-                .inactivity_floor()
-                .expect("last operation should be a commit with floor");
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
@@ -153,11 +147,16 @@ where
 
     /// Get the value at location `loc` in the database.
     ///
+    /// Every database at the same commitment that retains its operations from the inactivity
+    /// floor onward answers alike, however far it has pruned.
+    ///
     /// # Errors
     ///
     /// - Returns [`Error::LocationOutOfBounds`] if `loc` >= `self.bounds().end`.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `loc` <
-    ///   `self.bounds().start`.
+    /// - Returns [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `loc` is at or
+    ///   above the inactivity floor and below `self.bounds().start`. Only a database recovered or
+    ///   synced with its floor below its retained start has such locations (see [`Self::init`]).
     pub async fn get(&self, loc: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
@@ -166,6 +165,7 @@ where
         if loc >= op_count {
             return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
         }
+        batch::check_floor(loc, self.inactivity_floor_loc)?;
         let op = self.journal.read(*loc).await?;
 
         let result = op.into_value();
@@ -174,15 +174,16 @@ where
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be strictly increasing.
-    /// Returns results in the same order as the input locations.
+    /// Locations must be strictly increasing. Returns results in the same order as the input
+    /// locations, each as [`Self::get`] would.
     ///
     /// # Errors
     ///
     /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     /// - Returns [`Error::LocationOutOfBounds`] if any location >= `self.bounds().end`.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any location <
-    ///   `self.bounds().start`.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below the inactivity floor.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any location is
+    ///   at or above the inactivity floor and below `self.bounds().start`.
     pub async fn get_many(&self, locs: &[Location<F>]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         if locs.is_empty() {
             return Ok(Vec::new());
@@ -192,6 +193,9 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(locs.len() as u64);
         check_locations(locs, Location::new(self.journal.bounds().end))?;
+
+        // The first location is the smallest, so checking it against the floor is sufficient.
+        batch::check_floor(locs[0], self.inactivity_floor_loc)?;
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = self.journal.read_many(&positions).await?;
         let result = ops.into_iter().map(|op| op.into_value()).collect();
@@ -204,8 +208,6 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -281,13 +283,14 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
-    ///   >= `historical_size` or `historical_size` > number of operations.
+    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if
+    ///   `historical_size` exceeds the number of operations or `start_loc` is at or beyond
+    ///   the requested commit boundary.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
-    ///   commit op.
+    /// - Returns [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation
+    ///   is retained and is not a commit.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.keyless.db.historical_proof",
@@ -320,14 +323,12 @@ where
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root.
+    /// Pruning leaves [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location
+    /// still require the requested operations and Merkle nodes to be retained.
     ///
     /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
@@ -372,8 +373,7 @@ where
     /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed recovery-watermark sync is not observed by
-    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
-    /// [Self::sync].
+    /// [Self::commit]. It resurfaces on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.keyless.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();

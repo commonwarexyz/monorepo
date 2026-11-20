@@ -10,13 +10,12 @@ use crate::{
     merkle::{
         self, Graftable, Location, Position, Readable,
         batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
-        storage::Storage as MerkleStorage,
     },
     qmdb::{
         Error,
         any::{
             self,
-            batch::{DiffCursors, DiffEntry, RetainedAncestors, Staged as AnyStaged},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
@@ -161,16 +160,18 @@ impl<F: Graftable, const N: usize> Candidates<F> for &BitmapBatch<N> {
     }
 }
 
-/// Reads nodes from a batch chain layered over the database's [`Mem`] it extends.
+/// Reads nodes from a batch chain layered over the in-memory nodes of the tree it extends.
 ///
 /// Nodes the chain appended or updated come from the chain, and every other position comes from
-/// the `Mem`.
-struct Layered<'a, R: Readable> {
+/// `base`.
+struct Layered<'a, R: Readable, B> {
     batch: &'a R,
-    mem: &'a Mem<R::Family, R::Digest>,
+    base: &'a B,
 }
 
-impl<R: Readable> Readable for Layered<'_, R> {
+impl<R: Readable, B: Readable<Family = R::Family, Digest = R::Digest>> Readable
+    for Layered<'_, R, B>
+{
     type Family = R::Family;
     type Digest = R::Digest;
 
@@ -182,22 +183,7 @@ impl<R: Readable> Readable for Layered<'_, R> {
         if let Some(d) = self.batch.get_node(pos) {
             return Some(d);
         }
-        self.mem.get_node(pos)
-    }
-}
-
-impl<R: Readable> MerkleStorage<R::Family> for Layered<'_, R> {
-    type Digest = R::Digest;
-
-    fn size(&self) -> Position<R::Family> {
-        Readable::size(self)
-    }
-
-    async fn get_node(
-        &self,
-        pos: Position<R::Family>,
-    ) -> Result<Option<R::Digest>, merkle::Error<R::Family>> {
-        Ok(Readable::get_node(self, pos))
+        self.base.get_node(pos)
     }
 }
 
@@ -520,17 +506,10 @@ where
         let (prepared, staged) = inner
             .resolve_updates_prefetched(slots, unstaged, &db.any, &*policy, &bitmap_parent)
             .await?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -609,17 +588,10 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let (inner, staged) = inner.resolve_updates(slots, unstaged, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -676,17 +648,10 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -743,17 +708,10 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
+        let inner = prepared
             .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
-        compute_current_layer(
-            inner,
-            retained_ancestors,
-            db,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -868,12 +826,8 @@ where
 ///
 /// Builds a chunk overlay from the diff, computes grafted leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
-///
-/// `_retained_ancestors` is held only to keep ancestor batches alive while grafting and root
-/// computation read their nodes through weak parent links.
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    _retained_ancestors: RetainedAncestors<F, H::Digest, U, S>,
     db: &super::db::Db<F, E, C, I, H, U, N, S>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
@@ -904,10 +858,10 @@ where
 
     // Merkleization reads ops-tree nodes only from memory. Graft roots of chunks the database has
     // already grafted come from its retained roots, and all other nodes come from the batch chain
-    // or the database's `Mem`.
+    // or the nodes the ops tree holds in memory.
     let ops_tree = Layered {
         batch: &inner.journal_batch,
-        mem: db.any.log.merkle.mem(),
+        base: &db.any.log.merkle,
     };
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
@@ -992,7 +946,7 @@ where
     let ops_root = inner.root();
     let grafted_tree = Layered {
         batch: &grafted_batch,
-        mem: &*db.grafted_tree,
+        base: &*db.grafted_tree,
     };
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);
@@ -1002,8 +956,7 @@ where
         &grafted_storage,
         overlay_ops_leaves,
         inner.bounds.inactivity_floor,
-    )
-    .await?;
+    )?;
     let canonical_root = ops_root_witness.root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
@@ -1405,10 +1358,32 @@ where
     }
 }
 
+impl<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
+    crate::qmdb::sync::MerkleizedBatch for MerkleizedBatch<F, D, U, N, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    /// The root is the ops root, which the sync engine verifies against.
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.ops_root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().tip.size),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        merkle::Family as _,
         mmb, mmr,
         qmdb::{
             ProofExt,
@@ -2276,7 +2251,10 @@ mod tests {
             merkle::Location::new(zero * (N * 8) as u64),
             grafting::height::<N>(),
         );
-        let raw = db.any.log.merkle.get_node(pos).await.unwrap().unwrap();
+        let raw = merkle::storage::Storage::get_node(&db.any.log, pos)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(mirror.nodes.get(&pos), Some(&raw));
         db.destroy().await.unwrap();
     }

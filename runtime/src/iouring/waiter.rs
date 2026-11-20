@@ -157,7 +157,7 @@ impl Waiters {
     /// remains occupied until a local result is consumed or dropped.
     pub fn insert(&mut self, request: Request, observer: Observer) -> WaiterId {
         let id = self.entries.insert_with(|id| {
-            // Reserve the maximum index for cancellation and mailbox wake tokens.
+            // Reserve the maximum index for cancellation and ring wait tokens.
             assert!(id.index < u32::MAX, "waiter slot index overflow");
             Entry::Pending(Waiter {
                 state: WaiterState::Active,
@@ -400,8 +400,9 @@ impl Waiters {
         // A retained result must not keep the request counted as pending.
         self.pending -= 1;
 
-        // Permit waiters use only the driver's native wake source. Accounting
-        // precedes their release. File and buffer owners remain deferred.
+        // Permit waiters wake only through their driver's acquisition waker,
+        // which runs no user code. Accounting precedes their release. File and
+        // buffer owners remain deferred.
         let (output, resources) = waiter.request.complete(result);
         drop(waiter.durability);
         deferred.resources.push(resources);

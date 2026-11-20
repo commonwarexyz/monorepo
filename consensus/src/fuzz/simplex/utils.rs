@@ -13,7 +13,6 @@ const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 pub enum Action {
     Link(Link),
     Update(Link),
-    Unlink,
 }
 
 /// Network partition strategies for fuzz testing.
@@ -34,17 +33,17 @@ pub enum Partition {
 impl Partition {
     pub fn filter(&self) -> Option<fn(usize, usize, usize) -> bool> {
         match self {
-            Partition::Connected => None,
-            Partition::Isolated => Some(|_, i, j| i == j),
-            Partition::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
-            Partition::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
-            Partition::Ring => Some(ring),
+            Self::Connected => None,
+            Self::Isolated => Some(|_, i, j| i == j),
+            Self::TwoPartitionsWithByzantine => Some(two_partitions_with_byzantine),
+            Self::ManyPartitionsWithByzantine => Some(many_partitions_with_byzantine),
+            Self::Ring => Some(ring),
         }
     }
 }
 
 // Byzantine node (index 0) connects both partitions, honest nodes split in half.
-fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
+const fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
     if i == 0 || j == 0 {
         return true;
     }
@@ -55,12 +54,12 @@ fn two_partitions_with_byzantine(n: usize, i: usize, j: usize) -> bool {
 }
 
 // Only Byzantine node (index 0) has connections, creating a star topology.
-fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
+const fn many_partitions_with_byzantine(_: usize, i: usize, j: usize) -> bool {
     i == 0 || j == 0
 }
 
 // Ring topology: node i connects to i-1 and i+1 (with wraparound).
-fn ring(n: usize, i: usize, j: usize) -> bool {
+const fn ring(n: usize, i: usize, j: usize) -> bool {
     i.abs_diff(j) == 1 || i.abs_diff(j) == n - 1
 }
 
@@ -80,21 +79,17 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
             {
                 continue;
             }
-            match action {
-                Action::Update(_) | Action::Unlink => {
+            let link = match &action {
+                Action::Link(link) => link,
+                Action::Update(link) => {
                     oracle.remove_link(v1.clone(), v2.clone()).await.ok();
+                    link
                 }
-                _ => {}
-            }
-            match action {
-                Action::Link(ref link) | Action::Update(ref link) => {
-                    oracle
-                        .add_link(v1.clone(), v2.clone(), link.clone())
-                        .await
-                        .unwrap();
-                }
-                _ => {}
-            }
+            };
+            oracle
+                .add_link(v1.clone(), v2.clone(), link.clone())
+                .await
+                .unwrap();
         }
     }
 }

@@ -53,11 +53,11 @@
 //!   authenticated structure (see below).
 //!
 //! - **Graft roots**: The ops-tree root at the grafting height of each graftable bitmap chunk not
-//!   wholly below the inactivity floor, held in memory by chunk index. They survive journal
-//!   flushes, so merkleization recomputes a dirty chunk's grafted leaf without reading the ops
-//!   tree from storage. Startup and state sync rebuild them with the grafted tree, and a root is
-//!   released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte digests,
-//!   that is 32 bytes per 256 operations.
+//!   wholly below the inactivity floor, held in memory by chunk index whatever the ops tree's
+//!   resident height, so merkleization recomputes a dirty chunk's grafted leaf without reading the
+//!   ops tree from storage. Startup and state sync rebuild them with the grafted tree, and a root
+//!   is released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte
+//!   digests, that is 32 bytes per 256 operations.
 //!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
 //!   restore the grafted tree after pruning old bitmap chunks.
@@ -315,8 +315,8 @@
 //! Pending and partial slots are independent. When both are present, pending hashes in before
 //! partial.
 //!
-//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], also
-//! exposed by [`sync::Database::ops_root`](crate::qmdb::sync::Database::ops_root).
+//! The canonical root is returned by [`Db::root`]. State sync uses [`Db::ops_root`], the root of
+//! the [`sync::Database::target`](crate::qmdb::sync::Database::target).
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::ProofExt::verify`]. After sync, the
@@ -328,9 +328,10 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::authenticated,
-    merkle::{self, Location, full::Config as MerkleConfig},
+    journal::{authenticated, authenticated::Config as MerkleConfig},
+    merkle::{self, Location},
     qmdb::{
+        Error,
         any::{
             self, Config as AnyConfig,
             operation::{
@@ -370,7 +371,7 @@ use self::db::Metrics;
 
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy, B = ()> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle: MerkleConfig<S>,
 
@@ -391,16 +392,15 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
-    /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
-    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
-    pub init_concurrency: B,
+    /// Tasks that initialization spawns to scan the log at once. A partitioned index decodes on
+    /// them, beside fewer insert tasks, and any other index builds on the calling task. With 1,
+    /// initialization spawns nothing, and the calling task scans the log while the strategy hashes
+    /// it.
+    pub init_concurrency: NonZeroUsize,
 }
 
-impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T, J, S, B> {
-    fn from(cfg: Config<T, J, S, B>) -> Self {
+impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
+    fn from(cfg: Config<T, J, S>) -> Self {
         Self {
             merkle: cfg.merkle,
             log: cfg.log,
@@ -428,15 +428,14 @@ where
     ///
     /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
     /// the latest retained commit with at most `max_size` operations, while `None` selects the
-    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// latest retained state. Initialization fails with [Error::HistoricalFloorPruned]
     /// if the log or bitmap has pruned the commit's inactivity floor, and with
-    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
+    /// [Error::NoRetainedCommit] if no retained commit fits under the bound.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, Error<F>> {
         init_db(context, cfg, max_size).await
     }
 }
@@ -457,26 +456,25 @@ where
     ///
     /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
     /// the latest retained commit with at most `max_size` operations, while `None` selects the
-    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// latest retained state. Initialization fails with [Error::HistoricalFloorPruned]
     /// if the log or bitmap has pruned the commit's inactivity floor, and with
-    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
-    /// itself has been pruned.
+    /// [Error::NoRetainedCommit] if no retained commit fits under the bound.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, Error<F>> {
         init_db(context, cfg, max_size).await
     }
 }
 
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
-async fn init_db<F, E, U, H, I, J, const N: usize, S>(
+pub(crate) async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S>,
     max_size: Option<Location<F>>,
-) -> Result<db::Db<F, E, J, I, H, U, N, S>, crate::qmdb::Error<F>>
+) -> Result<db::Db<F, E, J, I, H, U, N, S>, Error<F>>
 where
     F: merkle::Graftable,
     E: Context + Spawner,
@@ -520,7 +518,7 @@ where
 
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
+        .map_err(|_| Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
@@ -541,7 +539,7 @@ where
     let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
-        &any.log.merkle,
+        &any.log,
         any.inactivity_floor_loc,
         &strategy,
     )
@@ -676,9 +674,8 @@ pub mod tests {
                     let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
-                        // Hold every unapplied ancestor until the child is merkleized.
-                        // Speculative batch Merkle lookups walk weak parent links for in-memory
-                        // ancestor nodes.
+                        // Hold every unapplied ancestor until the child is merkleized, which
+                        // captures their operations and Merkle records.
                         let mut stack = Vec::new();
                         match depth {
                             0 => {}
@@ -866,25 +863,21 @@ pub mod tests {
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
     ) -> Config<T, FConfig, Sequential> {
-        fixed_config_full(partition_prefix, ())
+        fixed_config_full(partition_prefix, NZUsize!(2))
     }
 
-    /// Shared config construction for every fixed-value flavor, generic over the index's
-    /// snapshot-build concurrency.
-    pub(crate) fn fixed_config_full<T: Translator + Default, B>(
+    /// Shared config construction for every fixed-value flavor.
+    pub(crate) fn fixed_config_full<T: Translator + Default>(
         partition_prefix: &str,
-        init_concurrency: B,
-    ) -> Config<T, FConfig, Sequential, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, FConfig, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
-                metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -905,25 +898,21 @@ pub mod tests {
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
     ) -> Config<T, VConfig<((), ())>, Sequential> {
-        variable_config_full(partition_prefix, ())
+        variable_config_full(partition_prefix, NZUsize!(2))
     }
 
-    /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
-    pub(crate) fn variable_config_full<T: Translator + Default, B>(
+    /// Shared config construction for every variable-value flavor.
+    pub(crate) fn variable_config_full<T: Translator + Default>(
         partition_prefix: &str,
-        init_concurrency: B,
-    ) -> Config<T, VConfig<((), ())>, Sequential, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("{partition_prefix}-journal-partition"),
-                metadata_partition: format!("{partition_prefix}-metadata-partition"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -942,17 +931,17 @@ pub mod tests {
         }
     }
 
-    /// Like [fixed_config], typed for a partitioned index at the serial concurrency.
+    /// Like [fixed_config], but initializes serially.
     pub(crate) fn fixed_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
+    ) -> Config<T, FConfig, Sequential> {
         fixed_config_full(partition_prefix, NZUsize!(1))
     }
 
-    /// Like [variable_config], typed for a partitioned index at the serial concurrency.
+    /// Like [variable_config], but initializes serially.
     pub(crate) fn variable_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-    ) -> Config<T, VConfig<((), ())>, Sequential, NonZeroUsize> {
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         variable_config_full(partition_prefix, NZUsize!(1))
     }
 
@@ -2034,7 +2023,7 @@ pub mod tests {
                 <mmb::Family as merkle::Family>::location_to_position(end)
             );
 
-            let ops_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let ops_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 Location::new(0),
                 grafting_height,
             );
@@ -2084,13 +2073,10 @@ pub mod tests {
             let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = Config {
                 merkle: MerkleConfig {
-                    journal_partition: "forged-exclusion-journal".to_string(),
-                    metadata_partition: "forged-exclusion-metadata".to_string(),
-                    items_per_blob: NZU64!(11),
-                    write_buffer: NZUsize!(1024),
+                    partition: "forged-exclusion-metadata".to_string(),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    page_cache: page_cache.clone(),
+                    resident_height: Default::default(),
                 },
                 log: VConfig {
                     partition: "forged-exclusion-log".to_string(),
@@ -3103,7 +3089,7 @@ pub mod tests {
             let youngest = pruned_chunks - 1;
             let pair_chunk = youngest & !1;
             let pair_start = pair_chunk << gh;
-            let pair_pos = <mmb::Family as merkle::Graftable>::subtree_root_position(
+            let pair_pos = <mmb::Family as merkle::Family>::subtree_root_position(
                 merkle::Location::<mmb::Family>::new(pair_start),
                 gh + 1,
             );
@@ -3227,6 +3213,18 @@ pub mod tests {
                 )
                 .await;
             }
+
+            // The batch and the database agree on the chunk-aligned sync target.
+            let merkleized = db
+                .new_batch()
+                .write(key(0), Some(val(1)))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            let expected = crate::qmdb::sync::MerkleizedBatch::target(&*merkleized);
+            db = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(crate::qmdb::sync::Database::target(&db), expected);
+            assert!(*expected.range.start() > 0, "expected a nonzero sync boundary");
 
             let prune_boundary = db.sync_boundary();
             let db = db.prune(prune_boundary).await.unwrap();
@@ -3801,7 +3799,7 @@ pub mod tests {
             assert!(
                 matches!(
                     boundary_err,
-                    Error::Journal(crate::journal::Error::ItemPruned(_))
+                    Error::NoRetainedCommit(cap) if cap == oldest_retained
                 ),
                 "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
             );
@@ -3812,7 +3810,6 @@ pub mod tests {
             )
             .await
             .unwrap();
-            let expected_pruned_loc = *first_start;
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
@@ -3825,8 +3822,7 @@ pub mod tests {
             assert!(
                 matches!(
                     err,
-                    Error::Journal(crate::journal::Error::ItemPruned(loc))
-                    if loc == expected_pruned_loc
+                    Error::NoRetainedCommit(cap) if cap == first_start
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
@@ -3974,11 +3970,79 @@ pub mod tests {
             assert!(
                 matches!(
                     err,
-                    Error::Journal(crate::journal::Error::ItemPruned(loc))
-                    if loc == *history[0].size
+                    Error::NoRetainedCommit(cap) if cap == history[0].size
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
+        });
+    }
+
+    /// Pruning an MMB database to an earlier generation's sync boundary leaves it and each later
+    /// generation initializable at its size with its recorded root and sync boundary.
+    #[test_traced("INFO")]
+    fn test_current_mmb_prune_keeps_retained_checkpoints_initializable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Write the same keys in six synced generations and record each one's checkpoint.
+            let partition = "current-mmb-prune-retained-checkpoints";
+            let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                context.child("storage"),
+                variable_config::<OneCap>(partition),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut history = Vec::new();
+            for generation in 0..6u64 {
+                let mut batch = db.new_batch();
+                for i in 0..384 {
+                    batch = batch.write(key(i), Some(val(generation * 1_000 + i)));
+                }
+                let merkleized = batch.merkleize(&db).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.sync().await.unwrap();
+                history.push((
+                    db.bounds().end,
+                    db.inactivity_floor(),
+                    db.sync_boundary(),
+                    db.root(),
+                ));
+            }
+
+            // Prune to the first sync boundary of at least one bitmap chunk that lags its floor's
+            // chunk. Only MMB's delayed merges cause that lag, and this prune moves the bitmap.
+            let oldest = history
+                .iter()
+                .position(|(_, floor, boundary, _)| {
+                    **boundary >= CHUNK_BITS && **boundary < **floor / CHUNK_BITS * CHUNK_BITS
+                })
+                .expect("some generation's sync boundary must lag its floor's chunk");
+            assert!(
+                oldest + 1 < history.len(),
+                "a generation must follow the pruned one"
+            );
+            let prune_loc = history[oldest].2;
+            let db = db.prune(prune_loc).await.unwrap();
+            assert_eq!(db.pruned_bits(), *prune_loc);
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen each retained generation bounded at its size, newest first.
+            let labels = ["gen0", "gen1", "gen2", "gen3", "gen4", "gen5"];
+            for index in (oldest..history.len()).rev() {
+                let (size, _, boundary, root) = history[index];
+                let db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
+                    context.child(labels[index]),
+                    variable_config::<OneCap>(partition),
+                    Some(size),
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.bounds().end, size);
+                assert_eq!(db.root(), root);
+                assert_eq!(db.sync_boundary(), boundary);
+                assert_eq!(db.pruned_bits(), *prune_loc);
+            }
         });
     }
 

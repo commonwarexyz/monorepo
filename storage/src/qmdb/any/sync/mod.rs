@@ -8,7 +8,7 @@ use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered},
     journal::{authenticated, contiguous::Mutable},
-    merkle::{self, Location, full},
+    merkle::{self, Location},
     qmdb::{
         self, SnapshotBuild,
         any::{
@@ -32,18 +32,18 @@ pub(crate) mod tests;
 
 /// Shared helper to build a [Db] from sync components.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<F, E, U, I, H, C, const N: usize, S>(
+async fn build_db<F, E, U, I, H, C, S>(
     context: E,
-    merkle_config: full::Config<S>,
+    merkle_config: authenticated::Config<S>,
     log: C,
     translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as SnapshotBuild<F>>::Concurrency,
+    init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
-) -> Result<Db<F, E, C, I, H, U, N, S>, qmdb::Error<F>>
+) -> Result<Db<F, E, C, I, H, U, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
     E: Context + Spawner,
@@ -56,22 +56,15 @@ where
 {
     let hasher = qmdb::hasher::<H>();
 
-    let merkle = full::Merkle::<F, _, _, S>::init_sync(
-        context.child("merkle"),
-        full::SyncConfig {
-            config: merkle_config,
-            range: range.clone(),
-            pinned_nodes,
-        },
-    )
-    .await?;
-
     let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
-        merkle,
+        context.child("merkle"),
+        &merkle_config,
         log,
         hasher,
+        range.start(),
+        pinned_nodes.unwrap_or_default(),
         apply_batch_size,
     )
     .await?;
@@ -92,12 +85,15 @@ where
     Ok(db)
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> sync::Database for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, S> sync::Database for Db<F, E, C, I, H, U, S>
 where
     F: merkle::Family,
     E: Context + Spawner,
-    C: Mutable<Item = Operation<F, U>>
-        + sync::Journal<F, Context = E, Op = Operation<F, U>>
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as sync::Journal<F>>::Config,
+        > + sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
     H: Hasher,
@@ -110,23 +106,57 @@ where
     type Op = Operation<F, U>;
     type Journal = C;
     type Hasher = H;
-    type Config = Config<
-        I::Translator,
-        <C as sync::Journal<F>>::Config,
-        S,
-        <I as SnapshotBuild<F>>::Concurrency,
-    >;
+    type Config = Config<I::Translator, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
 
-    async fn from_sync_result(
-        context: Self::Context,
+    async fn init(
+        context: E,
         config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        crate::qmdb::any::init_with_bitmap(context, config, None, max_size, None).await
+    }
+
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: Self::root(self),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
+    }
+}
+
+impl<F, E, C, I, H, U, S> sync::Hooks<Self> for Db<F, E, C, I, H, U, S>
+where
+    F: merkle::Family,
+    E: Context + Spawner,
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as sync::Journal<F>>::Config,
+        > + sync::Journal<F, Context = E, Op = Operation<F, U>>
+        + 'static,
+    I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    async fn from_sync_result(
+        context: E,
+        config: <Self as sync::Database>::Config,
+        log: C,
+        pinned_nodes: Option<Vec<H::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
-        build_db::<F, _, U, _, H, _, N, _>(
+        build_db::<F, _, U, _, H, _, _>(
             context,
             config.merkle,
             log,
@@ -141,44 +171,24 @@ where
         .await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self.log = self.log.persist_boundary().await?;
         Ok(self)
     }
 
     async fn discard_local_state(
-        context: Self::Context,
-        config: &Self::Config,
+        context: E,
+        config: &<Self as sync::Database>::Config,
     ) -> Result<(), qmdb::Error<F>> {
-        qmdb::sync::discard_local_state::<F, _, H, S>(context, config.merkle.clone()).await
+        Ok(authenticated::discard_frontier::<F, _, H, S>(context, &config.merkle).await?)
     }
 
     async fn local_pinned_nodes(
-        context: Self::Context,
-        config: &Self::Config,
-        target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-        journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
-        {
-            return Ok(None);
-        }
-
-        // The inactivity floor is carried by the last commit operation rather than being
-        // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
-        qmdb::sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle.clone(),
-            target,
-            inactivity_floor,
-        )
-        .await
-    }
-
-    fn ops_root(&self) -> Self::Digest {
-        Self::root(self)
+        context: E,
+        config: &<Self as sync::Database>::Config,
+        target: &sync::Target<F, H::Digest>,
+        journal: &C,
+    ) -> Result<Option<Vec<H::Digest>>, qmdb::Error<F>> {
+        qmdb::sync::local_pinned_nodes::<F, _, H, S>(context, &config.merkle, target, journal).await
     }
 }

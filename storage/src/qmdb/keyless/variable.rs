@@ -49,14 +49,11 @@ mod tests {
     fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: crate::merkle::full::Config {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+            merkle: crate::journal::authenticated::Config {
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: JournalConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -67,6 +64,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -132,6 +130,7 @@ mod tests {
         test_keyless_variable_replay_with_trailing_appends => run_replay_with_trailing_appends, reopen_indexed;
         test_keyless_variable_get_out_of_bounds => run_get_out_of_bounds, db;
         test_keyless_variable_get_pruned => run_get_pruned, db;
+        test_keyless_variable_get_pruned_above_floor => run_get_pruned_above_floor, bounded_floor;
         test_keyless_variable_metadata => run_metadata, db;
         test_keyless_variable_pruning => run_pruning, reopen;
         test_keyless_variable_batch_get => run_batch_get, db;
@@ -178,18 +177,9 @@ mod tests {
         test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
-    /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
-    /// `historical_proof` for sizes in that leading interval must report `HistoricalFloorPruned`
-    /// (the floor metadata is gone) rather than the misleading `UnexpectedData` (which sounds like
-    /// data corruption).
-    ///
-    /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
-    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <=
-    /// 8) and retains blob 1 ([7, 14)). `bounds.start = 7` is a non-commit op (an Append), and the
-    /// previous commit at location 4 was pruned. `historical_proof(op_count=8, ...)` asks for the
-    /// state just before the first retained commit, which has no retained governing floor.
+    /// Distinguish a pruned commit from a retained append at the pruning boundary.
     #[test_traced("INFO")]
-    fn test_keyless_variable_historical_proof_floor_pruned() {
+    fn test_keyless_variable_historical_proof_across_prune() {
         use crate::merkle::Location;
         deterministic::Runner::default().start(|ctx| async move {
             let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
@@ -215,23 +205,26 @@ mod tests {
             let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
-            // op_count = first retained commit (= state just before that commit). Expected:
-            // HistoricalFloorPruned, NOT UnexpectedData.
+            // Size 5 ends at the pruned commit at 4. Size 8 ends at the retained append at 7.
             let result = db
-                .historical_proof(Location::new(8), bounds.start, NZU64!(5))
+                .historical_proof(Location::new(5), Location::new(4), NZU64!(1))
                 .await;
             assert!(
-                !matches!(result, Err(Error::UnexpectedData(_))),
-                "must not surface as UnexpectedData; got {result:?}",
+                matches!(
+                    result,
+                    Err(Error::Journal(crate::journal::Error::ItemPruned(4)))
+                ),
+                "expected ItemPruned(4), got {result:?}"
             );
+            let result = db
+                .historical_proof(Location::new(8), bounds.start, NZU64!(1))
+                .await;
             assert!(
-                matches!(result, Err(Error::HistoricalFloorPruned(loc)) if loc == Location::new(8)),
-                "expected HistoricalFloorPruned(8), got {result:?}",
+                matches!(result, Err(Error::NotCommitBoundary(size)) if size == Location::new(8)),
+                "expected NotCommitBoundary(8), got {result:?}"
             );
 
-            // Sanity: a commit-boundary size whose floor is retained still works. First retained
-            // commit at 8 declares some floor; op_count=9 is the post-commit size whose governing
-            // floor is the one declared at op 8.
+            // Size 9 ends at the first retained commit.
             db.historical_proof(Location::new(9), Location::new(8), NZU64!(1))
                 .await
                 .expect("commit-boundary historical_proof should succeed");

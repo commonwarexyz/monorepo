@@ -10,7 +10,7 @@ use crate::{
     },
     simulate::{reporter::MonitorReporter, tracker::ProgressTracker},
 };
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use commonware_actor::Feedback;
 use commonware_codec::{
     Buf, Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
@@ -33,7 +33,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
     bls12381::{
-        dkg::feldman_desmedt::DealerPrivMsg,
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
         primitives::{
             group::Share,
             variant::{MinPk, Variant},
@@ -832,8 +832,12 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
 
 /// In-memory [`SecretStore`] for tests.
 ///
-/// Dealings are keyed by the encoded dealer key so the store works with any
-/// [`PublicKey`](CryptoPublicKey). Pruned epochs are recorded for assertions.
+/// Dealings are keyed by the encoded dealer key and public message so the store
+/// works with any [`PublicKey`](CryptoPublicKey) and [`Variant`]. Pruned epochs
+/// are recorded for assertions.
+///
+/// Storing a different private dealing for a dealing that is already stored
+/// panics.
 #[derive(Clone, Default)]
 pub(crate) struct MemorySecretStore {
     inner: Arc<Mutex<MemorySecretStoreInner>>,
@@ -843,9 +847,10 @@ pub(crate) struct MemorySecretStore {
 struct MemorySecretStoreInner {
     shares: BTreeMap<Epoch, Share>,
     seeds: BTreeMap<Epoch, Summary>,
-    dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
+    dealings: BTreeMap<(Epoch, Vec<u8>, Bytes), DealerPrivMsg>,
     prunes: Vec<Epoch>,
     stall: bool,
+    park_dealings: bool,
 }
 
 impl MemorySecretStore {
@@ -869,6 +874,12 @@ impl MemorySecretStore {
     /// never return.
     pub(crate) fn stall(&self) {
         self.inner.lock().stall = true;
+    }
+
+    /// Sets whether [`SecretStore::put_dealing`] stops before it stores its
+    /// dealing and never returns.
+    pub(crate) fn park_dealings(&self, park: bool) {
+        self.inner.lock().park_dealings = park;
     }
 }
 
@@ -896,27 +907,35 @@ impl SecretStore for MemorySecretStore {
         self.inner.lock().seeds.get(&epoch).cloned()
     }
 
-    async fn put_dealing<P: CryptoPublicKey>(
+    async fn put_dealing<V: Variant, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
+        public: &DealerPubMsg<V>,
         private: DealerPrivMsg,
     ) {
-        self.inner
-            .lock()
-            .dealings
-            .insert((epoch, dealer.encode().to_vec()), private);
+        let park = self.inner.lock().park_dealings;
+        if park {
+            std::future::pending::<()>().await;
+        }
+        let key = (epoch, dealer.encode().to_vec(), public.encode());
+        let replaced = self.inner.lock().dealings.insert(key, private.clone());
+        assert!(
+            replaced.is_none_or(|replaced| replaced == private),
+            "stored private dealing must not change"
+        );
     }
 
-    async fn get_dealing<P: CryptoPublicKey>(
+    async fn get_dealing<V: Variant, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
+        public: &DealerPubMsg<V>,
     ) -> Option<DealerPrivMsg> {
         self.inner
             .lock()
             .dealings
-            .get(&(epoch, dealer.encode().to_vec()))
+            .get(&(epoch, dealer.encode().to_vec(), public.encode()))
             .cloned()
     }
 
@@ -925,7 +944,7 @@ impl SecretStore for MemorySecretStore {
         inner.prunes.push(min);
         inner.shares.retain(|epoch, _| *epoch >= min);
         inner.seeds.retain(|epoch, _| *epoch >= min);
-        inner.dealings.retain(|(epoch, _), _| *epoch >= min);
+        inner.dealings.retain(|(epoch, _, _), _| *epoch >= min);
     }
 }
 

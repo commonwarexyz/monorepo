@@ -12,15 +12,13 @@
 //! log and included in the Merkle root, so all replicas processing the same operations
 //! arrive at the same floor.
 //!
-//! The floor controls two things:
+//! - **Key lookups**: [`Db::get`] and [`Db::get_many`] return only values set at or above the floor.
 //! - **Pruning**: [`Db::prune`] only allows pruning up to the floor.
 //! - **Reconstruction**: on restart or sync, the snapshot is rebuilt from the floor
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
-//! A running database keeps serving keys set before the floor until their operations are
-//! pruned, while a restarted or synced one does not know them, so only reads at or above the
-//! floor are consistent across replicas. Treat declaring a floor as retiring every key set
-//! before it.
+//! At the same commitment, key lookups give the same results on live, pruned, reopened, and
+//! synced databases. A retired key must not be set again.
 //!
 //! The floor must be monotonically non-decreasing across commits and must not exceed
 //! the batch's commit location. New batches inherit the database or parent batch's floor. Use
@@ -77,8 +75,13 @@
 //! ```
 
 use crate::{
-    merkle::{Family, Location, full::Config as MerkleConfig},
-    qmdb::{operation::Key, single_operation_root, value::ValueEncoding},
+    journal::authenticated::Config as MerkleConfig,
+    merkle::Family,
+    qmdb::{
+        operation::{Committable as _, Key},
+        single_operation_root,
+        value::ValueEncoding,
+    },
     translator::Translator,
 };
 use commonware_codec::EncodeShared;
@@ -112,7 +115,7 @@ where
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
-    single_operation_root::<F, H>(&Operation::<F, K, V>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, K, V>::initial_commit())
 }
 
 /// Configuration for a [Db].
@@ -129,6 +132,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
+
+    /// Tasks that initialization spawns to scan the log at once, beside the calling task's index
+    /// build. With 1, initialization spawns nothing, and the calling task scans the log while the
+    /// strategy hashes it.
+    pub init_concurrency: NonZeroUsize,
 }
 
 #[cfg(test)]
@@ -361,8 +369,9 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Batch reads cover only operations at or above the batch's inactivity floor, so a long-lived,
-    /// a pruned, and a reopened instance at the same commitment all answer alike.
+    /// Reads cover only operations at or above the inactivity floor, whether made through a batch
+    /// or on the database, so a long-lived, a pruned, and a reopened instance at the same
+    /// commitment all answer alike.
     #[boxed]
     pub(crate) async fn run_reads_ignore_inactive_operations<F: Family, V, C>(
         context: deterministic::Context,
@@ -432,7 +441,7 @@ pub(super) mod tests {
         drop(grandchild);
 
         // Apply the parent. The long-lived instance still indexes `old`, a pruned one has removed
-        // it, and a reopened one rebuilds its index from the floor. Batch reads agree on all three.
+        // it, and a reopened one rebuilds its index from the floor. Reads agree on all three.
         let db = db.apply_batch(parent).await.unwrap();
         let db = db.commit().await.unwrap();
         let expected = vec![None, Some(Sha256::fill(102u8))];
@@ -444,6 +453,8 @@ pub(super) mod tests {
             db.new_batch().get(&fresh, &db).await.unwrap(),
             Some(Sha256::fill(102u8))
         );
+        assert_eq!(db.get(&old).await.unwrap(), None);
+        assert_eq!(db.get_many(&[&old, &fresh]).await.unwrap(), expected);
 
         // `twin` shares `old`'s translated key, so the index yields both locations for either
         // key, and only the one at or above the floor is read.
@@ -468,6 +479,8 @@ pub(super) mod tests {
             db.new_batch().get_many(&[&old, &twin], &db).await.unwrap(),
             collided
         );
+        assert_eq!(db.get(&old).await.unwrap(), None);
+        assert_eq!(db.get_many(&[&old, &twin]).await.unwrap(), collided);
         let db = db.prune(base).await.unwrap();
         assert!(db.bounds().start > Location::new(1), "`old` must be pruned");
         assert_eq!(
@@ -478,6 +491,8 @@ pub(super) mod tests {
             db.new_batch().get_many(&[&old, &twin], &db).await.unwrap(),
             collided
         );
+        assert_eq!(db.get_many(&[&old, &fresh]).await.unwrap(), expected);
+        assert_eq!(db.get_many(&[&old, &twin]).await.unwrap(), collided);
         drop(db);
         let db = open_db(context.child("db")).await;
         assert_eq!(
@@ -493,6 +508,8 @@ pub(super) mod tests {
             db.new_batch().get(&twin, &db).await.unwrap(),
             Some(Sha256::fill(104u8))
         );
+        assert_eq!(db.get(&old).await.unwrap(), None);
+        assert_eq!(db.get_many(&[&old, &twin]).await.unwrap(), collided);
         db.destroy().await.unwrap();
     }
 
@@ -831,6 +848,18 @@ pub(super) mod tests {
         let merkleized = db.new_batch().set(k1, v1).merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
+
+        // Size two ends at the Set following the initial commit.
+        for size in [Location::new(0), Location::new(2)] {
+            let result = db
+                .historical_proof(size, Location::new(0), NZU64!(1))
+                .await
+                .map(|_| ());
+            assert!(
+                matches!(result, Err(Error::NotCommitBoundary(actual)) if actual == size),
+                "expected NotCommitBoundary({size}), got {result:?}"
+            );
+        }
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
@@ -1198,7 +1227,7 @@ pub(super) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_unsynced_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1339,9 +1368,14 @@ pub(super) mod tests {
         let pruned_key = sorted_keys[*oldest_retained_loc as usize - 2];
         assert!(db.get(&pruned_key).await.unwrap().is_none());
 
-        // Try to fetch unpruned key (at location oldest_retained).
+        // An unpruned key (at location oldest_retained) is below the floor, so it is not read
+        // either.
         let unpruned_key = sorted_keys[*oldest_retained_loc as usize - 1];
-        assert!(db.get(&unpruned_key).await.unwrap().is_some());
+        assert!(db.get(&unpruned_key).await.unwrap().is_none());
+
+        // The key at the floor is read.
+        let floor_key = sorted_keys[*inactivity_floor as usize - 1];
+        assert!(db.get(&floor_key).await.unwrap().is_some());
 
         // Drop & reopen the db, making sure it has exactly the same state.
         let root = db.root();
@@ -1681,7 +1715,7 @@ pub(super) mod tests {
         assert!(
             matches!(
                 boundary_err,
-                Error::Journal(crate::journal::Error::ItemPruned(_))
+                Error::NoRetainedCommit(cap) if cap == oldest_retained
             ),
             "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
         );
@@ -1695,7 +1729,7 @@ pub(super) mod tests {
             panic!("expected bounded initialization to fail");
         };
         assert!(
-            matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+            matches!(err, Error::NoRetainedCommit(cap) if cap == first_start),
             "unexpected bounded initialization error: {err:?}"
         );
     }
@@ -2189,19 +2223,21 @@ pub(super) mod tests {
         let v3 = Sha256::fill(3u8);
 
         // The log holds 0=initial commit, 1=Set(key1,v1), 2=Commit, 3-4=Set(key2,v2) and
-        // Set(key3,v3), 5=Commit(floor=4). Floor=4 permits prune(2).
+        // Set(key3,v3), 5=Commit(floor=3). Floor=3 retires key1 and permits prune(2).
         let merkleized = db.new_batch().set(key1, v1).merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let merkleized = db
             .new_batch()
             .set(key2, v2)
             .set(key3, v3)
-            .with_inactivity_floor(Location::new(4))
+            .with_inactivity_floor(Location::new(3))
             .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
+
+        // The floor retires key1 from reads, and it stays indexed until it is pruned.
+        assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
         assert_eq!(db.snapshot.len(), 3);
 
@@ -2217,8 +2253,8 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Every prune retires exactly the sets below the retained start, and a set at the retained
-    /// start survives and stays readable.
+    /// Every prune retires exactly the sets below the retained start from the index, and a set at
+    /// the retained start survives. It is readable when it is at or above the floor.
     ///
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
@@ -2259,21 +2295,27 @@ pub(super) mod tests {
         }
         assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
 
-        // Pruning to the set at 9 retires the set at 7 and keeps the one at the retained start.
+        // The set at 9 stays indexed at the pruning boundary, though it is below the floor.
+        let key4 = Sha256::fill(4);
         db = db.prune(Location::new(9)).await.unwrap();
         assert_eq!(db.snapshot.len(), 6);
-        assert_eq!(
-            db.get(&Sha256::fill(4)).await.unwrap(),
-            Some(Sha256::fill(4))
-        );
+        assert!(db.snapshot.get(&key4).eq([9]));
+        assert!(db.get(&key4).await.unwrap().is_none());
 
-        // Pruning past it retires it.
+        // Pruning past it retires it from the index too.
         db = db.prune(Location::new(10)).await.unwrap();
         assert_eq!(db.snapshot.len(), 5);
-        assert!(db.get(&Sha256::fill(4)).await.unwrap().is_none());
+        assert!(db.snapshot.get(&key4).next().is_none());
+
+        // Pruning to the floor keeps the set there, which stays readable.
+        assert_eq!(db.inactivity_floor(), Location::new(19));
+        db = db.prune(Location::new(19)).await.unwrap();
+        assert_eq!(db.bounds().start, Location::new(19));
+        assert_eq!(db.snapshot.len(), 1);
+        assert!(db.get(&Sha256::fill(8)).await.unwrap().is_none());
         assert_eq!(
-            db.get(&Sha256::fill(5)).await.unwrap(),
-            Some(Sha256::fill(5))
+            db.get(&Sha256::fill(9)).await.unwrap(),
+            Some(Sha256::fill(9))
         );
 
         db.destroy().await.unwrap();
@@ -3330,6 +3372,7 @@ pub(super) mod tests {
 
         // Reopen: snapshot rebuilt from floor=second_size. Only k3 is in snapshot.
         let db = open_db(context.child("second"), None).await.unwrap();
+        assert_eq!(db.snapshot.len(), 1);
         assert!(db.get(&k1).await.unwrap().is_none());
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
@@ -3339,6 +3382,7 @@ pub(super) mod tests {
         let db = open_db(context.child("cap"), Some(second_size))
             .await
             .unwrap();
+        assert_eq!(db.snapshot.len(), 1);
         assert!(db.get(&k1).await.unwrap().is_none()); // below B's floor
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert!(db.get(&k3).await.unwrap().is_none()); // in suffix, removed
@@ -3404,10 +3448,13 @@ pub(super) mod tests {
         assert_eq!(db.inactivity_floor(), commit_loc);
         let root_after_commit = db.root();
 
-        // All three keys are in the in-memory snapshot pre-prune.
-        assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
-        assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
-        assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
+        // All three keys are in the in-memory snapshot pre-prune, and the floor has already
+        // retired them from reads.
+        assert_eq!(db.snapshot.len(), 3);
+        assert_eq!(
+            db.get_many(&[&k1, &k2, &k3]).await.unwrap(),
+            vec![None, None, None]
+        );
 
         // Prune at the floor, the maximum prune allowed.
         // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
@@ -3470,8 +3517,10 @@ pub(super) mod tests {
         assert_eq!(db.bounds().end - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor(), next_commit_loc);
 
-        // New key readable; keys from the pre-prune batch remain excluded.
-        assert_eq!(db.get(&k4).await.unwrap(), Some(v4));
+        // The floor at the new commit retires the new key too, though it stays indexed until it
+        // is pruned. Keys from the pre-prune batch remain excluded.
+        assert_eq!(db.snapshot.len(), 1);
+        assert!(db.get(&k4).await.unwrap().is_none());
         assert!(db.get(&k1).await.unwrap().is_none());
         // Follow-on commit replaced the anchor: its metadata was `None`, so `get_metadata`
         // should no longer return the original metadata.

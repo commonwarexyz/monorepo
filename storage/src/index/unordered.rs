@@ -79,7 +79,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// metrics through detached handles and holds no registrations, so the metrics leave the
     /// registry when this index is dropped. Parallel snapshot-build workers use it for their
     /// partition slots.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
         Self {
             translator: self.translator.clone(),
@@ -98,7 +97,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// # Panics
     ///
     /// Panics if self is not empty.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn absorb(&mut self, other: Self) {
         assert!(
             self.map.is_empty() && self.overflow.is_empty(),
@@ -109,7 +107,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 
     /// Visit every value held by the index (inline and overflow), in unspecified order.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
         for v in self.map.values() {
             f(v);

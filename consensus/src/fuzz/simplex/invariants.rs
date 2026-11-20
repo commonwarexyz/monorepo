@@ -1,13 +1,13 @@
-use crate::{
+use super::{
     Configuration, bounds,
-    simplex::Simplex,
+    schemes::Simplex,
     types::{Finalization, Notarization, Nullification, ReplicaState},
 };
-use commonware_codec::{Encode, Read};
-use commonware_consensus::{
+use crate::{
     simplex::{elector, mocks::reporter::Reporter, scheme, scheme::Scheme},
     types::TermLength,
 };
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::{
     certificate::{self, Signers},
     sha256::Digest as Sha256Digest,
@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 // (same_term, term_start) or a bug in them could hide from the fuzzer.
 // View 0 (genesis) is its own term; for views >= 1, term boundaries are
 // [1, term_length], [term_length + 1, 2 * term_length], ...
-fn nullification_conflicts(
+const fn nullification_conflicts(
     nullified_view: u64,
     finalized_view: u64,
     term_length: TermLength,
@@ -37,7 +37,7 @@ fn nullification_conflicts(
 
 // Keep the fuzz oracle independent of the production term predicates. Genesis
 // is term 0; view 1 begins term 1.
-fn term_of(view: u64, term_length: TermLength) -> u64 {
+const fn term_of(view: u64, term_length: TermLength) -> u64 {
     match view {
         0 => 0,
         view => 1 + (view - 1) / term_length.get(),
@@ -45,7 +45,7 @@ fn term_of(view: u64, term_length: TermLength) -> u64 {
 }
 
 // A term starts at genesis or immediately after a complete term.
-fn is_term_start(view: u64, term_length: TermLength) -> bool {
+const fn is_term_start(view: u64, term_length: TermLength) -> bool {
     view == 0 || (view - 1).is_multiple_of(term_length.get())
 }
 
@@ -402,8 +402,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{N4F1C3, N4F3C1, simplex::SimplexEd25519};
+    use super::{
+        super::{N4F1C3, N4F3C1, schemes::SimplexEd25519},
+        *,
+    };
     use commonware_utils::NZU32;
     use std::{collections::HashMap, panic};
 

@@ -6,6 +6,9 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+#[cfg(any(test, feature = "fuzz"))]
+commonware_macros::stability_mod!(ALPHA, pub mod fuzz);
+
 commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "std", test)) {
     pub use rng::{Entropy, FuzzRng, ScriptedRng, TestRng, test_rng};
 });

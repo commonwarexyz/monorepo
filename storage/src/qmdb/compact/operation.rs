@@ -2,7 +2,7 @@
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::operation::Floored,
+    qmdb::operation::Committable,
 };
 use commonware_codec::CodecShared;
 
@@ -26,7 +26,7 @@ pub(in crate::qmdb) mod sealed {
 /// Sealed: implemented by [`crate::qmdb::keyless::Operation`] and
 /// [`crate::qmdb::immutable::Operation`].
 pub trait Operation<F: Family>:
-    sealed::Sealed + Floored<F> + CodecShared + Clone + 'static
+    sealed::Sealed + Committable<F> + CodecShared + Clone + 'static
 {
     /// The commit metadata type.
     type Metadata: Clone + Send;

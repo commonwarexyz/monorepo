@@ -56,15 +56,13 @@
 //! context if the validator missed the proposal or restarted. Its notarizations therefore do not
 //! guarantee application validity and cannot safely be trusted by [`Inline`] validators.
 
-commonware_macros::stability_scope!(ALPHA {
-    mod deferred;
-    pub use deferred::Deferred;
+mod deferred;
+pub use deferred::Deferred;
 
-    mod inline;
-    pub use inline::Inline;
+mod inline;
+pub use inline::Inline;
 
-    mod validation;
-});
+mod validation;
 
 mod variant;
 pub use variant::Standard;
@@ -811,16 +809,11 @@ mod tests {
             .expect("failed to sync seeded application metadata");
     }
 
-    // Writes a block directly into the cache's per-epoch notarized storage,
-    // simulating a block that was notarized but never finalized before a crash.
-    async fn seed_cache_block(
+    async fn init_seed_cache(
         context: deterministic::Context,
         partition_prefix: &str,
-        epoch: Epoch,
-        view: View,
-        block: &B,
-    ) {
-        let cache = cache::Manager::<_, Standard<B>, S>::init(
+    ) -> cache::Manager<deterministic::Context, Standard<B>, S> {
+        cache::Manager::init(
             context.child("seed_cache"),
             cache::Config {
                 partition_prefix: format!("{partition_prefix}-cache"),
@@ -832,7 +825,19 @@ mod tests {
             },
             (),
         )
-        .await;
+        .await
+    }
+
+    // Writes a block directly into the cache's per-epoch notarized storage,
+    // simulating a block that was notarized but never finalized before a crash.
+    async fn seed_cache_block(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        epoch: Epoch,
+        view: View,
+        block: &B,
+    ) {
+        let cache = init_seed_cache(context, partition_prefix).await;
         let (_cache, synced) = cache
             .put_notarized(
                 Round::new(epoch, view),
@@ -1156,6 +1161,52 @@ mod tests {
                 let h = recovering.application.acknowledged().await;
                 assert_eq!(h, Height::new(expected_height));
             }
+        });
+    }
+
+    /// If a crash interrupts the sync of the height archives, the lookup recovers the finalization
+    /// from the digest cache when the block was stored by height without its certificate.
+    #[test_traced("WARN")]
+    fn test_standard_restart_reads_cached_finalization() {
+        const PARTITION_PREFIX: &str = "restart-reads-cached-finalization";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let height = Height::new(1);
+            let block = make_raw_block(genesis.digest(), height, 100);
+            let digest = block.digest();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+
+            // The digest cache sync and the block archive sync completed before the crash.
+            let storage = context.child("storage");
+            let cache = init_seed_cache(storage.child("cache"), PARTITION_PREFIX).await;
+            drop(cache.put_finalization(round, digest, &finalization).await);
+            seed_inconsistent_restart_state(
+                storage,
+                PARTITION_PREFIX,
+                &[genesis.inner().clone(), block],
+                &[],
+            )
+            .await;
+
+            let (mailbox, _, _, _handle) = start_standard_actor(
+                context.child("restart"),
+                PARTITION_PREFIX,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis),
+            )
+            .await;
+
+            assert_eq!(mailbox.get_finalization(height).await, Some(finalization));
         });
     }
 
@@ -7726,16 +7777,22 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "floor-jump-ignores-stale-ack",
+            let prefix = "floor-jump-ignores-stale-ack";
+            let (certificates, blocks) = prunable_finalized_stores(&context, prefix).await;
+            let config = test_config(
+                prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                NZUsize!(1),
+            );
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                blocks,
+                config,
             )
             .await;
-            let mut mailbox = mailbox;
+            let (rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let _actor_handle = actor.start_unbuffered(application.clone(), (rx, resolver.clone()));
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
@@ -7746,7 +7803,7 @@ mod tests {
                 QUORUM,
             );
             assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
+            StandardHarness::report_finalization(&mut mailbox, block1_finalization.clone()).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -7755,10 +7812,16 @@ mod tests {
             )
             .await;
 
-            let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
+            assert_eq!(
+                mailbox.get_finalization(block1.height()).await,
+                Some(block1_finalization)
+            );
+
+            let floor_round = Round::new(Epoch::zero(), View::new(15));
+            let floor_block =
+                make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(15), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(floor_round, View::new(4), floor_block.digest()),
+                Proposal::new(floor_round, View::new(14), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7789,15 +7852,19 @@ mod tests {
             );
             assert_eq!(
                 mailbox
-                    .get_block(Height::new(5))
+                    .get_block(floor_block.height())
                     .await
                     .expect("floor block missing")
                     .digest(),
                 floor_block.digest()
             );
 
+            // The old height has been pruned, even though its ack is still held.
+            assert!(mailbox.get_block(block1.height()).await.is_none());
+            assert!(mailbox.get_finalization(block1.height()).await.is_none());
+
             // Release the stale ack after the remote floor has been applied.
-            // It must not lower the processed floor back below height 5.
+            // It must not lower the processed floor back below the new floor.
             let fetches_after_floor = resolver.fetches().len();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
@@ -7809,7 +7876,7 @@ mod tests {
                     round: None,
                 },
             );
-            let _ = mailbox.get_block(Height::new(5)).await;
+            let _ = mailbox.get_block(Height::new(15)).await;
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_after_floor,
@@ -10750,7 +10817,7 @@ mod tests {
             .await;
 
             assert!(mailbox.verified(round, ready(block.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             select! {
                 height = started => {
@@ -10791,13 +10858,9 @@ mod tests {
                 "restart should recover the delivered finalized block by height"
             );
             assert_eq!(
-                mailbox
-                    .get_finalization(Height::new(1))
-                    .await
-                    .expect("finalization must be durable before delivery")
-                    .round(),
-                round,
-                "restart should recover the delivered finalization by height"
+                mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(1), block.digest())),
+                "the delivered finalization must survive restart in the height archive"
             );
         });
     }

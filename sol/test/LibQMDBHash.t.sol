@@ -177,7 +177,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
 
     /// @dev Membership and exclusion both authenticate through a graft and a partial final chunk.
     function test_RawCurrentSingletonAndExclusionMatchPrecompile() public view {
-        bytes memory operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), bytes32(uint256(20)));
+        bytes memory operation = abi.encodePacked(bytes1(0x01), bytes32(uint256(10)), bytes32(uint256(20)));
         QMDBCase memory c = currentBuilder.build(33, 0, operation, true, 2);
         assertTrue(this.singleCurrentMembership(c, address(2)));
         assertTrue(this.singleCurrentMembership(c, _hasher()));
@@ -232,7 +232,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         for (uint256 stage; stage < stages.length; ++stage) {
             assertStageFailures(input, stages[stage]);
         }
-        c.operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), bytes32(uint256(20)));
+        c.operation = abi.encodePacked(bytes1(0x01), bytes32(uint256(10)), bytes32(uint256(20)));
         c = currentBuilder.build(33, 0, c.operation, true, 2);
         assertStageFailures(abi.encodeCall(this.singleCurrentExclusion, (c, _hasher())), 34);
         for (uint256 proofIndex; proofIndex < 2; ++proofIndex) {

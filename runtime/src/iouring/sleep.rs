@@ -2390,6 +2390,7 @@ mod loom_tests {
     use super::*;
     use crate::iouring::{
         mailbox::{Mailbox, Message},
+        park::Parker,
         pool::Pool,
         task::{AfterPoll, Ready},
         tasks::Tasks,
@@ -2570,7 +2571,7 @@ mod loom_tests {
                 // A pool with no runner, so every wake that publishes a
                 // runnable pushes it to the global queue, which this thread
                 // serves as the pool's only worker.
-                let pool = Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]));
+                let pool = Arc::new(Pool::new(1).0);
                 let set = Tasks::new(1);
                 let mut ready = pool.queue(0).owner();
                 let timers = Arc::new(Timers::new(Instant::now()));
@@ -2636,7 +2637,7 @@ mod loom_tests {
                 // that worker. It alone polls with the waker, and after a
                 // pending poll it polls again only for a wake, which reaches
                 // it from another thread as a message.
-                let mailbox = Arc::new(Mailbox::new().unwrap());
+                let mailbox = Arc::new(Mailbox::new(Parker::new().unparker()));
                 let root = Waker::from(RootWaker::new(Arc::downgrade(&mailbox)));
                 let _scope = RootWaker::install(&root);
                 let cx = Context::from_waker(&root);

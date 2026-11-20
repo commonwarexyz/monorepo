@@ -24,7 +24,7 @@ use core::{borrow::Borrow, num::NonZeroU64};
 use std::{future::Future, ops::Range, sync::Arc};
 
 impl<F, K, V, H, E, C, I, const N: usize, S>
-    UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>
+    UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Unordered<K, V>, S, N>>
     for UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>
 where
     F: Family,
@@ -53,7 +53,7 @@ where
 
     fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
         policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
         self.merkleize_with(db, policy)
@@ -61,7 +61,7 @@ where
 }
 
 impl<F, K, V, H, E, C, I, const N: usize, S>
-    UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>
+    UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Ordered<K, V>, S, N>>
     for UnmerkleizedBatch<F, H, update::Ordered<K, V>, S>
 where
     F: Family,
@@ -90,7 +90,7 @@ where
 
     fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
         policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
         self.merkleize_with(db, policy)
@@ -109,7 +109,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> BatchableDb for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> BatchableDb for Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,
@@ -146,7 +146,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> DbAny for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> DbAny for Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,
@@ -212,7 +212,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Provable for Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Provable for Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,

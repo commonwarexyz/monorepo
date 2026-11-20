@@ -6,9 +6,11 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     index::unordered::Index,
-    journal::contiguous::fixed::{Config as FConfig, Journal},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::fixed::{Config as FConfig, Journal},
+    },
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
-    mmr::full::Config as MerkleConfig,
     qmdb::{
         ProofExt as _,
         any::{
@@ -31,7 +33,6 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
-const BITMAP_CHUNK_BYTES: usize = 64;
 
 type GenericDb<F> = AnyDb<
     F,
@@ -40,7 +41,6 @@ type GenericDb<F> = AnyDb<
     Index<EightCap, Location<F>>,
     Sha256,
     Update<Key, FixedEncoding<Value>>,
-    BITMAP_CHUNK_BYTES,
     Sequential,
 >;
 
@@ -108,13 +108,10 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
                 merkle: MerkleConfig {
-                    journal_partition: format!("test-qmdb-mmr-journal-{suffix}"),
-                    metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
-                    items_per_blob: NZU64!(500000),
-                    write_buffer: NZUsize!(1024),
+                    partition: format!("test-qmdb-mmr-metadata-{suffix}"),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    page_cache: page_cache.clone(),
+                    resident_height: commonware_storage_fuzz::low_resident_height(),
                 },
                 log: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
@@ -126,7 +123,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 translator: EightCap,
                 init_cache: Some(NZUsize!(3)),
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             };
 
             let mut db = GenericDb::<F>::init(context.child("storage"), cfg, None)
