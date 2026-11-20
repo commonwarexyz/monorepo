@@ -128,19 +128,21 @@ impl<D: Copy> Resident<D> {
     /// Make room for the nodes born by size `end`, so adding them regrows no level. Regrowing
     /// copies every digest a level holds.
     ///
-    /// A level gets the room that growing to its new length would have left it, so the appends
-    /// after `end` do not regrow it at once.
+    /// A level gets the room that doubling to its new length would have left it. An exact
+    /// reservation would leave every level full, to regrow on the next append. A level whose room
+    /// cannot be reserved is left to grow as its nodes arrive.
     fn reserve<F: Family>(&mut self, end: Position<F>) {
         let born = born(end);
         for (level, &to) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
-            let additional = to.saturating_sub(level.end()) as usize;
-            if additional == 0 {
-                continue;
-            }
             let len = level.nodes.len();
-            let total = len.saturating_add(additional);
+            let total = usize::try_from(to.saturating_sub(level.end()))
+                .ok()
+                .and_then(|additional| len.checked_add(additional));
+            let Some(total) = total.filter(|&total| total > len) else {
+                continue;
+            };
             let capacity = total.checked_next_power_of_two().unwrap_or(total);
-            level.nodes.reserve_exact(capacity - len);
+            let _ = level.nodes.try_reserve_exact(capacity - len);
         }
     }
 
@@ -1510,6 +1512,34 @@ mod tests {
     #[test]
     fn replay_regrows_no_level_mmb() {
         deterministic::Runner::default().start(replay_regrows_no_level::<mmb::Family>);
+    }
+
+    /// Reserving for more nodes than memory can hold skips the levels that do not fit, and the
+    /// tree still appends.
+    async fn reserve_skips_levels_too_large<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let ops = Operations::new(100);
+        let mut tree =
+            Tree::<F, D, _>::new(Location::new(0), Vec::new(), &config(5), &context).unwrap();
+        tree.reserve(F::MAX_LEAVES);
+        assert_eq!(tree.resident.levels[0].nodes.capacity(), 0);
+        let tree = tree
+            .replay(&ops, &hasher, Location::new(100), NZU64!(7))
+            .await
+            .unwrap();
+        assert_eq!(
+            tree.root(&hasher, 0).unwrap(),
+            oracle::<F>(&ops, &hasher).root(&hasher, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn reserve_skips_levels_too_large_mmr() {
+        deterministic::Runner::default().start(reserve_skips_levels_too_large::<mmr::Family>);
+    }
+    #[test]
+    fn reserve_skips_levels_too_large_mmb() {
+        deterministic::Runner::default().start(reserve_skips_levels_too_large::<mmb::Family>);
     }
 
     /// A chunk, whole or partial, that does not start at the tree's end is rejected.
