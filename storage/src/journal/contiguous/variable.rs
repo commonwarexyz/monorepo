@@ -3614,12 +3614,15 @@ mod tests {
 
                         let count = cfg.codec_config.clone();
                         count.store(0, std::sync::atomic::Ordering::Relaxed);
+                        // The reopen discards the offsets left unsynced by the commit, so recovery
+                        // must rebuild them.
                         *context.storage_fault_config().write() = deterministic::FaultConfig {
                             write_rate: Some(deterministic::WriteConfig {
                                 failure_rate: probability!(1.0),
                                 retention_rate,
                                 mode: deterministic::PartialWriteMode::Prefix,
                             }),
+                            reopen_flush_rate: probability!(0.0),
                             ..Default::default()
                         };
                         assert!(
@@ -11259,6 +11262,9 @@ mod tests {
     fn test_variable_destroy_observes_failed_data_sync_before_removal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Pin the reopen that discards unsynced writes, so it shows only the synced items.
+            context.storage_fault_config().write().reopen_flush_rate = probability!(0.0);
+
             // Make three items durable.
             let pending = PendingSyncs::default();
             let cfg = initialization_cfg("destroy-failed-data", 100);

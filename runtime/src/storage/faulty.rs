@@ -119,12 +119,17 @@ pub struct ResizeConfig {
 /// Rate at which [Config::default] passes over a pending mutation, see [Config::reorder_rate].
 const DEFAULT_REORDER_RATE: Probability = probability!(0.5);
 
+/// Rate at which [Config::default] makes a dropped open's unsynced mutations durable when the
+/// blob opens again, see [Config::reopen_flush_rate].
+const DEFAULT_REOPEN_FLUSH_RATE: Probability = probability!(0.5);
+
 /// Configuration for deterministic storage fault injection and for the order in which storage
 /// mutations take effect.
 ///
-/// [Config::default] injects no faults and reorders pending mutations, as the io_uring and Tokio
-/// backends may. Reordering is not a fault, so replacing the configuration with [Config::default]
-/// to clear faults keeps it.
+/// [Config::default] injects no faults, reorders pending mutations, and makes a dropped open's
+/// unsynced mutations durable on the next open half of the time, as the io_uring and Tokio
+/// backends may. Neither is a fault, so replacing the configuration with [Config::default] to
+/// clear faults keeps them.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Failure rate for `open_versioned` operations.
@@ -168,6 +173,16 @@ pub struct Config {
     /// each of its pending mutations to finish in one poll, as the in-memory storage of the
     /// deterministic runtime does.
     pub reorder_rate: Probability,
+
+    /// Probability that opening a blob again makes the unsynced mutations of its previous open
+    /// durable, one half by default.
+    ///
+    /// The io_uring and Tokio backends flush a dropped open when the blob is next opened, so
+    /// its unsynced writes and resizes stay readable and survive a later crash. The [crate::Blob]
+    /// contract also lets a dropped open's unsynced mutations be discarded, which is what the
+    /// open sees otherwise. Either way, the open's mutations land together: none of them is torn
+    /// by the reopen. Zero always discards them and one always keeps them.
+    pub reopen_flush_rate: Probability,
 }
 
 impl Default for Config {
@@ -181,6 +196,7 @@ impl Default for Config {
             remove_rate: None,
             scan_rate: None,
             reorder_rate: DEFAULT_REORDER_RATE,
+            reopen_flush_rate: DEFAULT_REOPEN_FLUSH_RATE,
         }
     }
 }
@@ -242,10 +258,11 @@ impl Config {
         self
     }
 
-    /// No faults, with every mutation taking effect when it is first polled, in call order.
+    /// No faults, with every mutation taking effect when it is first polled, in call order, and a
+    /// dropped open's unsynced mutations discarded when the blob opens again.
     ///
-    /// The real backends do not promise this order. Use it only for tests that pin a single
-    /// outcome, such as storage format conformance, rather than the behavior of a backend.
+    /// The real backends promise neither. Use it only for tests that pin a single outcome, such as
+    /// storage format conformance, rather than the behavior of a backend.
     pub const fn in_call_order() -> Self {
         Self {
             open_rate: None,
@@ -256,6 +273,7 @@ impl Config {
             remove_rate: None,
             scan_rate: None,
             reorder_rate: probability!(0.0),
+            reopen_flush_rate: probability!(0.0),
         }
     }
 
@@ -263,6 +281,13 @@ impl Config {
     /// order. See [`Self::reorder_rate`].
     pub const fn reorder(mut self, rate: Probability) -> Self {
         self.reorder_rate = rate;
+        self
+    }
+
+    /// Set the rate at which reopening a blob makes its previous open's unsynced mutations
+    /// durable. See [`Self::reopen_flush_rate`].
+    pub const fn reopen_flush(mut self, rate: Probability) -> Self {
+        self.reopen_flush_rate = rate;
         self
     }
 
@@ -685,7 +710,33 @@ impl Storage<memory::Storage> {
             .get(&(partition.to_owned(), name.to_vec()))
             .and_then(Weak::upgrade)
             .expect("an admitted blob retains its file generation");
+        self.inner.admit_open(partition, name);
         clear_pending(&self.pending, std::slice::from_ref(&generation))
+    }
+
+    /// Settle the previous open of a blob that is about to open again, while no handle of it is
+    /// alive. Its pending mutations take effect first. Then its unsynced mutations become durable
+    /// at the configured [Config::reopen_flush_rate], which also retires their crash evidence as
+    /// a sync would, or are left to be discarded by the open. The caller releases namespace locks
+    /// before dropping the returned evidence.
+    pub(crate) fn settle_reopen(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Retired<crate::storage::memory::Blob> {
+        let key = (partition.to_owned(), name.to_vec());
+        settle(&self.accepted, &self.ctx, Some(&key));
+        let rate = self.ctx.config.read().reopen_flush_rate;
+        if !self
+            .inner
+            .flush_previous_open(partition, name, || self.ctx.roll(rate))
+        {
+            return Retired {
+                _mutations: Vec::new(),
+            };
+        }
+        let generation = self.generations.lock().get(&key).and_then(Weak::upgrade);
+        clear_pending(&self.pending, generation.as_slice())
     }
 
     /// Replay selected crash outcomes in issue order. Mutations that have not taken effect are

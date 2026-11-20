@@ -4372,7 +4372,8 @@ mod tests {
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
     ///
     /// A destroy dropped while the operation journal's clear is still being staged has removed
-    /// nothing, so the pruned journal reopens at its last commit.
+    /// nothing, so the pruned journal reopens at its last commit, or empty if the reopen flushes
+    /// the staged clear as the io_uring and Tokio backends do.
     #[test_traced("INFO")]
     fn issue_5668_regression_destroy_stages_journal_clear_before_removal() {
         let executor = deterministic::Runner::default();
@@ -4411,7 +4412,8 @@ mod tests {
                 assert!(futures::poll!(destroy.as_mut()).is_pending());
             }
 
-            // The unfinished clear is not durable, so the last commit must reopen.
+            // The unfinished clear was never synced, so the reopen either discards it and finds the
+            // last commit, or flushes it and finds the journal empty.
             let journal = TestJournal::<mmr::Family>::new(
                 context.child("second"),
                 merkle_config("destroy_staged"),
@@ -4421,8 +4423,12 @@ mod tests {
             )
             .await
             .expect("a destroy that staged nothing must reopen");
-            assert_eq!(journal.bounds(), bounds);
-            assert_eq!(journal.root(0).unwrap(), root);
+            if journal.bounds().is_empty() {
+                assert_eq!(*journal.size(), 0);
+            } else {
+                assert_eq!(journal.bounds(), bounds);
+                assert_eq!(journal.root(0).unwrap(), root);
+            }
             journal.destroy().await.unwrap();
         });
     }

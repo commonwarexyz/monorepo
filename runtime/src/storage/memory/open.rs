@@ -24,22 +24,30 @@ pub(crate) struct Opens {
 impl Opens {
     /// Registers an exclusive open atomically with opening the underlying blob.
     ///
-    /// The open future must complete in one poll. The returned guard retains the
-    /// namespace lock until [`Opened::finish`] returns the blob.
+    /// When no handle of an earlier open is alive, `settle` runs first, under the namespace lock,
+    /// to settle what that open left behind. The open future must complete in one poll. The
+    /// returned guard retains the namespace lock until [`Opened::finish`] returns the blob.
     pub(crate) fn open<B: crate::Blob>(
         self: &Arc<Self>,
         partition: &str,
         name: &[u8],
+        settle: impl FnOnce(),
         open: impl Future<Output = Result<(B, u64, BlobVersion), Error>> + Send,
     ) -> Result<Opened<'_, B>, Error> {
         let mut opens = self.enter();
-        let (inner, len, version) = self.complete(open)?;
         let key = (partition.to_owned(), name.to_vec());
 
         // Observing liveness must not acquire an owner whose destructor locks this registry.
-        let live = opens
-            .get(&key)
-            .is_some_and(|identity| identity.strong_count() != 0);
+        let is_live = |opens: &BTreeMap<Key, Weak<Live>>| {
+            opens
+                .get(&key)
+                .is_some_and(|identity| identity.strong_count() != 0)
+        };
+        if !is_live(&opens) {
+            settle();
+        }
+        let (inner, len, version) = self.complete(open)?;
+        let live = is_live(&opens);
         #[cfg(test)]
         self.test.observe_open(opens.get(&key));
         if live {
@@ -303,6 +311,7 @@ pub(crate) mod tests {
                     .open(
                         partition,
                         name,
+                        || {},
                         inner.open_versioned(partition, name, versions),
                     )
                     .map(Opened::finish)

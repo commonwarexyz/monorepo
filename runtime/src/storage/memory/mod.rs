@@ -51,6 +51,36 @@ type Partition = BTreeMap<Vec<u8>, Vec<u8>>;
 /// Durable contents detached from all live storage and blob handles.
 pub(crate) struct Snapshot(BTreeMap<String, Partition>);
 
+/// The live contents of one open, shared with its handle.
+#[derive(Clone)]
+struct Live {
+    /// Namespace generation the open belongs to.
+    generation: u64,
+    /// Contents the open's handle reads and writes.
+    content: Arc<RwLock<Vec<u8>>>,
+}
+
+/// The live contents of recent opens, kept after their handles drop so that the next open of a
+/// blob can decide whether the previous open's unsynced mutations become durable.
+#[derive(Default)]
+struct Retained {
+    /// The latest open of each blob, which may still be rejected as a second open.
+    opened: BTreeMap<BlobKey, Live>,
+    /// The latest open of each blob that was admitted as its only open.
+    admitted: BTreeMap<BlobKey, Live>,
+}
+
+impl Retained {
+    /// Forget every open of `key`, or of every blob in `partition` without one.
+    fn forget(&mut self, partition: &str, name: Option<&[u8]>) {
+        let keep = |(stored_partition, stored_name): &BlobKey, _: &mut Live| {
+            stored_partition != partition || name.is_some_and(|name| stored_name != name)
+        };
+        self.opened.retain(keep);
+        self.admitted.retain(keep);
+    }
+}
+
 #[derive(Default)]
 struct Generations {
     next: u64,
@@ -87,6 +117,7 @@ impl Generations {
 pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
+    retained: Arc<Mutex<Retained>>,
 }
 
 impl Storage {
@@ -98,6 +129,7 @@ impl Storage {
         Self {
             partitions: Arc::new(Mutex::new(partitions)),
             generations: Arc::new(Mutex::new(Generations::default())),
+            retained: Arc::new(Mutex::new(Retained::default())),
         }
     }
 
@@ -105,6 +137,7 @@ impl Storage {
     pub(crate) fn take_snapshot(&self) -> Snapshot {
         let mut generations = self.generations.lock();
         generations.current.clear();
+        *self.retained.lock() = Retained::default();
         let mut partitions = self.partitions.lock();
         Snapshot(std::mem::take(&mut *partitions))
     }
@@ -168,18 +201,70 @@ impl Storage {
             }
         };
 
+        let live = Live {
+            generation,
+            content: Arc::new(RwLock::new(content.clone())),
+        };
+        self.retained
+            .lock()
+            .opened
+            .insert(key.clone(), live.clone());
         Ok((
             Blob::new(
                 self.partitions.clone(),
                 self.generations.clone(),
                 key,
-                content.clone(),
+                live.content,
                 data_offset,
                 generation,
             ),
             logical_size,
             blob_version,
         ))
+    }
+
+    /// Record the latest open of a blob as admitted, once no earlier open of it is alive.
+    pub(crate) fn admit_open(&self, partition: &str, name: &[u8]) {
+        let key = (partition.to_owned(), name.to_vec());
+        let mut retained = self.retained.lock();
+        if let Some(live) = retained.opened.get(&key).cloned() {
+            retained.admitted.insert(key, live);
+        }
+    }
+
+    /// Make the unsynced contents of the blob's latest admitted open durable if `flush` returns
+    /// true, as a backend that flushes a dropped open on its next open does. `flush` runs only if
+    /// that open left unsynced contents in the blob's current incarnation. Returns whether the
+    /// contents became durable.
+    pub(crate) fn flush_previous_open(
+        &self,
+        partition: &str,
+        name: &[u8],
+        flush: impl FnOnce() -> bool,
+    ) -> bool {
+        let key = (partition.to_owned(), name.to_vec());
+        let Some(live) = self.retained.lock().admitted.get(&key).cloned() else {
+            return false;
+        };
+
+        // Copy the live contents first, as a sync does, before locking the namespace.
+        let content = live.content.read().clone();
+        let generations = self.generations.lock();
+        if generations.current.get(&key) != Some(&live.generation) {
+            return false;
+        }
+        let mut partitions = self.partitions.lock();
+        let Some(durable) = partitions
+            .get_mut(partition)
+            .and_then(|blobs| blobs.get_mut(name))
+        else {
+            return false;
+        };
+        if *durable == content || !flush() {
+            return false;
+        }
+        *durable = content;
+        true
     }
 
     /// Return a copy of a blob's durable raw contents without interpreting its container header.
@@ -202,6 +287,7 @@ impl Storage {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
         let key = (partition.to_string(), name.to_vec());
+        self.retained.lock().forget(partition, Some(name));
         let mut generations = self.generations.lock();
         let mut partitions = self.partitions.lock();
         generations.current.remove(&key);
@@ -229,6 +315,7 @@ impl crate::Storage for Storage {
 
         let mut generations = self.generations.lock();
         let mut partitions = self.partitions.lock();
+        self.retained.lock().forget(partition, name);
         match name {
             Some(name) => {
                 partitions
@@ -270,7 +357,8 @@ pub struct Blob {
     generations: Arc<Mutex<Generations>>,
     partition: String,
     name: Vec<u8>,
-    content: RwLock<Vec<u8>>,
+    /// Live contents, shared with the storage so that the next open can flush them.
+    content: Arc<RwLock<Vec<u8>>>,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
     /// Namespace generation captured when this handle was opened.
@@ -282,7 +370,7 @@ impl Blob {
         partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
         generations: Arc<Mutex<Generations>>,
         (partition, name): BlobKey,
-        content: Vec<u8>,
+        content: Arc<RwLock<Vec<u8>>>,
         data_offset: u64,
         generation: u64,
     ) -> Self {
@@ -291,7 +379,7 @@ impl Blob {
             generations,
             partition,
             name,
-            content: RwLock::new(content),
+            content,
             data_offset,
             generation,
         }
