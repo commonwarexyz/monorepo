@@ -2798,7 +2798,6 @@ pub(crate) mod test {
         (@open $context:ident, $db:ty, $cfg:ident, $translator:ty) => {{
             let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
             let mut cfg = $cfg::<$translator>("prefetch");
-            cfg.merkle.page_cache = cache.clone();
             cfg.log.page_cache = cache.clone();
             let db = <$db>::init($context.child("storage"), cfg, None)
                 .await

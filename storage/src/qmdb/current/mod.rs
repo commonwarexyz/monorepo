@@ -2298,11 +2298,13 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
 
-    /// Merkleizing a change to a key whose bitmap chunk is graftable reads no ops-tree node from
-    /// storage, so prefetching the key's operations is enough. `cache` is the database's page
-    /// cache.
-    async fn test_merkleize_reads_no_graft_inputs<M, C>(context: Context, db: C, cache: CacheRef)
-    where
+    /// Prefetching a key's operations lets merkleization change a graftable bitmap chunk
+    /// without reading storage. `cache` is the database's page cache.
+    async fn test_merkleize_prefetched_key_reads_no_storage<M, C>(
+        context: Context,
+        db: C,
+        cache: CacheRef,
+    ) where
         M: merkle::Graftable,
         C: DbAny<Family = M, Key = Digest, Value = Digest>,
     {
@@ -2321,17 +2323,20 @@ pub mod tests {
 
         let key = digest(7);
         let change = [(key, Some(digest(20_000)))];
-        let node_misses = || counter(&context, "merkle_journal_cache_misses_total");
+        let reads = || counter(&context, "runtime_storage_reads_total");
 
-        // From a cold cache, merkleizing the change reads its graft input from memory.
+        // The cold key requires storage reads before it is prefetched.
         cache.clear();
-        let before = node_misses();
+        let before = reads();
         drop(hold_batch(&db, db.new_batch(), &change).await);
-        assert_eq!(
-            node_misses(),
-            before,
-            "a change must not read its graft input"
-        );
+        assert!(reads() > before, "the cold key must require a read");
+
+        // Warming the key is enough: the graft input is already in memory.
+        cache.clear();
+        db.prefetch(&[key]).await;
+        let before = reads();
+        drop(hold_batch(&db, db.new_batch(), &change).await);
+        assert_eq!(reads(), before, "merkleizing must not read storage");
 
         db.destroy().await.unwrap();
     }
@@ -2360,11 +2365,12 @@ pub mod tests {
                 }
 
                 #[test_traced("WARN")]
-                fn [<test_merkleize_reads_no_graft_inputs_ $label>]() {
+                fn [<test_merkleize_prefetched_key_reads_no_storage_ $label>]() {
                     deterministic::Runner::default().start(|context| async move {
                         let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
-                        test_merkleize_reads_no_graft_inputs(context.child("test"), db, cache)
-                            .await;
+                        test_merkleize_prefetched_key_reads_no_storage(
+                            context.child("test"), db, cache
+                        ).await;
                     });
                 }
             }
@@ -2372,7 +2378,6 @@ pub mod tests {
         (@open $context:ident, $db:ty, $cfg:ident) => {{
             let cache = CacheRef::new(PAGE_SIZE, NZUsize!(512));
             let mut cfg = $cfg::<OneCap>("prefetch");
-            cfg.merkle.page_cache = cache.clone();
             cfg.log.page_cache = cache.clone();
             let db = <$db>::init($context.child("storage"), cfg, None)
                 .await
