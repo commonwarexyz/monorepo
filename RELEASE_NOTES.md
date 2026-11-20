@@ -54,16 +54,20 @@ longer persist Merkle nodes. The authenticated journal that these databases
 build on no longer persists Merkle nodes either. The databases and the journal
 now store an operation log and a frontier, which records the pruning boundary
 and the digests pinned there. At startup, the databases and the journal now
-replay the retained operations to rebuild the tree in memory. No setting keeps
-the previous layout. The rebuild or resync that the new tags require also moves
-these databases to the new layout. A standalone authenticated journal with a
-pruned log cannot reopen under a fresh frontier. Rebuild it, or seed it with its
-pruning boundary and pinned digests through `Journal::from_components` and
-`persist_boundary`. Nothing in this release reads or removes the old node
-journal partitions that `journal_partition` named. Delete those partitions, and
-the rest of each replaced database, once nothing needs them. Compact databases
-keep their witness journal, and the standalone `merkle::full::Merkle` keeps its
-node journal ([#5158]).
+replay the retained operations to rebuild the tree in memory. Startup time
+therefore grows with the number of retained operations, so keep databases well
+pruned to keep it short. On a large database, set `init_concurrency` above 1 so
+that several tasks share the replay ([#5158]).
+
+No setting keeps the previous layout. The rebuild or resync that the new tags
+require also moves these databases to the new layout. A standalone authenticated
+journal with a pruned log cannot reopen under a fresh frontier. Rebuild it, or
+seed it with its pruning boundary and pinned digests through
+`Journal::from_components` and `persist_boundary`. Nothing in this release reads
+or removes the old node journal partitions that `journal_partition` named.
+Delete those partitions, and the rest of each replaced database, once nothing
+needs them. Compact databases keep their witness journal, and the standalone
+`merkle::full::Merkle` keeps its node journal ([#5158]).
 
 `sync::CompactTarget` is removed, so describe a compact database's state with a
 `sync::Target` whose range is `[size - 1, size)`. `CompactDb::target` now
