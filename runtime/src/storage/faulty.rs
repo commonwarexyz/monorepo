@@ -268,7 +268,7 @@ impl<B> PendingMutation<B> {
 /// Unresolved entries in issue order within each file generation.
 type PendingMutations<B> = Arc<Mutex<Vec<PendingMutation<B>>>>;
 
-/// Evidence detached from the fault model. Callers release namespace locks before dropping it.
+/// Evidence detached by namespace operations or full syncs for disposal after unlocking.
 pub(crate) struct Retired<B> {
     _mutations: Vec<PendingMutation<B>>,
 }
@@ -934,9 +934,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if self.ctx.should_fail(Op::Sync) {
             return Err(injected_io_error().into());
         }
-        let _mutation = self.generation.mutation.lock().await;
+        let mutation = self.generation.mutation.lock().await;
         self.inner.sync().await?;
-        clear_pending(&self.pending, std::slice::from_ref(&self.generation));
+        let retired = clear_pending(&self.pending, std::slice::from_ref(&self.generation));
+        drop(mutation);
+        drop(retired);
         Ok(())
     }
 
@@ -944,7 +946,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if self.ctx.should_fail(Op::Sync) {
             return Handle::ready(Err(injected_io_error().into()));
         }
-        let _mutation = self.generation.mutation.lock().await;
+        let mutation = self.generation.mutation.lock().await;
+        // Record the cut in mutation order. Later writes must remain pending even if
+        // they arrive before we observe this sync's result.
         let sync = Arc::new(PendingSync {
             generation: self.generation.clone(),
             completion: self.inner.start_sync().await.shared(),
@@ -952,14 +956,18 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.pending
             .lock()
             .push(PendingMutation::Sync { sync: sync.clone() });
+        drop(mutation);
 
         let pending = self.pending.clone();
-        let completion = sync.completion.clone();
-        Handle::from_future(async move {
-            let result = completion.await;
+        let mut completion = sync.completion.clone().map(move |result| {
             resolve_pending_sync(&pending, &sync, result.is_ok());
             result
-        })
+        });
+        // Retire an already completed sync even if the caller discards its handle.
+        // Polling and dropping a backing completion may run backend code.
+        (&mut completion)
+            .now_or_never()
+            .map_or_else(|| Handle::from_future(completion), Handle::ready)
     }
 }
 
@@ -1507,6 +1515,165 @@ mod tests {
                 .as_ref(),
             b"freshlater"
         );
+    }
+
+    #[tokio::test]
+    async fn test_full_sync_releases_mutation_guard_before_retiring_buffers() {
+        struct Owner(Arc<FileGeneration>, Arc<AtomicBool>);
+
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                b"x"
+            }
+        }
+
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.1
+                    .store(self.0.mutation.try_lock().is_ok(), Ordering::Relaxed);
+            }
+        }
+
+        let h = Harness::new(Config::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        }));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        for start in [true, false] {
+            let unlocked = Arc::new(AtomicBool::new(false));
+            let buf = bytes::Bytes::from_owner(Owner(blob.generation.clone(), unlocked.clone()));
+            blob.write_at(0, buf, WriteOptions::default())
+                .await
+                .unwrap();
+            if start {
+                drop(blob.start_sync().await);
+            } else {
+                blob.sync().await.unwrap();
+            }
+            assert!(unlocked.load(Ordering::Relaxed), "start_sync = {start}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_sync_observes_the_backing_completion_without_the_mutation_lock() {
+        let h = Harness::new(Config::default());
+        let (inner, _) = h.storage.open("partition", b"test").await.unwrap();
+        let generation = inner.generation.clone();
+        let (delayed, gate) = crate::mocks::DelayedSyncBlob::new(inner);
+        gate.unblock();
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let blob = Blob::new(
+            h.storage.ctx.clone(),
+            pending.clone(),
+            generation,
+            delayed,
+            0,
+        );
+
+        // This backing completion takes the same mutation lock when polled. It can finish
+        // during admission only after the wrapper releases that lock.
+        drop(blob.start_sync().await);
+        assert!(pending.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dropped_ready_start_sync_resolves_at_admission() {
+        let h = Harness::new(Config::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        }));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        let (other, _) = h.storage.open("partition", b"other").await.unwrap();
+        other
+            .write_at(0, b"x", WriteOptions::default())
+            .await
+            .unwrap();
+
+        // A sync that completes during admission releases its cut and the writes it covers
+        // without being observed.
+        for round in 0..8u8 {
+            blob.write_at(0, vec![round; 4], WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob.start_sync().await);
+            assert_eq!(h.storage.pending.lock().len(), 1);
+        }
+
+        // A sync that fails during admission leaves earlier writes pending without retaining
+        // its cut.
+        blob.write_at(0, b"lost", WriteOptions::default())
+            .await
+            .unwrap();
+        h.inner.remove("partition", Some(b"test")).await.unwrap();
+        let completion = blob.start_sync().await;
+        let unresolved = |pending: &[PendingMutation<_>]| {
+            pending
+                .iter()
+                .map(|mutation| matches!(mutation, PendingMutation::Write { .. }))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(unresolved(&h.storage.pending.lock()), [true, true]);
+        assert!(matches!(completion.await, Err(Error::BlobMissing(..))));
+        assert_eq!(unresolved(&h.storage.pending.lock()), [true, true]);
+    }
+
+    #[test]
+    fn test_dropped_pending_start_sync_keeps_its_crash_cut() {
+        crate::tokio::Runner::default().start(|context| async move {
+            let h = Harness::new(Config::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }));
+            let (inner, _) = h.inner.open("partition", b"pending").await.unwrap();
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let completed = Arc::new(tokio::sync::Notify::new());
+            let gated = OperationGate {
+                inner: Arc::new(inner),
+                context: Arc::new(context),
+                pause_after_write: false,
+                armed: Arc::new(AtomicBool::new(true)),
+                started: started.clone(),
+                release: release.clone(),
+                completed: completed.clone(),
+            };
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let blob = Blob::new(
+                h.storage.ctx.clone(),
+                pending.clone(),
+                Arc::new(FileGeneration::new()),
+                gated,
+                0,
+            );
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Crash replay still owes the write while the unobserved sync is incomplete.
+            drop(blob.start_sync().await);
+            started.notified().await;
+            let cut = {
+                let pending = pending.lock();
+                let [
+                    PendingMutation::Write { .. },
+                    PendingMutation::Sync { sync },
+                ] = &pending[..]
+                else {
+                    panic!("an incomplete sync must retain its cut after the write it covers");
+                };
+                sync.clone()
+            };
+            assert!(!cut.completed_successfully());
+
+            // Once the backing sync completes, the retained cut covers the write.
+            release.notify_one();
+            completed.notified().await;
+            assert!(cut.completed_successfully());
+            assert_eq!(pending.lock().len(), 2);
+        });
     }
 
     #[tokio::test]
