@@ -19,7 +19,9 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use core::{borrow::Borrow, future::Future, ops::RangeBounds};
+use core::ops::RangeBounds;
+#[commonware_macros::stability(ALPHA)]
+use core::{borrow::Borrow, future::Future};
 use futures::stream::Stream;
 
 /// The generic Db type for ordered Current QMDB variants.
@@ -73,6 +75,7 @@ where
     /// Return a future that reads into the page cache the applied operations a batch reads to
     /// link the keys it creates or deletes into the key order. See
     /// [`any::Db::prefetch_neighbors`](crate::qmdb::any::Db::prefetch_neighbors).
+    #[commonware_macros::stability(ALPHA)]
     pub fn prefetch_neighbors<W: Borrow<K>, D: Borrow<K>>(
         &self,
         writes: &[W],

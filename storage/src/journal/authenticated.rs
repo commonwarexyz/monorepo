@@ -1276,6 +1276,7 @@ where
         items
     }
 
+    #[commonware_macros::stability(ALPHA)]
     fn prefetch(
         &self,
         positions: &[u64],
