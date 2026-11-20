@@ -691,6 +691,34 @@ impl WithBackend for Verify<'_> {
     }
 }
 
+/// Returns whether `point` lies in the prime-order subgroup, that is, whether `[L]point` is the
+/// identity.
+///
+/// Variable-time, so the point must be public.
+pub fn is_torsion_free(point: &G) -> bool {
+    with_backend(TorsionFree(point))
+}
+
+/// The input of [`is_torsion_free`], multiplied with the selected backend's single-point
+/// operations.
+struct TorsionFree<'a>(&'a G);
+
+impl WithBackend for TorsionFree<'_> {
+    type Output = bool;
+
+    // Inlined for the same reason as `Verify::call`.
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> bool {
+        // Scalars are reduced modulo `L`, so `[L]P` is computed as `[L - 1]P + P`.
+        let multiple = straus(backend, [Scalar::ZERO; 2], [(*self.0, Scalar::MINUS_ONE)]);
+        backend
+            .store_projective(multiple)
+            .to_extended()
+            .add(*self.0)
+            .is_identity()
+    }
+}
+
 struct VerifyBatchCall<'a, 'b, R, S> {
     rng: &'a mut R,
     items: &'a [Item<'b>],

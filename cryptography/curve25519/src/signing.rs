@@ -23,14 +23,17 @@
 mod core;
 
 use self::core::Scalar;
-use crate::curve::G;
+use crate::{
+    STACK_SCRUB_BYTES,
+    curve::{G, GAffine},
+};
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
 };
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier};
@@ -43,28 +46,71 @@ use sha2::{
     Digest,
     digest::{FixedOutput, Update},
 };
-use zeroize::{ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing, zeroize_stack};
 
 /// An Ed25519 signing key.
 ///
-/// Secret material is zeroized when the key is dropped.
-/// Serialization writes the raw secret seed, so callers must protect the encoded bytes as
-/// secret key material.
-#[derive(Clone, ZeroizeOnDrop)]
+/// The secret material lives in one heap allocation that is zeroized when the key is dropped, so
+/// a move copies only a pointer, and key derivation and signing clear the stack they used before
+/// returning, within the limits described in the [crate documentation](crate#zeroization).
+/// Serialization writes the raw secret seed, so callers must protect the encoded bytes as secret
+/// key material.
 pub struct SigningKey {
+    secret: Box<Secret>,
+    /// The verifying key derived from the secret scalar.
+    verifying_key: VerifyingKey,
+}
+
+/// The secret half of a [`SigningKey`].
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct Secret {
     /// When serializing, we want to just write the seed, so we keep it around.
     seed: [u8; 32],
     /// The private prefix we use to derive a deterministic nonce for each message.
     prefix: [u8; 32],
     /// The pruned secret scalar, reduced modulo the basepoint order.
     scalar: Scalar,
-    /// The verifying key derived from the secret scalar.
-    #[zeroize(skip)]
-    verifying_key: VerifyingKey,
+}
+
+impl Secret {
+    const ZERO: Self = Self {
+        seed: [0; 32],
+        prefix: [0; 32],
+        scalar: Scalar::ZERO,
+    };
+}
+
+// The boxed `Secret` zeroizes itself when the key drops it.
+impl ZeroizeOnDrop for SigningKey {}
+
+impl Clone for SigningKey {
+    fn clone(&self) -> Self {
+        // Fill a fresh allocation field by field: cloning the whole `Secret` would build it on
+        // the stack before moving it to the heap.
+        let mut secret = Box::new(Secret::ZERO);
+        secret.seed.copy_from_slice(&self.secret.seed);
+        secret.prefix.copy_from_slice(&self.secret.prefix);
+        secret.scalar = self.secret.scalar;
+        Self {
+            secret,
+            verifying_key: self.verifying_key.clone(),
+        }
+    }
 }
 
 impl SigningKey {
+    /// Derives the key of `seed`, then clears the stack that derivation used.
     fn from_seed(seed: &[u8; 32]) -> Self {
+        let key = Self::derive(seed);
+        zeroize_stack::<STACK_SCRUB_BYTES>();
+        key
+    }
+
+    /// The derivation itself, kept out of line so that [`Self::from_seed`] can clear its frames.
+    #[inline(never)]
+    fn derive(seed: &[u8; 32]) -> Self {
+        let mut secret = Box::new(Secret::ZERO);
+        secret.seed.copy_from_slice(seed);
         // Following: https://www.rfc-editor.org/rfc/rfc8032.html#section-5.1.5.
         // The first half becomes our secret scalar material, while the second half
         // is the private prefix we use to derive deterministic nonces.
@@ -72,8 +118,7 @@ impl SigningKey {
         FixedOutput::finalize_into(sha2::Sha512::new().chain(seed), (&mut *h).into());
         let mut scalar_le_bytes: Zeroizing<[u8; 32]> =
             Zeroizing::new(h[..32].try_into().expect("h is 64 bytes"));
-        let prefix: Zeroizing<[u8; 32]> =
-            Zeroizing::new(h[32..].try_into().expect("h is 64 bytes"));
+        secret.prefix.copy_from_slice(&h[32..]);
         // We want the integer represented by these little-endian bytes to be a
         // multiple of the curve's cofactor, 8, so we "clamp" it by zeroing its
         // three least-significant bits. This is part of Ed25519 key derivation too,
@@ -90,7 +135,7 @@ impl SigningKey {
         scalar_le_bytes[31] |= 0b0100_0000;
         let mut wide_scalar = Zeroizing::new([0u8; 64]);
         wide_scalar[..32].copy_from_slice(&scalar_le_bytes[..]);
-        let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide_scalar));
+        secret.scalar = Scalar::from_bytes_mod_order_wide(&wide_scalar);
 
         // Normalize before caching (see `VerifyingKey::point`).
         let point = G::mul_base_secret(&scalar_le_bytes).to_affine();
@@ -100,17 +145,19 @@ impl SigningKey {
         };
 
         Self {
-            seed: *seed,
-            prefix: *prefix,
-            scalar: *scalar,
+            secret,
             verifying_key,
         }
     }
 
+    /// Signs an unframed message, kept out of line so that callers can clear its frames.
+    #[inline(never)]
     fn sign_message(&self, msg: &[u8]) -> Signature {
         let mut nonce_digest = Zeroizing::new([0u8; 64]);
         FixedOutput::finalize_into(
-            sha2::Sha512::new().chain(self.prefix.as_slice()).chain(msg),
+            sha2::Sha512::new()
+                .chain(self.secret.prefix.as_slice())
+                .chain(msg),
             (&mut *nonce_digest).into(),
         );
         let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
@@ -124,7 +171,7 @@ impl SigningKey {
             .finalize_fixed()
             .into();
         let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
-        let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.scalar));
+        let challenge_scalar = Zeroizing::new(challenge.mul_mod_l(&self.secret.scalar));
         let s_bytes = nonce.add_mod_l(&challenge_scalar).to_bytes();
 
         let mut bytes = [0u8; 64];
@@ -145,7 +192,8 @@ impl SigningKey {
     /// The namespace is committed to the signature to prevent its reuse in another context.
     /// Signing is deterministic per [RFC 8032]: the nonce is derived from the key and the
     /// message, so signing the same message twice yields the same signature and no randomness
-    /// is consumed.
+    /// is consumed. The stack that signing used is cleared before returning, within the limits
+    /// described in the [crate documentation](crate#zeroization).
     ///
     /// # Panics
     ///
@@ -153,8 +201,9 @@ impl SigningKey {
     ///
     /// [RFC 8032]: https://www.rfc-editor.org/rfc/rfc8032
     pub fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
-        let msg = union_unique(namespace, msg);
-        self.sign_message(&msg)
+        let signature = self.sign_message(&union_unique(namespace, msg));
+        zeroize_stack::<STACK_SCRUB_BYTES>();
+        signature
     }
 
     /// Signs an unframed message for raw Ed25519 test-vector checks.
@@ -189,7 +238,7 @@ impl Random for SigningKey {
 
 impl Write for SigningKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.seed.write(buf);
+        self.secret.seed.write(buf);
     }
 }
 
@@ -222,6 +271,18 @@ impl arbitrary::Arbitrary<'_> for SigningKey {
 /// Encodings that do not represent a curve point can never verify a signature.
 /// Equality, ordering, and hashing use the original encoding: distinct encodings of the same
 /// point are distinct keys, and verification hashes the received bytes as required by ZIP215.
+///
+/// # Key validation
+///
+/// Verification follows ZIP215 and accepts keys of any order. A key of small order admits a
+/// signature that verifies for every message, and the holder of a secret scalar can sign under
+/// its honest key and the seven keys that differ from it by a torsion component, so distinct keys
+/// outside the prime-order subgroup need not belong to distinct signers.
+///
+/// Callers that register keys from untrusted sources and need a nonidentity key of order `L`
+/// should require `!is_small_order() && is_torsion_free()`: the first check rejects the keys
+/// anyone can forge under, and the second rejects mixed-order keys. Keys produced by
+/// [`SigningKey::verifying_key`] pass both checks.
 #[derive(Clone)]
 pub struct VerifyingKey {
     /// The encoded point.
@@ -332,6 +393,31 @@ impl VerifyingKey {
             &core::Signature::from_bytes(sig.bytes),
             msg,
         )
+    }
+
+    /// The point this key encodes, if its encoding is one.
+    fn point(&self) -> Option<G> {
+        self.point
+            .or_else(|| GAffine::decompress(self.bytes.as_bytes()).map(GAffine::to_extended))
+    }
+
+    /// Returns whether this key is a point of small order (dividing 8), the identity included.
+    ///
+    /// A signature with `s = 0` and a small-order `R` verifies under such a key for every
+    /// message. An encoding of no curve point is not of small order: it verifies no signature.
+    pub fn is_small_order(&self) -> bool {
+        self.point()
+            .is_some_and(|point| point.mul_by_cofactor().is_identity())
+    }
+
+    /// Returns whether this key is a point of the prime-order subgroup (`[L]A` is the
+    /// identity), the identity included.
+    ///
+    /// An encoding of no curve point is not in the subgroup. See [key
+    /// validation](Self#key-validation) for how this combines with [`Self::is_small_order`].
+    pub fn is_torsion_free(&self) -> bool {
+        self.point()
+            .is_some_and(|point| core::is_torsion_free(&point))
     }
 
     /// Verifies `sig` over the namespaced message, per the [module's validation
@@ -460,7 +546,7 @@ impl BatchVerifier for VerifyingKey {
 ///
 /// For an honestly generated [`VerifyingKey`], successful verification demonstrates approval by
 /// the holder of the corresponding [`SigningKey`]. A maliciously generated verifying key can
-/// admit a signature that verifies for any message.
+/// admit a signature that verifies for any message (see [`VerifyingKey::is_small_order`]).
 ///
 /// Decoding accepts any 64 bytes. Point decoding and scalar canonicality are checked during
 /// verification. Equality, ordering, and hashing compare the original encoding.
@@ -552,13 +638,27 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
 #[cfg(test)]
 mod tests {
-    use super::{SigningKey, VerifyingKey};
+    use super::{Scalar, Secret, Signature, SigningKey, VerifyingKey};
+    use crate::curve::GAffine;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_cryptography::{BatchEntry, BatchVerifier as _, PrivateKey, Verifier};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use core::cmp::Ordering;
     use std::collections::HashSet;
+    use zeroize::Zeroize;
+
+    /// An encoding of no curve point.
+    fn undecodable() -> [u8; 32] {
+        (2..=u8::MAX)
+            .map(|y| {
+                let mut encoding = [0; 32];
+                encoding[0] = y;
+                encoding
+            })
+            .find(|encoding| GAffine::decompress(encoding).is_none())
+            .unwrap()
+    }
 
     #[test]
     fn batch_entries_use_union_unique_framing() {
@@ -627,6 +727,54 @@ mod tests {
         assert_ne!(canonical, noncanonical);
         assert_ne!(canonical.cmp(&noncanonical), Ordering::Equal);
         assert!(HashSet::from([canonical]).insert(noncanonical));
+    }
+
+    /// Derived keys have order `L`, the ZIP215 encodings are of small order with only the
+    /// identity torsion free, a key with a torsion component is neither, and neither is an
+    /// encoding of no point. The two kinds of key the checks reject each admit a signature the
+    /// honest key does not.
+    #[test]
+    fn verifying_key_order_checks() {
+        let signer = SigningKey::from_seed(&[9; 32]);
+        let key = signer.verifying_key();
+        let decoded = VerifyingKey::decode(key.encode()).unwrap();
+        for honest in [&key, &decoded] {
+            assert!(!honest.is_small_order());
+            assert!(honest.is_torsion_free());
+        }
+
+        let mut torsion = None;
+        let forged = Signature::decode(Copying(&[0u8; 64][..])).unwrap();
+        for encoding in crate::test::ZIP215_POINTS {
+            let key = VerifyingKey::decode(Copying(&encoding[..])).unwrap();
+            let point = key.point().unwrap();
+            assert!(key.is_small_order(), "{encoding:?}");
+            assert_eq!(key.is_torsion_free(), point.is_identity(), "{encoding:?}");
+            if !point.is_identity() {
+                torsion = Some(point);
+            }
+
+            // Under a small-order key, a signature with `s = 0` and a small-order `R` verifies
+            // any message.
+            assert!(key.verify(b"ns", b"any message", &forged), "{encoding:?}");
+        }
+        assert!(!key.verify(b"ns", b"any message", &forged));
+
+        // The holder of the secret scalar signs under the key with a torsion component added,
+        // and that key verifies the signature while the honest key does not.
+        let mixed_point = key.point().unwrap().add(torsion.unwrap());
+        let mixed = VerifyingKey::decode(Copying(&mixed_point.compress()[..])).unwrap();
+        assert!(!mixed.is_small_order());
+        assert!(!mixed.is_torsion_free());
+        let mut mixed_signer = signer;
+        mixed_signer.verifying_key = mixed.clone();
+        let signature = mixed_signer.sign(b"ns", b"message");
+        assert!(mixed.verify(b"ns", b"message", &signature));
+        assert!(!key.verify(b"ns", b"message", &signature));
+
+        let no_point = VerifyingKey::decode(Copying(&undecodable()[..])).unwrap();
+        assert!(!no_point.is_small_order());
+        assert!(!no_point.is_torsion_free());
     }
 
     #[test]
@@ -710,7 +858,148 @@ mod tests {
         fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
 
         assert_zeroize_on_drop::<SigningKey>();
+        assert_zeroize_on_drop::<Secret>();
         assert!(core::mem::needs_drop::<SigningKey>());
+    }
+
+    #[test]
+    fn secret_zeroizes_every_field() {
+        let mut secret = Secret {
+            seed: [1; 32],
+            prefix: [2; 32],
+            scalar: Scalar::from_bytes_mod_order_wide(&[3; 64]),
+        };
+        secret.zeroize();
+        assert_eq!(secret.seed, [0; 32]);
+        assert_eq!(secret.prefix, [0; 32]);
+        assert_eq!(secret.scalar.to_bytes(), [0; 32]);
+    }
+
+    /// Derivation and signing clear the dead stack they used: the probes find none of the
+    /// secrets they handled, the scrub ran in every entry point, and it reaches below their
+    /// deepest frame.
+    #[cfg(all(not(debug_assertions), not(miri)))]
+    mod stack {
+        use super::super::{Scalar, SigningKey};
+        use crate::{
+            STACK_SCRUB_BYTES,
+            test::stack::{contains, depth, probe, scrubbed, words_swapped},
+        };
+        use commonware_codec::{Copying, DecodeExt};
+        use commonware_math::algebra::Random;
+        use commonware_utils::{TestRng, union_unique};
+        use rand_core::Rng;
+        use sha2::{Digest, Sha512};
+
+        /// Returns the 512-bit product of two little-endian 256-bit integers.
+        fn product(a: &[u8; 32], b: &[u8; 32]) -> [u8; 64] {
+            let mut out = [0u8; 64];
+            for (i, &x) in a.iter().enumerate() {
+                let mut carry = 0u32;
+                for (j, &y) in b.iter().enumerate() {
+                    let sum = u32::from(out[i + j]) + u32::from(x) * u32::from(y) + carry;
+                    out[i + j] = sum as u8;
+                    carry = sum >> 8;
+                }
+                out[i + 32] = carry as u8;
+            }
+            out
+        }
+
+        /// The key's secrets as derivation handles them: the seed, prefix, and scalar, and the
+        /// seed and prefix as SHA-512 holds them.
+        fn secrets(signer: &SigningKey) -> Vec<Vec<u8>> {
+            let seed = signer.secret.seed;
+            let prefix = signer.secret.prefix;
+            vec![
+                seed.to_vec(),
+                prefix.to_vec(),
+                signer.secret.scalar.to_bytes().to_vec(),
+                words_swapped(&seed),
+                words_swapped(&prefix),
+            ]
+        }
+
+        fn assert_clear(span: &[u8], secrets: &[Vec<u8>]) {
+            for (i, secret) in secrets.iter().enumerate() {
+                assert!(!contains(span, secret), "secret {i} remains on the stack");
+            }
+            assert!(
+                scrubbed(span, STACK_SCRUB_BYTES),
+                "the operation did not scrub"
+            );
+        }
+
+        #[test]
+        fn derivation_leaves_no_secret_on_the_stack() {
+            let seed = [7u8; 32];
+            let (signer, span) = probe(|| SigningKey::from_seed(&seed));
+            assert_clear(&span, &secrets(&signer));
+
+            let (decoded, span) = probe(|| SigningKey::decode(Copying(&seed[..])).unwrap());
+            assert_eq!(decoded.secret.seed, seed);
+            assert_clear(&span, &secrets(&decoded));
+
+            let mut rng = TestRng::new(3);
+            let (random, span) = probe(|| SigningKey::random(&mut rng));
+            let mut expected = [0u8; 32];
+            TestRng::new(3).fill_bytes(&mut expected);
+            assert_eq!(random.secret.seed, expected);
+            assert_clear(&span, &secrets(&random));
+        }
+
+        #[test]
+        fn signing_leaves_no_secret_on_the_stack() {
+            let signer = SigningKey::from_seed(&[7; 32]);
+            let (signature, span) = probe(|| signer.sign(b"ns", b"message"));
+
+            // The nonce, the challenge's product with the scalar, and its reduction.
+            let msg = union_unique(b"ns", b"message");
+            let nonce_digest: [u8; 64] = Sha512::new()
+                .chain_update(signer.secret.prefix)
+                .chain_update(&msg)
+                .finalize()
+                .into();
+            let nonce = Scalar::from_bytes_mod_order_wide(&nonce_digest);
+            let challenge_digest: [u8; 64] = Sha512::new()
+                .chain_update(&signature.bytes[..32])
+                .chain_update(signer.verifying_key.as_ref())
+                .chain_update(&msg)
+                .finalize()
+                .into();
+            let challenge = Scalar::from_bytes_mod_order_wide(&challenge_digest);
+            let scalar = signer.secret.scalar.to_bytes();
+            let mut secrets = secrets(&signer);
+            secrets.extend([
+                nonce_digest.to_vec(),
+                words_swapped(&nonce_digest),
+                nonce.to_bytes().to_vec(),
+                product(&challenge.to_bytes(), &scalar).to_vec(),
+                challenge
+                    .mul_mod_l(&signer.secret.scalar)
+                    .to_bytes()
+                    .to_vec(),
+            ]);
+            assert_clear(&span, &secrets);
+        }
+
+        #[test]
+        fn scrub_covers_derivation_and_signing() {
+            let seed = [7u8; 32];
+            let reached = depth(&probe(|| SigningKey::derive(&seed)).1);
+            assert!(
+                reached <= STACK_SCRUB_BYTES,
+                "derivation reached {reached} bytes below the caller"
+            );
+
+            let signer = SigningKey::from_seed(&seed);
+            let msg = union_unique(b"ns", &[0x42; 200]);
+            let reached = depth(&probe(|| signer.sign_message(&msg)).1);
+            assert!(
+                reached <= STACK_SCRUB_BYTES,
+                "signing reached {reached} bytes below the caller"
+            );
+        }
     }
 
     #[cfg(feature = "arbitrary")]
