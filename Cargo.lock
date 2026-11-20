@@ -2161,29 +2161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-flood"
-version = "2026.11.0"
-dependencies = [
- "clap",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-deployer",
- "commonware-formatting",
- "commonware-math",
- "commonware-p2p",
- "commonware-runtime",
- "commonware-stream",
- "commonware-utils",
- "rand 0.10.2",
- "serde",
- "serde_yaml",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "commonware-formatting"
 version = "2026.11.0"
 dependencies = [
