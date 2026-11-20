@@ -5301,8 +5301,11 @@ mod tests {
 
     /// A tracked prune interrupted at any step reopens to every entry at or above the prune floor,
     /// with each section below it retained whole or removed.
+    #[rstest::rstest]
+    #[case::in_call_order(false)]
+    #[case::reordered(true)]
     #[test_traced]
-    fn test_oversized_interrupted_prune_reopens_to_consistent_prefix() {
+    fn test_oversized_interrupted_prune_reopens_to_consistent_prefix(#[case] reorder: bool) {
         const MARKERS: &str = "prune-markers";
         const SECTIONS: u64 = 3;
         const ENTRIES: u64 = 2;
@@ -5316,6 +5319,8 @@ mod tests {
             let (pruned, checkpoint) = deterministic::Runner::default().start_and_recover({
                 let faults = faults.clone();
                 |context| async move {
+                    context.storage_fault_config().write().reorder_rate =
+                        reorder.then_some(commonware_utils::probability!(0.75));
                     let context = MutationFaultContext {
                         inner: context,
                         faults: faults.clone(),
@@ -5420,8 +5425,11 @@ mod tests {
     /// the oldest retained index section. The index is pruned before the values, so an
     /// interruption can leave value sections with no index section, which the restore removes,
     /// and never an index section whose values are gone.
+    #[rstest::rstest]
+    #[case::in_call_order(false)]
+    #[case::reordered(true)]
     #[test_traced]
-    fn test_init_with_checkpoint_after_interrupted_prune() {
+    fn test_init_with_checkpoint_after_interrupted_prune(#[case] reorder: bool) {
         const SECTIONS: u64 = 4;
         const FLOOR: u64 = 3;
 
@@ -5434,6 +5442,8 @@ mod tests {
             let (pruned, checkpoint) = deterministic::Runner::default().start_and_recover({
                 let faults = faults.clone();
                 |context| async move {
+                    context.storage_fault_config().write().reorder_rate =
+                        reorder.then_some(commonware_utils::probability!(0.75));
                     let context = MutationFaultContext {
                         inner: context,
                         faults: faults.clone(),

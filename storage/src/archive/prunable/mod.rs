@@ -3295,9 +3295,12 @@ mod tests {
     }
 
     /// A destroy stopped before any one of its mutations leaves an archive that reopens and that
-    /// a retried destroy removes.
+    /// a retried destroy removes, whether or not pending storage mutations land in call order.
+    #[rstest::rstest]
+    #[case::in_call_order(false)]
+    #[case::reordered(true)]
     #[test_traced]
-    fn test_interrupted_destroy_reopens() {
+    fn test_interrupted_destroy_reopens(#[case] reorder: bool) {
         // Stop the destroy before its first mutation, then its second, and so on until one
         // destroy completes.
         let mut interrupted = 0;
@@ -3306,6 +3309,8 @@ mod tests {
             let (destroyed, checkpoint) = deterministic::Runner::default().start_and_recover({
                 let faults = faults.clone();
                 |context| async move {
+                    context.storage_fault_config().write().reorder_rate =
+                        reorder.then_some(commonware_utils::probability!(0.75));
                     let context = MutationFaultContext {
                         inner: context,
                         faults: faults.clone(),
@@ -3350,8 +3355,11 @@ mod tests {
     /// value blobs both survive. Destroy removes the markers and then the two journals
     /// concurrently, so a crash can leave each journal without some of its sections, in any
     /// pairing.
+    #[rstest::rstest]
+    #[case::in_call_order(false)]
+    #[case::reordered(true)]
     #[test_traced]
-    fn test_destroy_interrupted_inside_journals_reopens() {
+    fn test_destroy_interrupted_inside_journals_reopens(#[case] reorder: bool) {
         // Bit k of a mask removes the k-th section of a journal. EVERYTHING also removes the
         // journal's partition.
         const EVERYTHING: u8 = 1 << DESTROY_SECTIONS;
@@ -3359,6 +3367,8 @@ mod tests {
         for key_mask in 0..=EVERYTHING {
             for value_mask in 0..=EVERYTHING {
                 deterministic::Runner::default().start(|context| async move {
+                    context.storage_fault_config().write().reorder_rate =
+                        reorder.then_some(commonware_utils::probability!(0.75));
                     let context = MutationFaultContext {
                         inner: context,
                         faults: MutationFaults::default(),

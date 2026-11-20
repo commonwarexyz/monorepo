@@ -76,10 +76,12 @@ pub async fn poll_interrupted<F: Future>(
 /// Draw one faulted recovery attempt's fault config from `rng`.
 ///
 /// Separate draws select the mutation (write, sync, resize, or remove failures), its
-/// failure rate, the crash retention rate, the resize partial rate, and the partial-write
-/// mode, so each knob stays independently steerable by the fuzzer. Crash retention and
-/// mode stay live for every mutation so the crash after the attempt can still tear
-/// whatever the attempt wrote.
+/// failure rate, the crash retention rate, the resize partial rate, the partial-write
+/// mode, and the rate at which pending mutations are reordered, so each knob stays
+/// independently steerable by the fuzzer. Crash retention and mode stay live for every
+/// mutation so the crash after the attempt can still tear whatever the attempt wrote.
+/// Reordering lets the recovery's truncations, rewrites, and syncs land in any order the
+/// [`commonware_runtime::Blob`] contract allows, including after their futures drop.
 fn recovery_fault_config(rng: &mut impl Rng) -> deterministic::FaultConfig {
     fn rate(rng: &mut impl Rng, from: u64) -> Probability {
         Probability::new(rng.random_range(from..=100), 100)
@@ -116,6 +118,12 @@ fn recovery_fault_config(rng: &mut impl Rng) -> deterministic::FaultConfig {
         3 => config.remove_rate = Some(failure_rate),
         _ => unreachable!("the draw range spans four mutations"),
     }
+
+    // Drawn last so the earlier knobs keep their draws. Zero keeps call order, and the cap
+    // bounds how many polls a pending mutation waits through.
+    config.reorder_rate = Some(
+        Probability::new(rng.random_range(0..=75), 100).expect("a percentage in 0..=75 is valid"),
+    );
     config
 }
 

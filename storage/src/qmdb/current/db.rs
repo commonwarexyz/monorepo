@@ -2192,8 +2192,11 @@ mod tests {
     /// Stop the destroy of a pruned database holding several commits before its first mutation,
     /// then its second, and so on until one destroy completes. Reopen the database after each
     /// and require that destroy stopped at each of its outcomes, in order.
+    ///
+    /// With `reorder`, pending storage mutations land in any order the blob contract allows.
     fn interrupted_destroy_reopens<F, DB, Fut>(
         stages: &Stages,
+        reorder: bool,
         open: impl Fn(FaultedContext) -> Fut,
     ) where
         F: merkle::Graftable,
@@ -2206,6 +2209,9 @@ mod tests {
         let mut interrupted = 0;
         loop {
             let outcome = deterministic::Runner::default().start(|ctx| async move {
+                ctx.storage_fault_config().write().reorder_rate =
+                    reorder.then_some(commonware_utils::probability!(0.75));
+
                 // Record the digest of empty storage and the state of a new database. A
                 // completed destroy must restore the former.
                 let empty = ctx.storage_audit();
@@ -2373,9 +2379,11 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmr() {
         let (cfg, stages) = fixed_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            FixedDb::<mmr::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                FixedDb::<mmr::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -2385,9 +2393,11 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmb() {
         let (cfg, stages) = fixed_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            FixedDb::<mmb::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                FixedDb::<mmb::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -2397,9 +2407,11 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_variable_mmr() {
         let (cfg, stages) = variable_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            VariableDb::<mmr::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                VariableDb::<mmr::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -2409,8 +2421,10 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_variable_mmb() {
         let (cfg, stages) = variable_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            VariableDb::<mmb::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                VariableDb::<mmb::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 }

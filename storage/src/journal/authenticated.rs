@@ -4469,9 +4469,13 @@ mod tests {
     /// that destroy stopped at each of its outcomes, in order.
     ///
     /// `journal_partitions` names every partition of the operation journal configured by
-    /// `journal_cfg`. Destroy removes them before the Merkle structure.
-    fn interrupted_destroy_reopens<F, C>(journal_cfg: C::Config, journal_partitions: &[String])
-    where
+    /// `journal_cfg`. Destroy removes them before the Merkle structure. With `reorder`, pending
+    /// storage mutations land in any order the blob contract allows.
+    fn interrupted_destroy_reopens<F, C>(
+        journal_cfg: C::Config,
+        journal_partitions: &[String],
+        reorder: bool,
+    ) where
         F: Family + PartialEq,
         C: Backing<FaultedContext, Item = TestOp<F>>,
     {
@@ -4480,6 +4484,9 @@ mod tests {
         loop {
             let journal_cfg = journal_cfg.clone();
             let outcome = deterministic::Runner::default().start(|context| async move {
+                context.storage_fault_config().write().reorder_rate =
+                    reorder.then_some(commonware_utils::probability!(0.75));
+
                 // Record the digest of empty storage. A completed destroy must restore it.
                 let empty = context.storage_audit();
 
@@ -4658,10 +4665,12 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmr() {
         let (cfg, partitions) = fixed_destroy_config();
-        interrupted_destroy_reopens::<
-            mmr::Family,
-            ContiguousJournal<FaultedContext, TestOp<mmr::Family>>,
-        >(cfg, &partitions);
+        for reorder in [false, true] {
+            interrupted_destroy_reopens::<
+                mmr::Family,
+                ContiguousJournal<FaultedContext, TestOp<mmr::Family>>,
+            >(cfg.clone(), &partitions, reorder);
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -4671,10 +4680,12 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmb() {
         let (cfg, partitions) = fixed_destroy_config();
-        interrupted_destroy_reopens::<
-            mmb::Family,
-            ContiguousJournal<FaultedContext, TestOp<mmb::Family>>,
-        >(cfg, &partitions);
+        for reorder in [false, true] {
+            interrupted_destroy_reopens::<
+                mmb::Family,
+                ContiguousJournal<FaultedContext, TestOp<mmb::Family>>,
+            >(cfg.clone(), &partitions, reorder);
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -4684,10 +4695,12 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_variable_mmr() {
         let (cfg, partitions) = variable_destroy_config();
-        interrupted_destroy_reopens::<
-            mmr::Family,
-            VariableJournal<FaultedContext, TestOp<mmr::Family>>,
-        >(cfg, &partitions);
+        for reorder in [false, true] {
+            interrupted_destroy_reopens::<
+                mmr::Family,
+                VariableJournal<FaultedContext, TestOp<mmr::Family>>,
+            >(cfg.clone(), &partitions, reorder);
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -4697,10 +4710,12 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_variable_mmb() {
         let (cfg, partitions) = variable_destroy_config();
-        interrupted_destroy_reopens::<
-            mmb::Family,
-            VariableJournal<FaultedContext, TestOp<mmb::Family>>,
-        >(cfg, &partitions);
+        for reorder in [false, true] {
+            interrupted_destroy_reopens::<
+                mmb::Family,
+                VariableJournal<FaultedContext, TestOp<mmb::Family>>,
+            >(cfg.clone(), &partitions, reorder);
+        }
     }
 
     /// A bounded open that selects no item empties the journal. An empty Merkle structure needs
