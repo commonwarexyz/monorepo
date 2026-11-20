@@ -8,7 +8,7 @@
 //! ```rust
 //! use commonware_storage::{
 //!     journal::contiguous::variable::Config as JournalConfig,
-//!     qmdb::store::{Config, unpartitioned::Db},
+//!     qmdb::store::unpartitioned::{Config, Db},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -86,6 +86,7 @@ pub use db::{Batch, Changeset, Config, Db};
 
 /// Store types with an unpartitioned snapshot index.
 pub mod unpartitioned {
+    pub use super::Config;
     use crate::{index::unordered::Index, merkle::mmr::Location};
 
     /// An unauthenticated key-value database backed by an append-only journal and an unpartitioned
@@ -103,6 +104,7 @@ pub mod unpartitioned {
 /// Partition metrics use the `index` attribute for the partition number. Use a separate attribute,
 /// such as `store`, to distinguish stores that share a metrics prefix.
 pub mod partitioned {
+    pub use super::Config;
     use crate::{index::partitioned::unordered::Index, merkle::mmr::Location};
 
     /// An unauthenticated key-value database with a partitioned snapshot index.

@@ -326,10 +326,9 @@ where
         Ok(metadata)
     }
 
-    /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
-    /// or current snapshot.
+    /// Prune historical operations prior to `prune_loc`, preserving the current snapshot.
     ///
-    /// `prune` requires no prior commit. After a crash, the database remains recoverable;
+    /// `prune` requires no prior commit. After a crash, the database remains recoverable, but
     /// uncommitted operations are not guaranteed to survive.
     #[tracing::instrument(name = "qmdb.store.db.prune", level = "info", skip_all)]
     #[boxed]
