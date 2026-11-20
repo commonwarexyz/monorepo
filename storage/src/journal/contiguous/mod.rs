@@ -53,6 +53,13 @@ const fn position_to_blob(position: u64, items_per_blob: u64) -> u64 {
     position / items_per_blob
 }
 
+/// Return the index range of `positions` (strictly increasing) that lies within `bounds`.
+fn within(positions: &[u64], bounds: &Range<u64>) -> Range<usize> {
+    let start = positions.partition_point(|&pos| pos < bounds.start);
+    let end = positions.partition_point(|&pos| pos < bounds.end);
+    start..end
+}
+
 /// Return the first position stored in `blob`.
 fn blob_first_position(blob: u64, items_per_blob: u64) -> Result<u64, Error> {
     blob.checked_mul(items_per_blob)
@@ -230,6 +237,21 @@ pub trait Contiguous: Send + Sync {
     /// that require I/O, fail to decode, or fall outside `bounds()` decline to `None`. The
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
+
+    /// Return a future that reads the storage backing `positions` (strictly increasing) into
+    /// the page cache, so later reads of them can avoid storage I/O.
+    ///
+    /// The default implementation does nothing.
+    ///
+    /// The future does not borrow the journal, so it can run alongside any journal operation, and
+    /// it can be dropped at any point. Prefetching is best effort. Positions outside `bounds()`
+    /// are skipped, and failures are logged.
+    fn prefetch(
+        &self,
+        _positions: &[u64],
+    ) -> impl Future<Output = ()> + Send + 'static + use<Self> {
+        std::future::ready(())
+    }
 
     /// Return a stream of the items in `range` as [`Batch`]es of consecutive items, in position
     /// order. `range` must fall within `bounds()`. An empty range within `bounds()` yields an

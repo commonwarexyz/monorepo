@@ -11,7 +11,12 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics},
+    qmdb::{
+        Error,
+        bitmap::{Candidates as _, Shared},
+        chain::Commitment,
+        metrics::Metrics,
+    },
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -395,6 +400,70 @@ where
         keys: &[impl Borrow<U::Key> + Sync],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
         self.get_many_map(keys, |data, _| data.into_value()).await
+    }
+
+    /// Return a future that reads the storage holding the applied operations of `keys` into
+    /// the page cache, so later reads of those keys can avoid storage I/O.
+    ///
+    /// The keys are looked up in the index before this returns, and every operation the index
+    /// holds for a key's translated key is read. Keys absent from the index are skipped, but an
+    /// absent key whose translated key collides with an indexed key's causes that key's
+    /// operations to be read. Unapplied batches are ignored.
+    ///
+    /// Only the keys' own operations are read. The neighbor an ordered index reads when a key is
+    /// created or deleted is not, and [Self::prefetch_floor] warms the operations read by raising
+    /// the inactivity floor.
+    ///
+    /// The future does not borrow the database, so it can run alongside any database operation,
+    /// and it can be dropped at any point. Prefetching is best effort. Failures are logged.
+    ///
+    /// With the built-in [fixed](crate::journal::contiguous::fixed) and
+    /// [variable](crate::journal::contiguous::variable) journals, each call to `prefetch`,
+    /// `prefetch_floor`, or `prefetch_neighbors` gets its own page budget, even for the same
+    /// block. Warmed pages are not pinned. Together the calls can warm more pages than Main
+    /// holds, evicting each other's pages before they are read and potentially costing more
+    /// reads than skipping prefetch.
+    /// Warmed pages can also displace Main residents not read since the eviction sweep last
+    /// passed them, so prefetching many cold keys evicts the existing working set faster than
+    /// reading them on demand would.
+    pub fn prefetch<Q: Borrow<U::Key>>(
+        &self,
+        keys: &[Q],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S, Q> {
+        let mut positions = Vec::with_capacity(keys.len());
+        self.snapshot
+            .get_many(keys.iter().map(Borrow::borrow), |_, &loc| {
+                positions.push(*loc)
+            });
+        positions.sort_unstable();
+        positions.dedup();
+        self.log.prefetch(&positions)
+    }
+
+    /// Return a future that reads the first `candidates` active operations at or above the
+    /// inactivity floor into the page cache, so a later batch can raise the floor without
+    /// storage I/O.
+    ///
+    /// A batch raises the floor by reading active operations in location order from the floor of
+    /// the state it builds on, up to the `entries` of its policy's
+    /// [Limits](crate::qmdb::floor::Limits). It passes the operations its own writes supersede
+    /// without counting them, so its walk spans at most its entries plus the keys it updates or
+    /// deletes. The next batch continues where that one stopped, so warming that span for a batch
+    /// and for the batch after it covers both. Otherwise behaves like [Self::prefetch].
+    pub fn prefetch_floor(
+        &self,
+        candidates: usize,
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        let candidates = candidates.min(self.active_keys);
+        let mut locations = Vec::with_capacity(candidates);
+        (&*self.bitmap).fill(
+            self.inactivity_floor_loc,
+            *self.log.size(),
+            candidates,
+            &mut locations,
+        );
+        let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
+        self.log.prefetch(&positions)
     }
 
     /// Like [`Self::get_many`] but maps each matched update through `map`, which takes the

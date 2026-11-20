@@ -12,6 +12,9 @@ enum Op {
     GetMut(u8, u16),
     Remove(u8),
     Retain(u8),
+    Expect(u8),
+    GetOrInsertMutExpected(u8, u16),
+    IsReferenced(u8),
     Clear,
 }
 
@@ -20,7 +23,7 @@ impl Op {
         let key = key % keys;
         let value = u16::from_le_bytes([low, high]);
         // Keep clears rare so most sequences can build up cache state.
-        match tag % 65 {
+        match tag % 89 {
             0..=7 => Self::Get(key),
             8..=15 => Self::Peek(key),
             16..=23 => Self::Put(key, value),
@@ -29,6 +32,9 @@ impl Op {
             40..=47 => Self::GetMut(key, value),
             48..=55 => Self::Remove(key),
             56..=63 => Self::Retain(key),
+            64..=71 => Self::Expect(key),
+            72..=79 => Self::GetOrInsertMutExpected(key, value),
+            80..=87 => Self::IsReferenced(key),
             _ => Self::Clear,
         }
     }
@@ -115,6 +121,27 @@ fn exercise_cache(capacity: usize, keys: u8, prefill: bool, ops: Vec<Op>) {
                 cache.retain(|resident, _| *resident < key);
                 model.retain(|resident, _| *resident < key);
                 assert!(cache.len() <= usize::from(key).min(capacity));
+            }
+            Op::Expect(key) => {
+                let (present, len) = (cache.contains(&key), cache.len());
+                let value = cache.peek(&key).copied();
+                assert_eq!(cache.expect(&key), present);
+                assert!(cache.len() <= len);
+                assert_eq!(cache.peek(&key).copied(), value);
+            }
+            Op::GetOrInsertMutExpected(key, value) => {
+                *cache.get_or_insert_mut_expected(key, || value).1 = value;
+                model.insert(key, value);
+                assert_eq!(cache.peek(&key).copied(), Some(value));
+            }
+            Op::IsReferenced(key) => {
+                // The query records no use, and a referenced key is resident.
+                let state =
+                    |cache: &Cache<u8, u16>| cache.find_slot(&key).map(|slot| cache.bits(slot));
+                let before = state(&cache);
+                let referenced = cache.is_referenced(&key);
+                assert!(!referenced || before.is_some());
+                assert_eq!(state(&cache), before);
             }
             Op::Clear => {
                 cache.clear();
