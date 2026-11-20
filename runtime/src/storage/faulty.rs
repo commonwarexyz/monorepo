@@ -2,7 +2,7 @@
 
 use super::memory;
 use crate::{
-    BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Error, Handle, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     deterministic::BoxDynRng,
 };
 use bytes::Buf;
@@ -163,7 +163,9 @@ pub struct Config {
     /// point chosen from the shared RNG: a poll of its own future, or a later storage call that
     /// drives pending mutations. Mutations pending at the same time therefore take effect in any
     /// order, and dropping a mutation's future does not cancel it, so it may take effect after
-    /// later operations complete. A mutation's future completes only once it has taken effect,
+    /// later operations complete. A read that overlaps pending mutations sees each of them in a
+    /// stage chosen from the RNG: a write not at all, partway, or whole, and a resize before or
+    /// after. A mutation's future completes only once it has taken effect,
     /// opening a blob first applies every mutation still pending on it, and a simulated crash
     /// discards mutations that have not taken effect. Zero makes mutations take effect when they
     /// are first polled, in call order, for tests that pin an order the contract does not
@@ -404,6 +406,8 @@ type FileGenerations = Arc<Mutex<BTreeMap<FileKey, Weak<FileGeneration>>>>;
 struct Accepted {
     /// File the mutation targets, so that opening it can apply the mutation first.
     key: FileKey,
+    /// What the mutation does, so that a read overlapping it can see it partway.
+    op: Mutation,
     /// The mutation, absent once it has taken effect or while a driver polls it.
     work: Mutex<Option<BoxFuture<'static, Result<(), Error>>>>,
     /// The mutation's result, until its future takes it.
@@ -412,10 +416,28 @@ struct Accepted {
     done: AtomicBool,
 }
 
+/// A mutation accepted on a blob, by its logical offsets.
+#[derive(Clone)]
+enum Mutation {
+    /// `bufs` written at `offset`.
+    Write { offset: u64, bufs: IoBuf },
+    /// A resize to `len`.
+    Resize { len: u64 },
+}
+
+/// How much of one pending mutation a read sees.
+enum Stage {
+    /// The first bytes of a write, written at its offset.
+    Write { offset: u64, bytes: IoBuf },
+    /// A resize to `len`.
+    Resize { len: u64 },
+}
+
 impl Accepted {
-    fn new(key: FileKey, work: BoxFuture<'static, Result<(), Error>>) -> Self {
+    fn new(key: FileKey, op: Mutation, work: BoxFuture<'static, Result<(), Error>>) -> Self {
         Self {
             key,
+            op,
             work: Mutex::new(Some(work)),
             result: Mutex::new(None),
             done: AtomicBool::new(false),
@@ -650,16 +672,15 @@ impl<S: crate::Storage> Storage<S> {
                     generation
                 })
         };
-        let mut blob = Blob::new(
-            self.ctx.clone(),
-            self.pending.clone(),
+        Blob {
+            inner: Arc::new(inner),
+            ctx: self.ctx.clone(),
+            pending: self.pending.clone(),
             generation,
-            inner,
-            size,
-        );
-        blob.accepted = self.accepted.clone();
-        blob.key = key;
-        blob
+            size: Arc::new(AtomicU64::new(size)),
+            accepted: self.accepted.clone(),
+            key,
+        }
     }
 
     /// Retires generations and pending mutations for one file or an entire partition.
@@ -854,6 +875,8 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> Blob<B> {
+    /// A blob outside any storage, with its own list of accepted mutations.
+    #[cfg(test)]
     fn new(
         ctx: Oracle,
         pending: PendingMutations<B>,
@@ -892,16 +915,101 @@ impl<B: crate::Blob> Blob<B> {
         settle(&self.accepted, &self.ctx, None);
     }
 
+    /// The stages of this blob's pending mutations that a read sees, in a random order, or
+    /// `None` when none is pending. A read that overlaps a mutation is not an atomic snapshot:
+    /// it can see a write not at all, partway, or whole, and a resize before or after.
+    fn read_stages(&self) -> Option<Vec<Stage>> {
+        let pending: Vec<Mutation> = self
+            .accepted
+            .lock()
+            .iter()
+            .filter(|mutation| mutation.key == self.key && !mutation.is_done())
+            .map(|mutation| mutation.op.clone())
+            .collect();
+        if pending.is_empty() {
+            return None;
+        }
+
+        let mut rng = self.ctx.rng.lock();
+        let mut stages = Vec::with_capacity(pending.len());
+        for mutation in pending {
+            match mutation {
+                Mutation::Write { offset, bufs } => {
+                    let seen = rng.random_range(0..=bufs.len());
+                    if seen > 0 {
+                        stages.push(Stage::Write {
+                            offset,
+                            bytes: bufs.slice(..seen),
+                        });
+                    }
+                }
+                Mutation::Resize { len } => {
+                    if rng.random_bool(0.5) {
+                        stages.push(Stage::Resize { len });
+                    }
+                }
+            }
+        }
+
+        // Pending mutations may land in any order.
+        for index in (1..stages.len()).rev() {
+            stages.swap(index, rng.random_range(0..=index));
+        }
+        Some(stages)
+    }
+
+    /// Serve a nonempty read from the stages of the pending mutations it may see (see
+    /// [`Self::read_stages`]). Hands `bufs` back when none is pending or the wrapped storage
+    /// cannot stage a view.
+    fn read_staged(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: IoBufsMut,
+    ) -> Result<Result<IoBufsMut, Error>, IoBufsMut> {
+        if len == 0 {
+            return Err(bufs);
+        }
+        let Some(blob) = self.memory_blob() else {
+            return Err(bufs);
+        };
+        let Some(stages) = self.read_stages() else {
+            return Err(bufs);
+        };
+        Ok(blob.read_staged(offset, len, bufs, |content, data_offset| {
+            for stage in stages {
+                // Accepted mutations passed range validation, so their physical extents fit.
+                match stage {
+                    Stage::Write { offset, bytes } => {
+                        let start = (data_offset + offset) as usize;
+                        let end = start + bytes.len();
+                        if content.len() < end {
+                            memory::Blob::stage_resize(content, end);
+                        }
+                        content[start..end].copy_from_slice(bytes.as_ref());
+                    }
+                    Stage::Resize { len } => {
+                        memory::Blob::stage_resize(content, (data_offset + len) as usize);
+                    }
+                }
+            }
+        }))
+    }
+
     /// Apply `mutation` now, or accept it to take effect later when mutations are reordered
     /// (see [`Config::reorder_rate`]).
-    async fn mutate(&self, mutation: BoxFuture<'static, Result<(), Error>>) -> Result<(), Error> {
+    async fn mutate(
+        &self,
+        op: impl FnOnce() -> Mutation,
+        mutation: BoxFuture<'static, Result<(), Error>>,
+    ) -> Result<(), Error> {
         if self.ctx.config.read().deferral().is_none() {
             self.drive_pending();
             return mutation.await;
         }
 
         // From here on the mutation takes effect whether or not this future is polled again.
-        let accepted = Arc::new(Accepted::new(self.key.clone(), mutation));
+        let accepted = Arc::new(Accepted::new(self.key.clone(), op(), mutation));
         self.accepted.lock().push(accepted.clone());
         poll_fn(|cx| {
             // Each poll drives the pending mutations, this one included, passing over each at
@@ -1197,6 +1305,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     ) -> Result<IoBufsMut, Error> {
         self.drive_pending();
         self.preflight_read(offset, len)?;
+        if let Ok(read) = self.read_staged(offset, len, IoBufMut::with_capacity(len).into()) {
+            return read;
+        }
         self.inner.read_at(offset, len, options).await
     }
 
@@ -1214,6 +1325,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         );
         self.drive_pending();
         self.preflight_read(offset, len)?;
+        let bufs = match self.read_staged(offset, len, bufs) {
+            Ok(read) => return read,
+            Err(bufs) => bufs,
+        };
         self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
@@ -1230,9 +1345,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return self.write_now(offset, bufs, options).await;
         }
         self.write_range(offset, total_bytes)?;
+        let accepted = bufs.clone();
+        let op = move || Mutation::Write {
+            offset,
+            bufs: accepted.coalesce(),
+        };
         let blob = self.handle();
-        self.mutate(async move { blob.write_now(offset, bufs, options).await }.boxed())
-            .await
+        let write = async move { blob.write_now(offset, bufs, options).await };
+        self.mutate(op, write.boxed()).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -1241,7 +1361,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             blob.resize_len(len)?;
         }
         let blob = self.handle();
-        self.mutate(async move { blob.resize_now(len).await }.boxed())
+        let resize = async move { blob.resize_now(len).await };
+        self.mutate(|| Mutation::Resize { len }, resize.boxed())
             .await
     }
 
@@ -3463,6 +3584,52 @@ mod tests {
             })
             .collect();
         assert_eq!(outcomes, HashSet::from([false, true]));
+    }
+
+    #[test]
+    fn test_read_sees_pending_mutations_partway() {
+        // A read overlapping a pending write sees some prefix of it over the old bytes, and a read
+        // past a pending shrink either fails or sees the old bytes.
+        let mut seen = HashSet::new();
+        let mut shrunk = HashSet::new();
+        for seed in 0..64 {
+            let (prefix, failed) = run_reordered(seed, probability!(0.99), |context| async move {
+                let (blob, _) = context.open("partition", b"blob").await.unwrap();
+                blob.write_at(0, b"oooooooo", WriteOptions::SYNC)
+                    .await
+                    .unwrap();
+
+                let mut write = Box::pin(blob.write_at(0, b"nnnnnnnn", WriteOptions::default()));
+                let written = futures::poll!(write.as_mut());
+                let read = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
+                let read = read.coalesce();
+                let prefix = read
+                    .as_ref()
+                    .iter()
+                    .take_while(|byte| **byte == b'n')
+                    .count();
+                assert!(read.as_ref()[prefix..].iter().all(|byte| *byte == b'o'));
+                if written.is_pending() {
+                    write.await.unwrap();
+                }
+
+                let mut resize = Box::pin(blob.resize(2));
+                let resized = futures::poll!(resize.as_mut());
+                let failed = matches!(
+                    blob.read_at(0, 8, ReadOptions::default()).await,
+                    Err(Error::BlobInsufficientLength)
+                );
+                if resized.is_pending() {
+                    resize.await.unwrap();
+                }
+                (prefix, failed)
+            });
+            seen.insert(prefix);
+            shrunk.insert(failed);
+        }
+        assert!(seen.contains(&0) && seen.contains(&8));
+        assert!(seen.iter().any(|prefix| (1..8).contains(prefix)));
+        assert_eq!(shrunk, HashSet::from([false, true]));
     }
 
     #[tokio::test]

@@ -502,6 +502,17 @@ impl Blob {
         len: usize,
         copy: impl FnOnce(&[u8]) -> T,
     ) -> Result<T, crate::Error> {
+        self.read_from(&self.content.read(), offset, len, copy)
+    }
+
+    /// Read a validated range of `content`, a view of this blob's physical contents.
+    fn read_from<T>(
+        &self,
+        content: &[u8],
+        offset: u64,
+        len: usize,
+        copy: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T, crate::Error> {
         let start = self.read_offset(offset, len)?;
         if len == 0 {
             return Ok(copy(&[]));
@@ -511,11 +522,46 @@ impl Blob {
         let end = start
             .checked_add(len)
             .ok_or(crate::Error::BlobInsufficientLength)?;
-        let content = self.content.read();
         let bytes = content
             .get(start..end)
             .ok_or(crate::Error::BlobInsufficientLength)?;
         Ok(copy(bytes))
+    }
+
+    /// Read a validated range of `content` into `bufs`, preserving their chunk layout.
+    fn read_into(
+        &self,
+        content: &[u8],
+        offset: u64,
+        len: usize,
+        mut bufs: IoBufsMut,
+    ) -> Result<IoBufsMut, crate::Error> {
+        // SAFETY: `len` bytes are filled via copy_from_slice below.
+        unsafe { bufs.set_len(len) };
+        self.read_from(content, offset, len, |bytes| {
+            bufs.copy_from_slice(bytes);
+            bufs
+        })
+    }
+
+    /// Read a validated range as [crate::Blob::read_at_buf] does, from a copy of the live
+    /// contents that `stage` first rewrites. `stage` receives the physical contents and the
+    /// offset of logical byte zero, and models mutations a concurrent read may see partway.
+    pub(crate) fn read_staged(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: IoBufsMut,
+        stage: impl FnOnce(&mut Vec<u8>, u64),
+    ) -> Result<IoBufsMut, crate::Error> {
+        let mut content = self.content.read().clone();
+        stage(&mut content, self.data_offset);
+        self.read_into(&content, offset, len, bufs)
+    }
+
+    /// Resize the physical contents `content` for a staged view, as a resize to `len` would.
+    pub(crate) fn stage_resize(content: &mut Vec<u8>, len: usize) {
+        resize_vec(content, len);
     }
 
     /// Merge selected bytes into durable storage without changing this handle's live contents.
@@ -609,13 +655,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufsMut> + Send,
         _options: ReadOptions,
     ) -> Result<IoBufsMut, crate::Error> {
-        let mut bufs = bufs.into();
-        // SAFETY: `len` bytes are filled via copy_from_slice below.
-        unsafe { bufs.set_len(len) };
-        self.read_range(offset, len, |bytes| {
-            bufs.copy_from_slice(bytes);
-            bufs
-        })
+        self.read_into(&self.content.read(), offset, len, bufs.into())
     }
 
     async fn write_at(

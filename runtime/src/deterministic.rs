@@ -18,7 +18,9 @@
 //! Storage models the [Blob](crate::Blob) contract as the io_uring and Tokio backends exercise
 //! it rather than any one outcome. By default, mutations pending at the same time take effect in
 //! an order chosen from the seed, and a mutation whose future was dropped can still take effect
-//! after later operations complete (see [FaultConfig::reorder_rate]). When a blob opens again
+//! after later operations complete (see [FaultConfig::reorder_rate]). A read that overlaps a
+//! pending mutation is not an atomic snapshot: it can see a pending write not at all, partway,
+//! or whole, and a pending resize before or after. When a blob opens again
 //! after every handle of its previous open was dropped, that open's unsynced mutations either
 //! become durable, as the io_uring and Tokio backends make them, or are discarded, as the contract
 //! allows (see [FaultConfig::reopen_flush_rate]). Tests that must pin a single outcome can opt
