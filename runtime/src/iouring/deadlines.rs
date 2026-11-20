@@ -19,7 +19,7 @@
 //! [`MAX_TIMEOUT`]: super::runtime::MAX_TIMEOUT
 
 use super::wheel::{BUDGET, InstantExt as _, Wheel};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Resolution of request deadlines in nanoseconds, about a millisecond.
 /// Rounding up delays an expiry by less than one tick, which is small next to
@@ -119,6 +119,18 @@ impl Deadlines {
                 .after_nanos(bound)
                 .expect("a request deadline's firing time must fit Instant")
         });
+    }
+
+    /// The latest deadline that an expiry pass at `now` finds due, since
+    /// firing times round up to whole ticks, or `None` when the bound shows
+    /// that no deadline is due. A pass that runs out of budget leaves the
+    /// bound at or before `now`, so this is `Some` while due deadlines
+    /// remain.
+    pub fn due_cutoff(&self, now: Instant) -> Option<Instant> {
+        self.next.filter(|next| *next <= now).map(|_| {
+            let ticks = now.nanos_since(self.origin) / RESOLUTION;
+            self.origin + Duration::from_nanos(ticks * RESOLUTION)
+        })
     }
 
     /// A conservative bound on the earliest firing time, or `None` when empty.

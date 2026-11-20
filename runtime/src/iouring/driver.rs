@@ -310,7 +310,12 @@ impl Driver {
         self.state.poll_acquisitions(deferred);
         self.state.compact_ready_queue();
 
-        while self.state.fill_submission_queue(&mut self.ring) {
+        // An expiry pass that ran out of budget leaves due requests behind.
+        // Staging stops at the first of them, so none reaches the kernel
+        // before a later pass reports its timeout.
+        let cutoff = self.state.deadlines.due_cutoff(now);
+
+        while self.state.fill_submission_queue(&mut self.ring, cutoff) {
             let before = self.ring.submission().len();
             Self::enter(&mut self.ring, Enter::Flush)?;
             if self.ring.submission().len() >= before {
@@ -668,8 +673,14 @@ impl State {
         self.ready_queue.retain(|id| self.waiters.is_pending(*id));
     }
 
-    /// Stage operation SQEs in FIFO order, returning whether an SQ flush is needed.
-    fn stage_ready_requests(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+    /// Stage operation SQEs in FIFO order, returning whether an SQ flush is
+    /// needed. Staging stops at a request whose deadline is at or before
+    /// `cutoff`.
+    fn stage_ready_requests(
+        &mut self,
+        submission_queue: &mut SubmissionQueue<'_>,
+        cutoff: Option<Instant>,
+    ) -> bool {
         while self.waiters.in_flight() < self.in_flight_limit {
             let Some(id) = self.ready_queue.front().copied() else {
                 return false;
@@ -681,6 +692,18 @@ impl State {
                 self.ready_queue.pop_front();
                 continue;
             }
+
+            // A due request waits at the head for the next expiry pass, which
+            // reports its timeout. Its deadline keeps the bound at or before
+            // now, so the worker serves again before it parks.
+            if cutoff.is_some_and(|cutoff| {
+                self.waiters
+                    .deadline(id)
+                    .is_some_and(|deadline| deadline <= cutoff)
+            }) {
+                return false;
+            }
+
             if submission_queue.is_full() {
                 return true;
             }
@@ -733,7 +756,8 @@ impl State {
     }
 
     /// Fill available SQ slots and report whether more work requires a flush.
-    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> bool {
+    /// Operations stage up to `cutoff` (see [`Self::stage_ready_requests`]).
+    fn fill_submission_queue(&mut self, ring: &mut IoUring, cutoff: Option<Instant>) -> bool {
         // One SQ view batches tail publication until it is dropped on return.
         let mut submission_queue = ring.submission();
 
@@ -742,7 +766,7 @@ impl State {
             return true;
         }
 
-        self.stage_ready_requests(&mut submission_queue)
+        self.stage_ready_requests(&mut submission_queue, cutoff)
     }
 
     /// Reap every posted CQE without invoking observer callbacks.
@@ -1558,7 +1582,7 @@ pub mod tests {
             let flush = harness
                 .driver
                 .state
-                .stage_ready_requests(&mut harness.driver.ring.submission());
+                .stage_ready_requests(&mut harness.driver.ring.submission(), None);
 
             // Only a live request justifies a flush. A stale ID must disappear
             // even if there is no SQ space and its slot has already been reused.
@@ -1821,7 +1845,7 @@ pub mod tests {
                     !harness
                         .driver
                         .state
-                        .stage_ready_requests(&mut harness.driver.ring.submission())
+                        .stage_ready_requests(&mut harness.driver.ring.submission(), None)
                 );
                 harness.driver.ring.submit_and_wait(1).unwrap();
                 assert!(matches!(
@@ -2593,7 +2617,7 @@ pub mod tests {
                 !harness
                     .driver
                     .state
-                    .fill_submission_queue(&mut harness.driver.ring)
+                    .fill_submission_queue(&mut harness.driver.ring, None)
             );
             assert!(harness.driver.ring.submission().is_full());
             assert!(harness.driver.state.waiters.is_in_flight(id));
@@ -3163,7 +3187,7 @@ pub mod tests {
             !harness
                 .driver
                 .state
-                .fill_submission_queue(&mut harness.driver.ring)
+                .fill_submission_queue(&mut harness.driver.ring, None)
         );
         assert!(harness.driver.ring.submission().is_full());
         assert!(harness.driver.state.ring_wait_needed);
@@ -3538,16 +3562,14 @@ pub mod tests {
 
         assert_eq!(harness.driver.state.deadlines.len(), count as usize);
 
-        // One pass expires one budget. While some remain due, the next
-        // deadline stays at or before now, so the drive loop serves again
-        // instead of parking.
+        // One service pass expires one budget, and its staging leaves the due
+        // rest out of the kernel. While some remain due, the next deadline
+        // stays at or before now, so the drive loop serves again instead of
+        // parking.
         let now = harness.fires_at(deadline + Duration::from_nanos(4));
-        harness
-            .driver
-            .state
-            .advance_timeouts(now, &mut harness.deferred);
-        harness.collect();
+        harness.service_at(now, false);
 
+        assert_eq!(harness.driver.state.waiters.in_flight(), 0);
         assert_eq!(harness.completed.len(), BUDGET as usize);
         assert_eq!(harness.driver.state.deadlines.len(), 3);
         assert!(harness.driver.next_deadline().unwrap() <= now);
