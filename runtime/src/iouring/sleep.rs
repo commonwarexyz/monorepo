@@ -216,11 +216,11 @@
 //! cache where it was, so an owner that is about to park, which it does only
 //! with an empty queue, takes the wheel's bound again (see
 //! [`Timers::refresh`]). An owner therefore parks on no firing time removed
-//! before it parked, unless it was the minimum of a wheel bucket that expiry
-//! has not drained, which costs it timed wakes until expiry drains that
-//! bucket. A removal on another thread while the owner is parked leaves its
-//! timed wake armed, which costs it one wake and one expiry pass that fires
-//! nothing.
+//! before it took that bound, unless it was the minimum of a wheel bucket that
+//! expiry has not drained, which costs it timed wakes until expiry drains that
+//! bucket. A removal on another thread after that, including while the owner
+//! is parked, leaves its timed wake armed, which costs it one wake and one
+//! expiry pass that fires nothing.
 //!
 //! # Closure
 //!

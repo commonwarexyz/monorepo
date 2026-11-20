@@ -1690,8 +1690,6 @@ pub mod tests {
         // The request is in flight, and its firing time bounds the next wait.
         assert!(harness.completed.is_empty());
         assert!(harness.driver.state.waiters.is_in_flight(id));
-
-        // The rejected receive never reached the SQ.
         assert_eq!(
             harness.driver.next_deadline(),
             Some(harness.fires_at(deadline))
