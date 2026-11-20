@@ -559,7 +559,7 @@ where
         ops_root_witness,
         metrics,
         #[cfg(test)]
-        halt_before_prune_log: false,
+        halt_before_prune_log: None,
     };
     db.update_metrics();
     Ok(db)

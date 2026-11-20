@@ -262,9 +262,9 @@ pub struct Db<
     pub(super) metrics: Metrics<E>,
 
     /// Test-only: park [Self::prune] after the pruning-metadata sync, before the log prune,
-    /// so tests can drop the pending future at that exact point.
+    /// raising the flag once parked so tests can drop the pending future at that exact point.
     #[cfg(test)]
-    pub(super) halt_before_prune_log: bool,
+    pub(super) halt_before_prune_log: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
@@ -638,7 +638,8 @@ where
         self = self.sync_metadata().await?;
 
         #[cfg(test)]
-        if self.halt_before_prune_log {
+        if let Some(halted) = &self.halt_before_prune_log {
+            halted.store(true, std::sync::atomic::Ordering::Release);
             std::future::pending::<()>().await;
         }
 
@@ -1984,15 +1985,19 @@ mod tests {
 
         // Drop the production prune future while it is parked after the metadata sync, before
         // the log prune: a genuine cancellation at that await.
-        db.halt_before_prune_log = true;
+        let halted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        db.halt_before_prune_log = Some(halted.clone());
         let boundary = db.sync_boundary();
         {
             let fut = db.prune(boundary);
             futures::pin_mut!(fut);
-            assert!(
-                futures::poll!(fut.as_mut()).is_pending(),
-                "prune must park before the log prune"
-            );
+            while !halted.load(std::sync::atomic::Ordering::Acquire) {
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the log prune"
+                );
+                commonware_runtime::reschedule().await;
+            }
         }
 
         // Reopening must succeed and recover the post-batch state: prune committed the buffered

@@ -439,9 +439,9 @@ struct Inner<E: Context, V: Codec> {
     bounds: Range<u64>,
 
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
-    /// so tests can drop the pending future at that exact point.
+    /// raising the flag once parked so tests can drop the pending future at that exact point.
     #[cfg(test)]
-    halt_before_offsets_prune: bool,
+    halt_before_offsets_prune: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 
     /// The number of items per blob.
     ///
@@ -1589,7 +1589,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             offsets,
             bounds,
             #[cfg(test)]
-            halt_before_offsets_prune: false,
+            halt_before_offsets_prune: None,
             items_per_blob: self.cfg.items_per_section,
             compression: self.cfg.compression,
             codec_config: self.cfg.codec_config,
@@ -1904,7 +1904,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.start = new_boundary;
 
         #[cfg(test)]
-        if self.halt_before_offsets_prune {
+        if let Some(halted) = &self.halt_before_offsets_prune {
+            halted.store(true, std::sync::atomic::Ordering::Release);
             std::future::pending::<()>().await;
         }
 
@@ -2867,7 +2868,10 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::Rng as _;
-    use std::num::NonZeroU16;
+    use std::{
+        num::NonZeroU16,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -3273,11 +3277,15 @@ mod tests {
                     (journal, _) = journal.append(&value).await.unwrap();
                 }
                 journal = journal.sync().await.unwrap();
-                journal.0.halt_before_offsets_prune = true;
+                let halted = Arc::new(AtomicBool::new(false));
+                journal.0.halt_before_offsets_prune = Some(halted.clone());
                 {
                     let prune = journal.prune(10);
                     futures::pin_mut!(prune);
-                    assert!(futures::poll!(prune.as_mut()).is_pending());
+                    while !halted.load(Ordering::Acquire) {
+                        assert!(futures::poll!(prune.as_mut()).is_pending());
+                        commonware_runtime::reschedule().await;
+                    }
                 }
                 assert_eq!(
                     context.scan(&cfg.data_partition()).await.unwrap(),
@@ -4027,7 +4035,10 @@ mod tests {
                 (journal, _) = journal.append(&2).await.unwrap();
                 let starts = pending.starts();
                 let mut starting = std::pin::pin!(journal.start_sync());
-                assert!(futures::poll!(starting.as_mut()).is_pending());
+                while pending.starts() == starts {
+                    assert!(futures::poll!(starting.as_mut()).is_pending());
+                    commonware_runtime::reschedule().await;
+                }
                 assert_eq!(pending.starts(), starts + 1);
                 prior_data.blocked.await.unwrap();
                 let offsets = next_pending_sync(&pending);
@@ -6589,14 +6600,18 @@ mod tests {
             // Drop the production prune future while it is parked after the data-blob
             // removal, before offsets.prune has made the appended offsets durable: a
             // genuine cancellation at that await.
-            journal.0.halt_before_offsets_prune = true;
+            let halted = Arc::new(AtomicBool::new(false));
+            journal.0.halt_before_offsets_prune = Some(halted.clone());
             {
                 let fut = journal.prune(10);
                 futures::pin_mut!(fut);
-                assert!(
-                    futures::poll!(fut.as_mut()).is_pending(),
-                    "prune must park before offsets.prune"
-                );
+                while !halted.load(Ordering::Acquire) {
+                    assert!(
+                        futures::poll!(fut.as_mut()).is_pending(),
+                        "prune must park before offsets.prune"
+                    );
+                    commonware_runtime::reschedule().await;
+                }
             }
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())

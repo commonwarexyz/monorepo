@@ -507,8 +507,7 @@ mod tests {
                 "put_multi_sync must wait for writes accepted before its below-floor put"
             );
             assert!(pending.calls() > 0);
-            release_pending_syncs(&pending);
-            let archive = task
+            let archive = drive_pending_syncs(&pending, task)
                 .await
                 .expect("put_multi_sync task failed")
                 .expect("put_multi_sync failed");
