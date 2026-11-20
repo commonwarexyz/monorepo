@@ -1,5 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
+use super::memory;
 use crate::{
     BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     deterministic::BoxDynRng,
@@ -12,6 +13,7 @@ use commonware_utils::{
 use futures::{FutureExt as _, future::Shared};
 use rand::RngExt as _;
 use std::{
+    any::Any,
     collections::{BTreeMap, HashSet},
     io::Error as IoError,
     sync::{
@@ -115,8 +117,9 @@ pub struct Config {
     /// Failure rate for `open_versioned` operations.
     pub open_rate: Option<Probability>,
 
-    /// Failure rate for nonempty reads. An injected fault takes precedence over the
-    /// underlying blob's range errors.
+    /// Failure rate for nonempty reads. In the deterministic runner, invalid ranges still
+    /// return [Error::OffsetOverflow]. A valid range may return an injected error instead of
+    /// [Error::BlobInsufficientLength].
     pub read_rate: Option<Probability>,
 
     /// Failure and byte-retention configuration for `write_at` operations.
@@ -415,7 +418,8 @@ impl Oracle {
 
 /// A storage wrapper that injects deterministic faults based on configuration.
 ///
-/// Uses a shared RNG for determinism.
+/// Uses a shared RNG for determinism. With arbitrary backends, an injected fault can
+/// take precedence over backend-specific range validation.
 #[derive(Clone)]
 pub struct Storage<S: crate::Storage> {
     inner: S,
@@ -501,7 +505,7 @@ impl<S: crate::Storage> Storage<S> {
     }
 }
 
-impl Storage<crate::storage::memory::Storage> {
+impl Storage<memory::Storage> {
     /// Retire crash evidence excluded from the durable snapshot admitted by a successful open.
     /// The caller holds the logical namespace guard through admission and retirement.
     pub(crate) fn admit(
@@ -612,6 +616,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 /// A blob wrapper that injects deterministic faults based on configuration.
 pub struct Blob<B: crate::Blob> {
     inner: Arc<B>,
+    extent: Option<memory::Extent>,
     ctx: Oracle,
     pending: PendingMutations<B>,
     generation: Arc<FileGeneration>,
@@ -627,13 +632,30 @@ impl<B: crate::Blob> Blob<B> {
         inner: B,
         size: u64,
     ) -> Self {
+        let extent = (&inner as &dyn Any)
+            .downcast_ref::<memory::Blob>()
+            .map(memory::Blob::extent);
         Self {
             inner: Arc::new(inner),
+            extent,
             ctx,
             pending,
             generation,
             size: AtomicU64::new(size),
         }
+    }
+
+    fn preflight_read(&self, offset: u64, len: usize) -> Result<(), Error> {
+        if len == 0 {
+            return Ok(());
+        }
+        if let Some(extent) = self.extent {
+            extent.read_offset(offset, len)?;
+        }
+        if self.ctx.should_fail(Op::Read) {
+            return Err(injected_io_error().into());
+        }
+        Ok(())
     }
 
     fn record_pending(
@@ -779,9 +801,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        if len != 0 && self.ctx.should_fail(Op::Read) {
-            return Err(injected_io_error().into());
-        }
+        self.preflight_read(offset, len)?;
         self.inner.read_at(offset, len, options).await
     }
 
@@ -792,12 +812,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        if len != 0 && self.ctx.should_fail(Op::Read) {
-            return Err(injected_io_error().into());
-        }
-        self.inner
-            .read_at_buf(offset, len, bufs.into(), options)
-            .await
+        let bufs = bufs.into();
+        assert!(
+            len == 0 || len <= bufs.capacity(),
+            "read length exceeds buffer capacity"
+        );
+        self.preflight_read(offset, len)?;
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
     async fn write_at(
@@ -812,9 +833,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return self.inner.write_at(offset, bufs, options).await;
         }
         let sync = options.contains(WriteOptions::SYNC);
-        offset
-            .checked_add(total_bytes)
-            .ok_or(Error::OffsetOverflow)?;
+        if let Some(extent) = self.extent {
+            extent.write_range(offset, total_bytes)?;
+        } else {
+            offset
+                .checked_add(total_bytes)
+                .ok_or(Error::OffsetOverflow)?;
+        }
         let (should_fail, write_retention) = self.ctx.check_write_fault();
         let _mutation = self.generation.mutation.lock().await;
         if should_fail {
@@ -882,6 +907,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        if let Some(extent) = self.extent {
+            extent.resize_len(len)?;
+        }
         let (should_fail, partial_rate, retain) = self.ctx.check_resize_fault();
         let _mutation = self.generation.mutation.lock().await;
         if should_fail {
@@ -2107,12 +2135,107 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        for offset in [0, i64::MAX as u64] {
+        assert!(matches!(
+            blob.read_at(0, 4, ReadOptions::default()).await,
+            Err(Error::Io(_))
+        ));
+        assert!(matches!(
+            blob.read_at(i64::MAX as u64, 4, ReadOptions::default())
+                .await,
+            Err(Error::OffsetOverflow)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_opaque_storage_read_fault_can_precede_backing_range_validation() {
+        let rng: BoxDynRng = Box::new(StdRng::seed_from_u64(42));
+        let config = Arc::new(RwLock::new(Config::default().read(probability!(1.0))));
+        let storage = Storage::new(
+            crate::mocks::Storage::new(),
+            Arc::new(Mutex::new(rng)),
+            config.clone(),
+        );
+        let (blob, _) = storage.open("partition", b"test").await.unwrap();
+        let offset = i64::MAX as u64;
+        let options = ReadOptions::default();
+
+        // Only directly wrapped memory blobs can preflight the backend's range.
+        assert!(matches!(
+            blob.read_at(offset, 4, options).await,
+            Err(Error::Io(_))
+        ));
+        assert!(matches!(
+            blob.read_at_buf(offset, 4, IoBufMut::with_capacity(4), options)
+                .await,
+            Err(Error::Io(_))
+        ));
+        config.write().read_rate = None;
+        assert!(matches!(
+            blob.read_at(offset, 4, options).await,
+            Err(Error::OffsetOverflow)
+        ));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "read length exceeds buffer capacity")]
+    async fn test_read_fault_cannot_mask_insufficient_capacity() {
+        let h = Harness::new(Config::default().read(probability!(1.0)));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        let _ = blob
+            .read_at_buf(u64::MAX, 1, IoBufMut::default(), ReadOptions::default())
+            .await;
+    }
+
+    #[test]
+    fn test_invalid_memory_reads_do_not_sample_faults() {
+        crate::deterministic::Runner::default().start(|_| async {
+            // The first sample lets a read through and the second injects a fault.
+            let rng: BoxDynRng = ScriptedRng::new([u64::MAX, 0, 0]).into();
+            let storage = Storage::new(
+                MemStorage::new(),
+                Arc::new(Mutex::new(rng)),
+                Arc::new(RwLock::new(Config::default().read(probability!(0.5)))),
+            );
+            let (blob, _) = storage.open("partition", b"test").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+
+            let options = ReadOptions::default();
+            // Empty reads still validate their start, but never consume a fault sample.
+            assert!(blob.read_at(5, 0, options).await.unwrap().is_empty());
             assert!(matches!(
-                blob.read_at(offset, 4, ReadOptions::default()).await,
+                blob.read_at(u64::MAX, 0, options).await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(
+                blob.read_at_buf(5, 0, IoBufMut::with_capacity(4), options)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                blob.read_at_buf(u64::MAX, 0, IoBufMut::default(), options)
+                    .await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(matches!(
+                blob.read_at(u64::MAX, 4, options).await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(matches!(
+                blob.read_at_buf(u64::MAX, 4, IoBufMut::with_capacity(4), options)
+                    .await,
+                Err(Error::OffsetOverflow)
+            ));
+            let read = blob.read_at(0, 4, options).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            assert!(matches!(
+                blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), options)
+                    .await,
                 Err(Error::Io(_))
             ));
-        }
+        });
     }
 
     #[tokio::test]
