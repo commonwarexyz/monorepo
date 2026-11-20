@@ -6,6 +6,12 @@
 //!
 //! _See [super::variable] for a journal that supports variable length items._
 //!
+//! # Prefetching
+//!
+//! Each call to [`super::Contiguous::prefetch`] has a page budget of half the page cache's Main
+//! capacity (rounded down, with a minimum of one page). The journal warms pages in position order,
+//! skips ranges that exceed the budget, and logs a warning if it skips pages.
+//!
 //! # Format
 //!
 //! Data stored in a `fixed::Journal` is persisted in one of many Blobs. Each `Blob` contains a

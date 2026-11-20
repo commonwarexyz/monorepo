@@ -3,6 +3,13 @@
 //! The data blobs are the source of truth. The offsets journal provides indexed access and records
 //! the preferred recovery point for replaying data to rebuild offset entries.
 //!
+//! # Prefetching
+//!
+//! Each call to [`Contiguous::prefetch`] has a page budget of half the page cache's Main capacity
+//! (rounded down, with a minimum of one page). Frame and offset pages share that budget. Frames
+//! whose offsets are already available go first. The journal skips ranges that exceed the budget
+//! and logs a warning if it skips pages.
+//!
 //! # Durability
 //!
 //! Data blobs follow the same rollover pipeline as the fixed journal: filling the tail seals it
