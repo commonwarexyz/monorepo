@@ -19,8 +19,8 @@ too ([#5810]).
 QMDB operations now share one tag table: commit is 0, update is 1, delete is 2,
 set is 3, and append is 4. `qmdb::operation` now exports the tags as
 `COMMIT_CONTEXT`, `UPDATE_CONTEXT`, `DELETE_CONTEXT`, `SET_CONTEXT`, and
-`APPEND_CONTEXT`. The new tags change the encoded operations of Any, Current,
-Immutable, and Store, and the appends of Keyless. Every root and proof that
+`APPEND_CONTEXT`. The new tags change how Any, Current, Immutable, and Store
+encode operations and how Keyless encodes appends. Every root and proof that
 commits to a retagged operation also changes, including the genesis roots of
 Any, Current, and Immutable. No setting keeps the previous encoding. Rebuild
 Store in fresh partitions. Rebuild or resync each of the other databases into
@@ -43,9 +43,9 @@ and the digests pinned there. At startup, the databases and the journal now
 replay the retained operations to rebuild the tree in memory. No setting keeps
 the previous layout. The rebuild or resync that the new tags require also moves
 these databases to the new layout. Nothing in this release reads or removes the
-old node journal partitions, the ones that `journal_partition` named. Delete
-those partitions, and the rest of each replaced database, once nothing needs
-them. Compact databases keep their witness journal, and the standalone
+old node journal partitions that `journal_partition` named. Delete those
+partitions, and the rest of each replaced database, once nothing needs them.
+Compact databases keep their witness journal, and the standalone
 `merkle::full::Merkle` keeps its node journal ([#5158]).
 
 `sync::CompactTarget` is removed, so describe a compact database's state with a
@@ -80,14 +80,15 @@ type. Immutable and Keyless `Config` gain `init_concurrency`, and their
 `init_concurrency` to 1 to replay on the calling task ([#5158]).
 
 `FixedConfig` and `VariableConfig` are removed from `qmdb::any` and
-`qmdb::current`. Use the `Config` that each fixed and variable module now
-exports beside its `Db`, including the partitioned modules ([#5575]). Current's
+`qmdb::current`. Use the `Config` that each fixed and variable module, including
+each partitioned module, now exports beside its `Db` ([#5575]). Current's
 ordered, unordered, fixed, variable, and partitioned modules now re-export
 `Operation` and `Update`. Current's partitioned modules gain `p256` and `p64k`,
-as Any's have, each with a `Db` and a `Config` ([#5610]). The free function
-`any::init` is removed, so call `Db::init` on the database type ([#5495]).
-`SnapshotBuild::build_snapshot` and `SnapshotBuild::Concurrency` are removed, so
-rebuild a snapshot by opening the database ([#5158], [#5783]).
+which Any's partitioned modules already have. Both `p256` and `p64k` provide a
+`Db` and a `Config` ([#5610]). The free function `any::init` is removed, so call
+`Db::init` on the database type ([#5495]). `SnapshotBuild::build_snapshot` and
+`SnapshotBuild::Concurrency` are removed, so rebuild a snapshot by opening the
+database ([#5158], [#5783]).
 
 Any, Current, and the full Immutable and Keyless databases no longer report the
 `merkle_journal` and `merkle_metadata` metric families. The frontier's metadata
@@ -130,13 +131,13 @@ takes the Merkle family as a type parameter and gives `is_commit` a default
 implementation. `Committable` now requires `inactivity_floor` and
 `initial_commit`, so implement both on a custom operation type ([#4590]).
 Immutable operations now implement `Committable` ([#5611]). Immutable operations
-no longer implement `operation::Operation`. Use `key` to borrow a key. To
-replace `into_key`, match `immutable::Operation::Set` ([#5644]).
+no longer implement `operation::Operation`. Use `key` to borrow a key. Match
+`immutable::Operation::Set` in place of `into_key` ([#5644]).
 
-Any and Current unmerkleized batches, and the `Staged` batches that `stage`
-returns, now take commit metadata through `with_metadata` instead of an argument
+In Any and Current, unmerkleized batches and the `Staged` batches that `stage`
+returns now take commit metadata through `with_metadata` instead of an argument
 to `merkleize`. `merkleize` now advances the floor with `floor::Proportional`
-and no longer takes a policy. To keep another policy, call `merkleize_with(&db,
+and no longer takes a policy. To use another policy, call `merkleize_with(&db,
 &mut policy)` on an unmerkleized batch or `merkleize_with(slots, unstaged, &db,
 &mut policy)` on a staged batch. Immutable and Keyless batches, including
 compact batches, now take metadata through `with_metadata` and the floor through
@@ -152,8 +153,8 @@ the values swapped ([#5601]). Ordered Any's `get_all` is renamed to
 `get_with_next_key` ([#5603]). Ordered Current gains `get_with_next_key`
 ([#5577], [#5603]). `get_many` now takes a slice of owned or borrowed keys on
 Any, Current, and full Immutable databases and batches. `stage` and `expand` on
-Any and Current now take the same slices. An empty slice literal now needs an
-element type, such as `&[] as &[K]` ([#4886]).
+Any and Current now take the same kind of slice. An empty slice literal now
+needs an element type, as in `&[] as &[K]` ([#4886]).
 
 `size` is removed from Store and full Immutable databases, so read
 `bounds().end` ([#5577]). `size` is also removed from full Keyless merkleized
@@ -173,7 +174,7 @@ returns results in input order. On a batch, `get_many` also reflects the batch's
 own writes and deletes ([#5600]). Store batches now take metadata through
 `with_metadata`, and `finalize` now takes no argument.
 `store::Db::apply_batch(batch)` now applies `floor::Proportional`, so call
-`apply_batch_with(batch, &mut policy)` to keep another policy ([#5577]).
+`apply_batch_with(batch, &mut policy)` to use another policy ([#5577]).
 
 `store::Config`, `Db`, and `Batch` gain a strategy type parameter, and `Config`
 gains `strategy`. Pass `Sequential` to keep reads on the calling thread
@@ -186,11 +187,12 @@ database's `init` is given `Some(max_size)`, it now returns
 `Error::NoRetainedCommit` if pruning prevents it from selecting a commit within
 that bound. For that failure, the new error replaces `HistoricalFloorPruned` on
 compact databases and `Journal(ItemPruned)` on the others ([#5158], [#5791]).
-The `codec_config` docs now state that the setting bounds what a database can
+The `codec_config` docs now state that the setting limits what a database can
 decode and does not limit what the database writes. Check keys, values, and
-commit metadata against that configuration before writing them, because an
-out-of-bounds write can succeed and then fail to decode. For a compact database,
-check commit metadata against `witness.codec_config` ([#5786]).
+commit metadata against that configuration before writing them. A write outside
+those limits can succeed and leave data that the database cannot decode. For a
+compact database, check commit metadata against `witness.codec_config`
+([#5786]).
 
 An Immutable read now panics instead of returning `UnexpectedData` when the
 database's index points at an operation that is not a set. Full Keyless
@@ -211,11 +213,12 @@ Every `ProofExt` method except `verify_multi` takes an exact-size iterator of
 operation references instead of a slice ([#5615]). `verify_multi` takes an
 iterator of location and operation pairs instead of a slice ([#5633]).
 
-Current proofs now verify only through their own types. `RangeProof::verify`
-replaces `Db::verify_range_proof`, and `RangeProof::verify_and_extract_digests`
-replaces the free `verify_proof_and_extract_digests`. Unordered Current's
-`KeyValueProof` is now a struct that wraps an `OperationProof` in its `proof`
-field. `KeyValueProof::verify` replaces `Db::verify_key_value_proof` ([#5530]).
+Current proofs can now be verified only by calling a method on the proof's own
+type. `RangeProof::verify` replaces `Db::verify_range_proof`, and
+`RangeProof::verify_and_extract_digests` replaces the free
+`verify_proof_and_extract_digests`. Unordered Current's `KeyValueProof` is now a
+struct that wraps an `OperationProof` in its `proof` field.
+`KeyValueProof::verify` replaces `Db::verify_key_value_proof` ([#5530]).
 `RangeProof::verify` and `verify_with_chunk_size` now take an exact-size
 iterator of operation references ([#5615]). `RangeProof` gains
 `verify_and_extract_digests_with_chunk_size` for a chunk size chosen at runtime
@@ -225,13 +228,13 @@ Current `key_value_proof` now borrows its key and returns `(proof, value)`
 ([#5529]). Current `Db::pinned_nodes_at` is renamed to `ops_pinned_nodes_at`.
 The other databases keep `pinned_nodes_at` ([#5607]). `KEY_VALUE_CONTEXT` and
 `COMMIT_CONTEXT` move from `current::ordered` to `current::ordered::proof`
-([#5613]). Current `Db::ops_root_witness` now returns a reference without
-awaiting. Current `MerkleizedBatch` gains `chunks`, `pruned_chunks`,
+([#5613]). Current `Db::ops_root_witness` is no longer async and now returns a
+reference. Current `MerkleizedBatch` gains `chunks`, `pruned_chunks`,
 `grafted_nodes`, `ops_pinned_nodes`, and `ops_root_witness`. These methods
-expose what applying the batch publishes ([#5562]).
+expose what the batch publishes when it is applied ([#5562]).
 
 A historical proof or sync request on a non-compact database now returns
-`Error::NotCommitBoundary` for a size of zero. The request returns the same
+`Error::NotCommitBoundary` for a size of zero. The request now also returns that
 error when the last operation within the requested size is retained and is not a
 commit ([#5785]).
 
@@ -241,19 +244,20 @@ commit ([#5785]).
 no longer public ([#5313]). `Target::new` is removed, so build `Target { root,
 range }` ([#5613]). `sync::Database` gains `init`, `initial_target`, `target`,
 and `prune_to_target`. Read `target().root` in place of `root`. The new
-`sync::MerkleizedBatch` trait reports the `root` and `target` that applying a
-batch reaches. Compact sync now returns `EngineError::InvalidTarget` for a
-target that covers more than the last commit. `InvalidTarget` now carries
-`bounds` instead of `lower_bound_pos` and `upper_bound_pos` ([#4590]).
+`sync::MerkleizedBatch` trait reports the `root` and `target` that a database
+reaches when it applies the batch. Compact sync now returns
+`EngineError::InvalidTarget` for a target that covers more than the last commit.
+`InvalidTarget` now carries `bounds` instead of `lower_bound_pos` and
+`upper_bound_pos` ([#4590]).
 
-`sync::Database` is now sealed to the databases that `commonware-storage`
-provides. The trait no longer exposes `from_sync_result`, `persist_sync_result`,
-or `local_pinned_nodes`, so run a sync through `sync::sync` ([#5795]). A sync
-now persists its frontier and prunes older operations only after it verifies the
-target root. After an interrupted sync, call `sync::sync` again with a trusted
-target ([#5158]). When the destination database holds none of the target's
-operations, a sync now discards that database's leftover Merkle state before it
-appends fetched operations ([#5665]).
+`sync::Database` is now sealed, so only the databases that `commonware-storage`
+provides can implement it. The trait no longer exposes `from_sync_result`,
+`persist_sync_result`, or `local_pinned_nodes`, so run a sync through
+`sync::sync` ([#5795]). A sync now persists its frontier and prunes older
+operations only after it verifies the target root. After an interrupted sync,
+call `sync::sync` again with a trusted target ([#5158]). When the destination
+database holds none of the target's operations, a sync now discards that
+database's leftover Merkle state before it appends fetched operations ([#5665]).
 
 `qmdb::compact` is now public and exports `Db`, `Config`, `Operation`,
 `UnmerkleizedBatch`, `MerkleizedBatch`, and `initial_root`. The Immutable and
@@ -272,54 +276,55 @@ The `qmdb.keyless.compact.*` and `qmdb.immutable.compact.*` spans are renamed to
 
 `Recovery` replaces the `Replay` types of the segmented fixed, variable, and
 `Oversized` journals, and `replay` is removed from all three. Read an open
-segmented journal or `Oversized` store with `get` at known positions ([#5663],
-[#5664], [#5671]). Dropping a pending `Recovery::next` on a segmented fixed,
-variable, or `Oversized` journal now ends that recovery. The next call to `next`
-returns `Error::ReplayInterrupted` and `finish` returns `Error::ReplayFailed`,
-so open the journal again ([#5535]).
+segmented or `Oversized` journal with `get` at known positions ([#5663],
+[#5664], [#5671]). Dropping a pending `Recovery::next` on any of the three
+journals now ends that recovery. The next call to `next` returns
+`Error::ReplayInterrupted` and `finish` returns `Error::ReplayFailed`, so open
+the journal again ([#5535]).
 
 Segmented variable `Journal::init` now takes the `ReadOptions` that `replay`
 took and returns a `Recovery`. Drain `Recovery::next` until it returns `None`,
 then call `finish` to get the journal. `Config` gains `replay_buffer`, which
-sizes the reads of recovery and of `init_at_most`. Recovery now reads every
-section from its first item ([#5664]).
+sets the size of the replay buffer for recovery and `init_at_most`. Recovery now
+reads every section from its first item ([#5664]).
 
 Segmented fixed `Journal::init` is removed. Open the journal by calling
-`Journal::preflight_floors` with an empty map, which sets no floors, and the
-`ReadOptions` that `replay` took. Then drain `Recovery::next` and await
-`finish`. To restore an exact durable checkpoint, call `preflight_restore` with
-the section and byte size that the checkpoint records, then await `finish`
+`Journal::preflight_floors` with an empty map and the `ReadOptions` that
+`replay` took. An empty map sets no floors. Then drain `Recovery::next` and
+await `finish`. To restore an exact durable checkpoint, call `preflight_restore`
+with the section and byte size that the checkpoint records, then await `finish`
 without draining. `Config` gains `replay_buffer`, and `init_at_most` keeps its
 signature ([#5663], [#5671]).
 
 `Oversized::init`, `init_at_most`, and `init_with_metadata_at_most` are removed.
 `init_with_metadata` is renamed to `init_with_markers` and now returns a
-`Recovery`. Pass the same marker partition for a store that already used
-markers, or a new, empty partition for a store that relied on `Oversized::init`.
-With a new, empty partition, recovery now checks each section from its first
-entry and truncates the section at the first missing, incomplete, or
-checksum-invalid value. In both cases, drain `next` and await `finish` to get
-the store. For a store that already used markers, `finish` replaces
-`finish_tracked`. Open a new store with `init_with_checkpoint` and `(0, 0)`. To
-restore an existing store to a checkpoint, pass `init_with_checkpoint` a
-checkpoint that the store's owner published after syncing the data the
-checkpoint covers. `init_with_metadata_at_most` has no replacement, so a store
-opened with markers cannot be opened up to a bound. `Glob::init` is removed, so
-call `glob::Recovery::init` and then `finish` ([#5663]).
+`Recovery`. Pass the same marker partition for a journal that already used
+markers, or a new, empty partition for a journal that relied on
+`Oversized::init`. With a new, empty partition, recovery now checks each section
+from its first entry and truncates the section at the first missing, incomplete,
+or checksum-invalid value. In both cases, drain `next` and await `finish` to get
+the journal. For a journal that already used markers, `finish` replaces
+`finish_tracked`. Open a new journal with `init_with_checkpoint` and `(0, 0)`.
+To restore an existing journal to a checkpoint, pass that checkpoint to
+`init_with_checkpoint`. The journal's owner must have published the checkpoint
+after syncing the data it covers. `init_with_metadata_at_most` has no
+replacement, so there is no way to open a journal with markers up to a bound.
+`Glob::init` is removed, so call `glob::Recovery::init` and then `finish`
+([#5663]).
 
 After an interrupted `destroy`, a contiguous variable journal now reopens
 through ordinary crash recovery or as an empty journal at position zero, as the
 contiguous fixed journal already does. `Queue` now reopens the same way. After
-an interrupted `destroy`, an unbounded Store `init` now reopens at the last
-retained commit or as a new database ([#5665]).
+an interrupted `destroy`, an unbounded `init` of Store now reopens the database
+at the last retained commit or as a new database ([#5665]).
 
 If an index already holds a record, `Ordinal::put` now leaves that record
 unchanged and still returns `Ok`. Write a replacement at a new index. A
 segmented fixed journal whose item type encodes to zero bytes no longer
 compiles. The `Freezer::destroy` docs now state that a checkpoint returned
 earlier stops describing the stored data once `destroy` is called. Retire the
-checkpoint first, and reopen with `None` after an interrupted `destroy`
-([#5687]).
+checkpoint before calling `destroy`, and reopen with `None` after an interrupted
+`destroy` ([#5687]).
 
 `contiguous::Mutable` gains `prune_target`, which reports where pruning to a
 given position stops. The default clamps the position to the journal's bounds,
@@ -333,10 +338,10 @@ prefix ([#5766]).
 `Metadata::init` now returns `Error::Corruption` instead of panicking when a
 blob passes its checksum but does not decode ([#5158]). `RMap::missing_items`
 now returns an empty vector for a limit of zero instead of panicking ([#5772]).
-A synchronous cached read of one fixed journal item of at most 128 encoded bytes
-now uses a stack buffer ([#5261]). The `Queue` docs now state that reopening can
-deliver appends that were never committed, including part of an interrupted
-`enqueue_bulk`. Handle duplicate deliveries ([#5773]).
+A synchronous cached read of a single fixed journal item now uses a stack buffer
+if the item encodes to at most 128 bytes ([#5261]). The `Queue` docs now state
+that reopening can deliver appends that were never committed, including part of
+an interrupted `enqueue_bulk`. Handle duplicate deliveries ([#5773]).
 
 ### Merkle Trees and Authenticated Journals
 
@@ -355,8 +360,8 @@ their elements as an exact-size iterator instead of a slice. BMT
 `verify_range_inclusion` now takes an exact-size iterator of digests ([#5615]).
 
 With the `commonware-storage/std` feature, `merkle::batch::UnmerkleizedBatch`
-gains `add_many`, which appends a slice of items and hashes whole subtrees on
-the batch's strategy. Pass the same hasher to `add_many` and `merkleize`
+gains `add_many`, which appends a slice of items and uses the batch's strategy
+to hash whole subtrees. Pass the same hasher to `add_many` and `merkleize`
 ([#4942]).
 
 A custom Merkle family must now implement `Family::birth_offset` ([#4942]).
@@ -381,11 +386,12 @@ operation ([#5158]).
 The authenticated journal no longer implements `contiguous::Mutable`, and
 `journal::Error::Merkle` is removed. Call the authenticated journal's own
 methods, apply a journal batch in place of `append_many`, and match
-`authenticated::Error::Merkle` ([#5794]). `Journal::destroy` now removes the
-operation log first and the frontier second, and Current removes its grafted
-metadata last. Reopening after an interrupted destroy now finds the previous
-database or an empty one, and discards any frontier or grafted metadata left
-beside an empty log ([#5158], [#5665]).
+`authenticated::Error::Merkle` in place of `journal::Error::Merkle` ([#5794]).
+`Journal::destroy` now removes the operation log first and the frontier second,
+and Current removes its grafted metadata last. After an interrupted destroy, a
+database now reopens as the previous database or as an empty one. Reopening also
+discards any frontier or grafted metadata left beside an empty log ([#5158],
+[#5665]).
 
 ### Broadcast and Networking
 
@@ -418,26 +424,27 @@ write `Rayon::new(ThreadPoolBuilder::new(n))`. `ThreadPoolBuilder` no longer
 implements `Default`, and `num_threads` is removed. The builder no longer reads
 `RAYON_NUM_THREADS` or `RAYON_RS_NUM_CPUS`, so set the worker count explicitly.
 The `thread_name` and `start_handler` callbacks now receive a `WorkerPosition`
-instead of an index. Read `index` for the previous value, or `group` and
-`offset` for the worker's place in its group ([#5508]).
+instead of an index. Read `index` for the index the callbacks received before,
+or `group` and `offset` for the worker's group and its position in that group
+([#5508]).
 
-On Linux, `Rayon::new` can now group its workers by last-level cache. For the
-threads it starts in a group that has a cache, `Rayon` asks the kernel to keep
-those threads on the CPUs that share that cache. The tokio and io_uring runtimes
-now build their strategies with `Rayon::new`, so those strategies can group
-workers the same way. When a thread outside any pool calls `Rayon`, the call can
-now run with that thread limited to one group's CPUs. When `Rayon` limits a
-caller to one group's CPUs, it asks the kernel to restore the caller's previous
-CPU affinity when the call ends. A thread that the caller starts while limited
-inherits the limit. A pool passed to `Rayon::with_pool` stays one group and
-keeps its threads' affinity. Every pool on macOS also stays one group and keeps
-its threads' affinity. `Rayon::new` now names the threads it starts
+On Linux, `Rayon::new` can now group its workers by last-level cache. For each
+group assigned a cache, `Rayon` asks the kernel to keep the threads it started
+on the CPUs that share that cache. The tokio and io_uring runtimes now build
+their strategies with `Rayon::new`, so those strategies can group workers the
+same way. When a thread outside any pool calls `Rayon`, the call can now run
+with that thread limited to one group's CPUs. When `Rayon` limits a caller to
+one group's CPUs, it asks the kernel to restore the caller's previous CPU
+affinity when the call ends. A thread that the caller starts while limited
+inherits the limit. A pool passed to `Rayon::with_pool` stays a single group and
+keeps its threads' affinity. Every pool on macOS also stays a single group and
+keeps its threads' affinity. `Rayon::new` now names the threads it starts
 `group<g>-<w>` unless the builder sets `thread_name` ([#5508]).
 
-When the caller is outside its pool, `Strategy::join` on `Rayon` can now run
-both closures in sequence on the caller. Neither closure may rely on the other
-running on a worker. When `join` runs both closures on such a caller, the second
-closure does not run if the first panics ([#5508]).
+`Strategy::join` on `Rayon` can now run both closures in sequence on the caller
+when the caller is outside its pool. Neither closure may rely on the other
+running on a worker. When `join` runs the closures in sequence on a caller
+outside the pool, the second closure does not run if the first panics ([#5508]).
 
 To decide whether to try running work serially on the caller, `Rayon` now
 measures the time threads spend on the work instead of the elapsed time. Time
@@ -487,9 +494,9 @@ With an enabled `state_sync::Plan`, the DKG orchestrator now writes each epoch's
 boundary block to a checkpoint before it acknowledges the block. A validator
 with no applicable state-sync record can now restart from that checkpoint after
 marshal has pruned the block. The probe now serves boundary certificates and
-blocks from checkpoints that hold a finalization. The probe's discovery now
-samples again when its boundary fetch runs out of responders without finding the
-block. Probe messages are unchanged ([#5555]).
+blocks from checkpoints that hold a finalization. During discovery, the probe
+now samples again when its boundary fetch runs out of responders without finding
+the block. Probe messages are unchanged ([#5555]).
 
 `dkg::state_sync::Plan` now takes the signing scheme and the marshal variant as
 `Plan<S, MV>`. `state_sync::Config` gains a type parameter and
@@ -510,21 +517,21 @@ state-sync record still needs marshal to hold the current epoch's boundary block
 Marshal's `Mailbox::get_finalization` now also checks marshal's cache when the
 archive holds the block at the requested height without that block's
 finalization ([#5555]). The `SecretStore` docs now state that reads after a
-restart must reflect the state that earlier runs left. No operation from an
-earlier run may change the store once those reads begin ([#5753]). The
-`DatabaseSet` docs now state that a caller must discard the whole set and every
-handle to its databases when a pending `apply`, `finalize`, or `prune` is
-cancelled ([#5540]).
+restart must reflect the state that earlier runs left. The `SecretStore` docs
+also state that no operation from an earlier run may change the store once those
+reads begin ([#5753]). The `DatabaseSet` docs now state that a caller must
+discard the whole set and every handle to its databases when a pending `apply`,
+`finalize`, or `prune` is cancelled ([#5540]).
 
-`stateful::db::qmdb` adds `Unmerkleized<D>` and `Merkleized<D>`, which wrap the
-batches of Any, Current, Immutable, Keyless, and compact databases, where `D` is
-the database type. They replace `AnyUnmerkleized`, `AnyMerkleized`,
+`stateful::db::qmdb` adds `Unmerkleized<D>` and `Merkleized<D>`, where `D` is
+the database type. These types wrap the batches of Any, Current, Immutable,
+Keyless, and compact databases. They replace `AnyUnmerkleized`, `AnyMerkleized`,
 `CurrentUnmerkleized`, `CurrentMerkleized`, and the Immutable and Keyless
 wrappers. The modules of the Immutable and Keyless wrappers are no longer
-public. `Merkleized<D>` provides `target` ([#4590]). The new sealed
-`stateful::db::qmdb::Qmdb` trait is the bound on `D` ([#4590], [#5795]). Ordered
-Any and partitioned Any and Current databases now implement `ManagedDb` and
-`StateSyncDb`. Compact databases now use `sync::Target` as their
+public. `Merkleized<D>` provides `target` ([#4590]). `D` must implement the new
+sealed `stateful::db::qmdb::Qmdb` trait ([#4590], [#5795]). Ordered Any
+databases and partitioned Any and Current databases now implement `ManagedDb`
+and `StateSyncDb`. Compact databases now use `sync::Target` as their
 `ManagedDb::SyncTarget` ([#4590]).
 
 `glue::transfers` now settles balances in the account's own amount type.
@@ -544,21 +551,21 @@ records the `write_at`, `resize`, `sync`, and `start_sync` spans of
 runner drops queued messages at shutdown, even when the root task finished
 without error ([#5597]). `Spawner::spawn` no longer makes the compiler prove
 `Send` a second time for a spawned future. That second proof could exceed the
-recursion limit for deeply nested futures ([#5804]). Spawning under a parent
-with many children, polling a task that stays pending, and batched page cache
-reads each now do less work ([#5526], [#5527], [#5622]).
+recursion limit for deeply nested futures ([#5804]). The runtime now does less
+work when it spawns under a parent with many children, polls a task that stays
+pending, or reads from the page cache in batches ([#5526], [#5527], [#5622]).
 
 ### Encoding and Utilities
 
-`commonware-codec` adds `Uint<BITS, LIMBS>` and its `U256` alias, unsigned
-integers of a fixed width that encode as big-endian bytes. `Uint` provides
-`ZERO`, `ONE`, `MAX`, `BYTES`, `from_limbs`, `as_limbs`, `leading_zeros`,
-`overflowing_add`, and `overflowing_sub`. `varint::UInt` now encodes a `Uint`,
-and `varint::Decoder` now reads a `Uint`. The varint of a `Uint` has the same
-bytes as the varint of an unsigned primitive that holds the same value.
-`commonware-utils` adds the `Amount` trait, which provides `ZERO` and checked
-and overflowing addition and subtraction for `u8`, `u16`, `u32`, `u64`, `u128`,
-and `Uint` ([#5657]).
+`commonware-codec` adds `Uint<BITS, LIMBS>` and its `U256` alias. A `Uint` is an
+unsigned integer of a fixed width that encodes as big-endian bytes. `Uint`
+provides `ZERO`, `ONE`, `MAX`, `BYTES`, `from_limbs`, `as_limbs`,
+`leading_zeros`, `overflowing_add`, and `overflowing_sub`. `varint::UInt` now
+encodes a `Uint`, and `varint::Decoder` now reads a `Uint`. The varint of a
+`Uint` has the same bytes as the varint of an unsigned primitive that holds the
+same value. `commonware-utils` adds the `Amount` trait, which provides `ZERO`
+and checked and overflowing addition and subtraction. `u8`, `u16`, `u32`, `u64`,
+`u128`, and `Uint` implement `Amount` ([#5657]).
 
 `Viewing::new` is no longer `const`. `Viewing` gains `split_to`, which returns a
 cursor over the next `len` bytes and advances the original cursor past them
@@ -575,8 +582,8 @@ of references instead of a slice ([#4886]).
 ([#4886]). The `Output::revealed` docs now state that the set lists the players
 whose shares the selected dealers may have exposed in the round. The set can
 omit a player whose share leaked outside the protocol. The set can also omit a
-player whose new share an adversary can rebuild from an earlier share and this
-round's reveals ([#5706], [#5708]).
+player when an adversary can rebuild that player's new share from an earlier
+share and this round's reveals ([#5706], [#5708]).
 
 On x86-64 CPUs with SHA-NI, AVX2, SSSE3, and SSE4.1, `Sha256::hash` gains a fast
 path for single messages shaped like Merkle leaves and nodes ([#5719]). The
@@ -588,10 +595,10 @@ slowdown on affected CPUs ([#5713]). Both changes leave digests unchanged
 
 Every Commonware package now declares Rust 1.95.0 as its minimum supported
 version, which the workspace already required. `commonware_utils::sync` now
-re-exports its locks and guards from `parking_lot` 0.13. Move a direct
+re-exports its locks and guards from `parking_lot` 0.13. Update a direct
 `parking_lot` dependency to 0.13 wherever its types are used with Commonware's
-([#5691]). The workspace lockfile now selects `crypto-bigint` 0.7.11 instead of
-the yanked 0.7.5 ([#5763]).
+types ([#5691]). The workspace lockfile now selects `crypto-bigint` 0.7.11
+instead of the yanked 0.7.5 ([#5763]).
 
 ### Clearing
 
@@ -648,13 +655,14 @@ through its own manager now counts toward `max_peers_per_set` even when the set
 omits that peer ([#5572]).
 
 With the `commonware-runtime/test-utils` feature, `commonware_runtime::mocks`
-adds `ReadGate`, `ReadGateContext`, and `ReadGateBlob`, which park the reads of
+adds `ReadGate`, `ReadGateContext`, and `ReadGateBlob`, which park reads from
 one storage partition. `ReadGateContext::new` wraps a context and returns the
 wrapper with a disarmed gate. `ReadGate::arm` parks every later read of the
 partition, and `disarm` lets new reads through without releasing the parked
 ones. `blocked` counts the reads parked since the last `arm` ([#5535]).
-`ReadGate::parked` returns a receiver that a later parked read signals.
-`ReadGateContext` implements `Spawner` when the wrapped context does ([#5158]).
+`ReadGate::parked` returns a receiver that gets a signal when a later read is
+parked. `ReadGateContext` implements `Spawner` when the wrapped context does
+([#5158]).
 
 With the `fuzz` feature, `commonware-codec`, `commonware-parallel`, and
 `commonware-utils` each add a `fuzz::Plan`, whose `run` executes one generated
@@ -673,8 +681,8 @@ the `commonware-codec/arbitrary` feature, `Uint` implements `Arbitrary`
 `conformance_tests!` now finds `conformance.toml` through `CARGO_MANIFEST_DIR`
 when a test runs, so set that variable to run a generated test binary directly.
 `test_group` now looks for the nextest config from the calling crate unless
-`COMMONWARE_NEXTEST_CONFIG` is set ([#5524]). `commonware-bench` adds `Inputs`,
-whose `current` picks `Smoke`, `Standard`, or `Full` inputs when a benchmark
+`COMMONWARE_NEXTEST_CONFIG` is set ([#5524]). `commonware-bench` adds `Inputs`.
+`Inputs::current` picks `Smoke`, `Standard`, or `Full` inputs when a benchmark
 runs. Set `COMMONWARE_BENCH_FULL=1` for `Full` instead of rebuilding with a cfg
 flag ([#5588]).
 
