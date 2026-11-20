@@ -23,6 +23,8 @@ pub use handle::{AbortOnDrop, Handle};
 pub(crate) use handle::{Aborter, FactoryGuard, MetricHandle, Panicker};
 
 mod cell;
+mod pinned;
+pub(crate) use pinned::Pinned;
 pub use cell::Cell as ContextCell;
 
 pub(crate) mod supervision;
