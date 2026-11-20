@@ -3,6 +3,7 @@ use crate::{
     storage::{
         Generation, Pending, Sender, Tracker,
         hold::{Held, Hold},
+        physical_end, physical_range, read_offset,
     },
 };
 use cfg_if::cfg_if;
@@ -16,7 +17,6 @@ use futures::{StreamExt as _, stream};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
-    alloc,
     fs::File,
     io::IoSlice,
     ops::Deref,
@@ -298,6 +298,16 @@ impl Blob {
         self.shared.tracker.skipped()
     }
 
+    fn read_buffered_exact_at(file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        file.read_exact_at(buf, offset).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                Error::BlobInsufficientLength
+            } else {
+                err.into()
+            }
+        })
+    }
+
     #[cfg(target_os = "linux")]
     fn read_exact_at(
         mut cache: Cache,
@@ -306,11 +316,14 @@ impl Blob {
         mut offset: u64,
     ) -> Result<(), Error> {
         if !cache.is_disabled(&file.dont_cache_supported) {
-            file.read_exact_at(buf, offset)?;
-            return Ok(());
+            return Self::read_buffered_exact_at(file, buf, offset);
         }
 
         while !buf.is_empty() {
+            // Some 32-bit targets expose a narrower offset for the cache hint than for FileExt.
+            let Ok(position) = libc::off_t::try_from(offset) else {
+                return Self::read_buffered_exact_at(file, buf, offset);
+            };
             let iovec = libc::iovec {
                 iov_base: buf.as_mut_ptr().cast(),
                 iov_len: buf.len(),
@@ -318,13 +331,7 @@ impl Blob {
             // SAFETY: `file` owns a valid fd for this call. `iovec` describes the exclusive
             // writable slice borrowed for the duration of the syscall.
             let ret = unsafe {
-                libc::preadv2(
-                    file.as_raw_fd(),
-                    &iovec,
-                    1,
-                    offset.try_into().map_err(|_| Error::OffsetOverflow)?,
-                    libc::RWF_DONTCACHE,
-                )
+                libc::preadv2(file.as_raw_fd(), &iovec, 1, position, libc::RWF_DONTCACHE)
             };
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
@@ -332,15 +339,14 @@ impl Blob {
                     continue;
                 }
                 if cache.retry_cached(&file.dont_cache_supported, &err, true) {
-                    file.read_exact_at(buf, offset)?;
-                    return Ok(());
+                    return Self::read_buffered_exact_at(file, buf, offset);
                 }
                 return Err(err.into());
             }
 
             let bytes_read = ret as usize;
             if bytes_read == 0 {
-                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+                return Err(Error::BlobInsufficientLength);
             }
             let (_, unread) = buf.split_at_mut(bytes_read);
             buf = unread;
@@ -353,8 +359,7 @@ impl Blob {
 
     #[cfg(not(target_os = "linux"))]
     fn read_exact_at(_: Cache, file: &Shared, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        file.read_exact_at(buf, offset)?;
-        Ok(())
+        Self::read_buffered_exact_at(file, buf, offset)
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -449,13 +454,6 @@ impl Blob {
     }
 }
 
-/// Return the physical offset of the `len` logical bytes at `offset` in a blob whose data starts at
-/// `data_offset`, or `None` when that offset overflows or no buffer can hold `len` bytes.
-fn physical_offset(data_offset: u64, offset: u64, len: usize) -> Option<u64> {
-    alloc::Layout::array::<u8>(len).ok()?;
-    offset.checked_add(data_offset)
-}
-
 impl crate::Blob for Blob {
     async fn read_at(
         &self,
@@ -463,36 +461,32 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        // Reject a length no buffer can hold before allocating.
-        alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
-
-        // An uncached read first tries a direct read of the range's aligned superset and hands out
-        // the aligned allocation narrowed to the range without copying it.
-        #[cfg(target_os = "linux")]
-        if options.contains(ReadOptions::DONT_CACHE) && len > 0 {
-            let offset = offset
-                .checked_add(self.data_offset)
-                .ok_or(Error::OffsetOverflow)?;
-            let file = self.shared.clone();
-            return task::spawn_blocking(move || {
-                if let Some(buf) = aio::read_direct(&file, offset, len) {
-                    return Ok(buf.into());
-                }
-
-                // Otherwise read the range through the page cache into a new buffer, with the
-                // RWF_DONTCACHE hint until the kernel or filesystem rejects it.
-                let mut buf = IoBufMut::with_capacity(len);
-                // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
-                unsafe { buf.set_len(len) };
-                Self::read_exact_at(Cache::Disabled, &file, buf.as_mut(), offset)?;
-                Ok(buf.into())
-            })
-            .await
-            .map_err(|_| Error::ReadFailed)?;
+        let offset = read_offset(self.data_offset, offset, len).ok_or(Error::OffsetOverflow)?;
+        if len == 0 {
+            return Ok(IoBufsMut::default());
         }
-
-        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
-            .await
+        let file = self.shared.clone();
+        let cache = if options.contains(ReadOptions::DONT_CACHE) {
+            Cache::Disabled
+        } else {
+            Cache::Enabled
+        };
+        task::spawn_blocking(move || {
+            // Hand out the aligned buffer directly when it covers the range.
+            #[cfg(target_os = "linux")]
+            if matches!(cache, Cache::Disabled)
+                && let Some(buf) = aio::read_direct(&file, offset, len)
+            {
+                return Ok(buf.into());
+            }
+            let mut buf = IoBufMut::with_capacity(len);
+            // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
+            unsafe { buf.set_len(len) };
+            Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
+            Ok(buf.into())
+        })
+        .await
+        .map_err(|_| Error::ReadFailed)?
     }
 
     async fn read_at_buf(
@@ -505,9 +499,7 @@ impl crate::Blob for Blob {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled below before the buffers are returned.
         unsafe { bufs.set_len(len) };
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
+        let offset = read_offset(self.data_offset, offset, len).ok_or(Error::OffsetOverflow)?;
         if len == 0 {
             return Ok(bufs);
         }
@@ -562,7 +554,7 @@ impl crate::Blob for Blob {
         // a batch with a bad range yields only its error.
         if ranges
             .iter()
-            .any(|&(offset, len)| physical_offset(self.data_offset, offset, len).is_none())
+            .any(|&(offset, len)| read_offset(self.data_offset, offset, len).is_none())
         {
             return stream::iter([Err(Error::OffsetOverflow)]).boxed();
         }
@@ -586,7 +578,7 @@ impl crate::Blob for Blob {
         // Every range is checked before any read starts, so a bad range leaves none behind.
         let mut offsets = Vec::with_capacity(ranges.len());
         for &(offset, len) in ranges {
-            let Some(offset) = physical_offset(self.data_offset, offset, len) else {
+            let Some(offset) = read_offset(self.data_offset, offset, len) else {
                 return Handle::ready(Err(Error::OffsetOverflow));
             };
             offsets.push((offset, len));
@@ -627,19 +619,12 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let offset = offset
-            .checked_add(self.data_offset)
+        let range = physical_range(self.data_offset, offset, Widen::widen(bufs.len()))
             .ok_or(Error::OffsetOverflow)?;
-        if !bufs.has_remaining() {
+        if range.is_empty() {
             return Ok(());
         }
-
-        // Validate the signed file extent before recording debt or entering the blocking pool.
-        // Each submission after partial progress then has a representable offset.
-        offset
-            .checked_add(Widen::widen(bufs.len()))
-            .filter(|end| *end <= i64::MAX as u64)
-            .ok_or(Error::OffsetOverflow)?;
+        let offset = range.start;
 
         // Derive per-write policy from the requested options. The blocking worker checks
         // backend support before each hinted submission.
@@ -723,10 +708,8 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        let len = physical_end(self.data_offset, len).ok_or(Error::OffsetOverflow)?;
         let file = self.shared.clone();
-        let len = len
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
         self.shared.tracker.write();
         task::spawn_blocking(move || {
             #[cfg(test)]
@@ -1547,10 +1530,7 @@ mod tests {
                 .read_many(&[(LEN as u64 - 100, 101)], ReadOptions::DONT_CACHE)
                 .try_collect::<Vec<_>>()
                 .await;
-            assert!(matches!(
-                result,
-                Err(Error::Io(ref err)) if err.kind() == std::io::ErrorKind::UnexpectedEof
-            ));
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
 
             drop(blob);
             storage.remove("partition", None).await.unwrap();
@@ -1801,8 +1781,7 @@ mod tests {
                     assert!(
                         matches!(
                             blob.read_at(offset, len, options).await,
-                            Err(Error::Io(ref err))
-                                if err.kind() == std::io::ErrorKind::UnexpectedEof
+                            Err(Error::BlobInsufficientLength)
                         ),
                         "({offset}, {len}) {options:?}"
                     );
@@ -1895,6 +1874,14 @@ mod tests {
                 .await
                 .unwrap();
             assert!(read.is_empty());
+            let ranges = [(0, 0), (OFFSET, 0)];
+            let reads = crate::collect_reads(
+                blob.read_many(&ranges, ReadOptions::DONT_CACHE),
+                ranges.len(),
+            )
+            .await
+            .unwrap();
+            assert!(reads.iter().all(|buf| buf.is_empty()));
             assert!(blob.shared.direct.set(direct).is_ok());
 
             // read_at and read_at_buf return the open's own bytes, in the caller's buffer for
@@ -2014,14 +2001,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invalid_write_range_leaves_open_clean() {
+    async fn test_invalid_mutation_extent_leaves_open_clean() {
         // Validate physical extents with both header layouts before any mutation is recorded.
         for (case, layouts) in [Layout::V0..=Layout::V0, Layout::ALL]
             .into_iter()
             .enumerate()
         {
             let (storage, directory) =
-                storage_for_reopen_test(&format!("invalid_write_range_{case}"), layouts);
+                storage_for_reopen_test(&format!("invalid_mutation_extent_{case}"), layouts);
             let (blob, _) = storage.open("partition", b"blob").await.unwrap();
             let header = blob.data_offset;
             let last = i64::MAX as u64;
@@ -2055,6 +2042,13 @@ mod tests {
                     assert!(blob.shared.tracker.failure().is_none());
                 }
             }
+
+            assert!(matches!(
+                blob.resize(last - header + 1).await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(!blob.shared.tracker.is_dirty());
+            assert!(blob.shared.tracker.failure().is_none());
 
             // Rejected extents must leave neither flush debt nor a failure for the next open.
             drop(blob);

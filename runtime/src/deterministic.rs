@@ -11,6 +11,10 @@
 //! [std::io::ErrorKind::InvalidInput]. An injected namespace fault can fail the operation
 //! before name validation.
 //!
+//! Each blob is held in one contiguous in-memory allocation. A write or resize that would
+//! require a length beyond the addressable allocation size returns [crate::Error::OffsetOverflow],
+//! even when its physical extent is otherwise valid.
+//!
 //! # External Processes
 //!
 //! When testing an application that interacts with some external process, it can appear to

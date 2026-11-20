@@ -241,8 +241,7 @@ fn submit(
             // integer address, so it exposes the slab's provenance.
             aio_buf: Widen::widen(unsafe { slab_ptr.add(start) }.expose_provenance()),
             aio_nbytes: Widen::widen(aligned_len),
-            // An offset past the largest signed file offset wraps negative. The kernel
-            // rejects it at submission and the read is served positioned.
+            // Rounding down the validated range's start keeps the offset representable.
             aio_offset: aligned_offset as i64,
             ..Iocb::default()
         })
@@ -407,17 +406,22 @@ pub(super) fn read_many(
     // Translate each range to its physical file range, keeping its index so the stream can
     // name it. An offset beyond the file's address space or a length no buffer can hold fails
     // the call before anything is read, whether the reads would be direct or buffered.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut reads = Vec::with_capacity(ranges.len());
     for (index, &(offset, len)) in ranges.iter().enumerate() {
-        let Some(offset) = physical_offset(data_offset, offset, len) else {
+        let Some(offset) = read_offset(data_offset, offset, len) else {
             return stream::iter(vec![Err(Error::OffsetOverflow)]).boxed();
         };
-        reads.push(Read { index, offset, len });
+        if len == 0 {
+            // An unaligned empty range would otherwise submit a whole page.
+            let _ = tx.send(Ok((index, IoBufsMut::default())));
+        } else {
+            reads.push(Read { index, offset, len });
+        }
     }
 
     // Run every [NR_EVENTS] reads as one submission on its own blocking task. The tasks share
     // the channel the stream drains, so completions arrive in whatever order they land.
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut reads = reads.into_iter().peekable();
     while reads.peek().is_some() {
         let chunk: Vec<_> = reads.by_ref().take(NR_EVENTS).collect();

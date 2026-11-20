@@ -84,6 +84,14 @@ stability_scope!(BETA {
     ///
     /// Restricting the layouts a runtime accepts can be used to orchestrate rollback-safe
     /// upgrades.
+    ///
+    /// # Physical extent
+    ///
+    /// The built-in runtimes add the layout's data offset to a blob offset before validating a
+    /// range. They reject, with [`Error::OffsetOverflow`], a physical start that overflows `u64`
+    /// or a nonempty range whose exclusive physical end exceeds `i64::MAX`. Reads also require
+    /// each requested length to fit in one buffer. Passing these checks does not guarantee that a
+    /// backend can store a blob of that size.
     #[repr(u16)]
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum BlobLayout {
@@ -929,6 +937,26 @@ stability_scope!(BETA {
     /// subset of its bytes may be durable. Bytes outside the written range remain
     /// unchanged.
     ///
+    /// # Read ranges
+    ///
+    /// Reads are exact. If the end of the blob is reached before a range is filled, the
+    /// read fails with [Error::BlobInsufficientLength]. A zero-length range reads no bytes
+    /// and is valid even past the end of the blob.
+    ///
+    /// A range that cannot be addressed returns [Error::OffsetOverflow]. This differs from
+    /// [Error::BlobInsufficientLength], which reports a representable range that extends past
+    /// the end of the blob. See [`BlobLayout`] for the built-in limits. A batched read can also
+    /// return [Error::OffsetOverflow] if its temporary buffer cannot fit in one allocation, even
+    /// when every range fits individually.
+    ///
+    /// A read may allocate its full requested length before discovering EOF. Bound lengths
+    /// derived from untrusted input before issuing a read.
+    ///
+    /// # Mutation limits
+    ///
+    /// A write or resize that cannot be addressed returns [Error::OffsetOverflow] before changing
+    /// the blob. Being addressable does not guarantee that a backend can store a blob of that size.
+    ///
     /// # Concurrency
     ///
     /// A read observes every write and resize that completed before the read began. A read
@@ -967,7 +995,8 @@ stability_scope!(BETA {
         ///
         /// Without an error, every range is yielded exactly once. An error need not identify the
         /// ranges it affects, and those ranges may never be yielded, so treat any error as failing
-        /// the call. Reads may begin before the stream is polled and continue after it is dropped.
+        /// the call. If several ranges fail, any of their errors can be reported first.
+        /// Reads may begin before the stream is polled and continue after it is dropped.
         fn read_many(
             &self,
             ranges: &[(u64, usize)],
@@ -994,6 +1023,15 @@ stability_scope!(BETA {
         /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
+        /// Returns [Error::OffsetOverflow] before changing the blob if the range cannot be
+        /// addressed.
+        ///
+        /// If no bytes remain, only the start offset is checked. The write does not change
+        /// the blob's contents or length and is not a durability barrier, regardless of the
+        /// options.
+        ///
+        /// A nonempty write that starts beyond the current end extends the blob, and the gap
+        /// reads as zeros.
         fn write_at(
             &self,
             offset: u64,
@@ -1004,7 +1042,10 @@ stability_scope!(BETA {
         /// Resize the blob to the given length.
         ///
         /// If the length is greater than the current length, the blob is extended with zeros.
-        /// If the length is less than the current length, the blob is resized.
+        /// If the length is less than the current length, the blob is truncated.
+        ///
+        /// Returns [Error::OffsetOverflow] before changing the blob if the length cannot be
+        /// addressed.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Make every write and resize that completed before this call durable.

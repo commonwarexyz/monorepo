@@ -115,7 +115,8 @@ pub struct Config {
     /// Failure rate for `open_versioned` operations.
     pub open_rate: Option<Probability>,
 
-    /// Failure rate for `read_at` operations.
+    /// Failure rate for nonempty reads. An injected fault takes precedence over the
+    /// underlying blob's range errors.
     pub read_rate: Option<Probability>,
 
     /// Failure and byte-retention configuration for `write_at` operations.
@@ -778,7 +779,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        if self.ctx.should_fail(Op::Read) {
+        if len != 0 && self.ctx.should_fail(Op::Read) {
             return Err(injected_io_error().into());
         }
         self.inner.read_at(offset, len, options).await
@@ -791,7 +792,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        if self.ctx.should_fail(Op::Read) {
+        if len != 0 && self.ctx.should_fail(Op::Read) {
             return Err(injected_io_error().into());
         }
         self.inner
@@ -807,10 +808,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
-        let sync = options.contains(WriteOptions::SYNC);
-        if sync && total_bytes == 0 {
-            return Ok(());
+        if total_bytes == 0 {
+            return self.inner.write_at(offset, bufs, options).await;
         }
+        let sync = options.contains(WriteOptions::SYNC);
         offset
             .checked_add(total_bytes)
             .ok_or(Error::OffsetOverflow)?;
@@ -2064,16 +2065,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_empty_unsynced_write_does_not_create_crash_debt() {
-        let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: probability!(0.0),
-            retention_rate: probability!(1.0),
-            mode: PartialWriteMode::Prefix,
-        }));
+    async fn test_faulty_storage_empty_writes_skip_faults_and_bookkeeping() {
+        let h = Harness::new(
+            Config::default()
+                .write(WriteConfig {
+                    failure_rate: probability!(1.0),
+                    retention_rate: probability!(1.0),
+                    mode: PartialWriteMode::Prefix,
+                })
+                .sync(probability!(1.0)),
+        );
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
-            .await
-            .unwrap();
+        for options in [WriteOptions::default(), WriteOptions::SYNC] {
+            blob.write_at(8, Vec::<u8>::new(), options).await.unwrap();
+            assert!(matches!(
+                blob.write_at(u64::MAX, Vec::<u8>::new(), options).await,
+                Err(Error::OffsetOverflow)
+            ));
+        }
+        assert_eq!(blob.size.load(Ordering::Relaxed), 0);
         assert!(h.storage.pending.lock().is_empty());
     }
 
@@ -2091,10 +2101,18 @@ mod tests {
         // Enable read faults
         h.config.write().read_rate = Some(probability!(1.0));
 
-        assert!(matches!(
-            blob.read_at(0, 4, ReadOptions::default()).await,
-            Err(Error::Io(_))
-        ));
+        assert!(
+            blob.read_at(5, 0, ReadOptions::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for offset in [0, i64::MAX as u64] {
+            assert!(matches!(
+                blob.read_at(offset, 4, ReadOptions::default()).await,
+                Err(Error::Io(_))
+            ));
+        }
     }
 
     #[tokio::test]
