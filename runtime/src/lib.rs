@@ -881,7 +881,7 @@ stability_scope!(BETA {
     pub struct WriteOptions(u8);
 
     impl WriteOptions {
-        /// Durably persist the submitted bytes before returning.
+        /// Make this write durable before returning, subject to the concurrency rules on [`Blob`].
         ///
         /// This is not a durability barrier for earlier writes without
         /// [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
@@ -933,9 +933,21 @@ stability_scope!(BETA {
     ///
     /// # Durability
     ///
-    /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
-    /// subset of its bytes may be durable. Bytes outside the written range remain
-    /// unchanged.
+    /// A successful write with [`WriteOptions::SYNC`] makes its submitted bytes durable.
+    /// A successful [`Blob::sync`] or a successfully completed [`Blob::start_sync`] handle
+    /// makes all writes and resizes completed before the sync request durable. Concurrent or
+    /// later mutations can overwrite or truncate those bytes. Overlapping mutations may
+    /// interleave, so serialize them when recovery must see a particular result.
+    ///
+    /// After a crash, a write without either guarantee may be torn: any subset of its bytes
+    /// may be durable.
+    ///
+    /// # Failures
+    ///
+    /// A write or resize that returns an I/O error can have changed the blob, but a write never
+    /// changes bytes outside its range, other than zero-filling a gap it creates. A failed
+    /// durability operation can also cause later writes with [`WriteOptions::SYNC`], syncs,
+    /// or opens of the blob to fail.
     ///
     /// # Read ranges
     ///
@@ -1055,7 +1067,7 @@ stability_scope!(BETA {
         ///
         /// Awaiting this future waits until the runtime accepts responsibility for
         /// the sync. It continues even if the returned [`Handle`] is dropped.
-        /// Awaiting that handle waits for the same durability guarantee as [`Blob::sync`].
+        /// Successful completion of that handle gives the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 

@@ -405,14 +405,18 @@ impl Shared {
         result
     }
 
+    /// Name a failed barrier's kernel error like `sync`.
+    pub(crate) fn sync_error(&self, error: Error) -> Error {
+        let (partition, name) = &self.key;
+        match error {
+            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error),
+            error => error,
+        }
+    }
+
     /// Retain a failed barrier under the name the caller sees.
     pub(crate) fn sync_failed(&self, error: &Error) {
-        let (partition, name) = &self.key;
-        let error = match error {
-            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error.clone()),
-            error => error.clone(),
-        };
-        self.tracker.poison(&error);
+        self.tracker.poison(&self.sync_error(error.clone()));
     }
 
     /// Establish a settled predecessor's debt through this open's file.
@@ -798,8 +802,7 @@ impl crate::Blob for Blob {
         if !sync {
             self.shared.tracker.write();
         }
-        let trailing = state == WriteAtState::WritingBeforeSync;
-        let result = match Operation::register(Request::WriteAt(WriteAtRequest::new(
+        match Operation::register(Request::WriteAt(WriteAtRequest::new(
             self.shared.clone(),
             offset,
             bufs.into(),
@@ -811,15 +814,6 @@ impl crate::Blob for Blob {
             Ok(RequestOutput::WriteAt(result)) => result,
             Ok(_) => unreachable!("write request returned another output kind"),
             Err(_) => Err(Error::WriteFailed),
-        };
-
-        // In a multi-batch write, only the trailing sync reports `Error::Io`. Name it like `sync`.
-        match result {
-            Err(Error::Io(error)) if trailing => {
-                let (partition, name) = &self.shared.key;
-                Err(Error::BlobSyncFailed(partition.clone(), hex(name), error))
-            }
-            result => result,
         }
     }
 
@@ -829,7 +823,7 @@ impl crate::Blob for Blob {
         self.shared.tracker.write();
         self.shared.file.set_len(len).map_err(|e| {
             let (partition, name) = &self.shared.key;
-            Error::BlobResizeFailed(partition.clone(), hex(name), IoError::other(e).into())
+            Error::BlobResizeFailed(partition.clone(), hex(name), e.into())
         })?;
         self.shared.tracker.complete();
         Ok(())
@@ -848,10 +842,7 @@ impl crate::Blob for Blob {
         let RequestOutput::Sync(result) = output else {
             unreachable!("sync request returned another output kind");
         };
-        result.map_err(|error| match error {
-            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error),
-            error => error,
-        })
+        result.map_err(|error| self.shared.sync_error(error))
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -1149,8 +1140,34 @@ mod tests {
         iouring::Runner::default().start(|_| async move {
             assert!(matches!(
                 blob.write_at(0, buf, WriteOptions::default()).await,
-                Err(Error::WriteFailed)
+                Err(Error::Io(error)) if error.raw_os_error() == Some(libc::ENOSPC)
             ));
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_kernel_errors_keep_their_cause() {
+        let directory = create_test_directory();
+        let hold = Hold::acquire(&directory).unwrap();
+        let pending = Arc::new(Pending::default());
+        let open = |file, name: &[u8]| {
+            Blob::new(
+                file,
+                hold.clone(),
+                0,
+                pending.admit("partition", name, false).unwrap().0,
+            )
+        };
+        let path = directory.join("file");
+        iouring::Runner::default().start(|_| async {
+            shared::check_kernel_errors(&path, IOVEC_BATCH_SIZE, open, |blob| {
+                (
+                    blob.shared.tracker.is_dirty(),
+                    blob.shared.tracker.failure(),
+                )
+            })
+            .await;
         });
         std::fs::remove_dir_all(directory).unwrap();
     }

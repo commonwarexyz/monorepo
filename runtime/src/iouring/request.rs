@@ -314,6 +314,14 @@ impl Request {
                 )
             }
             Self::WriteAt(r) => {
+                // A request completes in the phase that ended it. Name a failed trailing sync
+                // like `sync`, keeping it distinct from a kernel error of the data phase.
+                let result = if r.state == WriteAtState::Syncing {
+                    result.map_err(|error| r.file.sync_error(error))
+                } else {
+                    result
+                };
+
                 // Only plain writes stay in `Writing`. Settle here so a caller that stopped
                 // waiting still leaves the open's debt correct.
                 let result = r.file.wrote(
@@ -720,8 +728,11 @@ impl ReadAtRequest {
             match CqeResult::from_raw(result, state) {
                 CqeResult::Retry => return None,
                 CqeResult::Cancelled => return Some(Err(Error::ReadFailed)),
+                // An unsolicited kernel cancellation fails the read with its error code.
                 CqeResult::Error(code) if code == -libc::ECANCELED => {
-                    return Some(Err(Error::ReadFailed));
+                    return Some(Err(Error::Io(
+                        std::io::Error::from_raw_os_error(-code).into(),
+                    )));
                 }
                 CqeResult::Positive(n) => {
                     let submitted = (self.buf.len() - self.read).min(DIRECT_CHUNK);
@@ -759,7 +770,8 @@ impl ReadAtRequest {
         }
 
         // A buffered read completes when it fills the buffer, and retries without the hint once
-        // the kernel rejects it.
+        // the kernel rejects it. A kernel error keeps its code, a requested cancellation fails
+        // without one, and an empty read reaches the end of the file.
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
             CqeResult::Error(code)
@@ -767,7 +779,10 @@ impl ReadAtRequest {
             {
                 None
             }
-            CqeResult::Cancelled | CqeResult::Error(_) => Some(Err(Error::ReadFailed)),
+            CqeResult::Error(code) => Some(Err(Error::Io(
+                std::io::Error::from_raw_os_error(-code).into(),
+            ))),
+            CqeResult::Cancelled => Some(Err(Error::ReadFailed)),
             CqeResult::Zero => Some(Err(Error::BlobInsufficientLength)),
             CqeResult::Positive(n) => {
                 let remaining = self.buf.len() - self.read;
@@ -956,12 +971,12 @@ impl WriteAtRequest {
             {
                 None
             }
-            CqeResult::Error(code) if self.state == WriteAtState::WritingSync => Some(Err(
-                Error::Io(std::io::Error::from_raw_os_error(-code).into()),
-            )),
-            CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
-                Some(Err(Error::WriteFailed))
-            }
+            // Every write phase keeps the kernel's error code. A requested cancellation or a
+            // write without progress fails without one.
+            CqeResult::Error(code) => Some(Err(Error::Io(
+                std::io::Error::from_raw_os_error(-code).into(),
+            ))),
+            CqeResult::Cancelled | CqeResult::Zero => Some(Err(Error::WriteFailed)),
             CqeResult::Positive(n) => {
                 self.write.advance(n);
                 self.offset += n as u64;
@@ -1652,6 +1667,7 @@ mod tests {
     fn test_active_read_at_paths() {
         let mut request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(request.on_cqe(ACTIVE, -libc::EAGAIN).is_none());
+        assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
 
         // Positioned reads accumulate progress until the full range is available.
         assert!(request.on_cqe(ACTIVE, 2).is_none());
@@ -1660,17 +1676,29 @@ mod tests {
             RequestOutput::ReadAt(Ok(_))
         ));
 
+        // An empty read reaches the end of the file, including after partial progress.
         let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(matches!(
             complete(request, ACTIVE, 0),
             RequestOutput::ReadAt(Err((_, Error::BlobInsufficientLength)))
         ));
-
-        let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
+        let mut request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
+        assert!(request.on_cqe(ACTIVE, 2).is_none());
         assert!(matches!(
-            complete(request, ACTIVE, -libc::EIO),
-            RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
+            complete(request, ACTIVE, 0),
+            RequestOutput::ReadAt(Err((_, Error::BlobInsufficientLength)))
         ));
+
+        // A kernel error keeps its code, including an unsolicited cancellation.
+        for code in [libc::EIO, libc::EBADF, libc::ECANCELED] {
+            let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
+            let RequestOutput::ReadAt(Err((_, Error::Io(error)))) =
+                complete(request, ACTIVE, -code)
+            else {
+                panic!("expected read I/O error");
+            };
+            assert_eq!(error.raw_os_error(), Some(code));
+        }
 
         // An orphaned read may be cancelled while its SQE is still in flight.
         let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
@@ -1722,7 +1750,10 @@ mod tests {
         );
         let result = failing_read.on_cqe(ACTIVE, -libc::EIO);
         assert!(file.dont_cache_supported.load(Ordering::Relaxed));
-        assert!(matches!(result, Some(Err(Error::ReadFailed))));
+        assert!(matches!(
+            result,
+            Some(Err(Error::Io(error))) if error.raw_os_error() == Some(libc::EIO)
+        ));
     }
 
     #[test]
@@ -1871,8 +1902,10 @@ mod tests {
             Direct,
             /// Served by a buffered read after a fallback.
             Buffered,
-            /// Failed with `Error::ReadFailed`.
+            /// Failed with `Error::ReadFailed` under a cancellation request.
             Failed,
+            /// Failed with the kernel's error code.
+            Kernel(i32),
             /// Timed out under a cancellation request, without output.
             TimedOut,
             /// Still needs another completion.
@@ -1949,15 +1982,19 @@ mod tests {
                         return (Served::Direct, Some(buf.as_ref().to_vec()));
                     }
                     // A failed read returns its buffer empty.
-                    Some(Err(Error::ReadFailed)) => {
-                        let (output, _) = Request::ReadAt(read).complete(Err(Error::ReadFailed));
+                    Some(Err(error)) => {
+                        let served = match &error {
+                            Error::ReadFailed => Served::Failed,
+                            Error::Io(error) => Served::Kernel(error.raw_os_error().unwrap()),
+                            error => panic!("unexpected direct read error: {error:?}"),
+                        };
+                        let (output, _) = Request::ReadAt(read).complete(Err(error));
                         let RequestOutput::ReadAt(Err((buf, _))) = output else {
                             panic!("a failed read must return its buffer");
                         };
                         assert_eq!(buf.len(), 0);
-                        return (Served::Failed, None);
+                        return (served, None);
                     }
-                    Some(Err(error)) => panic!("direct reads must fail with ReadFailed: {error:?}"),
                     // Under a cancellation request, a read that needs another SQE times out without
                     // output, whether or not it fell back.
                     None if cancelling => return (Served::TimedOut, None),
@@ -2026,8 +2063,15 @@ mod tests {
             (7, 10, &[-libc::EFAULT], NEVER, Served::Buffered),
             (7, 10, &[-libc::ENOMEM], NEVER, Served::Buffered),
             (4096, 4096, &[-libc::EIO], NEVER, Served::Buffered),
-            // A kernel cancellation fails the read, and an unfinished read exposes nothing.
-            (7, 10, &[-libc::ECANCELED], NEVER, Served::Failed),
+            // An unsolicited kernel cancellation fails the read with its code, and an unfinished
+            // read exposes nothing.
+            (
+                7,
+                10,
+                &[-libc::ECANCELED],
+                NEVER,
+                Served::Kernel(libc::ECANCELED),
+            ),
             (100, long, &[page, -libc::EAGAIN], NEVER, Served::Pending),
             // Under a cancellation request, a covering completion still exposes exactly the
             // reported bytes, including after an aligned prefix read before the request.
@@ -2189,20 +2233,31 @@ mod tests {
             RequestOutput::WriteAt(Ok(()))
         ));
 
-        for result in [0, -libc::EIO, -libc::ECANCELED] {
+        // A write without progress or a requested cancellation fails without an error code.
+        for (state, result) in [
+            (ACTIVE, 0),
+            (WaiterState::CancelRequested, -libc::ECANCELED),
+        ] {
             let request = Request::WriteAt(make_write_request(make_file(), Cache::Enabled));
             assert!(matches!(
-                complete(request, ACTIVE, result),
+                complete(request, state, result),
                 RequestOutput::WriteAt(Err(Error::WriteFailed))
             ));
         }
 
-        let mut write = make_write_request(make_file(), Cache::Enabled);
-        write.state = WriteAtState::WritingBeforeSync;
-        assert!(matches!(
-            complete(Request::WriteAt(write), ACTIVE, -libc::EIO),
-            RequestOutput::WriteAt(Err(Error::WriteFailed))
-        ));
+        // A plain write keeps the kernel error code, including an unsolicited cancellation,
+        // and records no durability failure.
+        for code in [libc::EIO, libc::ENOSPC, libc::EBADF, libc::ECANCELED] {
+            let write = make_write_request(make_file(), Cache::Enabled);
+            let file = write.file.clone();
+            let RequestOutput::WriteAt(Err(Error::Io(error))) =
+                complete(Request::WriteAt(write), ACTIVE, -code)
+            else {
+                panic!("expected write I/O error");
+            };
+            assert_eq!(error.raw_os_error(), Some(code));
+            assert!(file.tracker.failure().is_none());
+        }
 
         // A fused write retains the kernel errno through its durability failure.
         let mut write = make_write_request(make_file(), Cache::Enabled);
@@ -2231,6 +2286,73 @@ mod tests {
                 RequestOutput::WriteAt(Err(Error::WriteFailed))
             ));
         }
+    }
+
+    /// A multi-batch durable write reports a kernel error of its data phase as is and leaves the
+    /// open dirty without a retained failure. A failed trailing sync is named like `sync` and
+    /// retained, so a later durability operation reports it.
+    #[test]
+    fn test_multibatch_write_distinguishes_data_and_sync_errors() {
+        let write = |file: &Arc<Shared>| {
+            Request::WriteAt(WriteAtRequest::new(
+                file.clone(),
+                0,
+                IoBufs::from(IoBuf::from(b"hello")).into(),
+                WriteAtState::WritingBeforeSync,
+                Cache::Enabled,
+            ))
+        };
+        for code in [libc::EIO, libc::ENOSPC, libc::ECANCELED] {
+            // The data phase fails after a retry and partial progress, before the sync starts.
+            let file = make_file();
+            let mut request = write(&file);
+            assert!(request.on_cqe(ACTIVE, -libc::EINTR).is_none());
+            assert!(request.on_cqe(ACTIVE, 2).is_none());
+            let RequestOutput::WriteAt(Err(Error::Io(error))) = complete(request, ACTIVE, -code)
+            else {
+                panic!("expected data-phase I/O error");
+            };
+            assert_eq!(error.raw_os_error(), Some(code));
+            assert!(file.tracker.is_dirty());
+            assert!(file.tracker.failure().is_none());
+
+            // The trailing sync fails after every batch was written and a retry.
+            let file = make_file();
+            let mut request = write(&file);
+            assert!(request.on_cqe(ACTIVE, 5).is_none());
+            assert!(request.on_cqe(ACTIVE, -libc::EAGAIN).is_none());
+            let RequestOutput::WriteAt(Err(Error::BlobSyncFailed(_, _, error))) =
+                complete(request, ACTIVE, -code)
+            else {
+                panic!("expected trailing sync failure");
+            };
+            assert_eq!(error.raw_os_error(), Some(code));
+            assert!(file.tracker.is_dirty());
+            assert!(matches!(
+                file.tracker.failure(),
+                Some(Error::BlobSyncFailed(_, _, error)) if error.raw_os_error() == Some(code)
+            ));
+
+            // The retained failure is sticky: a later sync reports it without an SQE.
+            let request = Request::Sync(SyncRequest::new(file));
+            assert!(matches!(
+                request.prepare_durability(),
+                Some(Err(Error::BlobSyncFailed(_, _, error))) if error.raw_os_error() == Some(code)
+            ));
+        }
+
+        // A trailing sync failure without a kernel error code, such as a timeout, keeps its
+        // variant and is still retained.
+        let file = make_file();
+        let mut request = write(&file);
+        assert!(request.on_cqe(ACTIVE, 5).is_none());
+        let (output, retired) = request.complete(Err(Error::Timeout));
+        drop(retired);
+        assert!(matches!(
+            output,
+            RequestOutput::WriteAt(Err(Error::Timeout))
+        ));
+        assert!(matches!(file.tracker.failure(), Some(Error::Timeout)));
     }
 
     #[test]

@@ -1999,6 +1999,35 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn test_kernel_errors_keep_their_cause() {
+        let (storage, directory) = storage_for_reopen_test("kernel_errors", Layout::ALL);
+        std::fs::create_dir_all(&directory).unwrap();
+        let open = |file, name: &[u8]| {
+            Blob::new(
+                file,
+                0,
+                storage.hold.clone(),
+                storage.pending.admit("partition", name, false).unwrap().0,
+            )
+        };
+        crate::storage::shared::check_kernel_errors(
+            &directory.join("file"),
+            IOVEC_BATCH_SIZE,
+            open,
+            |blob| {
+                (
+                    blob.shared.tracker.is_dirty(),
+                    blob.shared.tracker.failure(),
+                )
+            },
+        )
+        .await;
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn test_fused_write_error_is_recorded_before_buffer_drop() {
         struct WriteErrorObserver {
             shared: std::sync::Weak<Shared>,
