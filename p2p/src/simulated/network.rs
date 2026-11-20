@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     Channel, Message as NetworkMessage, PeerSetSubscription, PeerSetUpdate, Recipients,
-    TrackedPeers,
+    SendReceipt, TrackedPeers,
     sizing::{max_retained_peers, peer_set_size},
     utils::{
         PeerSetsAtIndex as PeerSetsAtIndexBase,
@@ -1274,13 +1274,17 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
         crate::CheckedSender::recipients(&self.checked)
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send_with_receipt(
+        self,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> SendReceipt<Self::PublicKey> {
         // Convert to IoBuf here since forwarder needs to inspect the message
         let message = message.into().coalesce();
 
         // Determine the set of recipients that will receive the message
         let Some(recipients) = (self.forwarder)(self.replica, &self.recipients, &message) else {
-            return Unreliable::Rejected;
+            return SendReceipt::new(Unreliable::Rejected, Vec::new());
         };
 
         // SplitForwarder does not enforce any relationship between the original recipients and
@@ -2359,6 +2363,105 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert!(peer_a_recv.recv().now_or_never().is_none());
             assert!(peer_b_recv.recv().now_or_never().is_none());
+        });
+    }
+
+    /// A message that spends a recipient's quota through a competing clone when converted, after
+    /// the sender's check and before its submission.
+    struct Contending {
+        competitor: Sender<ed25519::PublicKey, deterministic::Context>,
+        peer: ed25519::PublicKey,
+    }
+
+    impl From<Contending> for IoBufs {
+        fn from(mut contending: Contending) -> Self {
+            let checked = contending
+                .competitor
+                .check(Recipients::One(contending.peer))
+                .unwrap();
+            assert!(checked.send(b"winner", false).accepted());
+            Self::from(b"loser".as_slice())
+        }
+    }
+
+    /// [`crate::Sender::send`] returns the recipients of the accepted submission, not those that
+    /// passed the check, when a clone spends a checked recipient's quota in between.
+    #[test]
+    fn test_sender_send_returns_recipients_after_contention() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(3),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(3),
+            };
+            let (network, oracle) = Network::new(context.child("network"), cfg);
+            network.start();
+
+            let me = ed25519::PrivateKey::from_seed(30).public_key();
+            let peer_a = ed25519::PrivateKey::from_seed(31).public_key();
+            let peer_b = ed25519::PrivateKey::from_seed(32).public_key();
+            let (mut sender, _receiver) = oracle
+                .control(me)
+                .register(0, Quota::per_second(NonZeroU32::MIN))
+                .await
+                .unwrap();
+
+            // A clone spends peer_a's quota between the check and the submission
+            let message = Contending {
+                competitor: sender.clone(),
+                peer: peer_a.clone(),
+            };
+            let both = Recipients::Some(vec![peer_a.clone(), peer_b.clone()]);
+            let sent = crate::Sender::send(&mut sender, both, message, false);
+            assert_eq!(sent, vec![peer_b]);
+
+            // A submission whose every recipient was spent by a clone reaches no one
+            context.sleep(Duration::from_secs(1)).await;
+            let message = Contending {
+                competitor: sender.clone(),
+                peer: peer_a.clone(),
+            };
+            let sent = crate::Sender::send(&mut sender, Recipients::One(peer_a), message, false);
+            assert!(sent.is_empty());
+        });
+    }
+
+    /// [`crate::Sender::send`] on a split sender returns the recipients its forwarder selected.
+    #[test]
+    fn test_split_sender_send_returns_forwarded_recipients() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                max_peers_per_set: NZUsize!(3),
+                disconnect_on_block: true,
+                tracked_peer_sets: NZUsize!(3),
+            };
+            let (network, oracle) = Network::new(context.child("network"), cfg);
+            network.start();
+
+            let twin = ed25519::PrivateKey::from_seed(40).public_key();
+            let peer_a = ed25519::PrivateKey::from_seed(41).public_key();
+            let peer_b = ed25519::PrivateKey::from_seed(42).public_key();
+            let peer_c = ed25519::PrivateKey::from_seed(43).public_key();
+            let (twin_sender, _twin_receiver) =
+                oracle.control(twin).register(0, TEST_QUOTA).await.unwrap();
+
+            // Primary rewrites the recipients to peer_c and secondary drops every message
+            let forwarded = peer_c.clone();
+            let (mut primary, mut secondary) =
+                twin_sender.split_with(move |origin, _, _| match origin {
+                    SplitOrigin::Primary => Some(Recipients::One(forwarded.clone())),
+                    SplitOrigin::Secondary => None,
+                });
+
+            let both = Recipients::Some(vec![peer_a, peer_b]);
+            let sent = crate::Sender::send(&mut primary, both.clone(), b"forwarded", false);
+            assert_eq!(sent, vec![peer_c]);
+            let sent = crate::Sender::send(&mut secondary, both, b"dropped", false);
+            assert!(sent.is_empty());
         });
     }
 

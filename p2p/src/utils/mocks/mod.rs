@@ -1,6 +1,6 @@
 //! Mock implementations for testing.
 
-use crate::{CheckedSender, LimitedSender, Receiver, Recipients};
+use crate::{CheckedSender, LimitedSender, Receiver, Recipients, SendReceipt};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
@@ -94,8 +94,12 @@ impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
         self.recipients.clone()
     }
 
-    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
-        Unreliable::new(Feedback::Ok)
+    fn send_with_receipt(
+        self,
+        _: impl Into<IoBufs> + Send,
+        _: bool,
+    ) -> SendReceipt<Self::PublicKey> {
+        SendReceipt::new(Unreliable::new(Feedback::Ok), self.recipients)
     }
 }
 
@@ -159,8 +163,12 @@ mod tests {
             vec![self.peer.clone()]
         }
 
-        fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
-            Unreliable::Rejected
+        fn send_with_receipt(
+            self,
+            _message: impl Into<IoBufs> + Send,
+            _priority: bool,
+        ) -> SendReceipt<Self::PublicKey> {
+            SendReceipt::new(Unreliable::Rejected, vec![self.peer])
         }
     }
 

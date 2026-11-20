@@ -1,11 +1,11 @@
 //! Rate-limited [`UnlimitedSender`] wrapper.
 
-use crate::{Recipients, UnlimitedSender};
-use commonware_actor::{Feedback, Unreliable};
+use crate::{Recipients, SendReceipt, UnlimitedSender};
+use commonware_actor::Unreliable;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
 use commonware_utils::{channel::ring, sync::Mutex};
-use std::{cmp, collections::HashSet, fmt, iter, mem, sync::Arc, time::SystemTime};
+use std::{cmp, collections::HashSet, fmt, mem, sync::Arc, time::SystemTime};
 
 /// Provides peer snapshots for resolving [`Recipients::All`].
 pub trait Connected: Clone + Send + Sync + 'static {
@@ -29,10 +29,10 @@ pub trait Connected: Clone + Send + Sync + 'static {
 /// # Accounting
 ///
 /// [`LimitedSender::check`] only probes the rate limit. A recipient's quota is charged when
-/// [`CheckedSender::send`](crate::CheckedSender::send) submits a message to it and the
-/// submission is accepted, so a dropped [`CheckedSender`] or an unaccepted submission consumes
-/// nothing. Each recipient is charged (and sent the message) at most once per send, even if it is
-/// listed more than once.
+/// [`CheckedSender::send_with_receipt`](crate::CheckedSender::send_with_receipt) submits a
+/// message to it and the submission is accepted, so a dropped [`CheckedSender`] or an unaccepted
+/// submission consumes nothing. Each recipient is charged (and sent the message) at most once per
+/// send, even if it is listed more than once. The receipt lists exactly the charged recipients.
 ///
 /// # Clones
 ///
@@ -81,6 +81,7 @@ impl<P: PublicKey, E: Clock> State<P, E> {
             Recipients::All => {
                 if let Ok(peers) = self.peer_subscription.try_recv() {
                     self.known_peers = peers;
+                    self.prune();
                 }
                 filter_rate_limited(self.known_peers.iter(), &mut self.rate_limit)
             }
@@ -94,15 +95,20 @@ impl<P: PublicKey, E: Clock> State<P, E> {
     /// Charges each of `peers` for one message.
     ///
     /// Space out pruning passes by the number of keys retained by the last pass.
-    fn charge<'a>(&mut self, peers: impl Iterator<Item = &'a P>) {
+    fn charge(&mut self, peers: &[P]) {
         for peer in peers {
             // The caller verified availability under the same lock
             let _ = self.rate_limit.check_key(peer);
         }
         if self.rate_limit.len() >= self.prune_at {
-            self.rate_limit.retain_recent();
-            self.prune_at = cmp::max(MIN_PRUNE_AT, self.rate_limit.len().saturating_mul(2));
+            self.prune();
         }
+    }
+
+    /// Forgets peers whose quota has fully replenished.
+    fn prune(&mut self) {
+        self.rate_limit.retain_recent();
+        self.prune_at = cmp::max(MIN_PRUNE_AT, self.rate_limit.len().saturating_mul(2));
     }
 }
 
@@ -225,32 +231,34 @@ impl<S: UnlimitedSender, E: Clock> CheckedSender<'_, S, E> {
     /// Sends a message to `recipients` instead of the checked recipients.
     ///
     /// The rate limit is applied to `recipients` exactly as it is to the checked recipients in
-    /// [`CheckedSender::send`](crate::CheckedSender::send).
+    /// [`CheckedSender::send_with_receipt`](crate::CheckedSender::send_with_receipt).
     #[commonware_macros::stability(BETA)]
     pub(crate) fn send_to(
         self,
         recipients: Recipients<S::PublicKey>,
         message: impl Into<IoBufs> + Send,
         priority: bool,
-    ) -> Unreliable<Feedback> {
-        // Convert the message before taking the lock shared by all clones
+    ) -> SendReceipt<S::PublicKey> {
+        // Convert the message before taking the lock shared by all clones, as the conversion may
+        // run arbitrary code
         let message = message.into();
 
         // Hold the lock from the availability check until the charge, so no clone can spend the
         // same quota in between and nothing is charged unless the submission is accepted.
         let mut state = self.state.lock();
         let Ok(recipients) = state.available(recipients) else {
-            return Unreliable::Rejected;
+            return SendReceipt::new(Unreliable::Rejected, Vec::new());
         };
-        let feedback = self.sender.send(recipients.clone(), message, priority);
+        let peers = match &recipients {
+            Recipients::One(peer) => vec![peer.clone()],
+            Recipients::Some(peers) => peers.clone(),
+            Recipients::All => unreachable!("available recipients are always resolved"),
+        };
+        let feedback = self.sender.send(recipients, message, priority);
         if feedback.accepted() {
-            match &recipients {
-                Recipients::One(peer) => state.charge(iter::once(peer)),
-                Recipients::Some(peers) => state.charge(peers.iter()),
-                Recipients::All => unreachable!("available recipients are always resolved"),
-            }
+            state.charge(&peers);
         }
-        feedback
+        SendReceipt::new(feedback, peers)
     }
 }
 
@@ -265,7 +273,11 @@ impl<S: UnlimitedSender, E: Clock> crate::CheckedSender for CheckedSender<'_, S,
         }
     }
 
-    fn send(mut self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send_with_receipt(
+        mut self,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> SendReceipt<Self::PublicKey> {
         let recipients = mem::replace(&mut self.recipients, Recipients::Some(Vec::new()));
         self.send_to(recipients, message, priority)
     }
@@ -275,6 +287,7 @@ impl<S: UnlimitedSender, E: Clock> crate::CheckedSender for CheckedSender<'_, S,
 mod tests {
     use super::*;
     use crate::CheckedSender as _;
+    use commonware_actor::Feedback;
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{IoBuf, Quota, Runner as _, Supervisor as _, deterministic::Runner};
     use commonware_utils::{NZU32, NZUsize, channel::ring};
@@ -750,10 +763,9 @@ mod tests {
             );
 
             // The slower clone only reaches the recipient that is still available
-            assert_eq!(
-                checked1.send(IoBuf::from(b"loser"), false),
-                Unreliable::new(Feedback::Ok)
-            );
+            let receipt = checked1.send_with_receipt(IoBuf::from(b"loser"), false);
+            assert_eq!(receipt.feedback(), Unreliable::new(Feedback::Ok));
+            assert_eq!(receipt.recipients(), std::slice::from_ref(&peer2));
             let messages = sender.sent_messages();
             assert_eq!(messages.len(), 2);
             assert!(matches!(&messages[0].0, Recipients::One(peer) if peer == &peer1));
@@ -781,11 +793,83 @@ mod tests {
             let checked1 = limited1.check(Recipients::One(peer.clone())).unwrap();
             let checked2 = limited2.check(Recipients::Some(vec![peer])).unwrap();
             checked2.send(IoBuf::from(b"winner"), false);
-            assert_eq!(
-                checked1.send(IoBuf::from(b"loser"), false),
-                Unreliable::Rejected
-            );
+            let receipt = checked1.send_with_receipt(IoBuf::from(b"loser"), false);
+            assert_eq!(receipt.feedback(), Unreliable::Rejected);
+            assert!(receipt.recipients().is_empty());
             assert_eq!(sender.sent_messages().len(), 1);
+        });
+    }
+
+    #[test]
+    fn unaccepted_send_receipt_has_no_recipients() {
+        Runner::default().start(|context| async move {
+            let sender = MockSender::new();
+            let peers = MockPeers::new();
+            let mut limited =
+                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let peer = key(1);
+
+            for feedback in [Unreliable::Rejected, Unreliable::new(Feedback::Closed)] {
+                sender.set_feedback(feedback);
+                let receipt = limited
+                    .check(Recipients::One(peer.clone()))
+                    .unwrap()
+                    .send_with_receipt(IoBuf::from(b"hello"), false);
+                assert_eq!(receipt.feedback(), feedback);
+                assert!(receipt.recipients().is_empty());
+            }
+
+            // Nothing was charged
+            sender.set_feedback(Unreliable::new(Feedback::Ok));
+            let receipt = limited
+                .check(Recipients::One(peer.clone()))
+                .unwrap()
+                .send_with_receipt(IoBuf::from(b"hello"), false);
+            assert_eq!(receipt.into_recipients(), vec![peer]);
+        });
+    }
+
+    #[test]
+    fn peer_update_prunes_replenished_peers() {
+        Runner::default().start(|context| async move {
+            let sender = MockSender::new();
+            let stale = key(1);
+            let partial = key(2);
+            let (mut updates, receiver) = ring::channel(NZUsize!(1));
+            let peers = UpdatingPeers {
+                peers: vec![stale.clone(), partial.clone()],
+                receiver: Arc::new(Mutex::new(Some(receiver))),
+            };
+            let mut limited =
+                LimitedSender::new(sender, quota_per_second(2), context.child("limiter"), peers);
+
+            // stale fully replenishes while partial still has one message of its burst spent
+            limited
+                .check(Recipients::One(stale.clone()))
+                .unwrap()
+                .send(IoBuf::from(b"hello"), false);
+            context.sleep(Duration::from_secs(1)).await;
+            limited
+                .check(Recipients::One(partial.clone()))
+                .unwrap()
+                .send(IoBuf::from(b"hello"), false);
+            assert_eq!(limited.state.lock().rate_limit.len(), 2);
+
+            // Addressing all peers without a membership update does not prune
+            drop(limited.check(Recipients::All).unwrap());
+            assert_eq!(limited.state.lock().rate_limit.len(), 2);
+
+            // A membership update prunes the replenished peer and retains the partial one
+            updates.send(vec![stale, partial.clone()]).await.unwrap();
+            drop(limited.check(Recipients::All).unwrap());
+            assert_eq!(limited.state.lock().rate_limit.len(), 1);
+
+            // partial retained its spent quota, so one more message exhausts its burst
+            limited
+                .check(Recipients::One(partial.clone()))
+                .unwrap()
+                .send(IoBuf::from(b"hello"), false);
+            assert!(limited.check(Recipients::One(partial)).is_err());
         });
     }
 
