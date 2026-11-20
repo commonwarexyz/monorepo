@@ -1176,7 +1176,7 @@ mod loom_tests {
         *,
     };
     use crate::iouring::{
-        mailbox::{Cancel, Mailbox, Message},
+        mailbox::{Mailbox, Message},
         slab::Id,
         waiter::WaiterId,
     };
@@ -1367,16 +1367,16 @@ mod loom_tests {
 
     /// A message identified by `index`, with no payload to release.
     const fn message(index: u32) -> Message {
-        Message::Cancel(Cancel::Waiter(WaiterId(Id {
+        Message::Cancel(WaiterId(Id {
             index,
             generation: 0,
-        })))
+        }))
     }
 
     /// The index of a message built by [`message`].
     fn index(message: Message) -> u32 {
         match message {
-            Message::Cancel(Cancel::Waiter(WaiterId(id))) => id.index,
+            Message::Cancel(WaiterId(id)) => id.index,
             _ => panic!("not a modeled message"),
         }
     }

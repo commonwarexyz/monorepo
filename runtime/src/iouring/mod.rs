@@ -23,20 +23,22 @@
 //!
 //! Sockets, blobs, and pending I/O and sleep futures can move between workers.
 //! Registrations stay on their original worker without keeping it alive. If it
-//! closes, pending I/O futures return errors and pending sleeps panic when polled.
-//! [`crate::Blob::start_sync`] handles can be awaited on another thread, even after
-//! the original runner shuts down.
+//! closes, pending I/O futures return errors, and pending sleeps whose deadline
+//! has not passed panic when polled. [`crate::Blob::start_sync`] handles can be
+//! awaited on another thread, even after the original runner shuts down.
 //!
 //! # Ownership
 //!
-//! Workers own request, timer, and result progress. Each ordinary task has at
-//! most one runnable, which a queue or poller owns, and at most one poll of
-//! that task runs at a time. A queued task can move through overflow or
-//! stealing, and each run queue synchronizes its owner with the workers that
-//! steal from it. Each open serializes its syncs and durable writes across
-//! workers until their results are recorded. Forwarded results, mailboxes, the
-//! global queue, the task set, task handles, supervision, and metrics are also
-//! synchronized across threads.
+//! Workers own request and result progress. Each worker's sleep registrations
+//! live in its timers, which any thread can reach to poll or drop a sleep,
+//! and which a busy peer may expire while the owner is stalled. Each
+//! ordinary task has at most one runnable, which a queue or poller owns, and
+//! at most one poll of that task runs at a time. A queued task can move
+//! through overflow or stealing, and each run queue synchronizes its owner
+//! with the workers that steal from it. Each open serializes its syncs and
+//! durable writes across workers until their results are recorded. Forwarded
+//! results, mailboxes, timers, the global queue, the task set, task
+//! handles, supervision, and metrics are also synchronized across threads.
 //!
 //! # Storage
 //!
@@ -52,9 +54,13 @@
 //! The runtime targets Linux 7.0 or newer. Older kernels may work, but they
 //! are untested and nothing is guaranteed on them. Each worker's ring uses
 //! single-issuer mode with deferred task work. Task polls must return so their
-//! worker can service I/O and deadlines. I/O and sleeps stay registered on the
-//! worker that first polled them, so a poll that blocks one worker also delays
-//! their results for tasks that have moved elsewhere.
+//! worker can service I/O and deadlines. I/O stays registered on the worker
+//! that first polled it, so a poll that blocks one worker also delays its
+//! results for tasks that have moved elsewhere. Sleeps stay registered there
+//! too, but a busy pool peer expires a blocked pool worker's sleeps once they
+//! are about a millisecond overdue. No peer expires a dedicated worker's
+//! sleeps, and while every other pool worker is parked, none expires a pool
+//! worker's either.
 //!
 //! Each worker limits in-flight I/O according to [`RingConfig::size`]. A receive
 //! can occupy the last slot while a send needed to satisfy it waits to be
@@ -85,6 +91,7 @@
 //! });
 //! ```
 
+mod deadlines;
 mod driver;
 mod idle;
 mod mailbox;
@@ -92,7 +99,6 @@ pub(crate) mod operation;
 mod park;
 mod pool;
 mod queue;
-mod registration;
 pub(crate) mod request;
 mod runtime;
 mod slab;
@@ -101,8 +107,8 @@ pub(crate) mod sockaddr;
 mod spinner;
 mod task;
 mod tasks;
-mod timeout;
 mod waiter;
+mod wheel;
 
 pub use runtime::{Config, Context, RingConfig, Runner};
 pub use spinner::Config as SpinnerConfig;
