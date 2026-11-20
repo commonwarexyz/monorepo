@@ -36,9 +36,9 @@ set is 3, and append is 4. `qmdb::operation` now exports the tags as
 `APPEND_CONTEXT`. The new tags change how Any, Current, Immutable, and Store
 encode operations and how Keyless encodes appends. Every root and proof that
 commits to a retagged operation also changes, including the genesis roots of
-Any, Current, and Immutable. No setting keeps the previous encoding. Rebuild
-Store in fresh partitions. Rebuild or resync each of the other databases into
-fresh partitions. Then recompute every pinned root of those databases ([#5787]).
+Any, Current, and Immutable. Rebuild Store in fresh partitions. Rebuild or
+resync each of the other databases into fresh partitions. Then recompute every
+pinned root of those databases ([#5787]).
 
 `LibQMDBCurrent` now expects the new update and commit tags when it parses the
 operation in an exclusion proof. Redeploy any contract that embeds
@@ -59,15 +59,14 @@ therefore grows with the number of retained operations, so keep databases well
 pruned to keep it short. On a large database, set `init_concurrency` above 1 so
 that several tasks share the replay ([#5158]).
 
-No setting keeps the previous layout. The rebuild or resync that the new tags
-require also moves these databases to the new layout. A standalone authenticated
-journal with a pruned log cannot reopen under a fresh frontier. Rebuild it, or
-seed it with its pruning boundary and pinned digests through
-`Journal::from_components` and `persist_boundary`. Nothing in this release reads
-or removes the old node journal partitions that `journal_partition` named.
-Delete those partitions, and the rest of each replaced database, once nothing
-needs them. Compact databases keep their witness journal, and the standalone
-`merkle::full::Merkle` keeps its node journal ([#5158]).
+A standalone authenticated journal with a pruned log cannot reopen under a fresh
+frontier. Rebuild it, or seed it with its pruning boundary and pinned digests
+through `Journal::from_components` and `persist_boundary`. Nothing in this
+release reads or removes the old node journal partitions that
+`journal_partition` named. Delete those partitions, and the rest of each
+replaced database, once nothing needs them. Compact databases keep their witness
+journal, and the standalone `merkle::full::Merkle` keeps its node journal
+([#5158]).
 
 `sync::CompactTarget` is removed, so describe a compact database's state with a
 `sync::Target` whose range is `[size - 1, size)`. `CompactDb::target` now
@@ -150,10 +149,10 @@ renamed to `inactivity_floor` on every database. Any and Current now expose
 place of `Floored::has_floor` ([#4590], [#5580]). `operation::Committable` now
 takes the Merkle family as a type parameter and gives `is_commit` a default
 implementation. `Committable` now requires `inactivity_floor` and
-`initial_commit`, so implement both on a custom operation type ([#4590]).
-Immutable operations now implement `Committable` ([#5611]). Immutable operations
-no longer implement `operation::Operation`. Use `key` to borrow a key. Match
-`immutable::Operation::Set` in place of `into_key` ([#5644]).
+`initial_commit` ([#4590]). Immutable operations now implement `Committable`
+([#5611]). Immutable operations no longer implement `operation::Operation`. Use
+`key` to borrow a key. Match `immutable::Operation::Set` in place of `into_key`
+([#5644]).
 
 In Any and Current, unmerkleized batches and the `Staged` batches that `stage`
 returns now take commit metadata through `with_metadata` instead of an argument
@@ -183,11 +182,10 @@ batches, so read `bounds().tip.size` ([#5605]). `get` and `get_many` on full
 Keyless merkleized batches now order their type parameters `E, C, H` ([#5577]).
 
 Immutable `get` and `get_many` now return `None` for a key whose set operation
-lies below the inactivity floor, as batch reads already do. Read a key before
-the floor passes its set operation, and do not treat `None` as proof that the
-key was never set ([#5770]). Keyless `get` and `get_many` now return
-`BelowInactivityFloor` for a location below the floor, whether or not the log
-still holds the operation at that location ([#5784]).
+lies below the inactivity floor, as batch reads already do. Do not treat `None`
+as proof that the key was never set ([#5770]). Keyless `get` and `get_many` now
+return `BelowInactivityFloor` for a location below the floor, whether or not the
+log still holds the operation at that location ([#5784]).
 
 Store batches now use `write(key, Some(value))` and `write(key, None)` instead
 of `update` and `delete`. `store::Db` and `store::Batch` gain `get_many`, which
@@ -312,11 +310,11 @@ reads every section from its first item ([#5664]).
 
 Segmented fixed `Journal::init` is removed. Open the journal by calling
 `Journal::preflight_floors` with an empty map and the `ReadOptions` that
-`replay` took. An empty map sets no floors. Then drain `Recovery::next` and
-await `finish`. To restore an exact durable checkpoint, call `preflight_restore`
-with the section and byte size that the checkpoint records, then await `finish`
-without draining. `Config` gains `replay_buffer`, and `init_at_most` keeps its
-signature ([#5663], [#5671]).
+`replay` took. Then drain `Recovery::next` and await `finish`. To restore an
+exact durable checkpoint, call `preflight_restore` with the section and byte
+size that the checkpoint records, then await `finish` without draining. `Config`
+gains `replay_buffer`, and `init_at_most` keeps its signature ([#5663],
+[#5671]).
 
 `Oversized::init`, `init_at_most`, and `init_with_metadata_at_most` are removed.
 `init_with_metadata` is renamed to `init_with_markers` and now returns a
@@ -330,12 +328,10 @@ the journal. For a journal that already used markers, `finish` replaces
 
 Open a new journal with `init_with_checkpoint` and `(0, 0)`. Use `(0, 0)` only
 for empty storage or an intentional reset, because `init_with_checkpoint`
-restores exactly the checkpoint it is given. To restore an existing journal to a
-checkpoint, pass that checkpoint to `init_with_checkpoint`. The journal's owner
-must have published the checkpoint after syncing the data it covers.
-`init_with_metadata_at_most` has no replacement, so there is no way to open a
-journal with markers up to a bound. `Glob::init` is removed, so call
-`glob::Recovery::init` and then `finish` ([#5663]).
+restores exactly the checkpoint it is given. Restore an existing journal only to
+a checkpoint that the journal's owner published after syncing the data it
+covers. `init_with_metadata_at_most` has no replacement. `Glob::init` is
+removed, so call `glob::Recovery::init` and then `finish` ([#5663]).
 
 After an interrupted `destroy`, a contiguous variable journal now reopens
 through ordinary crash recovery or as an empty journal at position zero, as the
@@ -390,11 +386,11 @@ to hash whole subtrees. Pass the same hasher to `add_many` and `merkleize`
 ([#4942]).
 
 A custom Merkle family must now implement `Family::birth_offset` ([#4942]).
-`subtree_root_position` and `leftmost_leaf` move from `Graftable` to `Family`,
-so implement them there in a custom family. A custom family's `peaks` and
-`nodes_to_pin` must now return at most `MAX_PINNED_NODES` entries. A merkleized
-batch now keeps the ancestor digests its proofs need, so those proofs no longer
-depend on the parent batches staying alive ([#5158]).
+`subtree_root_position` and `leftmost_leaf` move from `Graftable` to `Family`. A
+custom family's `peaks` and `nodes_to_pin` must now return at most
+`MAX_PINNED_NODES` entries. A merkleized batch now keeps the ancestor digests
+its proofs need, so those proofs no longer depend on the parent batches staying
+alive ([#5158]).
 
 `authenticated::Journal::new` and `init_at_most` now take
 `authenticated::Config` instead of `merkle::full::Config`.
@@ -438,8 +434,7 @@ now reports `shard_ingress_decode_total` ([#5519]).
 `Recipients` gains `union_with` ([#5519]). `p2p::max_message_size` now takes an
 `IntoIterator` of sizes instead of a slice ([#5615]). `Resolver::fetch_all` and
 `TargetedResolver::fetch_all_targeted` now take an `IntoIterator` instead of a
-`Vec`, so update each of these methods that a custom resolver implements
-([#4886]).
+`Vec` ([#4886]).
 
 ### Parallelism and SIMD
 
@@ -482,19 +477,18 @@ Inside work that runs on the strategy, use `block_on` to wait on the future that
 wait ([#5551]).
 
 `Simd` tokens must now be `Send`, `Sync`, and `'static`. The vector and table
-types of `Simd` and `Neon` must now be `Send` and `Sync`, so update a custom
-backend whose types do not meet these bounds ([#5724]). On an x86-64 target
-built without SSE2, `commonware_simd::dispatch` now uses the scalar backend, and
-`NativeX86V3` and `NativeX86V4C` are unavailable ([#5691]).
+types of `Simd` and `Neon` must now be `Send` and `Sync` ([#5724]). On an x86-64
+target built without SSE2, `commonware_simd::dispatch` now uses the scalar
+backend, and `NativeX86V3` and `NativeX86V4C` are unavailable ([#5691]).
 
 ### Collector
 
 The collector's p2p engine now carries requests and responses on one channel
 instead of two. `Engine::start` now takes a single sender and receiver pair.
 Each message is now a one-byte tag followed by the unchanged request or response
-encoding. No setting keeps the two-channel format, so upgrade every collector
-peer together. Size the channel with the new `collector::p2p::max_message_size`,
-and set the channel's quota for request and response traffic combined ([#5761]).
+encoding. Upgrade every collector peer together. Size the channel with the new
+`collector::p2p::max_message_size`, and set the channel's quota for request and
+response traffic combined ([#5761]).
 
 `Handler::process` now returns the `oneshot::Receiver` of a response channel
 that the handler supplies, instead of taking a sender. Drop that channel's
@@ -533,11 +527,10 @@ actor. Pass another clone as the new second argument of
 parameter ([#5555]).
 
 The plan's state-sync record now also stores the height of its floor. Neither
-this release nor v2026.10.1 reads the other's record. No setting keeps the
-previous record, so start with an empty state-sync partition or a new
-`partition_prefix`. A validator that starts with neither a checkpoint nor a
-state-sync record still needs marshal to hold the current epoch's boundary block
-([#5555]).
+this release nor v2026.10.1 reads the other's record. Start with an empty
+state-sync partition or a new `partition_prefix`. A validator that starts with
+neither a checkpoint nor a state-sync record still needs marshal to hold the
+current epoch's boundary block ([#5555]).
 
 Marshal's `Mailbox::get_finalization` now also checks marshal's cache when the
 archive holds the block at the requested height without that block's
@@ -568,17 +561,17 @@ now yields `(&Self::Key, Change<Self::Account>)` ([#5695]).
 ### Runtime
 
 `buffer::Read::read` now restores the reader's position when a read fails or is
-cancelled, so a retry reads from the same offset ([#5539]). The runtime now
-records the `write_at`, `resize`, `sync`, and `start_sync` spans of
-`runtime.storage.blob` at DEBUG instead of INFO. OpenTelemetry now exports the
-`write_at` span's `bytes` field and the `resize` span's `len` field as numbers
-([#5677]). The io_uring runner now propagates a waker panic raised while the
-runner drops queued messages at shutdown, even when the root task finished
-without error ([#5597]). `Spawner::spawn` no longer makes the compiler prove
-`Send` a second time for a spawned future. That second proof could exceed the
-recursion limit for deeply nested futures ([#5804]). The runtime now does less
-work when it spawns under a parent with many children, polls a task that stays
-pending, or reads from the page cache in batches ([#5526], [#5527], [#5622]).
+cancelled ([#5539]). The runtime now records the `write_at`, `resize`, `sync`,
+and `start_sync` spans of `runtime.storage.blob` at DEBUG instead of INFO.
+OpenTelemetry now exports the `write_at` span's `bytes` field and the `resize`
+span's `len` field as numbers ([#5677]). The io_uring runner now propagates a
+waker panic raised while the runner drops queued messages at shutdown, even when
+the root task finished without error ([#5597]). `Spawner::spawn` no longer makes
+the compiler prove `Send` a second time for a spawned future. That second proof
+could exceed the recursion limit for deeply nested futures ([#5804]). The
+runtime now does less work when it spawns under a parent with many children,
+polls a task that stays pending, or reads from the page cache in batches
+([#5526], [#5527], [#5622]).
 
 ### Encoding and Utilities
 
