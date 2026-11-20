@@ -6,7 +6,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    qmdb::store::{Config, Db},
+    qmdb::store::{Config, unpartitioned::Db},
     translator::TwoCap,
 };
 use commonware_storage_fuzz::floor::{Plan, Recorder};

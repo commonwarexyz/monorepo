@@ -40,7 +40,7 @@ use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
 
-/// Configuration for initializing a [Db](super::Db).
+/// Configuration for initializing a [Db].
 #[derive(Clone)]
 pub struct Config<T: Translator, C, S: Strategy> {
     /// Configuration for the variable-size operations log journal.
@@ -814,7 +814,10 @@ mod test {
                 },
             },
             floor::{Bounded, Hold, Proportional},
-            store::{self, Db, partitioned},
+            store::{
+                partitioned,
+                unpartitioned::{Batch, Db},
+            },
         },
         translator::{OneCap, TwoCap},
         utils::task_metrics::{SPAWNED, tasks},
@@ -1815,7 +1818,7 @@ mod test {
             b.0[31] = 1;
             let keys = [a, b];
             let db = create_test_store(context.child("seed")).await;
-            let batch: store::Batch<'_, _, _, _, TwoCap, _> = db.new_batch();
+            let batch: Batch<'_, _, _, _, TwoCap, _> = db.new_batch();
             let changes = batch
                 .write(a, Some(vec![1]))
                 .write(b, Some(vec![2]))

@@ -354,7 +354,7 @@ mod tests {
         }
     }
 
-    type Store = store::Db<Ctx, Digest, Digest, OneCap, Sequential>;
+    type Store = store::unpartitioned::Db<Ctx, Digest, Digest, OneCap, Sequential>;
 
     fn store_config(suffix: &str) -> store::Config<OneCap, ((), ()), Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
