@@ -38,7 +38,8 @@ pub trait Connected: Clone + Send + Sync + 'static {
 ///
 /// Clones share one rate limiter. If a clone consumes a recipient's quota between a check and its
 /// send, the send skips that recipient. If every checked recipient is skipped, the send is
-/// rejected.
+/// rejected. The wrapped sender submits under the shared limiter lock. Its send method must
+/// return without blocking and must not call back into a clone of this wrapper.
 pub struct LimitedSender<E, S, P>
 where
     E: Clock,
@@ -92,9 +93,7 @@ impl<P: PublicKey, E: Clock> State<P, E> {
 
     /// Charges each of `peers` for one message.
     ///
-    /// Pruning doubles its threshold after each pass, so the limiter tracks at most a constant
-    /// factor more peers than those whose quota has not fully replenished, however recipients
-    /// are addressed.
+    /// Space out pruning passes by the number of keys retained by the last pass.
     fn charge<'a>(&mut self, peers: impl Iterator<Item = &'a P>) {
         for peer in peers {
             // The caller verified availability under the same lock
