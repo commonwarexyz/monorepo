@@ -6,13 +6,36 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
-use commonware_utils::{Probability, probability};
+use commonware_utils::{FuzzRng, Probability, probability};
 use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
 use std::{fmt::Debug, future::Future};
 
 pub mod floor;
 pub mod index;
+
+/// Input bytes that seed the [stream].
+pub const SEED_BYTES: usize = 8;
+
+/// Length of the [stream] a scenario is sampled from.
+pub const STREAM_BYTES: usize = 1 << 12;
+
+/// Decode the input into the stream a scenario is sampled from.
+///
+/// libFuzzer starts from inputs of a few bytes and lengthens them slowly. The input's head
+/// therefore seeds a [STREAM_BYTES] stream of [FuzzRng] output that the rest of the input
+/// overwrites from its start, so every input, even an empty one, samples a whole scenario, and a
+/// byte mutated past the head changes only what is sampled from it. Input past the stream is
+/// ignored.
+pub fn stream(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+    let seed = u.bytes(u.len().min(SEED_BYTES))?.to_vec();
+    let mut stream = vec![0; STREAM_BYTES];
+    FuzzRng::new(seed).fill_bytes(&mut stream);
+    let literal = u.bytes(u.len())?;
+    let literal = &literal[..literal.len().min(STREAM_BYTES)];
+    stream[..literal.len()].copy_from_slice(literal);
+    Ok(stream)
+}
 
 /// Check strict, non-wrapping neighbors against the model's live keys.
 pub fn assert_ordered_neighbors<K: Ord + Debug>(

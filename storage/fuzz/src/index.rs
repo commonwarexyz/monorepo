@@ -6,7 +6,7 @@
 //! form a multiset, since an index may return them in any order and a cursor edits whichever
 //! value it visits. Cursor operations therefore record the visited value rather than a position.
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::telemetry::metrics::metric_samples;
 use commonware_storage::index::{Cursor as _, Ordered, Unordered};
 use std::{
@@ -17,69 +17,140 @@ use std::{
 /// The most keys a [Operation::Grind] inserts, enough to spill an ordered partition.
 const MAX_GRIND: u16 = 1024;
 
+/// The most values a [Operation::InsertMany] inserts: two of them under one key reach the 512
+/// entries at which an ordered partition spills.
+const MAX_MANY: u16 = 256;
+
+/// Length of the key [Operation::InsertLargeKey] inserts, past every capped key.
+const LARGE_KEY: usize = 1000;
+
+/// Bytes sampled keys are made of: both ends and the middle of the byte range, so sampled keys
+/// share partitions and capped keys, zero-padded short keys meet longer ones, and navigation
+/// reaches the first and the last partition and wraps.
+const KEY_BYTES: [u8; 4] = [0x00, 0x01, 0x80, 0xff];
+
+/// The longest sampled key. Keys of two or more bytes make a [Operation::Grind] put all its keys
+/// in one partition also when the partition prefix is two bytes.
+const MAX_KEY: usize = 4;
+
+/// The most keys one [Operation::GetMany] reads: more than the probes an ordered index prefetches
+/// ahead, so one read runs the whole look-ahead and is checked key by key in the middle of a run.
+const MAX_KEYS: usize = 16;
+
+/// Sampled values are below this bound, so prunes meet values that inserts, grinds and
+/// [Operation::InsertMany] wrote.
+const VALUES: u64 = 8;
+
+/// A key of at most [MAX_KEY] bytes drawn from [KEY_BYTES].
+fn key(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+    (0..u.int_in_range(0..=MAX_KEY)?)
+        .map(|_| u.choose(&KEY_BYTES).copied())
+        .collect()
+}
+
+/// At most [MAX_KEYS] keys.
+fn keys(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<Vec<u8>>> {
+    (0..u.int_in_range(0..=MAX_KEYS)?).map(|_| key(u)).collect()
+}
+
+/// A value below [VALUES].
+fn value(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+    u.int_in_range(0..=VALUES - 1)
+}
+
+/// A count of at most [MAX_MANY] values.
+fn many(u: &mut Unstructured<'_>) -> arbitrary::Result<u16> {
+    u.int_in_range(0..=MAX_MANY)
+}
+
 /// An operation applied to both an index and the [Model].
 #[derive(Arbitrary, Debug, Clone)]
 pub enum Operation {
     Insert {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
+        #[arbitrary(with = value)]
         value: u64,
     },
     Get {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
     },
     GetMut {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
     },
     GetMutOrInsert {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
+        #[arbitrary(with = value)]
         value: u64,
     },
     GetMany {
+        #[arbitrary(with = keys)]
         keys: Vec<Vec<u8>>,
     },
     Remove {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
     },
     Prune {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
+        #[arbitrary(with = value)]
         prune_value: u64,
     },
     InsertAndPrune {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
+        #[arbitrary(with = value)]
         value: u64,
+        #[arbitrary(with = value)]
         prune_value: u64,
     },
     // Edge case operations
     InsertLargeKey {
+        #[arbitrary(with = value)]
         value: u64,
     },
     InsertMany {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
-        count: u8,
+        #[arbitrary(with = many)]
+        count: u16,
     },
     PruneAll {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
     },
     // Insert `count` keys that extend `key` with a two-byte counter, so they share a partition
     // and, when `key` already fills the cap, one capped key.
     Grind {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
         count: u16,
     },
     // Cursor operations
     CursorUpdate {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
+        #[arbitrary(with = value)]
         new_value: u64,
     },
     CursorDelete {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
     },
     CursorInsert {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
+        #[arbitrary(with = value)]
         value: u64,
     },
     CursorReplace {
+        #[arbitrary(with = key)]
         key: Vec<u8>,
+        #[arbitrary(with = value)]
         value: u64,
     },
 }
@@ -89,8 +160,14 @@ pub enum Operation {
 pub enum Navigation {
     First,
     Last,
-    Next { key: Vec<u8> },
-    Prev { key: Vec<u8> },
+    Next {
+        #[arbitrary(with = key)]
+        key: Vec<u8>,
+    },
+    Prev {
+        #[arbitrary(with = key)]
+        key: Vec<u8>,
+    },
 }
 
 /// The values an index should hold, by capped key.
@@ -248,7 +325,7 @@ impl Model {
 
             Operation::InsertLargeKey { value } => {
                 // Create a large key to test translator behavior
-                let large_key = vec![0u8; 1000];
+                let large_key = vec![0u8; LARGE_KEY];
                 index.insert(&large_key, *value);
                 self.push(&large_key, *value);
             }

@@ -6,14 +6,24 @@
 //! cursor deletes empty them back. The input picks the sub-key translator, so partitions sort and
 //! spill both integer and array translated keys.
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{Metrics as _, Runner, Supervisor as _, deterministic};
 use commonware_storage::{
     index::partitioned::ordered::Index,
     translator::{Cap, EightCap, FourCap, OneCap, OrderedTranslator, TwoCap},
 };
-use commonware_storage_fuzz::index::{Model, Navigation, Operation};
+use commonware_storage_fuzz::{
+    index::{Model, Navigation, Operation},
+    stream,
+};
 use libfuzzer_sys::fuzz_target;
+
+/// The fewest operations an input applies, so even the shortest inputs grind, spill and revisit
+/// keys.
+const MIN_OPERATIONS: usize = 32;
+
+/// The most operations an input applies.
+const MAX_OPERATIONS: usize = 128;
 
 /// The translator applied to the key bytes after the partition prefix.
 #[derive(Arbitrary, Debug)]
@@ -32,10 +42,23 @@ enum IndexOperation {
     Ordered(Navigation),
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     translator: SubKeyTranslator,
     operations: Vec<IndexOperation>,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let stream = stream(u)?;
+        let u = &mut Unstructured::new(&stream);
+        Ok(Self {
+            translator: u.arbitrary()?,
+            operations: (0..u.int_in_range(MIN_OPERATIONS..=MAX_OPERATIONS)?)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<_>>()?,
+        })
+    }
 }
 
 /// Run the operations on a `P`-byte-prefix index whose translator `T` keeps `cap` sub-key bytes.
