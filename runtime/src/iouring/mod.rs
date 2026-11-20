@@ -23,10 +23,9 @@
 //!
 //! Sockets, blobs, and pending I/O and sleep futures can move between workers.
 //! Registrations stay on their original worker without keeping it alive. If it
-//! closes, pending I/O futures return errors, and pending sleeps whose
-//! deadline has not passed panic when polled.
-//! [`crate::Blob::start_sync`] handles can be awaited on another thread, even after
-//! the original runner shuts down.
+//! closes, pending I/O futures return errors, and pending sleeps whose deadline
+//! has not passed panic when polled. [`crate::Blob::start_sync`] handles can be
+//! awaited on another thread, even after the original runner shuts down.
 //!
 //! # Ownership
 //!
