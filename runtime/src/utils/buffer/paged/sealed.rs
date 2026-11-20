@@ -82,7 +82,6 @@ impl<B: Blob> Sealed<B> {
     }
 
     /// Returns the page cache the view reads through.
-    #[commonware_macros::stability(ALPHA)]
     pub fn page_cache(&self) -> &CacheRef {
         &self.inner.cache_ref
     }
@@ -191,7 +190,6 @@ impl<B: Blob> Sealed<B> {
     /// failed read does not stop the others, and the warm returns an error once every read
     /// finishes. Dropping the future releases the reads it joined. A read it started still
     /// completes if another reader joined it.
-    #[commonware_macros::stability(ALPHA)]
     pub async fn warm(&self, ranges: &[(u64, u64)]) -> Result<usize, Error> {
         self.view().warm(ranges).await
     }

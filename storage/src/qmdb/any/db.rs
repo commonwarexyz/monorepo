@@ -3,8 +3,6 @@
 //! The impl blocks in this file define shared functionality across all Any QMDB variants.
 
 use super::operation::{Operation, update::Update};
-#[commonware_macros::stability(ALPHA)]
-use crate::qmdb::bitmap::Candidates as _;
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
@@ -13,7 +11,12 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics},
+    qmdb::{
+        Error,
+        bitmap::{Candidates as _, Shared},
+        chain::Commitment,
+        metrics::Metrics,
+    },
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -423,7 +426,6 @@ where
     /// Warmed pages can also displace Main residents not read since the eviction sweep last
     /// passed them, so prefetching many cold keys evicts the existing working set faster than
     /// reading them on demand would.
-    #[commonware_macros::stability(ALPHA)]
     pub fn prefetch<Q: Borrow<U::Key>>(
         &self,
         keys: &[Q],
@@ -448,7 +450,6 @@ where
     /// without counting them, so its walk spans at most its entries plus the keys it updates or
     /// deletes. The next batch continues where that one stopped, so warming that span for a batch
     /// and for the batch after it covers both. Otherwise behaves like [Self::prefetch].
-    #[commonware_macros::stability(ALPHA)]
     pub fn prefetch_floor(
         &self,
         candidates: usize,

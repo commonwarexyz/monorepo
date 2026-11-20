@@ -8,18 +8,15 @@ use commonware_runtime::{
     },
 };
 use std::sync::Arc;
-#[commonware_macros::stability(ALPHA)]
 use tracing::warn;
 
 /// Pages read into the page cache by a journal's prefetches, and the prefetch reads that failed.
-#[commonware_macros::stability(ALPHA)]
 #[derive(Clone)]
 pub(super) struct PrefetchMetrics {
     pages: Counter,
     failures: Counter,
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl PrefetchMetrics {
     fn new<E: RuntimeMetrics>(context: &E) -> Self {
         Self {
@@ -97,13 +94,6 @@ pub(super) struct Metrics<E: Clock> {
     /// Duration of full sync calls.
     sync_duration: Timed,
     /// Prefetch reads.
-    #[cfg(not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    )))] // ALPHA
     pub prefetch: PrefetchMetrics,
     /// Clock used by the duration timers.
     clock: Arc<E>,
@@ -173,13 +163,6 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
                 "sync_duration",
                 "Duration of full sync calls",
             ),
-            #[cfg(not(any(
-                commonware_stability_BETA,
-                commonware_stability_GAMMA,
-                commonware_stability_DELTA,
-                commonware_stability_EPSILON,
-                commonware_stability_RESERVED
-            )))] // ALPHA
             prefetch: PrefetchMetrics::new(&context),
             clock: Arc::new(context),
         }

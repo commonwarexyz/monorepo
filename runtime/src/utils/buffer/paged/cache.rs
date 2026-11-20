@@ -36,9 +36,10 @@ use commonware_utils::{
     futures::{Shared, WeakShared},
     sync::{Mutex, RwLock, RwLockWriteGuard},
 };
-#[commonware_macros::stability(ALPHA)]
-use futures::StreamExt as _;
-use futures::{FutureExt, Stream, TryStreamExt as _, future::BoxFuture, stream::FuturesUnordered};
+use futures::{
+    FutureExt, Stream, StreamExt as _, TryStreamExt as _, future::BoxFuture,
+    stream::FuturesUnordered,
+};
 use std::{
     collections::{VecDeque, hash_map::Entry},
     mem,
@@ -694,7 +695,6 @@ impl CacheRef {
 
     /// The number of pages the page cache's Main section holds, which bounds how many warmed pages
     /// stay cached together until read.
-    #[commonware_macros::stability(ALPHA)]
     pub fn main_capacity(&self) -> usize {
         self.cache.read().cache.main_capacity()
     }
@@ -956,7 +956,6 @@ impl CacheRef {
     /// failure in one source does not stop the others. Once every source finishes, the warm
     /// returns the first error from the joined sources if any failed, and otherwise the first
     /// error from its own batch.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn warm<B: Blob>(
         &self,
         blob: &Arc<B>,
@@ -1311,7 +1310,6 @@ impl Cache {
 
     /// Like [Self::cache], for a page read ahead of its first request, which enters the cache as
     /// an expected entry (see [cache::Cache::get_or_insert_mut_expected]).
-    #[commonware_macros::stability(ALPHA)]
     fn cache_expected(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         let page_size: usize = self.page_size.widen();
         assert_eq!(page.len(), page_size);

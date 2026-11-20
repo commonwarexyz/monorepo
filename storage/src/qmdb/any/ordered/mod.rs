@@ -14,9 +14,8 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::{futures::try_join_all, range::contains_cyclic};
-#[commonware_macros::stability(ALPHA)]
-use core::borrow::Borrow;
 use core::{
+    borrow::Borrow,
     future::Future,
     mem,
     ops::{
@@ -202,7 +201,6 @@ where
     /// in the applied state, so keys that unapplied batches create or delete are not considered.
     ///
     /// Otherwise behaves like [Self::prefetch].
-    #[commonware_macros::stability(ALPHA)]
     pub fn prefetch_neighbors<W: Borrow<K>, D: Borrow<K>>(
         &self,
         writes: &[W],
@@ -1940,7 +1938,6 @@ mod test {
             self.inner.try_read_many_sync(positions)
         }
 
-        #[commonware_macros::stability(ALPHA)]
         fn prefetch(
             &self,
             positions: &[u64],

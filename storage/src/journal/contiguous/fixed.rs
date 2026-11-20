@@ -8,9 +8,10 @@
 //!
 //! # Prefetching
 //!
-//! Each call to `Contiguous::prefetch` has a page budget of half the page cache's Main
-//! capacity (rounded down, with a minimum of one page). The journal warms pages in position order,
-//! skips ranges that exceed the budget, and logs a warning if it skips pages.
+//! Each call to [`Contiguous::prefetch`](super::Contiguous::prefetch) has a page budget of half
+//! the page cache's Main capacity (rounded down, with a minimum of one page). The journal warms
+//! pages in position order, skips ranges that exceed the budget, and logs a warning if it skips
+//! pages.
 //!
 //! # Format
 //!
@@ -155,11 +156,9 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _, Viewing};
-#[commonware_macros::stability(ALPHA)]
-use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
-    buffer::paged::{CacheRef, Recovery as PagedRecovery},
+    buffer::paged::{CacheRef, Recovery as PagedRecovery, Sealed},
 };
 use commonware_utils::{Cached, futures::try_join_all};
 use futures::{FutureExt as _, Stream};
@@ -1850,7 +1849,6 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// view (see [Blobs::immutable]), returning each run's index range in `positions`, the
     /// view, and the position stored at the blob's first byte. Positions outside `bounds` are
     /// omitted. A writable tail's view may end before its last positions, which are buffered.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn immutable_runs(
         &self,
         positions: &[u64],
@@ -1867,13 +1865,11 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     }
 
     /// Where this journal records its prefetch reads.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch_metrics(&self) -> super::metrics::PrefetchMetrics {
         self.metrics.prefetch.clone()
     }
 
     /// See [super::Contiguous::prefetch].
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch(
         &self,
         positions: &[u64],
@@ -2093,7 +2089,6 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
 impl<'a, E: Context, A: CodecFixedShared> super::Contiguous for Reader<'a, E, A> {
     type Item = A;
 
-    #[commonware_macros::stability(ALPHA)]
     fn prefetch(
         &self,
         positions: &[u64],
@@ -2178,7 +2173,6 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         self.0.reader().probe_items(positions)
     }
 
-    #[commonware_macros::stability(ALPHA)]
     fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<E, A> {
         self.0.reader().prefetch(positions)
     }

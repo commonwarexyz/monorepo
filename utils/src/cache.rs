@@ -140,7 +140,6 @@ impl<K: Hash + Eq, V> Cache<K, V> {
 
     /// Returns the maximum number of entries Main can hold, which bounds how many expected
     /// entries survive together (see [Self::get_or_insert_mut_expected]).
-    #[commonware_macros::stability(ALPHA)]
     #[inline]
     pub const fn main_capacity(&self) -> usize {
         self.main.capacity
@@ -310,7 +309,6 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// admissions, regardless of the cache's total capacity. Unlike demand misses, which churn
     /// only Small, expected admissions give up that scan resistance: each displaces a Main
     /// resident when Main is full.
-    #[commonware_macros::stability(ALPHA)]
     pub fn get_or_insert_mut_expected<F: FnOnce() -> V>(
         &mut self,
         key: K,
@@ -343,7 +341,6 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// A Small resident moves to Main, evicting an unreferenced Main resident if Main is full, so
     /// its survival does not depend on Small's probation. An expected set thus shares one survival
     /// bound whether its keys were resident or not.
-    #[commonware_macros::stability(ALPHA)]
     pub fn expect(&mut self, key: &K) -> bool {
         let Some(slot) = self.find_slot(key) else {
             return false;
@@ -359,7 +356,6 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// full sweep from now, as a newly expected entry does. A Small resident that earned promotion
     /// leaves Small only by moving to Main ahead of the sweep. A caller that needs only that bound
     /// can skip [Self::expect], and the exclusive access it requires, for such a key.
-    #[commonware_macros::stability(ALPHA)]
     pub fn is_referenced(&self, key: &K) -> bool {
         // A reference bit is never set inside the correlation window, so for a Small resident it
         // already means the resident earned promotion.
@@ -580,7 +576,6 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     }
 
     /// Moves the resident at `slot` immediately before the Main hand (see [Self::expect]).
-    #[commonware_macros::stability(ALPHA)]
     fn expect_resident(&mut self, slot: Slot) {
         match self.topology[slot].location() {
             Location::Main => self.main.unlink(&mut self.topology, slot),
@@ -831,7 +826,6 @@ impl SlotState {
     }
 
     /// Returns whether the reference bit is set.
-    #[commonware_macros::stability(ALPHA)]
     #[inline]
     fn is_referenced(&self) -> bool {
         self.0.load(Ordering::Relaxed) & REFERENCED != 0
