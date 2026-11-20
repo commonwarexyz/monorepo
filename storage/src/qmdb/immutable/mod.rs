@@ -1359,10 +1359,10 @@ pub(super) mod tests {
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
 
-        // items_per_section is 5, so half should be exactly at a blob boundary, in which case
-        // the actual pruning location should match the requested.
+        // The oldest retained location is the requested one, though its blob still holds the
+        // operation before it.
         let oldest_retained_loc = bounds.start;
-        assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+        assert_eq!(oldest_retained_loc, Location::new((ELEMENTS + 2) / 2));
 
         // Try to fetch a pruned key (at location oldest_retained - 1).
         let pruned_key = sorted_keys[*oldest_retained_loc as usize - 2];
@@ -1386,26 +1386,17 @@ pub(super) mod tests {
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
         let oldest_retained_loc = bounds.start;
-        assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+        assert_eq!(oldest_retained_loc, Location::new((ELEMENTS + 2) / 2));
 
-        // Prune to a non-blob boundary.
+        // Prune to a location inside a blob. The boundary is that location.
         let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
         let db = db.prune(loc).await.unwrap();
-        // Actual boundary should be a multiple of 5.
-        let oldest_retained_loc = db.bounds().start;
-        assert_eq!(
-            oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
-        );
+        assert_eq!(db.bounds().start, loc);
 
         // Confirm boundary persists across restart.
         db.sync().await.unwrap();
         let db = open_db(context.child("third")).await;
-        let oldest_retained_loc = db.bounds().start;
-        assert_eq!(
-            oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
-        );
+        assert_eq!(db.bounds().start, loc);
 
         // Try to fetch a key before the inactivity floor (not in snapshot after reopen).
         let floor_val = ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1;
