@@ -972,7 +972,10 @@ mod tests {
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
         Clock, IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
         Faults, N3f1, NZDuration, NZU16, NZU32, NZUsize, TestRng, Widen,
@@ -984,7 +987,7 @@ mod tests {
         test_rng,
     };
     use engine::Engine;
-    use futures::future::join_all;
+    use futures::{FutureExt as _, future::join_all};
     use rand::{RngExt as _, SeedableRng, rngs::StdRng};
     use rand_core::CryptoRng;
     use std::{
@@ -6266,7 +6269,14 @@ mod tests {
         run_1k::<_, _, RoundRobin>(scheme_mocks::fixture, RoundRobin::default());
     }
 
-    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, elector: L, graceful: bool)
+    #[derive(Clone, Copy)]
+    enum Shutdown {
+        Abort,
+        Graceful,
+        NetworkFailure,
+    }
+
+    fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, elector: L, shutdown: Shutdown)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -6285,12 +6295,18 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers::<S, _>(
+            let (network, mut oracle) = Network::new_with_peers(
                 context.child("network"),
-                participants.clone(),
-                true,
+                Config {
+                    max_size: max_message_size([max_payload_size::<S, Sha256Digest>(n)]),
+                    max_peers_per_set: NZUsize!(1),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.iter().cloned(),
             )
             .await;
+            let network = network.start();
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -6352,13 +6368,21 @@ mod tests {
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
-            let engine = Engine::new(context.child("engine"), cfg);
+            let syncs = PendingSyncs::default();
+            syncs.unblock();
+            let engine = Engine::new(
+                DelayedSyncContext {
+                    inner: context.child("engine"),
+                    pending: syncs.clone(),
+                },
+                cfg,
+            );
 
             // Start engine
             let (pending, recovered, resolver) = registrations
                 .remove(&participants[0])
                 .expect("validator should be registered");
-            let handle = engine.start(pending, recovered, resolver);
+            let mut handle = engine.start(pending, recovered, resolver);
 
             // Allow tasks to start
             context.sleep(Duration::from_millis(1000)).await;
@@ -6377,25 +6401,32 @@ mod tests {
                 "engine tasks should still be running"
             );
 
-            // Shutdown engine and ensure children stop
-            let running_after = if graceful {
-                let result = context
-                    .child("stop")
-                    .stop(0, Some(Duration::from_secs(5)))
-                    .await;
-                assert!(
-                    result.is_ok(),
-                    "graceful shutdown should complete: {result:?}"
-                );
-                count_running_tasks(&context, "engine")
-            } else {
-                handle.abort();
-                let _ = handle.await; // ensure parent tear-down runs
-
-                // Give the runtime a tick to process aborts
-                context.sleep(Duration::from_millis(1000)).await;
-                count_running_tasks(&context, "engine")
-            };
+            // Hold a real voter journal sync across shutdown.
+            syncs.arm();
+            let gate = next_pending_sync(&syncs);
+            gate.blocked.await.expect("voter reached journal sync");
+            match shutdown {
+                Shutdown::Abort => {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+                Shutdown::Graceful => {
+                    let mut stopping =
+                        Box::pin(context.child("stop").stop(0, Some(Duration::from_secs(5))));
+                    assert!(stopping.as_mut().now_or_never().is_none());
+                    context.sleep(Duration::from_millis(1)).await;
+                    assert!((&mut handle).now_or_never().is_none());
+                    gate.release.send(Ok(())).expect("voter still owns sync");
+                    stopping.await.expect("graceful shutdown");
+                    handle.await.expect("engine stopped");
+                }
+                Shutdown::NetworkFailure => {
+                    network.abort();
+                    handle.await.expect("engine stops after its network closes");
+                }
+            }
+            context.sleep(Duration::from_millis(1)).await;
+            let running_after = count_running_tasks(&context, "engine");
             assert_eq!(
                 running_after, 0,
                 "all engine tasks should be stopped, but {running_after} still running"
@@ -6409,7 +6440,7 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        engine_shutdown::<S, F, L>(seed, fixture, elector, false);
+        engine_shutdown::<S, F, L>(seed, fixture, elector, Shutdown::Abort);
     }
 
     test_for_all_fixtures!(children_shutdown_on_engine_abort, seeds = 10);
@@ -6420,10 +6451,20 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        engine_shutdown::<S, F, L>(seed, fixture, elector, true);
+        engine_shutdown::<S, F, L>(seed, fixture, elector, Shutdown::Graceful);
     }
 
     test_for_all_fixtures!(graceful_shutdown, seeds = 10);
+
+    #[test_traced]
+    fn network_failure_stops_engine_with_pending_voter_sync() {
+        engine_shutdown::<_, _, RoundRobin>(
+            0,
+            ed25519::fixture,
+            RoundRobin::default(),
+            Shutdown::NetworkFailure,
+        );
+    }
 
     fn attributable_reporter_filtering<S, F, L>(mut fixture: F, elector: L)
     where
