@@ -130,6 +130,10 @@ stability_scope!(BETA {
         /// Recipients that exceed their rate limit will be filtered out. The
         /// returned [`CheckedSender`] will only send to non-limited recipients.
         ///
+        /// Checking does not consume a recipient's rate limit. It is consumed when
+        /// [`CheckedSender::send`] submits a message to that recipient and the
+        /// submission is accepted.
+        ///
         /// # Returns
         ///
         /// A [`CheckedSender`] containing only the recipients that are not
@@ -150,6 +154,12 @@ stability_scope!(BETA {
         fn recipients(&self) -> Vec<Self::PublicKey>;
 
         /// Sends a message to the pre-checked recipients.
+        ///
+        /// # Rate Limiting
+        ///
+        /// The rate limit is shared with every clone of the originating [`LimitedSender`].
+        /// A pre-checked recipient whose rate limit was consumed through a clone since the
+        /// check is skipped. If every pre-checked recipient is skipped, the send is rejected.
         ///
         /// # Offline Recipients
         ///
