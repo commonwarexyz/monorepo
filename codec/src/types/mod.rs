@@ -106,8 +106,14 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Buf, BufsMut, Error, Read, Write};
+    use crate::{Buf, BufsMut, Error, Read, Write, types::lazy::Lazy};
     use bytes::{BufMut, Bytes, BytesMut, TryGetError, buf::UninitSlice};
+    #[cfg(feature = "std")]
+    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     /// One-byte test type that uses the default aggregate hooks.
     ///
@@ -196,6 +202,61 @@ pub(crate) mod tests {
             self.inner.extend_from_slice(&bytes);
             self.pushed.push(bytes);
         }
+    }
+
+    /// Asserts that [`crate::EncodeSize::encode_inline_size`] is exactly the number of bytes
+    /// that [`Write::write_bufs`] writes inline (everything except chunks passed to
+    /// [`BufsMut::push`]), and that [`crate::EncodeSize::encode_size`] counts all of them.
+    ///
+    /// Writers size their inline buffer from `encode_inline_size`, so a smaller value
+    /// overflows that buffer and a larger one over-allocates.
+    pub fn assert_encode_inline_size<T: crate::EncodeSize + Write>(value: &T) {
+        let mut buf = TrackingWriteBuf::new();
+        value.write_bufs(&mut buf);
+        let pushed: usize = buf.pushed.iter().map(Bytes::len).sum();
+        let written = buf.freeze().len();
+        assert_eq!(written, value.encode_size(), "encode_size");
+        assert_eq!(
+            written - pushed,
+            value.encode_inline_size(),
+            "encode_inline_size"
+        );
+    }
+
+    #[test]
+    fn test_encode_inline_size_matches_inline_bytes() {
+        // Long enough that its length prefix takes two bytes.
+        let payload = Bytes::from(vec![7u8; 200]);
+        let values = vec![1u32, 2, 3];
+
+        assert_encode_inline_size(&5u32);
+        assert_encode_inline_size(&values);
+        assert_encode_inline_size(&values.as_slice());
+        assert_encode_inline_size(&Arc::new(values.clone()));
+        assert_encode_inline_size(&Some(5u32));
+        assert_encode_inline_size(&None::<u32>);
+        assert_encode_inline_size(&Lazy::new(values));
+        assert_encode_inline_size(&BTreeMap::from([(1u32, 2u32), (3, 4)]));
+        assert_encode_inline_size(&BTreeSet::from([1u32, 2, 3]));
+
+        // Byte payloads are pushed, so only their length prefixes are inline.
+        assert_encode_inline_size(&payload);
+        assert_encode_inline_size(&vec![payload.clone(), payload.clone()]);
+        assert_encode_inline_size(&Some(payload.clone()));
+        assert_encode_inline_size(&BTreeMap::from([(1u32, payload)]));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_encode_inline_size_matches_inline_bytes_hash_collections() {
+        // Long enough that its length prefix takes two bytes.
+        let payload = Bytes::from(vec![7u8; 200]);
+
+        assert_encode_inline_size(&HashMap::from([(1u32, 2u32), (3, 4)]));
+        assert_encode_inline_size(&HashSet::from([1u32, 2, 3]));
+
+        // Byte payloads are pushed, so only their length prefixes are inline.
+        assert_encode_inline_size(&HashMap::from([(1u32, payload)]));
     }
 
     /// Test [`bytes::Buf`] implementation that records how values are read.
