@@ -129,23 +129,11 @@ impl<T: Copy + PartialOrd> RangeCfg<T> {
     }
 
     /// Returns true if the value is within this range.
+    ///
+    /// Delegates to [`RangeBounds::contains`], whose inclusion tests reject
+    /// values incomparable to a bound (such as `f64::NAN`).
     pub fn contains(&self, value: &T) -> bool {
-        // Exclude by start bound
-        match &self.start {
-            Bound::Included(s) if value < s => return false,
-            Bound::Excluded(s) if value <= s => return false,
-            _ => {}
-        }
-
-        // Exclude by end bound
-        match &self.end {
-            Bound::Included(e) if value > e => return false,
-            Bound::Excluded(e) if value >= e => return false,
-            _ => {}
-        }
-
-        // If not excluded by either bound, the value is within the range
-        true
+        RangeBounds::contains(self, value)
     }
 
     /// Applies `f` to both bounds.
@@ -390,5 +378,43 @@ mod tests {
         // Type inference when assigning to typed variable
         let cfg: RangeCfg<u32> = RangeCfg::new(0..1000);
         assert!(cfg.contains(&500));
+    }
+
+    #[test]
+    fn test_range_cfg_contains_matches_range_bounds() {
+        // `RangeCfg::contains` shadows `RangeBounds::contains`. Both must give
+        // the same answer for every bound shape, including values that are
+        // incomparable to the bounds (NaN).
+        let cfgs: [RangeCfg<f64>; 6] = [
+            RangeCfg::new(0.0..=1.0),
+            RangeCfg::new(0.0..1.0),
+            RangeCfg::new(0.0..),
+            RangeCfg::new(..1.0),
+            RangeCfg::new(..=1.0),
+            RangeCfg::new(..),
+        ];
+        let values = [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            0.5,
+            1.0,
+            2.0,
+            f64::INFINITY,
+        ];
+        for cfg in &cfgs {
+            for v in &values {
+                assert_eq!(
+                    cfg.contains(v),
+                    RangeBounds::contains(cfg, v),
+                    "{cfg:?} disagrees on {v}"
+                );
+            }
+            // NaN is outside every bounded range.
+            if cfg.start != Bound::Unbounded || cfg.end != Bound::Unbounded {
+                assert!(!cfg.contains(&f64::NAN), "{cfg:?} contains NaN");
+            }
+        }
     }
 }
