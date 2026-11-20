@@ -565,7 +565,7 @@ mod tests {
 
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
-    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(not(target_arch = "wasm32"), case::tokio(crate::tokio::Runner::default()))]
     #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_until_ready_bounds_unrepresentable_wait<R: crate::Runner>(#[case] executor: R)
     where
