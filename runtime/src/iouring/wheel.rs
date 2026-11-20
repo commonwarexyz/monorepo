@@ -530,6 +530,16 @@ impl<const RESOLUTION: u64> Wheel<RESOLUTION> {
                 break;
             }
 
+            // A bucket above level zero whose earliest slot is still ahead
+            // stays filed until that slot is due, so a pass that reaches its
+            // start for an earlier slot spends no budget on refiles. Every
+            // other occupied bucket starts after its range, so nothing due
+            // remains, and the base stays before its start, where its slots
+            // were filed.
+            if bucket >= LEVEL_BUCKETS && self.buckets[bucket].min > target {
+                return;
+            }
+
             // No resident is earlier than start, so the base can move there
             // and every other resident stays correctly filed. Clearing the
             // bucket's bit detaches it in O(1). It keeps its list, so removals
@@ -1008,6 +1018,27 @@ pub mod tests {
     }
 
     #[test]
+    fn test_pass_leaves_a_later_bucket_until_its_first_deadline() {
+        // A due slot in level zero, and a higher bucket whose slots are all
+        // later, enough to spend a whole budget on refiles.
+        let mut wheel = Wheel::<FINE>::new(0);
+        wheel.insert(0, 63 * FINE);
+
+        for slot in 1..=(BUDGET * REFILES_PER_UNIT) {
+            wheel.insert(slot, 127 * FINE);
+        }
+
+        // The pass reaches the higher bucket's start but refiles none of it.
+        let mut budget = BUDGET;
+        let mut fired = Vec::new();
+        wheel.expire(64 * FINE, &mut budget, &mut |slot| fired.push(slot));
+
+        assert_eq!(fired, [0]);
+        assert_eq!(budget, BUDGET - 1);
+        assert_eq!(wheel.bound(), 127 * FINE);
+    }
+
+    #[test]
     fn test_bucket_cascades_at_its_first_deadline() {
         /// Slots in the bucket, few enough that one budget refiles them down
         /// three levels.
@@ -1071,22 +1102,17 @@ pub mod tests {
 
     #[test]
     fn test_insertion_into_a_detached_due_bucket_fires() {
-        // Four slots share one deadline.
+        // Four slots share one deadline in a level zero bucket.
         let mut wheel = Wheel::<FINE>::new(0);
-        let deadline = 100 * FINE;
+        let deadline = 50 * FINE;
 
         for slot in 0..4u32 {
             wheel.insert(slot, deadline);
         }
 
-        // Cascade the slots to level zero, one tick before they are due.
-        let mut budget = u32::MAX;
-        let mut fired = Vec::new();
-        wheel.expire(deadline - FINE, &mut budget, &mut |slot| fired.push(slot));
-
-        assert!(fired.is_empty());
-
+        // A pass at the deadline detaches the bucket and fires two slots.
         let mut budget = 2;
+        let mut fired = Vec::new();
         wheel.expire(deadline, &mut budget, &mut |slot| fired.push(slot));
 
         assert_eq!(fired.len(), 2);
