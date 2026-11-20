@@ -40,6 +40,9 @@
 //!
 //! # Storage
 //!
+//! Partition names and hex-encoded blob names can use the full component length the
+//! filesystem supports.
+//!
 //! Failures while synchronizing blob contents, including during
 //! [SYNC](crate::WriteOptions::SYNC) writes, are retained across opens of the
 //! blob, even after every handle is dropped. Creation failures are retained

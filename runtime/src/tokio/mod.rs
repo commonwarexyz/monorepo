@@ -10,6 +10,9 @@
 //!
 //! # Storage
 //!
+//! Partition names and hex-encoded blob names can use the full component length the
+//! filesystem supports.
+//!
 //! [crate::Runner::start] holds the storage directory (an advisory lock on its
 //! `.hold` file) until the run's storage and every operation it dispatched have
 //! finished. A start on a directory another run still holds blocks, with a

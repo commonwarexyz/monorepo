@@ -13,8 +13,7 @@ use tracing::warn;
 /// Name of the hold file at the storage directory root.
 ///
 /// It cannot collide with stored data: blobs live inside partition directories,
-/// and `validate_partition_name` rejects the `.`, so no partition can take this
-/// name.
+/// and partition names cannot contain a period.
 const HOLD_NAME: &str = ".hold";
 
 /// An exclusive hold on a storage directory, backed by an OS advisory lock on
@@ -113,12 +112,12 @@ impl Deref for Held {
 #[cfg(test)]
 mod tests {
     use super::{HOLD_NAME, Hold};
-    use crate::storage::validate_partition_name;
+    use crate::storage::validate_names;
     use std::fs;
 
     #[test]
     fn test_hold_name_rejected_as_partition() {
-        assert!(validate_partition_name(HOLD_NAME).is_err());
+        assert!(validate_names(HOLD_NAME, None, false).is_err());
     }
 
     #[test]

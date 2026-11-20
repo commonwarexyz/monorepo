@@ -4,6 +4,13 @@
 //!
 //! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
+//! # Storage
+//!
+//! Storage enforces the [portable name limits](crate::Storage#partition-and-blob-names).
+//! An otherwise valid name beyond these limits fails validation with
+//! [std::io::ErrorKind::InvalidInput]. An injected namespace fault can fail the operation
+//! before name validation.
+//!
 //! # External Processes
 //!
 //! When testing an application that interacts with some external process, it can appear to

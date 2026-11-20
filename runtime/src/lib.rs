@@ -709,13 +709,23 @@ stability_scope!(BETA {
     /// Runtimes must ensure that no operation issued by a previous run against
     /// the same storage is still in flight when a new run begins.
     ///
-    /// # Partition Names
+    /// # Partition and blob names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
     /// characters, dashes (`-`), or underscores (`_`). Names containing other
     /// characters (e.g., `/`, `.`, spaces) will return an error. On case-insensitive
     /// filesystems, partition names that differ only by letter case must not both
     /// be used.
+    ///
+    /// Blob names are non-empty byte strings. Opening or removing a blob with an empty name
+    /// fails before changing the namespace. Passing `None` to [Storage::remove] removes the
+    /// entire partition.
+    ///
+    /// If an open fails during creation, it can leave an empty partition or a blob name
+    /// visible to [Storage::scan]. A listed name does not guarantee the blob can be opened.
+    ///
+    /// For portability, use at most 255 bytes per partition name and 127 bytes per blob
+    /// name. Support for longer names varies, and the host filesystem can impose lower limits.
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
@@ -758,6 +768,8 @@ stability_scope!(BETA {
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
         /// [Error::BlobVersionMismatch]. `versions` must be non-empty.
         ///
+        /// Creation uses the highest version in `versions`. Reopening a blob preserves its version.
+        ///
         /// # Layout
         ///
         /// New blobs are created with the latest layout allowed by the runtime. Reopening an
@@ -777,7 +789,9 @@ stability_scope!(BETA {
 
         /// Remove a blob from a given partition.
         ///
-        /// If no `name` is provided, the entire partition is removed.
+        /// Removing an absent named blob returns [Error::BlobMissing], including when its
+        /// partition is absent. If no `name` is provided, the entire partition is removed
+        /// and an absent partition returns [Error::PartitionMissing].
         ///
         /// An Ok result indicates the blob is durably removed.
         ///
@@ -786,7 +800,7 @@ stability_scope!(BETA {
         /// Removal unlinks the blob's name but does not invalidate previously opened handles:
         /// they remain fully readable until dropped, whether the blob was removed by name or by
         /// removing its entire partition. This includes bytes written but never synced. Physical
-        /// resources are reclaimed once the last handle is dropped.
+        /// storage may remain in use until outstanding operations also finish.
         ///
         /// Re-opening a removed blob's name creates a new, independent blob; handles opened
         /// before the removal continue to observe the removed blob's contents.
@@ -799,7 +813,10 @@ stability_scope!(BETA {
             name: Option<&[u8]>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Return all blobs in a given partition.
+        /// Return all blob names in a given partition, in unspecified order.
+        ///
+        /// An empty partition returns an empty list. A missing partition returns
+        /// [Error::PartitionMissing]. Other errors do not establish absence.
         fn scan(&self, partition: &str)
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
