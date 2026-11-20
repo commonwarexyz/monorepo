@@ -435,7 +435,7 @@ where
                 };
                 match checked.send(message, self.priority_requests) {
                     Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
-                        // Success, so move from pending to active
+                        // Accepted locally (including backoff), so move from pending to active
                         self.requests_sent.inc(Status::Success);
                         let now = self.context.current();
                         sent = Some((key.clone(), id, peer, now));
@@ -776,8 +776,14 @@ mod tests {
             }
         }
 
-        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
-            self.sender.send(self.recipients, message, priority)
+        fn send_with_receipt(
+            self,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> commonware_p2p::SendReceipt<Self::PublicKey> {
+            let recipients = self.recipients();
+            let feedback = self.sender.send(self.recipients, message, priority);
+            commonware_p2p::SendReceipt::new(feedback, recipients)
         }
     }
 

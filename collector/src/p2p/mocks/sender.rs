@@ -3,7 +3,7 @@
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::ReadExt as _;
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{CheckedSender, LimitedSender, Recipients};
+use commonware_p2p::{CheckedSender, LimitedSender, Recipients, SendReceipt};
 use commonware_runtime::IoBufs;
 use commonware_utils::sync::Mutex;
 use std::{sync::Arc, time::SystemTime};
@@ -46,8 +46,12 @@ impl<P: PublicKey> CheckedSender for CheckedFailing<P> {
         Vec::new()
     }
 
-    fn send(self, _message: impl Into<IoBufs> + Send, _priority: bool) -> Unreliable<Feedback> {
-        Unreliable::new(Feedback::Closed)
+    fn send_with_receipt(
+        self,
+        _message: impl Into<IoBufs> + Send,
+        _priority: bool,
+    ) -> SendReceipt<Self::PublicKey> {
+        SendReceipt::new(Unreliable::new(Feedback::Closed), Vec::new())
     }
 }
 
@@ -98,10 +102,15 @@ impl<P: PublicKey> CheckedSender for CheckedRecording<P> {
         }
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send_with_receipt(
+        self,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> SendReceipt<Self::PublicKey> {
+        let recipients = self.recipients();
         let mut payload: IoBufs = message.into();
         let first = u8::read(&mut payload).expect("a payload must not be empty");
         self.sent.lock().push((self.recipients, first, priority));
-        Unreliable::new(Feedback::Ok)
+        SendReceipt::new(Unreliable::new(Feedback::Ok), recipients)
     }
 }
