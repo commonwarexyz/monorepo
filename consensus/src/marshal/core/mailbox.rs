@@ -80,12 +80,12 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// A hint that a finalized block may be available at a given height.
     ///
     /// This triggers a network fetch if the finalization is not available locally.
-    /// This is fire-and-forget: the finalization will be stored in marshal and
-    /// delivered via the normal finalization flow when available.
+    /// This is fire-and-forget. A valid response enters the normal finalization
+    /// flow, and a hint at or below the processed height is ignored.
     ///
     /// The height must be covered by both the epocher and the provider. If the
-    /// epocher cannot map the height to an epoch, or the provider cannot supply
-    /// a scheme for that epoch, the hint is silently dropped.
+    /// epocher cannot map the height to an epoch, or the provider cannot verify
+    /// certificates for that epoch, any response to the hinted fetch is ignored.
     ///
     /// Targets are required because this is typically called when a peer claims to
     /// be ahead. If a target returns invalid data, the resolver will block them.
@@ -772,12 +772,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Calling this multiple times for the same height with different targets will
     /// add to the target set if there is an ongoing fetch, allowing more peers to be tried.
     ///
-    /// This is fire-and-forget: the finalization will be stored in marshal and delivered
-    /// via the normal finalization flow when available.
+    /// This is fire-and-forget. A valid response enters the normal finalization flow, and a
+    /// hint at or below the processed height is ignored.
     ///
     /// The height must be covered by both the epocher and the provider. If the
-    /// epocher cannot map the height to an epoch, or the provider cannot supply
-    /// a scheme for that epoch, any response to the hinted fetch is ignored.
+    /// epocher cannot map the height to an epoch, or the provider cannot verify
+    /// certificates for that epoch, any response to the hinted fetch is ignored.
     pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         let _ = self.sender.enqueue(Message::HintFinalized {
             span: info_span!("marshal.mailbox.hint_finalized", height = height.traced()),

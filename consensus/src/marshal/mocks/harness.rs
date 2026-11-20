@@ -1758,8 +1758,8 @@ where
     });
 }
 
-/// Contract: once marshal has delivered a finalized block to the application,
-/// that finalized block and its certificate must already be durable.
+/// Contract: once marshal has delivered a finalized block that it wrote with its certificate,
+/// both must already be durable.
 pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
