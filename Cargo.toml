@@ -34,7 +34,6 @@ members = [
     "examples/chat",
     "examples/dkg",
     "examples/estimator",
-    "examples/flood",
     "examples/log",
 
     # Fuzz builds
