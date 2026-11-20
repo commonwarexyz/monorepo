@@ -780,7 +780,7 @@ mod tests {
 
             let checked1 = limited1.check(Recipients::One(peer.clone())).unwrap();
             let checked2 = limited2
-                .check(Recipients::Some(vec![peer.clone()]))
+                .check(Recipients::Some(vec![peer]))
                 .unwrap();
             checked2.send(IoBuf::from(b"winner"), false);
             assert_eq!(
