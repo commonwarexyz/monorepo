@@ -121,6 +121,11 @@ path = "src/qmdb/benches/scale.rs"
 required-features = ["test-traits"]
 
 [[bench]]
+name = "workload"
+harness = false
+path = "src/qmdb/benches/workload.rs"
+
+[[bench]]
 name="archive"
 harness = false
 path = "src/archive/benches/bench.rs"
