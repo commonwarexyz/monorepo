@@ -177,6 +177,41 @@
 //! recommended for applications that support state sync and do not require full block history to
 //! participate in consensus._
 //!
+//! ## Durability
+//!
+//! Marshal stores finalized blocks in [`store::Blocks`] and their finalizations in
+//! [`store::Certificates`]. After it writes a block and its finalization, it syncs both stores
+//! before it delivers the block in an [`Update::Block`].
+//!
+//! The two syncs run concurrently, so a process that stops between them can leave one store
+//! holding a height that the other lacks. A restart can then find either of two states:
+//!
+//! - A finalization without its block. Marshal tries to recover the block from local data or
+//!   peers, and it does not deliver that height until it has the block.
+//! - A block without its finalization. Marshal can still deliver the block, because only
+//!   finalized blocks are written to [`store::Blocks`]. If consensus reports the finalization
+//!   again, marshal stores it unless that height has been pruned.
+//!
+//! [`Identifier::Latest`] identifies the block named by the highest finalization in
+//! [`store::Certificates`]. In the second state, the [processed height](core::Processed) can rise
+//! above that block's height and stay there until a finalization at or above the processed height
+//! is stored.
+//!
+//! ```text
+//! Stores after a restart that follows an interrupted sync (x stored, . missing):
+//!
+//! height                  H-2   H-1    H
+//! store::Blocks            x     x     x
+//! store::Certificates      x     x     .
+//!
+//! Identifier::Latest is the block at H-1, and the processed height becomes H after the
+//! application acknowledges H
+//! ```
+//!
+//! A block can also be stored without a finalization while marshal fills a gap. Marshal can reach
+//! an ancestor of a finalized block by following parent links, and a block stored this way may
+//! never receive a finalization of its own.
+//!
 //! ## Limitations and Future Work
 //!
 //! - Only works with [crate::simplex] rather than general consensus.
@@ -217,8 +252,9 @@ pub enum Identifier<D: Digest> {
     Height(Height),
     /// The digest of the block to retrieve.
     Digest(D),
-    /// The highest finalized block. It may be the case that marshal does not have some of the
-    /// blocks below this height.
+    /// The block named by the highest finalization in [`store::Certificates`]. Marshal may lack
+    /// this block and some of the blocks below it. The Durability section of the
+    /// [module docs](self) describes when the processed height can be above this block's height.
     Latest,
 }
 
