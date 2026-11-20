@@ -12,7 +12,7 @@ use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Consumer, Delivery, Outcome, p2p::Producer};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{channel::oneshot, sequence::U64, vec::NonEmptyVec};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use tracing::{Span, info_span};
 
 /// Messages sent to the resolver actor from the voter.
@@ -85,12 +85,56 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
             Self::Replayed { .. } => "replayed",
         }
     }
+
+    /// Returns the deduplication key, or `None` for the replay marker.
+    fn key(&self) -> Option<Key> {
+        Some(match self {
+            Self::Updated { certificate, .. } => match certificate {
+                Certificate::Notarization(n) => Key::Notarization(n.view()),
+                Certificate::Nullification(n) => Key::Nullification(n.view()),
+                Certificate::Finalization(f) => Key::Finalization(f.view()),
+            },
+            Self::Certified { notarization, .. } => Key::Certified(notarization.view()),
+            Self::Resolve {
+                proposal,
+                view,
+                kind: Kind::Nullification,
+                ..
+            } => Key::ResolveNullification(*proposal, *view),
+            Self::Resolve {
+                proposal,
+                view,
+                kind: Kind::Notarization,
+                ..
+            } => Key::ResolveNotarization(*proposal, *view),
+            Self::Replayed { .. } => return None,
+        })
+    }
+}
+
+/// Identifies queued messages that are duplicate work.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Key {
+    Notarization(View),
+    Nullification(View),
+    Finalization(View),
+    Certified(View),
+    ResolveNullification(View, View),
+    ResolveNotarization(View, View),
 }
 
 /// Pending resolver messages retained after the mailbox fills.
+///
+/// Each keyed message in `messages` has one entry in `index` that maps its
+/// key to its logical position. The message at logical position `p` is at
+/// `messages[p - head]`. A pop from the front increments `head`, so other
+/// positions stay valid. A finalization prune rebuilds the index because it
+/// already visits every message.
 pub struct Pending<S: Scheme, D: Digest> {
     finalization: Option<MailboxMessage<S, D>>,
     messages: VecDeque<MailboxMessage<S, D>>,
+    index: HashMap<Key, u64>,
+    head: u64,
 }
 
 impl<S: Scheme, D: Digest> Default for Pending<S, D> {
@@ -98,7 +142,16 @@ impl<S: Scheme, D: Digest> Default for Pending<S, D> {
         Self {
             finalization: None,
             messages: VecDeque::new(),
+            index: HashMap::new(),
+            head: 0,
         }
+    }
+}
+
+impl<S: Scheme, D: Digest> Pending<S, D> {
+    /// Returns the queued message at a logical position.
+    fn get_mut(&mut self, position: u64) -> Option<&mut MailboxMessage<S, D>> {
+        self.messages.get_mut((position - self.head) as usize)
     }
 }
 
@@ -119,7 +172,16 @@ impl<S: Scheme, D: Digest> Overflow<MailboxMessage<S, D>> for Pending<S, D> {
         }
 
         while let Some(message) = self.messages.pop_front() {
+            let key = message.key();
+            if let Some(key) = &key {
+                self.index.remove(key);
+            }
+            self.head += 1;
             if let Some(message) = push(message) {
+                self.head -= 1;
+                if let Some(key) = key {
+                    self.index.insert(key, self.head);
+                }
                 self.messages.push_front(message);
                 break;
             }
@@ -133,10 +195,10 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         // The replay marker must follow every message queued before it and
         // survive every finalization, or background repair never starts.
-        if matches!(message, Self::Replayed { .. }) {
+        let Some(key) = message.key() else {
             overflow.messages.push_back(message);
             return;
-        }
+        };
 
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
@@ -150,16 +212,17 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         }
 
         // Retain only the highest-view finalization and any messages with a view greater than the new view
-        if matches!(
-            &message,
-            Self::Updated {
-                certificate: Certificate::Finalization(_),
-                ..
-            }
-        ) {
+        if matches!(key, Key::Finalization(_)) {
             overflow.messages.retain(|old_message| {
                 matches!(old_message, Self::Replayed { .. }) || old_message.view() > new_view
             });
+            overflow.head = 0;
+            overflow.index.clear();
+            for (position, old_message) in overflow.messages.iter().enumerate() {
+                if let Some(key) = old_message.key() {
+                    overflow.index.insert(key, position as u64);
+                }
+            }
             overflow.finalization = Some(message);
             return;
         }
@@ -168,67 +231,17 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         // requested view, and kind share one network fetch. An unrestricted
         // duplicate removes the target. Different kinds remain distinct
         // because their certificates are not interchangeable.
-        if overflow
-            .messages
-            .iter_mut()
-            .any(|old_message| match (&message, old_message) {
-                (
-                    Self::Updated {
-                        certificate: new_certificate,
-                        ..
-                    },
-                    Self::Updated {
-                        certificate: old_certificate,
-                        ..
-                    },
-                ) => {
-                    new_certificate.view() == old_certificate.view()
-                        && matches!(
-                            (new_certificate, old_certificate),
-                            (Certificate::Notarization(_), Certificate::Notarization(_))
-                                | (Certificate::Nullification(_), Certificate::Nullification(_))
-                                | (Certificate::Finalization(_), Certificate::Finalization(_))
-                        )
-                }
-                (
-                    Self::Certified {
-                        notarization: new_notarization,
-                        ..
-                    },
-                    Self::Certified {
-                        notarization: old_notarization,
-                        ..
-                    },
-                ) => new_notarization.view() == old_notarization.view(),
-                (
-                    Self::Resolve {
-                        proposal: new_proposal,
-                        view: new_view,
-                        kind: new_kind,
-                        target: new_target,
-                        ..
-                    },
-                    Self::Resolve {
-                        proposal: old_proposal,
-                        view: old_view,
-                        kind: old_kind,
-                        target: old_target,
-                        ..
-                    },
-                ) if new_proposal == old_proposal
-                    && new_view == old_view
-                    && new_kind == old_kind =>
-                {
-                    if new_target.is_none() {
-                        *old_target = None;
-                    }
-                    true
-                }
-                _ => false,
-            })
-        {
+        if let Some(&position) = overflow.index.get(&key) {
+            if let Self::Resolve { target: None, .. } = message
+                && let Some(Self::Resolve { target, .. }) = overflow.get_mut(position)
+            {
+                *target = None;
+            }
             return;
         }
+        overflow
+            .index
+            .insert(key, overflow.head + overflow.messages.len() as u64);
         overflow.messages.push_back(message);
     }
 }
@@ -916,5 +929,165 @@ mod tests {
                     if n.view() == View::new(5)
             ));
         }
+    }
+
+    /// Checks that each keyed message has one index entry at its position.
+    fn assert_indexed(overflow: &Pending<TestScheme, Sha256Digest>) {
+        let keyed = overflow.messages.iter().filter_map(|m| m.key()).count();
+        assert_eq!(overflow.index.len(), keyed);
+        for (key, &position) in &overflow.index {
+            let message = &overflow.messages[(position - overflow.head) as usize];
+            assert!(message.key() == Some(*key));
+        }
+    }
+
+    /// Drains with a receiver that accepts `accept` messages, then rejects.
+    fn drain_some(overflow: &mut Pending<TestScheme, Sha256Digest>, accept: usize) {
+        let mut accepted = 0;
+        Overflow::drain(overflow, |message| {
+            if accepted == accept {
+                return Some(message);
+            }
+            accepted += 1;
+            None
+        });
+        assert_indexed(overflow);
+    }
+
+    fn keys(overflow: Pending<TestScheme, Sha256Digest>) -> Vec<Option<Key>> {
+        drain(overflow).iter().map(|m| m.key()).collect()
+    }
+
+    #[test]
+    fn certificate_kinds_deduplicate_separately() {
+        let view = View::new(4);
+        let mut overflow = Pending::default();
+        for _ in 0..2 {
+            let notarization = Certificate::Notarization(notarization(view));
+            MailboxMessage::handle(&mut overflow, certificate_msg(notarization));
+            MailboxMessage::handle(&mut overflow, certificate_msg(nullification(view)));
+            MailboxMessage::handle(&mut overflow, certified_msg(view, true));
+        }
+        assert_indexed(&overflow);
+        assert!(
+            keys(overflow)
+                == [
+                    Some(Key::Notarization(view)),
+                    Some(Key::Nullification(view)),
+                    Some(Key::Certified(view)),
+                ]
+        );
+    }
+
+    /// A failed push requeues the message at the front and keeps its index
+    /// entry. A delivered message no longer suppresses a new one.
+    #[test]
+    fn failed_drain_keeps_message_indexed() {
+        let mut overflow = Pending::default();
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(3))));
+        drain_some(&mut overflow, 1);
+        drain_some(&mut overflow, 0);
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(3))));
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+        assert_indexed(&overflow);
+        assert!(
+            keys(overflow)
+                == [
+                    Some(Key::Nullification(View::new(3))),
+                    Some(Key::Nullification(View::new(2))),
+                ]
+        );
+    }
+
+    /// An unrestricted duplicate widens the queued request after earlier
+    /// messages were drained.
+    #[test]
+    fn resolve_widens_after_partial_drain() {
+        let proposal = View::new(10);
+        let mut overflow = Pending::default();
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+        for (view, kind) in [(3, Kind::Nullification), (4, Kind::Notarization)] {
+            MailboxMessage::handle(&mut overflow, resolve_msg(proposal, View::new(view), kind));
+        }
+        drain_some(&mut overflow, 1);
+        for view in [4, 3] {
+            MailboxMessage::handle(
+                &mut overflow,
+                unrestricted_resolve_msg(proposal, View::new(view), Kind::Notarization),
+            );
+        }
+
+        let overflow = drain(overflow);
+        let targets: Vec<_> = overflow
+            .iter()
+            .map(|m| {
+                matches!(
+                    m,
+                    MailboxMessage::Resolve {
+                        target: Some(_),
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(targets, [true, false, false]);
+        assert_eq!(overflow[1].view(), View::new(4));
+        assert_eq!(overflow[2].view(), View::new(3));
+    }
+
+    /// A finalization prune rebuilds the index, so retained messages still
+    /// deduplicate and pruned keys can be queued again above the floor.
+    #[test]
+    fn finalization_prune_rebuilds_index() {
+        let proposal = View::new(10);
+        let mut overflow = Pending::default();
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(1))));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(2), true));
+        MailboxMessage::handle(
+            &mut overflow,
+            resolve_msg(proposal, View::new(5), Kind::Notarization),
+        );
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(6))));
+        drain_some(&mut overflow, 1);
+
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+        assert_indexed(&overflow);
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(6))));
+        MailboxMessage::handle(
+            &mut overflow,
+            unrestricted_resolve_msg(proposal, View::new(5), Kind::Notarization),
+        );
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(2), true));
+        MailboxMessage::handle(&mut overflow, certified_msg(View::new(7), true));
+        assert_indexed(&overflow);
+
+        let overflow = drain(overflow);
+        assert!(matches!(
+            &overflow[1],
+            MailboxMessage::Resolve { target: None, .. }
+        ));
+        let queued: Vec<_> = overflow.iter().map(|m| m.key()).collect();
+        assert!(
+            queued
+                == [
+                    Some(Key::Finalization(View::new(3))),
+                    Some(Key::ResolveNotarization(proposal, View::new(5))),
+                    Some(Key::Nullification(View::new(6))),
+                    Some(Key::Certified(View::new(7))),
+                ]
+        );
+    }
+
+    #[test]
+    fn replay_markers_are_never_deduplicated() {
+        let mut overflow = Pending::default();
+        for _ in 0..3 {
+            let replayed = MailboxMessage::Replayed { span: Span::none() };
+            MailboxMessage::handle(&mut overflow, replayed);
+        }
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+        assert_indexed(&overflow);
+        assert!(keys(overflow) == [Some(Key::Finalization(View::new(3))), None, None, None]);
     }
 }
