@@ -939,10 +939,12 @@ stability_scope!(BETA {
     /// Callers that need a stable view must synchronize mutations with their reads or read
     /// only immutable ranges.
     ///
-    /// Mutations that overlap are not ordered by when they are called or first polled, so a
-    /// write that overlaps a resize may land before or after it. To order an operation after a
-    /// mutation, await the mutation's completion first. A mutation whose future was dropped may
-    /// still take effect after later operations complete.
+    /// Mutations that are pending at the same time may take effect in any order, regardless of
+    /// the order in which they were called. To order an operation after a mutation, await the
+    /// mutation first. A mutation whose future was dropped before it completed may still take
+    /// effect after later operations complete, including a later [`Blob::sync`]. Opening the
+    /// blob again after every handle to this open is dropped waits for such a mutation to finish
+    /// (see [`Storage`]).
     pub trait Blob: Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///
