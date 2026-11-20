@@ -311,11 +311,14 @@ impl Driver {
         self.state.compact_ready_queue();
 
         // An expiry pass that ran out of budget leaves due requests behind.
-        // Staging stops at the first of them, so none reaches the kernel
-        // before a later pass reports its timeout.
+        // Staging times out the queued ones it reaches, so none of them
+        // reaches the kernel.
         let latest_due = self.state.deadlines.latest_due(now);
 
-        while self.state.fill_submission_queue(&mut self.ring, latest_due) {
+        while self
+            .state
+            .fill_submission_queue(&mut self.ring, latest_due, deferred)
+        {
             let before = self.ring.submission().len();
             Self::enter(&mut self.ring, Enter::Flush)?;
             if self.ring.submission().len() >= before {
@@ -674,12 +677,13 @@ impl State {
     }
 
     /// Stage operation SQEs in FIFO order, returning whether an SQ flush is
-    /// needed. Staging stops at a request whose deadline is at or before
-    /// `latest_due`.
+    /// needed. A request whose deadline is at or before `latest_due` times
+    /// out instead of staging.
     fn stage_ready_requests(
         &mut self,
         submission_queue: &mut SubmissionQueue<'_>,
         latest_due: Option<Instant>,
+        deferred: &mut Deferred,
     ) -> bool {
         while self.waiters.in_flight() < self.in_flight_limit {
             let Some(id) = self.ready_queue.front().copied() else {
@@ -693,15 +697,18 @@ impl State {
                 continue;
             }
 
-            // A due request waits at the head for the next expiry pass, which
-            // reports its timeout. Its deadline keeps the bound at or before
-            // now, so the worker serves again before it parks.
+            // Time spent queued can exhaust the deadline, so a due request
+            // finishes here, as at admission, and never reaches the kernel.
+            // The queue is in admission order, so the requests behind it
+            // still stage.
             if latest_due.is_some_and(|latest_due| {
                 self.waiters
                     .deadline(id)
                     .is_some_and(|deadline| deadline <= latest_due)
             }) {
-                return false;
+                self.ready_queue.pop_front();
+                self.complete(id, Err(Error::Timeout), deferred);
+                continue;
             }
 
             if submission_queue.is_full() {
@@ -756,9 +763,14 @@ impl State {
     }
 
     /// Fill available SQ slots and report whether more work requires a flush.
-    /// Operations stage up to `latest_due` (see
+    /// Due operations time out instead of staging (see
     /// [`Self::stage_ready_requests`]).
-    fn fill_submission_queue(&mut self, ring: &mut IoUring, latest_due: Option<Instant>) -> bool {
+    fn fill_submission_queue(
+        &mut self,
+        ring: &mut IoUring,
+        latest_due: Option<Instant>,
+        deferred: &mut Deferred,
+    ) -> bool {
         // One SQ view batches tail publication until it is dropped on return.
         let mut submission_queue = ring.submission();
 
@@ -767,7 +779,7 @@ impl State {
             return true;
         }
 
-        self.stage_ready_requests(&mut submission_queue, latest_due)
+        self.stage_ready_requests(&mut submission_queue, latest_due, deferred)
     }
 
     /// Reap every posted CQE without invoking observer callbacks.
@@ -1580,10 +1592,11 @@ pub mod tests {
                 assert_ne!(stale, pending);
             }
 
-            let flush = harness
-                .driver
-                .state
-                .stage_ready_requests(&mut harness.driver.ring.submission(), None);
+            let flush = harness.driver.state.stage_ready_requests(
+                &mut harness.driver.ring.submission(),
+                None,
+                &mut harness.deferred,
+            );
 
             // Only a live request justifies a flush. A stale ID must disappear
             // even if there is no SQ space and its slot has already been reused.
@@ -1842,12 +1855,11 @@ pub mod tests {
 
                 // Complete the real read in the kernel, retaining its CQE and
                 // userspace owner while a later cancellation enters the SQ.
-                assert!(
-                    !harness
-                        .driver
-                        .state
-                        .stage_ready_requests(&mut harness.driver.ring.submission(), None)
-                );
+                assert!(!harness.driver.state.stage_ready_requests(
+                    &mut harness.driver.ring.submission(),
+                    None,
+                    &mut harness.deferred,
+                ));
                 harness.driver.ring.submit_and_wait(1).unwrap();
                 assert!(matches!(
                     probe.try_lock(),
@@ -2614,12 +2626,11 @@ pub mod tests {
 
             // The receive fills the SQ before the ring wait has a slot. Keep
             // the SQE unsubmitted so park must flush before arming.
-            assert!(
-                !harness
-                    .driver
-                    .state
-                    .fill_submission_queue(&mut harness.driver.ring, None)
-            );
+            assert!(!harness.driver.state.fill_submission_queue(
+                &mut harness.driver.ring,
+                None,
+                &mut harness.deferred
+            ));
             assert!(harness.driver.ring.submission().is_full());
             assert!(harness.driver.state.waiters.is_in_flight(id));
             assert!(harness.driver.state.ring_wait_needed);
@@ -3184,12 +3195,11 @@ pub mod tests {
         let mut harness = Harness::new(1);
         let (socket, _peer) = UnixStream::pair().unwrap();
         harness.admit(recv(socket, 1, None), 0);
-        assert!(
-            !harness
-                .driver
-                .state
-                .fill_submission_queue(&mut harness.driver.ring, None)
-        );
+        assert!(!harness.driver.state.fill_submission_queue(
+            &mut harness.driver.ring,
+            None,
+            &mut harness.deferred
+        ));
         assert!(harness.driver.ring.submission().is_full());
         assert!(harness.driver.state.ring_wait_needed);
         let fault = inject(&harness.driver, Fault::DropCompletion);
@@ -3534,27 +3544,31 @@ pub mod tests {
     }
 
     #[test]
-    fn test_budgeted_expiry_leaves_a_backlog_that_drains_before_parking() {
+    fn test_staging_times_out_the_due_requests_a_budgeted_expiry_leaves() {
         let mut harness = Harness::new(1);
         let deadline = harness.start + Duration::from_secs(1);
 
-        // Queued receives on one shared socket never reach the kernel.
+        // More than one budget of queued receives on one shared socket fall
+        // due at once, and a receive without a deadline queues behind them.
         let (socket, _peer) = UnixStream::pair().unwrap();
         let fd: Arc<OwnedFd> = Arc::new(socket.into());
         let count = u64::from(BUDGET) + 3;
-
-        for tag in 0..count {
-            let request = Request::Recv(RecvRequest {
+        let receive = |deadline| {
+            Request::Recv(RecvRequest {
                 fd: fd.clone(),
                 buf: IoBufMut::zeroed(1),
                 offset: 0,
                 len: 1,
                 exact: true,
-                deadline: Some(deadline + Duration::from_nanos(tag % 5)),
-            });
+                deadline,
+            })
+        };
 
-            harness.admit(request, tag);
+        for tag in 0..count {
+            harness.admit(receive(Some(deadline + Duration::from_nanos(tag % 5))), tag);
         }
+
+        let last = harness.admit(receive(None), count);
 
         harness
             .driver
@@ -3563,28 +3577,33 @@ pub mod tests {
 
         assert_eq!(harness.driver.state.deadlines.len(), count as usize);
 
-        // One service pass expires one budget, and its staging leaves the due
-        // rest out of the kernel. While some remain due, the next deadline
-        // stays at or before now, so the drive loop serves again instead of
-        // parking.
+        // One expiry pass times out one budget. While some remain due, the
+        // next deadline stays at or before now, so the drive loop serves
+        // again instead of parking.
         let now = harness.fires_at(deadline + Duration::from_nanos(4));
-        harness.service_at(now, false);
-
-        assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-        assert_eq!(harness.completed.len(), BUDGET as usize);
-        assert_eq!(harness.driver.state.deadlines.len(), 3);
-        assert!(harness.driver.next_deadline().unwrap() <= now);
-
-        // The next pass at the same time expires the rest, and each request
-        // reports a timeout.
         harness
             .driver
             .state
             .advance_timeouts(now, &mut harness.deferred);
         harness.collect();
 
+        assert_eq!(harness.completed.len(), BUDGET as usize);
+        assert_eq!(harness.driver.state.deadlines.len(), 3);
+        assert!(harness.driver.next_deadline().unwrap() <= now);
+
+        // Staging times out the due rest rather than submit them, and stages
+        // the receive behind them.
+        let latest_due = harness.driver.state.deadlines.latest_due(now);
+        harness.driver.state.fill_submission_queue(
+            &mut harness.driver.ring,
+            latest_due,
+            &mut harness.deferred,
+        );
+        harness.collect();
+
         assert_eq!(harness.completed.len(), count as usize);
-        assert!(harness.driver.next_deadline().is_none());
+        assert_eq!(harness.driver.state.deadlines.len(), 0);
+        assert!(harness.driver.state.waiters.is_in_flight(last));
 
         for tag in 0..count {
             assert!(
