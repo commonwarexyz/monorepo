@@ -4,15 +4,29 @@
 
 ### Stability
 
-QMDB is now BETA, along with the structures it builds on: `storage::merkle` with
-`mmr` and `mmb`, `storage::bmt`, `journal::authenticated`, the authenticated
-bitmap, and `index::immutable`. `commonware-coding` and its
-`cryptography::reed_solomon` backend are now BETA. `commonware-collector`, the
-consensus `Application` trait, marshal's `standard::Inline` and
-`standard::Deferred` wrappers, marshal's `coding` module, and
-`consensus::types::coding` are now BETA as well. `Journal::init_at_size` on the
-contiguous journals and `commonware_utils::range::contains_cyclic` are now BETA
-too ([#5810]).
+The following crates and APIs are now BETA ([#5810]):
+
+- `commonware_storage::qmdb`
+- `commonware_storage::merkle`
+- `commonware_storage::merkle::mmr`
+- `commonware_storage::merkle::mmb`
+- `commonware_storage::bmt`
+- `commonware_storage::journal::authenticated`
+- `commonware_storage::AuthenticatedBitMap`
+- `commonware_storage::MerkleizedBitMap`
+- `commonware_storage::UnmerkleizedBitMap`
+- `commonware_storage::index::immutable`
+- `commonware_storage::journal::contiguous::fixed::Journal::init_at_size`
+- `commonware_storage::journal::contiguous::variable::Journal::init_at_size`
+- `commonware_coding`
+- `commonware_cryptography::reed_solomon`
+- `commonware_collector`
+- `commonware_consensus::Application`
+- `commonware_consensus::marshal::standard::Inline`
+- `commonware_consensus::marshal::standard::Deferred`
+- `commonware_consensus::marshal::coding`
+- `commonware_consensus::types::coding`
+- `commonware_utils::range::contains_cyclic`
 
 ### QMDB Formats
 
@@ -42,11 +56,14 @@ now store an operation log and a frontier, which records the pruning boundary
 and the digests pinned there. At startup, the databases and the journal now
 replay the retained operations to rebuild the tree in memory. No setting keeps
 the previous layout. The rebuild or resync that the new tags require also moves
-these databases to the new layout. Nothing in this release reads or removes the
-old node journal partitions that `journal_partition` named. Delete those
-partitions, and the rest of each replaced database, once nothing needs them.
-Compact databases keep their witness journal, and the standalone
-`merkle::full::Merkle` keeps its node journal ([#5158]).
+these databases to the new layout. A standalone authenticated journal with a
+pruned log cannot reopen under a fresh frontier. Rebuild it, or seed it with its
+pruning boundary and pinned digests through `Journal::from_components` and
+`persist_boundary`. Nothing in this release reads or removes the old node
+journal partitions that `journal_partition` named. Delete those partitions, and
+the rest of each replaced database, once nothing needs them. Compact databases
+keep their witness journal, and the standalone `merkle::full::Merkle` keeps its
+node journal ([#5158]).
 
 `sync::CompactTarget` is removed, so describe a compact database's state with a
 `sync::Target` whose range is `[size - 1, size)`. `CompactDb::target` now
@@ -243,9 +260,10 @@ commit ([#5785]).
 `sync::engine::Config` moves to `sync::Config`, and `qmdb::immutable::sync` is
 no longer public ([#5313]). `Target::new` is removed, so build `Target { root,
 range }` ([#5613]). `sync::Database` gains `init`, `initial_target`, `target`,
-and `prune_to_target`. Read `target().root` in place of `root`. The new
-`sync::MerkleizedBatch` trait reports the `root` and `target` that a database
-reaches when it applies the batch. Compact sync now returns
+and `prune_to_target`. Read `target().root` in place of `sync::Database::root`.
+On Current, both give the ops root, and `Db::root` still returns the canonical
+root. The new `sync::MerkleizedBatch` trait reports the `root` and `target` that
+a database reaches when it applies the batch. Compact sync now returns
 `EngineError::InvalidTarget` for a target that covers more than the last commit.
 `InvalidTarget` now carries `bounds` instead of `lower_bound_pos` and
 `upper_bound_pos` ([#4590]).
@@ -304,13 +322,16 @@ markers, or a new, empty partition for a journal that relied on
 from its first entry and truncates the section at the first missing, incomplete,
 or checksum-invalid value. In both cases, drain `next` and await `finish` to get
 the journal. For a journal that already used markers, `finish` replaces
-`finish_tracked`. Open a new journal with `init_with_checkpoint` and `(0, 0)`.
-To restore an existing journal to a checkpoint, pass that checkpoint to
-`init_with_checkpoint`. The journal's owner must have published the checkpoint
-after syncing the data it covers. `init_with_metadata_at_most` has no
-replacement, so there is no way to open a journal with markers up to a bound.
-`Glob::init` is removed, so call `glob::Recovery::init` and then `finish`
-([#5663]).
+`finish_tracked` ([#5663]).
+
+Open a new journal with `init_with_checkpoint` and `(0, 0)`. Use `(0, 0)` only
+for empty storage or an intentional reset, because `init_with_checkpoint`
+restores exactly the checkpoint it is given. To restore an existing journal to a
+checkpoint, pass that checkpoint to `init_with_checkpoint`. The journal's owner
+must have published the checkpoint after syncing the data it covers.
+`init_with_metadata_at_most` has no replacement, so there is no way to open a
+journal with markers up to a bound. `Glob::init` is removed, so call
+`glob::Recovery::init` and then `finish` ([#5663]).
 
 After an interrupted `destroy`, a contiguous variable journal now reopens
 through ordinary crash recovery or as an empty journal at position zero, as the
