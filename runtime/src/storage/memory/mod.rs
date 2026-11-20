@@ -371,10 +371,36 @@ impl Blob {
         Ok(())
     }
 
-    fn sync_range_inner(&self, offset: usize, buf: &[u8]) -> Result<(), crate::Error> {
-        let end = offset
-            .checked_add(buf.len())
-            .ok_or(crate::Error::OffsetOverflow)?;
+    fn write_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        options: WriteOptions,
+        #[cfg(test)] before_publication: impl FnOnce(),
+    ) -> Result<(), crate::Error> {
+        let Some(range) = self.extent.write_range(offset, bufs.len() as u64)? else {
+            return Ok(());
+        };
+        let buf = bufs.coalesce();
+
+        // Hold the live contents through publication so overlapping durable writes publish in
+        // the order they updated the live contents.
+        let mut content = self.content.write();
+        if range.end > content.len() {
+            resize_vec(&mut content, range.end);
+        }
+        content[range.clone()].copy_from_slice(buf.as_ref());
+        if options.contains(WriteOptions::SYNC) {
+            #[cfg(test)]
+            before_publication();
+
+            self.sync_range_inner(range, buf.as_ref())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn sync_range_inner(&self, range: Range<usize>, buf: &[u8]) -> Result<(), crate::Error> {
         let generations = self.generations.lock();
         self.ensure_current(&generations)?;
         let mut partitions = self.partitions.lock();
@@ -382,10 +408,10 @@ impl Blob {
             .get_mut(&self.partition)
             .and_then(|partition| partition.get_mut(&self.name))
             .expect("a current blob generation has durable content");
-        if end > content.len() {
-            resize_vec(content, end);
+        if range.end > content.len() {
+            resize_vec(content, range.end);
         }
-        content[offset..end].copy_from_slice(buf);
+        content[range].copy_from_slice(buf);
         Ok(())
     }
 
@@ -518,24 +544,13 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), crate::Error> {
-        let bufs = bufs.into();
-        let Some(range) = self.extent.write_range(offset, bufs.len() as u64)? else {
-            return Ok(());
-        };
-        let buf = bufs.coalesce();
-        let start = range.start;
-        {
-            let mut content = self.content.write();
-            if range.end > content.len() {
-                resize_vec(&mut content, range.end);
-            }
-            content[range].copy_from_slice(buf.as_ref());
-        }
-        if options.contains(WriteOptions::SYNC) {
-            self.sync_range_inner(start, buf.as_ref())
-        } else {
-            Ok(())
-        }
+        self.write_inner(
+            offset,
+            bufs.into(),
+            options,
+            #[cfg(test)]
+            || {},
+        )
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
@@ -574,63 +589,99 @@ mod tests {
     use commonware_utils::{ScriptedRng, probability};
     use futures::executor::block_on;
     use rstest::rstest;
-    use std::{sync::mpsc, time::Duration};
+    use std::sync::Barrier;
 
     #[rstest]
-    #[case::range(true)]
-    #[case::full(false)]
-    fn test_concurrent_sync_preserves_durable_append(#[case] range: bool) {
+    #[case::range_then_range(true, true)]
+    #[case::range_then_full(true, false)]
+    #[case::full_then_range(false, true)]
+    #[case::full_then_full(false, false)]
+    fn test_sync_publications_follow_live_write_order(
+        #[case] first_range: bool,
+        #[case] second_range: bool,
+    ) {
         let storage = Storage::new();
         let (blob, _) = block_on(storage.open("partition", b"blob")).unwrap();
-        let blob = Arc::new(blob);
-        block_on(blob.write_at(0, b"old", WriteOptions::SYNC)).unwrap();
-        let snapshot = Arc::clone(&blob);
-        let (entered, entering) = mpsc::channel();
-        let (release, released) = mpsc::channel();
-        let sync = std::thread::spawn(move || {
-            snapshot.sync_inner(|| {
-                entered.send(()).unwrap();
-                released.recv_timeout(Duration::from_secs(10)).unwrap();
-            })
-        });
-        entering.recv_timeout(Duration::from_secs(10)).unwrap();
-
-        // If publication releases the content guard, complete the newer durable write
-        // before letting the older publication proceed.
-        let protected = blob.content.try_write().is_none();
-        let mut release = Some(release);
-        if protected {
-            release.take().unwrap().send(()).unwrap();
-        }
-        let options = if range {
-            WriteOptions::SYNC
-        } else {
-            WriteOptions::default()
+        let publish_new = || {
+            let options = if second_range {
+                WriteOptions::SYNC
+            } else {
+                WriteOptions::default()
+            };
+            block_on(blob.write_at(0, b"new!", options)).unwrap();
+            if !second_range {
+                block_on(blob.sync()).unwrap();
+            }
         };
-        block_on(blob.write_at(3, b"new", options)).unwrap();
-        if !range {
-            block_on(blob.sync()).unwrap();
+
+        let mut published_new = false;
+        let before_publication = || {
+            // If the content guard was released early, publish the newer write in that gap.
+            // The probe guard drops before the nested write takes the lock again.
+            if blob.content.try_write().is_some() {
+                publish_new();
+                published_new = true;
+            }
+        };
+        if first_range {
+            blob.write_inner(0, b"old".into(), WriteOptions::SYNC, before_publication)
+                .unwrap();
+        } else {
+            block_on(blob.write_at(0, b"old", WriteOptions::default())).unwrap();
+            blob.sync_inner(before_publication).unwrap();
         }
-        if let Some(release) = release {
-            release.send(()).unwrap();
+        if !published_new {
+            publish_new();
         }
-        sync.join().unwrap().unwrap();
 
         assert_eq!(
-            block_on(blob.read_at(0, 6, ReadOptions::default()))
+            block_on(blob.read_at(0, 4, ReadOptions::default()))
                 .unwrap()
                 .coalesce(),
-            b"oldnew"
+            b"new!"
         );
         drop(blob);
         let (reopened, size) = block_on(storage.open("partition", b"blob")).unwrap();
-        assert_eq!(size, 6);
+        assert_eq!(size, 4);
         assert_eq!(
-            block_on(reopened.read_at(0, 6, ReadOptions::default()))
+            block_on(reopened.read_at(0, 4, ReadOptions::default()))
                 .unwrap()
                 .coalesce(),
-            b"oldnew"
+            b"new!"
         );
+    }
+
+    #[test]
+    fn test_overlapping_sync_writes_agree_after_reopen() {
+        const WRITERS: u8 = 4;
+        const LEN: usize = 64;
+        let storage = Storage::new();
+        for round in 0..8u32 {
+            let name = round.to_be_bytes();
+            let (blob, _) = block_on(storage.open("partition", &name)).unwrap();
+            let barrier = Barrier::new(WRITERS as usize);
+            std::thread::scope(|scope| {
+                for fill in 1..=WRITERS {
+                    let (blob, barrier) = (&blob, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        block_on(blob.write_at(0, vec![fill; LEN], WriteOptions::SYNC)).unwrap();
+                    });
+                }
+            });
+
+            // Once every write has returned, a reopen observes the bytes the live handle reads.
+            let live = block_on(blob.read_at(0, LEN, ReadOptions::default()))
+                .unwrap()
+                .coalesce();
+            drop(blob);
+            let (reopened, size) = block_on(storage.open("partition", &name)).unwrap();
+            assert_eq!(size, LEN as u64);
+            let durable = block_on(reopened.read_at(0, LEN, ReadOptions::default()))
+                .unwrap()
+                .coalesce();
+            assert_eq!(live.as_ref(), durable.as_ref(), "round {round}");
+        }
     }
 
     async fn assert_logical_open_contract<S: crate::Storage>(storage: S, shared: S) {
