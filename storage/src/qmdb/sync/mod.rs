@@ -29,16 +29,15 @@ mod metrics;
 pub use metrics::Metrics;
 
 mod database;
-pub use database::Database;
-pub(crate) use database::{
-    Config as DatabaseConfig, discard_local_state, journal_covers_range, local_pinned_nodes,
-};
+pub(in crate::qmdb) use database::Hooks;
+pub(crate) use database::{Config as DatabaseConfig, local_pinned_nodes};
+pub use database::{Database, MerkleizedBatch};
 
 pub mod source;
 pub use source::{Feedback, Request, Response, ResponseOf, Source, max_response_size};
 
 mod target;
-pub use target::{CompactTarget, Target};
+pub use target::Target;
 
 mod requests;
 
@@ -56,6 +55,11 @@ where
 }
 
 /// Create or open a database and sync it to the target in `config`.
+///
+/// Local operations must belong to the same canonical history as the target. After an
+/// interruption, ordinary initialization can reopen at a retained commit, including one
+/// short of the target. It can fail if sync reset or truncated history needed for recovery.
+/// To finish a pending sync, call this function again with the trusted target.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,

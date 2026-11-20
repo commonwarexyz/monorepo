@@ -6,22 +6,26 @@ use super::{
     fixtures::{committee, described},
     invariants::{
         self, Bootstrap, Bootstrapper, Carried, Ceremony, Chain, Ending, Material, Observed,
-        ProbeCapture, ProbeSend, ProbeShape, ProbeStep, Reshare, Resharer, Startup, StateSync,
-        Step,
+        ProbeArtifact, ProbeCapture, ProbeSend, ProbeShape, ProbeStep, ProbeVerdict, Reshare,
+        Resharer, Startup, StateSync, Step,
     },
     schedule::Schedule,
 };
 use crate::stateful::ProbeEvent::*;
-use commonware_consensus::types::{Epoch, FixedEpocher, Height, Round, View};
+use commonware_codec::Write as _;
+use commonware_consensus::{
+    Block as _, CertifiableBlock as _, Epochable as _, Heightable as _,
+    types::{Epoch, FixedEpocher, Height, Round, View},
+};
 use commonware_cryptography::{
-    Signer as _,
+    Digestible as _, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Dealer, Info as DkgRound, Logs, Player, Reveal, observe},
         primitives::sharing::Mode,
     },
     sha256,
 };
-use commonware_glue::dkg::types::EpochOutcome;
+use commonware_glue::dkg::{ReshareBlock as _, types::EpochOutcome};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Spawner as _, Supervisor as _};
 use commonware_utils::{N3f1, TestRng, ordered::Set, sequence::Unit};
@@ -40,6 +44,13 @@ fn fails(id: &str, action: impl FnOnce()) {
     );
 }
 
+fn rejects(action: impl FnOnce()) {
+    assert!(
+        catch_unwind(AssertUnwindSafe(action)).is_err(),
+        "planted mismatch must fail"
+    );
+}
+
 fn identities() -> Vec<super::PublicKey> {
     let mut members = committee();
     let outsider = super::fixtures::identities()
@@ -48,6 +59,178 @@ fn identities() -> Vec<super::PublicKey> {
         .expect("fifth identity");
     members.push(outsider);
     members
+}
+
+const PROBE_RETRY: crate::stateful::ProbeEvent = crate::stateful::ProbeEvent::Advance { steps: 10 };
+
+fn probe_input(
+    sources: [u8; 3],
+    events: Vec<crate::stateful::ProbeEvent>,
+    seed: u16,
+) -> super::DkgProbeFuzzInput {
+    super::DkgProbeFuzzInput {
+        sources,
+        foreign: [false; 3],
+        bootstrap_epoch: 0,
+        floor: None,
+        sharing_mode: Mode::NonZeroCounter,
+        events,
+        checkpoints: [super::probe_input::FINALIZED; 3],
+        raw_bytes: super::fixtures::tape(seed),
+    }
+}
+
+fn probe_program(
+    order: &[u8],
+    rest: &[crate::stateful::ProbeEvent],
+) -> Vec<crate::stateful::ProbeEvent> {
+    let mut events = vec![
+        Attach { node: 1 },
+        Attach { node: 2 },
+        Attach { node: 3 },
+        Subscribe,
+    ];
+    events.extend(order.iter().map(|source| Release { source: *source }));
+    events.extend(rest.iter().cloned());
+    events
+}
+
+fn probe_artifact(observed: &super::probe::Observations) -> &ProbeArtifact {
+    observed
+        .run
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            ProbeStep::Resolved(artifact) => Some(artifact.as_ref()),
+            _ => None,
+        })
+        .expect("the fixed probe program emits an artifact")
+}
+
+fn assert_checkpoint_artifact(record: &invariants::ProbeCheckpoint, artifact: &ProbeArtifact) {
+    assert_eq!(record.epoch, Epoch::new(2));
+    assert_eq!(record.block.height(), Height::new(3));
+    let Some(commonware_glue::dkg::types::Payload::EpochInfo(info)) = record.block.payload() else {
+        panic!("the introducing block carries epoch information");
+    };
+    assert_eq!(info, artifact.info);
+    assert_eq!(record.commitment, record.block.digest());
+    let finalization = record
+        .finalization
+        .as_ref()
+        .expect("an epoch past zero has a boundary finalization");
+    assert_eq!(finalization.epoch(), Epoch::new(1));
+    assert_eq!(finalization.proposal.payload, record.commitment);
+    assert_eq!(artifact.floor.epoch(), Epoch::new(2));
+    assert_eq!(artifact.finalization.as_ref(), Some(finalization));
+}
+
+fn flip_network_block(run: &mut invariants::ProbeRun, peer: &super::PublicKey, blocked: bool) {
+    let pair = (run.discoverer.clone(), peer.clone());
+    if blocked {
+        assert!(!run.blocked.contains(&pair));
+        run.blocked.push(pair);
+    } else {
+        let position = run
+            .blocked
+            .iter()
+            .position(|recorded| *recorded == pair)
+            .expect("the correct run recorded the required block");
+        run.blocked.remove(position);
+    }
+}
+
+fn probe_request(tag: u8, epoch: u64) -> Vec<u8> {
+    let mut bytes = vec![tag];
+    Epoch::new(epoch).write(&mut bytes);
+    bytes
+}
+
+fn block_response(epoch: Epoch, block: &super::app::Block) -> Vec<u8> {
+    let mut bytes = vec![3];
+    epoch.write(&mut bytes);
+    block.write(&mut bytes);
+    bytes
+}
+
+fn probe_verdicts(observed: &super::probe::Observations) -> Vec<ProbeVerdict> {
+    invariants::probe_judgments(&observed.run)
+        .0
+        .into_iter()
+        .map(|judgment| judgment.verdict)
+        .collect()
+}
+
+fn clone_probe(observed: &super::probe::Observations) -> super::probe::Observations {
+    super::probe::Observations {
+        outcome: observed.outcome,
+        events: observed.events,
+        run: observed.run.clone(),
+        stopped: observed.stopped.clone(),
+    }
+}
+
+fn crafted_probe(bytes: Vec<u8>, serving: bool) -> super::probe::Observations {
+    let events = serving.then_some(Attach { node: 0 }).into_iter().collect();
+    super::probe::observe_planted(
+        probe_input([5; 3], events, 940),
+        async move |harness, stage| {
+            if stage == super::probe::Stage::Closing {
+                harness.craft(3, bytes.clone());
+                harness.execute(&Advance { steps: 1 }).await;
+            }
+        },
+    )
+}
+
+fn crafted_fetch_probe(bytes: Vec<u8>) -> super::probe::Observations {
+    super::probe::observe_planted(
+        probe_input([5; 3], probe_program(&[0, 1], &[]), 941),
+        async move |harness, stage| {
+            if stage == super::probe::Stage::Closing {
+                harness.craft(3, bytes.clone());
+                harness.execute(&Advance { steps: 1 }).await;
+            }
+        },
+    )
+}
+
+fn assert_one_probe_verdict(
+    observed: &super::probe::Observations,
+    verdict: ProbeVerdict,
+) -> super::PublicKey {
+    let (judgments, _) = invariants::probe_judgments(&observed.run);
+    let [judgment] = judgments.as_slice() else {
+        panic!("expected one crafted delivery, got {judgments:?}");
+    };
+    assert_eq!(judgment.verdict, verdict);
+    assert_eq!(judgment.blocked, verdict == ProbeVerdict::Block);
+    judgment.send.origin.clone()
+}
+
+fn recovered_state_sync_input(steps: u8, doublings: u8) -> super::DkgStateSyncFuzzInput {
+    super::DkgStateSyncFuzzInput {
+        session: super::SessionControls {
+            epochs: 1,
+            sharing_mode: Mode::NonZeroCounter,
+            outsider: super::fixtures::OUTSIDER,
+            rotations: super::fixtures::STAY,
+            mailbox: 100,
+        },
+        joiner: 0,
+        join_height: 5,
+        joiner_restart: Some(super::JoinerRestart {
+            steps,
+            doublings,
+            downtime: 1,
+        }),
+        restarts: 0,
+        first_outage: super::FirstOutage {
+            steps: 10,
+            doublings: 3,
+        },
+        raw_bytes: super::fixtures::tape(0),
+    }
 }
 
 fn bootstrap(count: usize) -> Bootstrap {
@@ -468,6 +651,7 @@ fn probe_records(deliveries: usize, artifacts: usize) -> invariants::ProbeRun {
             identity: identities[index + 1].clone(),
             foreign: false,
             finalizations: vec![boundary.clone(), latest[index].clone()],
+            checkpoints: vec![],
         })
         .collect();
     let captures = latest
@@ -543,80 +727,142 @@ fn at_001_probe_units_are_independent() {
 
 #[test]
 fn at_035_first_two_dealers_select_the_floor() {
-    let mut records = probe_records(3, 1);
-    assert_eq!(invariants::check_probe_floor(&records), 1);
-    let third = records.sources[2].finalizations.last().unwrap().clone();
-    let invariants::ProbeStep::Resolved(artifact) = records.steps.last_mut().unwrap() else {
-        unreachable!()
-    };
-    artifact.floor = third;
+    let observed = super::probe::observe_planted(
+        probe_input([3, 4, 5], probe_program(&[0, 1, 5, 1, 1], &[]), 935),
+        async |_, _| {},
+    );
+    let report = super::probe::measure(&observed);
+    let (selections, artifact) = invariants::probe_selections(&observed.run);
+    assert_eq!(selections.len(), 1, "{report}");
+    assert_eq!(artifact.unwrap().floor, selections[0].floor);
+    assert_eq!(report.judged.count(Invariant::I12), Some(1));
+    let third = observed.run.sources[2]
+        .finalizations
+        .last()
+        .expect("the third dealer answered")
+        .clone();
+    assert!(third.round() > selections[0].floor.round());
+
+    let mut planted = observed;
+    for step in &mut planted.run.steps {
+        if let ProbeStep::Resolved(artifact) = step {
+            artifact.floor = third.clone();
+        }
+    }
     fails("I12", || {
-        invariants::check_probe_floor(&records);
+        super::probe::measure(&planted);
     });
 }
 
 #[test]
 fn at_036_artifact_consistency_controls() {
-    let records = probe_records(2, 1);
-    assert_eq!(invariants::check_probe_artifact(&records), 1);
-    let mut foreign = records.clone();
-    let invariants::ProbeStep::Resolved(artifact) = foreign.steps.last_mut().unwrap() else {
-        unreachable!()
-    };
-    artifact.info = foreign.foreign.genesis.clone();
+    let observed = super::probe::observe_planted(
+        probe_input([4, 5, 3], probe_program(&[0, 1, 0, 0], &[]), 936),
+        async |_, _| {},
+    );
+    let report = super::probe::measure(&observed);
+    assert_eq!(report.judged.count(Invariant::I13), Some(1));
+
+    let mut foreign = clone_probe(&observed);
+    for step in &mut foreign.run.steps {
+        if let ProbeStep::Resolved(artifact) = step {
+            artifact.info = foreign.run.foreign.genesis.clone();
+        }
+    }
     fails("I13", || {
-        invariants::check_probe_artifact(&foreign);
+        super::probe::measure(&foreign);
     });
-    let mut duplicate = records;
-    let mut other = duplicate.steps.last().unwrap().clone();
-    let invariants::ProbeStep::Resolved(artifact) = &mut other else {
-        unreachable!()
-    };
-    artifact.finalization = None;
-    duplicate.steps.push(other);
+
+    let mut wrong_boundary = clone_probe(&observed);
+    for step in &mut wrong_boundary.run.steps {
+        if let ProbeStep::Resolved(artifact) = step {
+            artifact.finalization = wrong_boundary.run.chain.finalizations.first().cloned();
+        }
+    }
     fails("I13", || {
-        invariants::check_probe_artifact(&duplicate);
+        super::probe::measure(&wrong_boundary);
+    });
+
+    let mut duplicate = observed;
+    let mut other = duplicate
+        .run
+        .steps
+        .iter()
+        .find(|step| matches!(step, ProbeStep::Resolved(_)))
+        .expect("the real run emitted an artifact")
+        .clone();
+    let ProbeStep::Resolved(artifact) = &mut other else {
+        unreachable!();
+    };
+    artifact.info = duplicate.run.foreign.genesis.clone();
+    duplicate.run.steps.push(other);
+    fails("I13", || {
+        super::probe::measure(&duplicate);
     });
 }
 
 #[test]
 fn at_037_response_isolation_both_directions() {
-    let mut records = probe_records(1, 0);
-    let sender = records.outsider.clone();
-    records.steps.extend([
-        invariants::ProbeStep::Sent(invariants::ProbeSend {
-            origin: sender.clone(),
-            shape: invariants::ProbeShape::Junk,
-            bytes: vec![255],
-        }),
-        invariants::ProbeStep::Delivered {
-            peer: sender.clone(),
-            bytes: vec![255],
-        },
-        invariants::ProbeStep::Blocked {
-            peer: sender.clone(),
-        },
-    ]);
-    records.blocked.push((records.discoverer.clone(), sender));
-    let (required, forbidden, _, _) = invariants::check_probe_blocks(&records);
-    assert_eq!((required, forbidden), (1, 1));
-    let mut missing = records.clone();
-    missing.steps.pop();
-    missing.blocked.clear();
-    fails("I14", || {
-        invariants::check_probe_blocks(&missing);
-    });
-    let mut extra = records;
-    let valid = extra.sources[0].identity.clone();
-    extra.steps.insert(
-        4,
-        invariants::ProbeStep::Blocked {
-            peer: valid.clone(),
-        },
+    let blocked = crafted_probe(Vec::new(), false);
+    let passing = super::probe::observe_planted(
+        probe_input([3; 3], probe_program(&[0], &[]), 937),
+        async |_, _| {},
     );
-    extra.blocked.push((extra.discoverer.clone(), valid));
+    assert_report(super::probe::measure(&blocked).judged, true);
+    assert_report(super::probe::measure(&passing).judged, true);
+
+    let mut missing = clone_probe(&blocked);
+    missing
+        .run
+        .steps
+        .retain(|step| !matches!(step, ProbeStep::Blocked { .. }));
     fails("I14", || {
-        invariants::check_probe_blocks(&extra);
+        super::probe::measure(&missing);
+    });
+
+    let mut extra = clone_probe(&passing);
+    let peer = extra.run.sources[0].identity.clone();
+    let delivered = extra
+        .run
+        .steps
+        .iter()
+        .position(|step| matches!(step, ProbeStep::Delivered { .. }))
+        .unwrap();
+    extra
+        .run
+        .steps
+        .insert(delivered + 1, ProbeStep::Blocked { peer: peer.clone() });
+    extra
+        .run
+        .blocked
+        .push((extra.run.discoverer.clone(), peer.clone()));
+    fails("I14", || {
+        super::probe::measure(&extra);
+    });
+
+    let mut sender_block = clone_probe(&passing);
+    sender_block
+        .run
+        .blocked
+        .push((peer.clone(), sender_block.run.discoverer.clone()));
+    fails("I14", || {
+        super::probe::measure(&sender_block);
+    });
+
+    let mut bystander = passing;
+    let other = bystander.run.sources[1].identity.clone();
+    let delivered = bystander
+        .run
+        .steps
+        .iter()
+        .position(|step| matches!(step, ProbeStep::Delivered { .. }))
+        .unwrap();
+    bystander
+        .run
+        .steps
+        .insert(delivered + 1, ProbeStep::Blocked { peer: other });
+    fails("I14", || {
+        super::probe::measure(&bystander);
     });
 }
 
@@ -832,6 +1078,87 @@ fn at_013_at_014_all_targets_short_inputs_and_replay() {
     check!(super::run_dkg_reshare_restarts);
     check!(super::run_dkg_probe);
     check!(super::run_dkg_state_sync);
+
+    for length in 0..=7 {
+        let bytes = vec![0; length];
+        let input: super::DkgProbeFuzzInput = super::fixtures::decode(&bytes);
+        for (source, height) in input.checkpoints.iter().zip(input.sources) {
+            for (epoch, checkpoint) in source.iter().enumerate() {
+                if super::probe_input::introducing(epoch) > u64::from(height) {
+                    assert_eq!(
+                        *checkpoint,
+                        super::SourceCheckpoint::Missing,
+                        "length {length}, height {height}, epoch {epoch}"
+                    );
+                }
+            }
+            assert_ne!(source[0], super::SourceCheckpoint::Finalized);
+        }
+    }
+
+    let mut input = probe_input([5, 3, 1], probe_program(&[0, 1], &[]), 913);
+    input.checkpoints = [[super::SourceCheckpoint::Missing; 4]; 3];
+    input.checkpoints[0][2] = super::SourceCheckpoint::Finalized;
+    input.checkpoints[1][1] = super::SourceCheckpoint::Unfinalized;
+    let first = super::probe::observe_planted(input.clone(), async |_, _| {});
+    let second = super::probe::observe_planted(input, async |_, _| {});
+    assert_eq!(
+        super::probe::measure(&first),
+        super::probe::measure(&second)
+    );
+    let checkpoint_trace = |observed: &super::probe::Observations| {
+        observed
+            .run
+            .sources
+            .iter()
+            .map(|source| {
+                source
+                    .checkpoints
+                    .iter()
+                    .map(|checkpoint| {
+                        (
+                            checkpoint.epoch,
+                            checkpoint.block.height(),
+                            checkpoint.commitment,
+                            checkpoint
+                                .finalization
+                                .as_ref()
+                                .map(|finalization| finalization.round()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let response_trace = |observed: &super::probe::Observations| {
+        observed
+            .run
+            .captures
+            .iter()
+            .map(|capture| {
+                (
+                    capture.source,
+                    capture.request.clone(),
+                    capture.bytes.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(checkpoint_trace(&first), checkpoint_trace(&second));
+    assert_eq!(response_trace(&first), response_trace(&second));
+
+    let named = &super::reshare_restarts::tests::BEFORE_THE_NEW_SHARE;
+    let first = super::reshare_restarts::tests::forced(named);
+    let second = super::reshare_restarts::tests::forced(named);
+    assert_eq!(first.report, second.report);
+    assert_eq!(first.trace, second.trace);
+    assert_eq!(first.retained, second.retained);
+    assert_eq!(first.recoveries, second.recoveries);
+
+    let input = recovered_state_sync_input(15, 2);
+    let first = super::state_sync::run_dkg_state_sync_recovered(input.clone());
+    let second = super::state_sync::run_dkg_state_sync_recovered(input);
+    assert_eq!(first, second);
 }
 
 #[test]
@@ -864,6 +1191,7 @@ fn at_006_at_010_real_probe_without_deliveries() {
         floor: None,
         sharing_mode: Mode::NonZeroCounter,
         events: vec![],
+        checkpoints: [super::probe_input::FINALIZED; 3],
         raw_bytes: super::fixtures::tape(908),
     };
     let report = super::run_dkg_probe(input);
@@ -963,10 +1291,22 @@ fn at_019_reshare_restart_coverage() {
 
 #[test]
 fn at_007_at_020_probe_coverage() {
-    let reports: Vec<_> = (0..8)
-        .map(|byte| super::run_dkg_probe(super::fixtures::decode(&[byte])).judged)
-        .collect();
-    assert_covered(Target::Probe, &reports);
+    let artifact_input = probe_input([4, 5, 3], probe_program(&[0, 1, 0, 0], &[]), 920);
+    let artifact = super::run_dkg_probe(artifact_input.clone());
+    assert_eq!(artifact.judged.count(Invariant::I12), Some(1));
+    assert_eq!(artifact.judged.count(Invariant::I13), Some(1));
+    assert_eq!(super::run_dkg_probe(artifact_input), artifact);
+
+    let refused = super::run_dkg_probe(probe_input(
+        [3; 3],
+        vec![Junk {
+            origin: 3,
+            payload: vec![255],
+        }],
+        921,
+    ));
+    assert_eq!(refused.judged.count(Invariant::I14), Some(1));
+    assert_covered(Target::Probe, &[artifact.judged, refused.judged]);
 }
 
 #[test]
@@ -994,11 +1334,37 @@ fn at_027_continuity_control() {
 
 #[test]
 fn at_021_state_sync_coverage() {
-    let reports: Vec<_> = [vec![], vec![0x36, 0xf5], vec![0], vec![1], vec![2], vec![3]]
-        .iter()
-        .map(|bytes| super::run_dkg_state_sync(super::fixtures::decode(bytes)).judged)
-        .collect();
-    assert_eq!(reports[1].count(Invariant::I6), Some(1));
+    fn search() -> ([u8; 2], super::StateSyncReport, Vec<Judged>) {
+        let mut earlier = Vec::new();
+        for value in 0..512u16 {
+            let bytes = value.to_be_bytes();
+            let report = super::run_dkg_state_sync(super::fixtures::decode(&bytes));
+            if report
+                .judged
+                .count(Invariant::I6)
+                .is_some_and(|count| count > 0)
+            {
+                return (bytes, report, earlier);
+            }
+            assert_eq!(
+                report.judged.reason(Invariant::I6),
+                Some("no failed ceremony was reported"),
+                "earlier input {bytes:?} did not give the required zero reason"
+            );
+            earlier.push(report.judged);
+        }
+        panic!("none of the first 512 two-byte inputs measured I6")
+    }
+
+    let (first_bytes, first, earlier) = search();
+    let (second_bytes, second, second_earlier) = search();
+    assert_eq!(first_bytes, second_bytes);
+    assert_eq!(first, second);
+    assert_eq!(earlier, second_earlier);
+    assert_eq!(first.judged.count(Invariant::I6), Some(1));
+
+    let mut reports = earlier;
+    reports.push(first.judged);
     assert_covered(Target::StateSync, &reports);
 }
 
@@ -1014,6 +1380,7 @@ fn at_008_real_probe_judges_one_delivery_without_artifact() {
             origin: 3,
             payload: vec![255],
         }],
+        checkpoints: [super::probe_input::FINALIZED; 3],
         raw_bytes: super::fixtures::tape(908),
     });
     assert_eq!(report.counts.deliveries, 1);
@@ -1027,41 +1394,30 @@ fn at_008_real_probe_judges_one_delivery_without_artifact() {
 
 #[test]
 fn at_009_unsettled_delivery_adds_no_unit() {
-    let mut records = probe_records(0, 0);
-    let peer = records.sources[0].identity.clone();
-    records.steps.push(ProbeStep::Requested {
-        recipients: commonware_p2p::Recipients::One(peer.clone()),
-        bytes: vec![2, 1],
-    });
-    let captured = records.captures.len();
-    let bytes = vec![3, 1, 0];
-    records.captures.push(ProbeCapture {
-        source: 0,
-        request: vec![2, 1],
-        bytes: bytes.clone(),
-    });
-    // The requested responder delivered its whole block, but no artifact followed.
-    // A later cut block can be ignored or refused (Choices made, item 11).
-    for (shape, body) in [
-        (ProbeShape::Response(captured), bytes.clone()),
-        (ProbeShape::Prefix(captured), bytes[..2].to_vec()),
-        (ProbeShape::Junk, vec![255]),
-    ] {
-        records.steps.extend([
-            ProbeStep::Sent(ProbeSend {
-                origin: peer.clone(),
-                shape,
-                bytes: body.clone(),
-            }),
-            ProbeStep::Delivered {
-                peer: peer.clone(),
-                bytes: body,
-            },
-        ]);
-    }
-    records
-        .steps
-        .push(ProbeStep::Blocked { peer: peer.clone() });
+    // An impossible request step makes the oracle stop inferring probe state
+    // after the first valid reply. The second valid reply is therefore open,
+    // while junk remains unconditionally blockable.
+    let mut records = probe_records(2, 0);
+    records.steps.insert(
+        4,
+        ProbeStep::Requested {
+            recipients: commonware_p2p::Recipients::All,
+            bytes: vec![255],
+        },
+    );
+    let peer = records.outsider.clone();
+    records.steps.extend([
+        ProbeStep::Sent(ProbeSend {
+            origin: peer.clone(),
+            shape: ProbeShape::Junk,
+            bytes: vec![255],
+        }),
+        ProbeStep::Delivered {
+            peer: peer.clone(),
+            bytes: vec![255],
+        },
+        ProbeStep::Blocked { peer: peer.clone() },
+    ]);
     records.blocked.push((records.discoverer.clone(), peer));
     let counts = invariants::check_probe(&records);
     assert_eq!(
@@ -1074,34 +1430,1303 @@ fn at_009_unsettled_delivery_adds_no_unit() {
         (3, 1, 1, 1)
     );
     assert_eq!(counts.judged().count(Invariant::I14), Some(2));
+    assert_eq!(
+        invariants::probe_judgments(&records)
+            .0
+            .into_iter()
+            .map(|judgment| judgment.verdict)
+            .collect::<Vec<_>>(),
+        [ProbeVerdict::Pass, ProbeVerdict::Open, ProbeVerdict::Block]
+    );
 }
 
-// The sampler is kept with the acceptance suite so its search can be repeated.
 #[test]
-#[ignore = "bounded search for a fixed AT-011 input"]
-fn at_011_find_incomplete_sync_input() {
-    let limit = std::env::var("DKG_ACCEPTANCE_SEARCH_LIMIT")
-        .map(|value| value.parse::<u16>().expect("a bounded sample count"))
-        .unwrap_or(4096)
-        .clamp(1, 4096);
-    for seed in 0..limit {
-        let bytes = seed.to_le_bytes();
-        let report = super::run_dkg_state_sync(super::fixtures::decode(&bytes));
-        if report.outcome == super::Outcome::Timeout
-            && report.sync.starts == 1
-            && report.sync.entries == 0
-            && report.sync.blocks == 0
-            && report.sync.descriptions == 0
-        {
-            eprintln!("AT-011 seed={seed} bytes={bytes:?} report={report:?}");
-            return;
-        }
-        if (seed + 1) % 64 == 0 {
-            eprintln!("AT-011 completed {} inputs without a match", seed + 1);
+fn at_052_checkpoint_record_matches_the_epoch_two_artifact() {
+    let observed = super::probe::observe_planted(
+        probe_input([4, 5, 3], probe_program(&[0, 1, 0, 0], &[]), 952),
+        async |_, _| {},
+    );
+    let report = super::probe::measure(&observed);
+    assert_eq!(report.judged.count(Invariant::I12), Some(1));
+    assert_eq!(report.judged.count(Invariant::I13), Some(1));
+
+    let record = observed.run.sources[0]
+        .checkpoints
+        .iter()
+        .find(|record| record.epoch == Epoch::new(2))
+        .expect("source zero holds the selected epoch's checkpoint");
+    let artifact = probe_artifact(&observed);
+    assert_checkpoint_artifact(record, artifact);
+
+    let mut wrong = record.clone();
+    wrong.epoch = Epoch::new(1);
+    rejects(|| assert_checkpoint_artifact(&wrong, artifact));
+
+    let mut wrong = record.clone();
+    wrong.block = super::app::Block::new(
+        record.block.context(),
+        record.block.parent(),
+        record.block.height().next(),
+        record.block.payload(),
+    );
+    rejects(|| assert_checkpoint_artifact(&wrong, artifact));
+
+    let mut wrong = record.clone();
+    wrong.block = super::app::Block::new(
+        record.block.context(),
+        record.block.parent(),
+        record.block.height(),
+        None,
+    );
+    rejects(|| assert_checkpoint_artifact(&wrong, artifact));
+
+    let mut wrong = record.clone();
+    wrong.commitment = sha256::Digest::from([52; 32]);
+    rejects(|| assert_checkpoint_artifact(&wrong, artifact));
+
+    let mut wrong = record.clone();
+    wrong.finalization = None;
+    rejects(|| assert_checkpoint_artifact(&wrong, artifact));
+
+    let mut wrong = record.clone();
+    let finalization = wrong
+        .finalization
+        .as_mut()
+        .expect("the checkpoint has a finalization to mutate");
+    finalization.proposal.round = Round::new(Epoch::zero(), View::new(52));
+    let mut matching_artifact = artifact.clone();
+    matching_artifact.finalization = wrong.finalization.clone();
+    rejects(|| assert_checkpoint_artifact(&wrong, &matching_artifact));
+
+    let mut wrong = record.clone();
+    let finalization = wrong
+        .finalization
+        .as_mut()
+        .expect("the checkpoint has a finalization to mutate");
+    finalization.proposal.payload = sha256::Digest::from([52; 32]);
+    let mut matching_artifact = artifact.clone();
+    matching_artifact.finalization = wrong.finalization.clone();
+    rejects(|| assert_checkpoint_artifact(&wrong, &matching_artifact));
+
+    let mut wrong = artifact.clone();
+    wrong.floor = observed.run.sources[0].finalizations[0].clone();
+    rejects(|| assert_checkpoint_artifact(record, &wrong));
+
+    let mut wrong = artifact.clone();
+    wrong.info = observed.run.chain.genesis.clone();
+    rejects(|| assert_checkpoint_artifact(record, &wrong));
+
+    let mut wrong = artifact.clone();
+    wrong.finalization = None;
+    rejects(|| assert_checkpoint_artifact(record, &wrong));
+}
+
+#[test]
+fn at_053_only_checkpoint_source_supplies_the_boundary() {
+    let seed = |source: usize, chain: &super::probe::Chain, _: &super::probe::Chain| {
+        (source == 0)
+            .then(|| chain.checkpoint(2, true))
+            .into_iter()
+            .collect()
+    };
+    let observed = super::probe::observe_with_seed(
+        probe_input([1, 5, 5], probe_program(&[1, 2, 0, 0], &[]), 953),
+        &seed,
+        async |_, _| {},
+    );
+    let artifact = probe_artifact(&observed);
+    assert_eq!(artifact.floor.epoch(), Epoch::new(2));
+    assert_eq!(observed.run.sources[0].finalizations.len(), 1);
+    assert!(observed.run.sources[1].checkpoints.is_empty());
+    assert!(observed.run.sources[2].checkpoints.is_empty());
+
+    let provenance: Vec<_> = observed
+        .run
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            ProbeStep::Sent(ProbeSend {
+                shape: ProbeShape::Response(position),
+                ..
+            }) => Some(&observed.run.captures[*position]),
+            _ => None,
+        })
+        .filter(|capture| matches!(capture.request.first(), Some(0 | 2)))
+        .collect();
+    assert_eq!(provenance.len(), 2);
+    assert!(provenance.iter().all(|capture| capture.source == 0));
+    assert_eq!(
+        artifact.finalization.as_ref(),
+        observed.run.sources[0].checkpoints[0].finalization.as_ref()
+    );
+    assert_report(super::probe::measure(&observed).judged, true);
+}
+
+#[test]
+fn at_054_missing_or_unfinalized_checkpoint_serves_nothing() {
+    for finalized in [None, Some(false)] {
+        let seed = move |source: usize, chain: &super::probe::Chain, _: &super::probe::Chain| {
+            if source == 0 {
+                finalized
+                    .map(|finalized| chain.checkpoint(2, finalized))
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+        let boundary = probe_request(0, 2);
+        let block = probe_request(2, 2);
+        let observed = super::probe::observe_with_seed(
+            probe_input([5; 3], probe_program(&[0, 1], &[]), 954),
+            &seed,
+            async |harness, stage| {
+                if stage == super::probe::Stage::Closing {
+                    harness.ask(0, boundary.clone());
+                    harness.execute(&Advance { steps: 1 }).await;
+                    harness.ask(0, block.clone());
+                    harness.execute(&Advance { steps: 1 }).await;
+                }
+            },
+        );
+        assert!(observed.run.steps.iter().any(|step| {
+            matches!(
+                step,
+                ProbeStep::Requested {
+                    recipients: commonware_p2p::Recipients::All,
+                    bytes,
+                } if bytes == &boundary
+            )
+        }));
+        assert!(
+            observed
+                .run
+                .captures
+                .iter()
+                .all(|capture| capture.request != boundary && capture.request != block),
+            "source answered with checkpoint finalized={finalized:?}"
+        );
+        let source = &observed.run.sources[0].identity;
+        assert!(!observed.run.blocked.iter().any(|(blocker, blocked)| {
+            blocker == source
+                && (blocked == &observed.run.outsider || blocked == &observed.run.discoverer)
+        }));
+        assert_report(super::probe::measure(&observed).judged, true);
+    }
+}
+
+#[test]
+fn at_055_checkpoint_controls_are_independent_and_bounded() {
+    let sessions: Vec<super::DkgProbeFuzzInput> = (0..4096u16)
+        .map(|seed| super::fixtures::decode(&seed.to_le_bytes()))
+        .collect();
+    for session in &sessions {
+        assert!(
+            session
+                .sources
+                .iter()
+                .all(|height| *height <= crate::stateful::MAX_SOURCE_HEIGHT)
+        );
+        assert!(super::probe_input::drawable(&session.events));
+        for (held, height) in session.checkpoints.iter().zip(session.sources) {
+            assert_ne!(held[0], super::SourceCheckpoint::Finalized);
+            for (epoch, checkpoint) in held.iter().enumerate() {
+                if super::probe_input::introducing(epoch) > u64::from(height) {
+                    assert_eq!(*checkpoint, super::SourceCheckpoint::Missing);
+                }
+            }
         }
     }
-    eprintln!(
-        "AT-011 no incomplete-sync fixture in {limit} inputs; real-input acceptance remains open"
+    for source in 0..3 {
+        for epoch in 1..super::probe_input::CHECKPOINT_EPOCHS {
+            for choice in [
+                super::SourceCheckpoint::Missing,
+                super::SourceCheckpoint::Unfinalized,
+                super::SourceCheckpoint::Finalized,
+            ] {
+                assert!(sessions.iter().any(|session| {
+                    super::probe_input::introducing(epoch) <= u64::from(session.sources[source])
+                        && session.checkpoints[source][epoch] == choice
+                }));
+            }
+        }
+    }
+}
+
+#[test]
+fn at_056_seeding_is_partitioned_by_source_and_leaves_discoverer_empty() {
+    let mut input = probe_input([5, 3, 1], vec![], 956);
+    input.checkpoints = [[super::SourceCheckpoint::Missing; 4]; 3];
+    input.checkpoints[0][0] = super::SourceCheckpoint::Unfinalized;
+    input.checkpoints[0][2] = super::SourceCheckpoint::Finalized;
+    input.checkpoints[1][1] = super::SourceCheckpoint::Unfinalized;
+    let (observed, seeded) = super::probe::observe_seeding(input, None, async |harness, stage| {
+        if stage == super::probe::Stage::Closing {
+            // Attach the already initialized discovering plan, then ask it
+            // for a seeded source epoch. An empty plan serves no response.
+            harness.execute(&Attach { node: 0 }).await;
+            harness.craft(3, probe_request(0, 2));
+            harness.execute(&Advance { steps: 1 }).await;
+        }
+    });
+    assert_report(super::probe::measure(&observed).judged, true);
+    assert!(
+        observed
+            .run
+            .steps
+            .iter()
+            .all(|step| !matches!(step, ProbeStep::Requested { .. })),
+        "the initialized discovering plan serves no source checkpoint"
+    );
+    assert_eq!(seeded.len(), 4);
+
+    // The trace deliberately proves only the two named DKG partitions read
+    // by Plan: state_sync and checkpoint. It is not a whole-storage audit.
+    for (member, seen) in seeded.iter().enumerate() {
+        assert_eq!(seen.member, member);
+        assert_eq!(seen.before, super::fixtures::Plan::default());
+        assert_eq!(seen.opened.material, None);
+        if member == 0 || member == 3 {
+            assert!(seen.touched.is_empty());
+            assert_eq!(seen.opened, super::fixtures::Plan::default());
+            continue;
+        }
+
+        let checkpoint = format!("member-{member}_dkg_checkpoint");
+        assert_eq!(seen.touched, [checkpoint.clone(), checkpoint]);
+        assert!(
+            seen.touched
+                .iter()
+                .all(|partition| !partition.ends_with("_dkg_state_sync"))
+        );
+    }
+    assert_eq!(
+        seeded[1].opened.checkpoints,
+        [(Epoch::zero(), false), (Epoch::new(2), true)]
+    );
+    assert_eq!(seeded[2].opened.checkpoints, [(Epoch::new(1), false)]);
+    assert!(seeded[3].opened.checkpoints.is_empty());
+}
+
+fn two_round_probe() -> super::probe::Observations {
+    let rest = [
+        PROBE_RETRY,
+        Release { source: 0 },
+        Release { source: 2 },
+        Release { source: 3 },
+        Release { source: 0 },
+    ];
+    super::probe::observe_planted(
+        probe_input([4, 4, 5], probe_program(&[0, 1], &rest), 957),
+        async |_, _| {},
+    )
+}
+
+#[test]
+fn at_057_at_058_later_same_epoch_selection_updates_the_floor() {
+    let observed = two_round_probe();
+    let report = super::probe::measure(&observed);
+    let (selections, artifact) = invariants::probe_selections(&observed.run);
+    assert_eq!(selections.len(), 2);
+    assert_eq!(selections[0].floor.epoch(), Epoch::new(2));
+    assert!(selections[1].floor.round() > selections[0].floor.round());
+    assert_eq!(artifact.unwrap().floor, selections[1].floor);
+    assert_eq!(report.judged.count(Invariant::I12), Some(1));
+    assert_eq!(report.judged.count(Invariant::I13), Some(1));
+
+    let mut planted = observed;
+    let lower = selections[0].floor.clone();
+    for step in &mut planted.run.steps {
+        if let ProbeStep::Resolved(artifact) = step {
+            artifact.floor = lower.clone();
+        }
+    }
+    assert_eq!(invariants::check_probe_artifact(&planted.run), 1);
+    fails("I12", || {
+        super::probe::measure(&planted);
+    });
+}
+
+#[test]
+fn at_059_primary_rotation_keeps_a_completing_fallback() {
+    let rest = [
+        PROBE_RETRY,
+        Release { source: 1 },
+        Release { source: 2 },
+        Release { source: 6 },
+        Release { source: 0 },
+    ];
+    let observed = super::probe::observe_planted(
+        probe_input([3, 3, 5], probe_program(&[0, 1], &rest), 959),
+        async |_, _| {},
+    );
+    let report = super::probe::measure(&observed);
+    let (selections, artifact) = invariants::probe_selections(&observed.run);
+    assert_eq!(selections.len(), 2, "{report}");
+    assert_eq!(selections[0].floor.epoch(), Epoch::new(1));
+    assert_eq!(selections[1].floor.epoch(), Epoch::new(2));
+    assert_eq!(artifact.unwrap().floor, selections[0].floor);
+    assert_eq!(report.judged.count(Invariant::I12), Some(1));
+    assert_eq!(report.judged.count(Invariant::I13), Some(1));
+
+    let lower = super::probe::observe_planted(
+        probe_input(
+            [4, 4, 5],
+            probe_program(
+                &[2, 0],
+                &[
+                    PROBE_RETRY,
+                    Release { source: 0 },
+                    Release { source: 1 },
+                    Release { source: 3 },
+                    Release { source: 0 },
+                ],
+            ),
+            9591,
+        ),
+        async |_, _| {},
+    );
+    let lower_report = super::probe::measure(&lower);
+    let (lower_selections, lower_artifact) = invariants::probe_selections(&lower.run);
+    assert_eq!(lower_selections.len(), 2, "{lower_report}");
+    assert_eq!(lower_selections[0].floor.epoch(), Epoch::new(2));
+    assert_eq!(lower_selections[1].floor.epoch(), Epoch::new(2));
+    assert!(lower_selections[0].floor.round() > lower_selections[1].floor.round());
+    assert_eq!(lower_artifact.unwrap().floor, lower_selections[0].floor);
+    assert_eq!(lower_report.judged.count(Invariant::I12), Some(1));
+
+    // The ordinary source model has one fixed latest response per source. A
+    // real lower first selection therefore enters through the public probe
+    // boundary, using a valid older certificate from the same fixed chain.
+    let donor = super::probe::observe_planted(
+        probe_input([3, 3, 5], probe_program(&[], &[]), 9592),
+        async |_, _| {},
+    );
+    let lower = donor
+        .run
+        .chain
+        .finalizations
+        .iter()
+        .filter(|finalization| finalization.epoch() == Epoch::new(1))
+        .min_by_key(|finalization| finalization.round())
+        .expect("the fixed chain has an older epoch-one finalization")
+        .clone();
+    let latest_tag = donor.run.captures[0].bytes[0];
+    let mut lower_bytes = vec![latest_tag];
+    lower.write(&mut lower_bytes);
+    let mut fallback_selection = super::probe::observe_planted(
+        probe_input(
+            [3, 3, 5],
+            vec![
+                PROBE_RETRY,
+                Release { source: 1 },
+                Release { source: 2 },
+                PROBE_RETRY,
+                Release { source: 0 },
+                Release { source: 1 },
+                // Keep the primary's boundary responses held. Source zero's
+                // fourth-newest distinct response is the fallback boundary;
+                // its next response is that block.
+                Release { source: 9 },
+                Release { source: 0 },
+            ],
+            9592,
+        ),
+        async move |harness, stage| {
+            if stage == super::probe::Stage::Started {
+                for event in [
+                    Attach { node: 1 },
+                    Attach { node: 2 },
+                    Attach { node: 3 },
+                    Subscribe,
+                ] {
+                    harness.execute(&event).await;
+                }
+                for origin in [0, 1] {
+                    harness.craft(origin, lower_bytes.clone());
+                    harness.execute(&Advance { steps: 1 }).await;
+                }
+            }
+        },
+    );
+    // `craft` is the public-boundary injection surface. Once the run has
+    // delivered these two complete, valid latest replies, describe them to
+    // the ordinary oracle as the dealer responses they represent so I12 and
+    // I14 judge the same target events.
+    let latest_request = fallback_selection
+        .run
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            ProbeStep::Requested { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        })
+        .expect("subscribing requested latest finalizations");
+    let dealers: Vec<_> = fallback_selection
+        .run
+        .sources
+        .iter()
+        .take(2)
+        .map(|source| source.identity.clone())
+        .collect();
+    let mut modeled = 0;
+    for step in &mut fallback_selection.run.steps {
+        let ProbeStep::Sent(send) = step else {
+            continue;
+        };
+        if send.shape != ProbeShape::Crafted {
+            continue;
+        }
+        let source = dealers
+            .iter()
+            .position(|dealer| *dealer == send.origin)
+            .expect("the fixed replies were delivered as the first two dealers");
+        let capture = fallback_selection.run.captures.len();
+        fallback_selection.run.captures.push(ProbeCapture {
+            source,
+            request: latest_request.clone(),
+            bytes: send.bytes.clone(),
+        });
+        send.shape = ProbeShape::Response(capture);
+        modeled += 1;
+    }
+    assert_eq!(modeled, 2);
+
+    let capture_positions = |request: Vec<u8>| {
+        fallback_selection
+            .run
+            .captures
+            .iter()
+            .enumerate()
+            .filter_map(|(position, capture)| (capture.request == request).then_some(position))
+            .collect::<Vec<_>>()
+    };
+    let primary_boundaries = capture_positions(probe_request(0, 2));
+    let fallback_boundaries = capture_positions(probe_request(0, 1));
+    let fallback_blocks = capture_positions(probe_request(2, 1));
+    assert!(!primary_boundaries.is_empty());
+    assert!(!fallback_boundaries.is_empty());
+    assert!(!fallback_blocks.is_empty());
+
+    let sent = fallback_selection
+        .run
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(at, step)| match step {
+            ProbeStep::Sent(ProbeSend {
+                shape: ProbeShape::Response(position),
+                ..
+            }) => Some((at, *position)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        primary_boundaries
+            .iter()
+            .all(|position| sent.iter().all(|(_, sent)| sent != position)),
+        "every primary boundary response remains held"
+    );
+    assert!(
+        fallback_boundaries
+            .iter()
+            .any(|position| sent.iter().any(|(_, sent)| sent == position)),
+        "a fallback boundary response is sent"
+    );
+    let fallback_block_sent = sent
+        .iter()
+        .filter_map(|(at, position)| fallback_blocks.contains(position).then_some(*at))
+        .next()
+        .expect("a fallback block response is sent");
+    let resolved = fallback_selection
+        .run
+        .steps
+        .iter()
+        .position(|step| matches!(step, ProbeStep::Resolved(_)))
+        .expect("the fallback resolves an artifact");
+    assert!(
+        fallback_block_sent < resolved,
+        "the fallback block is sent before the artifact resolves"
+    );
+    let fallback_report = super::probe::measure(&fallback_selection);
+    let (fallback_selections, fallback_artifact) =
+        invariants::probe_selections(&fallback_selection.run);
+    assert_eq!(
+        fallback_selections
+            .iter()
+            .map(|selection| selection.floor.epoch())
+            .collect::<Vec<_>>(),
+        [Epoch::new(1), Epoch::new(2), Epoch::new(1)],
+        "the lower fallback selection is followed by primary and fallback updates"
+    );
+    assert!(
+        fallback_selections[2].floor.round() > lower.round(),
+        "the later fallback selection must exceed the crafted first one"
+    );
+    assert_eq!(
+        fallback_artifact.as_ref().unwrap().floor,
+        fallback_selections[2].floor,
+        "the completing fallback retains its later selection"
+    );
+    assert_eq!(fallback_report.judged.count(Invariant::I12), Some(1));
+    assert_report(fallback_report.judged, true);
+
+    for step in &mut fallback_selection.run.steps {
+        if let ProbeStep::Resolved(artifact) = step {
+            artifact.floor = lower.clone();
+        }
+    }
+    fails("I12", || {
+        super::probe::measure(&fallback_selection);
+    });
+}
+
+#[test]
+fn at_060_discovery_decodes_unconditional_faults_before_state() {
+    for (bytes, expected) in [
+        (vec![], ProbeVerdict::Block),
+        (vec![6], ProbeVerdict::Block),
+        (vec![5], ProbeVerdict::Block),
+        (vec![1], ProbeVerdict::Block),
+        (vec![3], ProbeVerdict::Block),
+        (vec![4, 9], ProbeVerdict::Pass),
+    ] {
+        let mut observed = crafted_probe(bytes.clone(), false);
+        let peer = assert_one_probe_verdict(&observed, expected);
+        let report = super::probe::measure(&observed);
+        assert_eq!(report.judged.count(Invariant::I14), Some(1));
+        flip_network_block(&mut observed.run, &peer, expected == ProbeVerdict::Pass);
+        fails("I14", || {
+            super::probe::measure(&observed);
+        });
+
+        let mut fetching = crafted_fetch_probe(bytes);
+        assert_eq!(probe_verdicts(&fetching).last(), Some(&expected));
+        assert_report(super::probe::measure(&fetching).judged, true);
+        let peer = fetching.run.outsider.clone();
+        flip_network_block(&mut fetching.run, &peer, expected == ProbeVerdict::Pass);
+        fails("I14", || {
+            super::probe::measure(&fetching);
+        });
+    }
+}
+
+#[test]
+fn at_061_latest_reply_state_table_and_no_subscriber_control() {
+    let run = |mut input: super::DkgProbeFuzzInput| {
+        let observed = super::probe::observe_planted(input.clone(), async |_, _| {});
+        assert_report(super::probe::measure(&observed).judged, true);
+        input.events.clear();
+        observed
+    };
+    let verdicts = |observed: &super::probe::Observations| {
+        invariants::probe_judgments(&observed.run)
+            .0
+            .into_iter()
+            .map(|judgment| judgment.verdict)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        verdicts(&run(probe_input([3; 3], probe_program(&[0], &[]), 961))),
+        [ProbeVerdict::Pass]
+    );
+    assert_eq!(
+        verdicts(&run(probe_input(
+            [3; 3],
+            probe_program(&[], &[Replay { source: 0 }]),
+            962,
+        ))),
+        [ProbeVerdict::Block]
+    );
+    let mut stale = probe_input([1, 3, 3], probe_program(&[0], &[]), 963);
+    stale.bootstrap_epoch = 1;
+    assert_eq!(verdicts(&run(stale.clone())), [ProbeVerdict::Pass]);
+    stale.foreign[0] = true;
+    assert_eq!(verdicts(&run(stale)), [ProbeVerdict::Pass]);
+    let mut foreign = probe_input([3; 3], probe_program(&[0], &[]), 964);
+    foreign.foreign[0] = true;
+    assert_eq!(verdicts(&run(foreign)), [ProbeVerdict::Block]);
+    assert_eq!(
+        verdicts(&run(probe_input(
+            [3; 3],
+            probe_program(&[0], &[Duplicate { source: 0 }]),
+            965,
+        ))),
+        [ProbeVerdict::Pass, ProbeVerdict::Pass]
+    );
+
+    let dropped = [
+        Release { source: 0 },
+        Unsubscribe,
+        Duplicate { source: 0 },
+        Release { source: 1 },
+        Replay { source: 0 },
+    ];
+    let mut observed = run(probe_input([3; 3], probe_program(&[], &dropped), 966));
+    assert!(
+        verdicts(&observed)
+            .into_iter()
+            .all(|verdict| verdict == ProbeVerdict::Pass)
+    );
+    let peer = observed.run.outsider.clone();
+    flip_network_block(&mut observed.run, &peer, true);
+    fails("I14", || {
+        super::probe::measure(&observed);
+    });
+}
+
+#[test]
+fn at_062_boundary_responses_follow_the_active_fetches() {
+    let dealer = super::probe::observe_planted(
+        probe_input([3; 3], probe_program(&[0, 1, 0], &[]), 9620),
+        async |_, _| {},
+    );
+    assert_eq!(probe_verdicts(&dealer).last(), Some(&ProbeVerdict::Pass));
+    assert_report(super::probe::measure(&dealer).judged, true);
+
+    let nondealer = super::probe::observe_planted(
+        probe_input(
+            [3; 3],
+            probe_program(&[0, 1], &[Replay { source: 0 }]),
+            9621,
+        ),
+        async |_, _| {},
+    );
+    assert_eq!(probe_verdicts(&nondealer).last(), Some(&ProbeVerdict::Pass));
+    assert_report(super::probe::measure(&nondealer).judged, true);
+
+    let mut invalid_input = probe_input([3; 3], probe_program(&[0, 1, 2], &[]), 9622);
+    invalid_input.foreign[2] = true;
+    let invalid = super::probe::observe_planted(invalid_input, async |_, _| {});
+    assert_eq!(probe_verdicts(&invalid).last(), Some(&ProbeVerdict::Block));
+    assert_report(super::probe::measure(&invalid).judged, true);
+
+    let mut invalid_nondealer_input = probe_input(
+        [3; 3],
+        probe_program(&[0, 1], &[Replay { source: 2 }]),
+        9626,
+    );
+    invalid_nondealer_input.foreign[2] = true;
+    let invalid_nondealer = super::probe::observe_planted(invalid_nondealer_input, async |_, _| {});
+    assert_eq!(
+        probe_verdicts(&invalid_nondealer).last(),
+        Some(&ProbeVerdict::Block)
+    );
+    assert!(invalid_nondealer.run.blocked.contains(&(
+        invalid_nondealer.run.discoverer.clone(),
+        invalid_nondealer.run.outsider.clone()
+    )));
+    assert_report(super::probe::measure(&invalid_nondealer).judged, true);
+
+    let mut repeated_input = probe_input(
+        [3; 3],
+        probe_program(
+            &[0, 1],
+            &[
+                Replay { source: 0 },
+                Release { source: 1 },
+                Replay { source: 2 },
+            ],
+        ),
+        9623,
+    );
+    repeated_input.foreign[2] = true;
+    let repeated = super::probe::observe_planted(repeated_input, async |_, _| {});
+    assert_eq!(
+        probe_verdicts(&repeated).last(),
+        Some(&ProbeVerdict::Pass),
+        "an accepted responder is ignored before verification"
+    );
+    assert_report(super::probe::measure(&repeated).judged, true);
+
+    let older_request = probe_request(0, 1);
+    let older = super::probe::observe_planted(
+        probe_input([4, 4, 5], probe_program(&[0, 1], &[]), 9624),
+        async move |harness, stage| {
+            if stage == super::probe::Stage::Closing {
+                harness.ask(0, older_request.clone());
+                harness.execute(&Advance { steps: 1 }).await;
+                harness.execute(&Release { source: 0 }).await;
+            }
+        },
+    );
+    assert_eq!(probe_verdicts(&older).last(), Some(&ProbeVerdict::Pass));
+    assert_report(super::probe::measure(&older).judged, true);
+
+    let later_request = probe_request(0, 2);
+    let later = super::probe::observe_planted(
+        probe_input([3, 3, 5], probe_program(&[0, 1], &[]), 9625),
+        async move |harness, stage| {
+            if stage == super::probe::Stage::Closing {
+                harness.ask(0, later_request.clone());
+                harness.execute(&Advance { steps: 1 }).await;
+                harness.execute(&Release { source: 0 }).await;
+            }
+        },
+    );
+    assert_eq!(probe_verdicts(&later).last(), Some(&ProbeVerdict::Block));
+    assert_report(super::probe::measure(&later).judged, true);
+
+    let fallback = super::probe::observe_planted(
+        probe_input(
+            [3, 3, 5],
+            probe_program(
+                &[0, 1],
+                &[
+                    PROBE_RETRY,
+                    Release { source: 1 },
+                    Release { source: 2 },
+                    Release { source: 6 },
+                    Release { source: 0 },
+                ],
+            ),
+            9627,
+        ),
+        async |_, _| {},
+    );
+    let fallback_boundary = probe_request(0, 1);
+    let fallback_judgments = invariants::probe_judgments(&fallback.run).0;
+    assert!(fallback_judgments.iter().any(|judgment| {
+        judgment.verdict == ProbeVerdict::Pass
+            && matches!(
+                judgment.send.shape,
+                ProbeShape::Response(position)
+                    if fallback.run.captures[position].request == fallback_boundary
+            )
+    }));
+    let selections = invariants::probe_selections(&fallback.run).0;
+    assert_eq!(selections.len(), 2);
+    assert_eq!(selections[0].floor.epoch(), Epoch::new(1));
+    assert_eq!(selections[1].floor.epoch(), Epoch::new(2));
+    assert_report(super::probe::measure(&fallback).judged, true);
+
+    let valid_fallback_nondealer = super::probe::observe_planted(
+        probe_input(
+            [3, 3, 5],
+            probe_program(
+                &[0, 1],
+                &[
+                    PROBE_RETRY,
+                    Release { source: 1 },
+                    Release { source: 2 },
+                    Replay { source: 6 },
+                ],
+            ),
+            9628,
+        ),
+        async |_, _| {},
+    );
+    let valid_judgment = invariants::probe_judgments(&valid_fallback_nondealer.run)
+        .0
+        .pop()
+        .expect("the non-dealer delivered a fallback boundary");
+    assert_eq!(
+        valid_judgment.send.origin,
+        valid_fallback_nondealer.run.outsider
+    );
+    assert_eq!(valid_judgment.verdict, ProbeVerdict::Pass);
+    let ProbeShape::Response(position) = valid_judgment.send.shape else {
+        panic!("the fallback boundary is a captured response")
+    };
+    assert_eq!(
+        valid_fallback_nondealer.run.captures[position].request,
+        fallback_boundary
+    );
+    assert_report(
+        super::probe::measure(&valid_fallback_nondealer).judged,
+        true,
+    );
+
+    let invalid_seed =
+        |source: usize, chain: &super::probe::Chain, foreign: &super::probe::Chain| match source {
+            0 => vec![foreign.checkpoint(1, true)],
+            1 => vec![chain.checkpoint(1, true)],
+            2 => vec![chain.checkpoint(2, true)],
+            _ => unreachable!(),
+        };
+    let invalid_fallback_nondealer = super::probe::observe_with_seed(
+        probe_input(
+            [3, 3, 5],
+            probe_program(
+                &[0, 1],
+                &[
+                    PROBE_RETRY,
+                    Release { source: 1 },
+                    Release { source: 2 },
+                    Replay { source: 6 },
+                ],
+            ),
+            9629,
+        ),
+        &invalid_seed,
+        async |_, _| {},
+    );
+    let invalid_judgment = invariants::probe_judgments(&invalid_fallback_nondealer.run)
+        .0
+        .pop()
+        .expect("the non-dealer delivered an invalid fallback boundary");
+    assert_eq!(
+        invalid_judgment.send.origin,
+        invalid_fallback_nondealer.run.outsider
+    );
+    assert_eq!(invalid_judgment.verdict, ProbeVerdict::Block);
+    let ProbeShape::Response(position) = invalid_judgment.send.shape else {
+        panic!("the fallback boundary is a captured response")
+    };
+    assert_eq!(
+        invalid_fallback_nondealer.run.captures[position].request,
+        fallback_boundary
+    );
+    assert_report(
+        super::probe::measure(&invalid_fallback_nondealer).judged,
+        true,
+    );
+}
+
+#[test]
+fn at_063_block_responses_are_decoded_only_for_eligible_peers() {
+    let input = probe_input([3; 3], probe_program(&[0, 1, 0], &[]), 9630);
+    let fixture = super::probe::observe_planted(input.clone(), async |_, _| {});
+    let checkpoint = fixture.run.sources[0]
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.epoch == Epoch::new(1))
+        .expect("the requested boundary checkpoint is present");
+    let valid_block = checkpoint.block.clone();
+    let valid = block_response(Epoch::new(1), &valid_block);
+    let wrong_commitment = block_response(
+        Epoch::new(1),
+        &super::app::Block::new(
+            valid_block.context(),
+            sha256::Digest::from([63; 32]),
+            valid_block.height(),
+            valid_block.payload(),
+        ),
+    );
+    let wrong_height = block_response(
+        Epoch::new(1),
+        &super::app::Block::new(
+            valid_block.context(),
+            valid_block.parent(),
+            valid_block.height().next(),
+            valid_block.payload(),
+        ),
+    );
+    let wrong_info = block_response(
+        Epoch::new(1),
+        &super::app::Block::new(
+            valid_block.context(),
+            valid_block.parent(),
+            valid_block.height(),
+            None,
+        ),
+    );
+    let cut = valid[..9].to_vec();
+
+    for (bytes, expected) in [
+        (valid.clone(), ProbeVerdict::Pass),
+        (cut, ProbeVerdict::Block),
+        (wrong_commitment, ProbeVerdict::Block),
+        (wrong_height, ProbeVerdict::Block),
+        (wrong_info, ProbeVerdict::Block),
+    ] {
+        let observed = super::probe::observe_planted(input.clone(), async move |harness, stage| {
+            if stage == super::probe::Stage::Closing {
+                harness.craft(0, bytes.clone());
+                harness.execute(&Advance { steps: 1 }).await;
+            }
+        });
+        assert_eq!(probe_verdicts(&observed).last(), Some(&expected));
+        assert_report(super::probe::measure(&observed).judged, true);
+    }
+
+    let earlier_input = probe_input(
+        [3; 3],
+        probe_program(&[0, 1, 0], std::slice::from_ref(&PROBE_RETRY)),
+        9630,
+    );
+    let earlier_bytes = valid.clone();
+    let earlier = super::probe::observe_planted(earlier_input, async move |harness, stage| {
+        if stage == super::probe::Stage::Closing {
+            harness.craft(0, earlier_bytes.clone());
+            harness.execute(&Advance { steps: 1 }).await;
+        }
+    });
+    assert_eq!(probe_verdicts(&earlier).last(), Some(&ProbeVerdict::Pass));
+    assert_report(super::probe::measure(&earlier).judged, true);
+
+    let blocked_valid = valid.clone();
+    let blocked_cut = valid[..9].to_vec();
+    let blocked = super::probe::observe_planted(input.clone(), async move |harness, stage| {
+        if stage == super::probe::Stage::Closing {
+            harness.craft(0, blocked_cut.clone());
+            harness.execute(&Advance { steps: 1 }).await;
+            harness.craft(0, blocked_valid.clone());
+            harness.execute(&Advance { steps: 1 }).await;
+        }
+    });
+    assert!(probe_verdicts(&blocked).ends_with(&[ProbeVerdict::Block, ProbeVerdict::Pass]));
+    assert_report(super::probe::measure(&blocked).judged, true);
+
+    for (origin, bytes) in [(2, valid[..9].to_vec()), (0, probe_request(3, 2))] {
+        let observed = super::probe::observe_planted(input.clone(), async move |harness, stage| {
+            if stage == super::probe::Stage::Closing {
+                harness.craft(origin, bytes.clone());
+                harness.execute(&Advance { steps: 1 }).await;
+            }
+        });
+        assert_eq!(probe_verdicts(&observed).last(), Some(&ProbeVerdict::Pass));
+        assert_report(super::probe::measure(&observed).judged, true);
+    }
+
+    let outsider_input = probe_input(
+        [3; 3],
+        probe_program(&[0, 1], &[Replay { source: 0 }]),
+        9630,
+    );
+    let outsider_bytes = valid;
+    let outsider = super::probe::observe_planted(outsider_input, async move |harness, stage| {
+        if stage == super::probe::Stage::Closing {
+            harness.craft(3, outsider_bytes.clone());
+            harness.execute(&Advance { steps: 1 }).await;
+        }
+    });
+    assert_eq!(probe_verdicts(&outsider).last(), Some(&ProbeVerdict::Pass));
+    assert_report(super::probe::measure(&outsider).judged, true);
+}
+
+#[test]
+fn at_064_serving_state_uses_the_request_table() {
+    for (bytes, expected) in [
+        (vec![], ProbeVerdict::Block),
+        (vec![6], ProbeVerdict::Block),
+        (vec![0], ProbeVerdict::Block),
+        (vec![2], ProbeVerdict::Block),
+        (probe_request(0, 1), ProbeVerdict::Pass),
+        (probe_request(2, 1), ProbeVerdict::Pass),
+        (vec![4, 9], ProbeVerdict::Pass),
+        (vec![1, 9], ProbeVerdict::Pass),
+        (vec![3, 9], ProbeVerdict::Pass),
+        (vec![5, 9], ProbeVerdict::Pass),
+    ] {
+        let mut observed = crafted_probe(bytes, true);
+        let peer = assert_one_probe_verdict(&observed, expected);
+        assert!(observed.run.captures.is_empty());
+        assert_report(super::probe::measure(&observed).judged, true);
+        flip_network_block(&mut observed.run, &peer, expected == ProbeVerdict::Pass);
+        fails("I14", || {
+            super::probe::measure(&observed);
+        });
+    }
+}
+
+#[test]
+fn at_065_checkpoint_partitions_are_dkg_paced_state() {
+    use super::pacing::{Change, Operation, Partition};
+
+    assert_eq!(
+        Partition::named("engine-0_dkg_checkpoint"),
+        Partition::Checkpoint
+    );
+    assert_ne!(
+        Partition::named("engine-0_dkg_checkpoint_changed"),
+        Partition::Checkpoint
+    );
+    for change in [
+        Change::Write { synced: false },
+        Change::Write { synced: true },
+        Change::Resize,
+        Change::Sync,
+    ] {
+        assert!(Operation::Blob(Partition::Checkpoint, change).dkg());
+    }
+
+    let reshare = super::reshare_restarts::tests::forced(
+        &super::reshare_restarts::tests::BEFORE_THE_NEW_SHARE,
+    );
+    let opened = reshare
+        .trace
+        .opened(super::reshare_restarts::tests::BEFORE_THE_NEW_SHARE.victim);
+    assert!(opened.contains(&Partition::Checkpoint));
+    assert!(!opened.contains(&Partition::Unknown));
+
+    let (report, trace, recoveries) =
+        super::state_sync::run_dkg_state_sync_recovered(recovered_state_sync_input(15, 2));
+    assert_report(report.judged, true);
+    assert!(!recoveries.is_empty());
+    for engine in 0..super::RESHARE_IDENTITIES as usize {
+        assert!(!trace.opened(engine).contains(&Partition::Unknown));
+    }
+    assert!(
+        (0..super::RESHARE_IDENTITIES as usize)
+            .any(|engine| trace.opened(engine).contains(&Partition::Checkpoint))
+    );
+
+    for source in [include_str!("twins.rs"), include_str!("probe.rs")] {
+        assert!(!source.contains("Pacing::new"));
+        assert!(!source.contains("PacedStorage::new"));
+    }
+}
+
+#[test]
+fn at_066_recovery_sources_are_observed_in_precedence_order() {
+    use super::{
+        fixtures::{Plan, Recovery, Source},
+        reshare_restarts::tests::{
+            BEFORE_THE_NEW_SHARE, JOURNALED_DEALING_WITHOUT_PRIVATE_HALF, forced,
+        },
+    };
+
+    let marshal = forced(&JOURNALED_DEALING_WITHOUT_PRIVATE_HALF);
+    assert_report(marshal.report.judged, true);
+    let marshal = marshal
+        .recoveries
+        .iter()
+        .find(|recovery| recovery.source() == Some(Source::Marshal))
+        .expect("the fixed dealing restart recovers from marshal");
+    let marshal_epoch = marshal.entered.expect("marshal recovery enters an epoch");
+    assert!(marshal.recorded);
+    assert_ne!(marshal.plan.material, Some(marshal_epoch));
+    assert!(
+        marshal
+            .plan
+            .checkpoints
+            .iter()
+            .all(|(epoch, _)| *epoch != marshal_epoch)
+    );
+
+    let checkpoint = forced(&BEFORE_THE_NEW_SHARE);
+    assert_report(checkpoint.report.judged, true);
+    let checkpoint = checkpoint
+        .recoveries
+        .iter()
+        .find(|recovery| recovery.source() == Some(Source::Checkpoint))
+        .expect("the fixed share restart recovers from a checkpoint alone");
+    let checkpoint_epoch = checkpoint
+        .entered
+        .expect("checkpoint recovery enters an epoch");
+    assert!(!checkpoint.recorded);
+    assert_ne!(checkpoint.plan.material, Some(checkpoint_epoch));
+    assert!(
+        checkpoint
+            .plan
+            .checkpoints
+            .iter()
+            .any(|(epoch, _)| *epoch == checkpoint_epoch)
+    );
+
+    let mut material = None;
+    for (steps, doublings) in [(15, 2), (10, 3), (15, 3), (10, 4), (15, 4)] {
+        let (report, _, recoveries) = super::state_sync::run_dkg_state_sync_recovered(
+            recovered_state_sync_input(steps, doublings),
+        );
+        assert_report(report.judged, true);
+        if recoveries
+            .iter()
+            .any(|recovery| recovery.source() == Some(Source::Material))
+        {
+            material = Some(recoveries);
+            break;
+        }
+    }
+    let material = material.expect("a fixed post-sync restart exposes plan material");
+    let material = material
+        .iter()
+        .find(|recovery| recovery.source() == Some(Source::Material))
+        .expect("the selected recovery uses material alone");
+    let material_epoch = material.entered.expect("material recovery enters an epoch");
+    assert!(!material.recorded);
+    assert_eq!(material.plan.material, Some(material_epoch));
+    assert!(
+        material
+            .plan
+            .checkpoints
+            .iter()
+            .all(|(epoch, _)| *epoch != material_epoch)
+    );
+
+    let ambiguous = Recovery {
+        engine: 0,
+        plan: Plan {
+            material: Some(Epoch::new(2)),
+            checkpoints: vec![(Epoch::new(2), true)],
+        },
+        entered: Some(Epoch::new(2)),
+        recorded: false,
+    };
+    assert_eq!(ambiguous.source(), Some(Source::MaterialOrCheckpoint));
+}
+
+#[test]
+fn at_067_checkpoint_sync_is_atomic_at_both_crash_stages() {
+    use super::{
+        pacing::Stage,
+        reshare_restarts::tests::{
+            AFTER_THE_STARTUP_CHECKPOINT, BEFORE_THE_STARTUP_CHECKPOINT, CHECKPOINT,
+            PRESEEDED_EPOCH, assert_dropped, forced_preseeded,
+        },
+    };
+
+    let before = forced_preseeded(&BEFORE_THE_STARTUP_CHECKPOINT, Some(PRESEEDED_EPOCH));
+    let after = forced_preseeded(&AFTER_THE_STARTUP_CHECKPOINT, Some(PRESEEDED_EPOCH));
+    assert_report(before.report.judged, true);
+    assert_report(after.report.judged, true);
+    assert_dropped(&before, &[(CHECKPOINT, Stage::Before)]);
+    assert_dropped(&after, &[(CHECKPOINT, Stage::After)]);
+    let [before_recovery] = &before.recoveries[..] else {
+        panic!(
+            "one checkpoint crash has one recovery: {:?}",
+            before.recoveries
+        );
+    };
+    let [after_recovery] = &after.recoveries[..] else {
+        panic!(
+            "one checkpoint crash has one recovery: {:?}",
+            after.recoveries
+        );
+    };
+    assert!(before_recovery.entered.is_some());
+    assert!(after_recovery.entered.is_some());
+    assert_eq!(
+        before_recovery.source(),
+        Some(super::fixtures::Source::Marshal)
+    );
+    assert_eq!(
+        after_recovery.source(),
+        Some(super::fixtures::Source::Checkpoint)
+    );
+    assert_eq!(before_recovery.entered, Some(Epoch::zero()));
+    assert_eq!(after_recovery.entered, Some(Epoch::zero()));
+    assert!(before_recovery.recorded);
+    assert!(!after_recovery.recorded);
+    assert_eq!(
+        before_recovery.plan.checkpoints,
+        [(PRESEEDED_EPOCH, false)],
+        "the earlier durable checkpoint survives the before-stage crash"
+    );
+    assert_eq!(
+        after_recovery.plan.checkpoints,
+        [(Epoch::zero(), false), (PRESEEDED_EPOCH, false)],
+        "the applied startup checkpoint is complete and the earlier record is retained"
+    );
+}
+
+#[test]
+fn at_068_six_named_crashes_preserve_their_state_assertions() {
+    use super::{
+        environment::Landing,
+        pacing::Stage,
+        reshare_restarts::tests::{
+            CHECKPOINT, JOURNAL_ENTRY, NAMED_CRASHES, PRIVATE_HALF, PRUNE, SHARE, assert_dropped,
+            assert_entered, assert_registered_again, forced,
+        },
+    };
+
+    for (case, state) in NAMED_CRASHES.iter().enumerate() {
+        let run = forced(state);
+        assert_report(run.report.judged, true);
+        let found = super::reshare_restarts::tests::found(&run);
+        let dropped = state
+            .writes
+            .iter()
+            .map(|write| (write.operation, write.stage))
+            .collect::<Vec<_>>();
+        assert_dropped(&run, &dropped);
+        assert!(
+            state
+                .writes
+                .iter()
+                .all(|write| write.engine == state.victim)
+        );
+        assert!(state.writes.iter().all(|write| {
+            matches!(
+                write.operation,
+                PRIVATE_HALF | JOURNAL_ENTRY | SHARE | PRUNE
+            ) && (write.after.0 == PRIVATE_HALF || write.after.0 == CHECKPOINT)
+        }));
+
+        match case {
+            0 => {
+                assert_eq!((found.landing, found.dealings), (Landing::Dealing, 0));
+                assert!(found.journal > 0);
+            }
+            1 => {
+                assert_eq!(
+                    (found.landing, found.dealings, found.journal),
+                    (Landing::Dealing, 1, 0)
+                );
+                assert_eq!(
+                    run.trace.dropped(found.engine),
+                    [(PRIVATE_HALF, Stage::After), (JOURNAL_ENTRY, Stage::Before)]
+                );
+            }
+            2 => assert_eq!(
+                (found.landing, found.share, found.next_share),
+                (Landing::Inclusion, true, false)
+            ),
+            3 => assert_eq!(
+                (found.landing, found.share, found.next_share),
+                (Landing::Inclusion, true, true)
+            ),
+            4 => assert_eq!(
+                (found.epoch, found.landing, found.oldest),
+                (Epoch::new(1), Landing::Boundary, Some(Epoch::zero()))
+            ),
+            5 => {
+                assert_eq!(
+                    (found.epoch, found.landing, found.oldest),
+                    (Epoch::new(1), Landing::Boundary, Some(Epoch::new(1)))
+                );
+                assert!(found.share && found.next_share);
+            }
+            _ => unreachable!(),
+        }
+        assert_registered_again(&run, found);
+        assert_entered(&run, found, found.epoch.next());
+    }
+}
+
+#[test]
+fn at_069_direct_driver_is_an_exact_test_only_handoff() {
+    let state = super::reshare_restarts::tests::NAMED_CRASHES[0];
+    let input = super::reshare_restarts::tests::named_input(&state);
+    let normal = super::run_dkg_reshare_restarts(input.clone());
+    let program = Program::new(
+        &input.environment,
+        input.raw_bytes.clone(),
+        super::RESHARE_IDENTITIES as usize,
+    );
+    let (direct, _, _) =
+        super::reshare_restarts::run_dkg_reshare_restarts_under(input.clone(), program);
+    assert_eq!(normal, direct);
+
+    let watched = super::reshare_restarts::tests::watched(input.clone());
+    let program = Program::new(
+        &input.environment,
+        input.raw_bytes.clone(),
+        super::RESHARE_IDENTITIES as usize,
+    );
+    let watched_direct = super::reshare_restarts::tests::watched_under(input, program);
+    assert_eq!(watched.report, watched_direct.report);
+    assert_eq!(watched.trace, watched_direct.trace);
+    assert_eq!(watched.retained, watched_direct.retained);
+    assert_eq!(watched.recoveries, watched_direct.recoveries);
+
+    let source = include_str!("reshare_restarts.rs");
+    let handoff = source
+        .split("pub(super) fn run_dkg_reshare_restarts_under")
+        .nth(1)
+        .expect("the test-only direct handoff exists");
+    assert!(
+        source[..source
+            .find("pub(super) fn run_dkg_reshare_restarts_under")
+            .unwrap()]
+            .ends_with("#[cfg(test)]\n")
+    );
+    assert!(handoff.contains("execute_under(input, program, |cluster| cluster)"));
+    assert!(
+        source.contains("runner::fuzz(input.raw_bytes.clone(), input, run_dkg_reshare_restarts)")
     );
 }
 
@@ -1327,21 +2952,53 @@ fn at_044_probe_event_boundary() {
         Unsubscribe,
     ];
     assert!(super::probe_input::drawable(&events));
-    let report = super::run_dkg_probe(super::DkgProbeFuzzInput {
-        sources: [4; 3],
-        foreign: [false; 3],
-        bootstrap_epoch: 0,
-        floor: None,
-        sharing_mode: Mode::NonZeroCounter,
-        events: events.clone(),
-        raw_bytes: super::fixtures::tape(921),
-    });
-    assert!(
-        report.events.iter().all(|count| *count > 0),
-        "{:?}",
-        report.events
-    );
-    assert_report(report.judged, true);
+    let mut minimum =
+        [[super::SourceCheckpoint::Missing; super::probe_input::CHECKPOINT_EPOCHS]; 3];
+    minimum[0][0] = super::SourceCheckpoint::Unfinalized;
+    let maximum = [
+        [
+            super::SourceCheckpoint::Unfinalized,
+            super::SourceCheckpoint::Missing,
+            super::SourceCheckpoint::Finalized,
+            super::SourceCheckpoint::Missing,
+        ],
+        [
+            super::SourceCheckpoint::Missing,
+            super::SourceCheckpoint::Finalized,
+            super::SourceCheckpoint::Unfinalized,
+            super::SourceCheckpoint::Finalized,
+        ],
+        [
+            super::SourceCheckpoint::Unfinalized,
+            super::SourceCheckpoint::Missing,
+            super::SourceCheckpoint::Finalized,
+            super::SourceCheckpoint::Unfinalized,
+        ],
+    ];
+    for (sources, checkpoints, seed) in [
+        ([0; 3], minimum, 921),
+        ([crate::stateful::MAX_SOURCE_HEIGHT; 3], maximum, 922),
+    ] {
+        let input = super::DkgProbeFuzzInput {
+            sources,
+            foreign: [false; 3],
+            bootstrap_epoch: 0,
+            floor: None,
+            sharing_mode: Mode::NonZeroCounter,
+            events: events.clone(),
+            checkpoints,
+            raw_bytes: super::fixtures::tape(seed),
+        };
+        assert_eq!(input.sources, sources);
+        assert_eq!(input.checkpoints, checkpoints);
+        let report = super::run_dkg_probe(input);
+        assert!(
+            report.events.iter().all(|count| *count > 0),
+            "{:?}",
+            report.events
+        );
+        assert_report(report.judged, true);
+    }
     let setup = include_str!("probe.rs")
         .split("impl Harness {")
         .nth(1)
@@ -1652,32 +3309,6 @@ fn at_045_state_sync_construction_and_restart_bounds() {
         "secrets: node.secrets.clone()",
         "secrets: Secrets::default()",
     );
-}
-
-#[test]
-#[ignore = "bounded search for an AT-043 held-write input"]
-fn at_043_find_held_write_input() {
-    for seed in 0..64u16 {
-        let report = super::run_dkg_bootstrap_restarts(super::DkgBootstrapRestartsFuzzInput {
-            sharing_mode: Mode::NonZeroCounter,
-            environment: super::EnvironmentControls {
-                restarts: 4,
-                links: super::fixtures::CLEAN,
-                cuts: vec![super::Cut {
-                    delay: 1,
-                    duration: 2,
-                    identity: 0,
-                    scope: super::CutScope::To(1),
-                }],
-            },
-            raw_bytes: super::fixtures::tape(seed),
-        });
-        if report.restarts.paced.crashes > 0 {
-            eprintln!("AT-043 seed={seed} report={report:?}");
-            return;
-        }
-    }
-    panic!("no held-write fixture in bounded sample");
 }
 
 struct IncompleteSyncStack {

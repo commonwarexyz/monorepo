@@ -520,22 +520,10 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
-pub(crate) type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
-
-/// Ancestors retained while a batch is merkleized, immediate parent first.
-pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
+type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 
 /// Result of merkleizing a batch.
 type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
-
-/// Result of a prepared merkleization: the batch and the ancestors retained while building it.
-pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
-    (
-        Arc<MerkleizedBatch<F, D, U, S>>,
-        RetainedAncestors<F, D, U, S>,
-    ),
-    crate::qmdb::Error<F>,
->;
 
 /// Batch-infrastructure state used during merkleization.
 ///
@@ -573,7 +561,7 @@ where
     Operation<F, U>: Codec,
 {
     /// The database the batch was validated against.
-    db: Compatible<'a, Db<F, E, C, I, H, U, N, S>>,
+    db: Compatible<'a, Db<F, E, C, I, H, U, S, N>>,
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
     /// Metadata for this batch's commit.
@@ -1087,7 +1075,7 @@ where
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
     ) -> Vec<Location<F>>
     where
         E: Context,
@@ -1236,7 +1224,7 @@ where
         policy: &mut P,
         mut prefetched: Option<Prefetched<F, U>>,
         mut source: impl Candidates<F>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
     ) -> Result<(Location<F>, Vec<Decided<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1449,8 +1437,8 @@ where
         walked: Walked<F, U>,
         mut floor: Location<F>,
         metadata: Option<U::Value>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
-    ) -> RetainedMerkleizeResult<F, H::Digest, U, S>
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
+    ) -> MerkleizeResult<F, H::Digest, U, S>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1549,7 +1537,7 @@ where
                 inactivity_floor: floor,
             },
         });
-        Ok((batch, self.ancestors))
+        Ok(batch)
     }
 }
 
@@ -1605,7 +1593,7 @@ where
     pub async fn expand<E, C, I, const N: usize>(
         mut self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<(Self, Range<usize>, Vec<Option<U::Value>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1797,7 +1785,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
@@ -1820,7 +1808,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
@@ -1833,10 +1821,9 @@ where
         let (prepared, staged) = self
             .resolve_updates_prefetched(slots, unstaged, db, &*policy, fill)
             .await?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(staged, fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 
     /// Resolve the caller's slots and unstaged writes on the strategy pool while selecting and
@@ -1859,7 +1846,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &'a Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &'a Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
         policy: &impl Policy<F, K, V::Value>,
         mut source: impl Candidates<F>,
     ) -> Result<
@@ -1914,7 +1901,7 @@ where
             .iter()
             .map(|(key, value)| (key, value))
             .chain(&prepared.mutations)
-            .filter(|&(key, _)| db.snapshot.get(key).next().is_some())
+            .filter(|&(key, _)| db.snapshot.get(key.as_ref()).next().is_some())
             .map(|(_, value)| made_inactive(value))
             .sum();
         let Limits { entries, skips } = policy.limits(staged + existing);
@@ -1984,7 +1971,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
@@ -2007,7 +1994,7 @@ where
         self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
@@ -2019,10 +2006,9 @@ where
         let fill: &Shared<N> = &db.bitmap;
         let (batch, staged) = self.resolve_updates(slots, unstaged, db.strategy());
         let prepared = batch.prepare(db)?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(staged, fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 }
 
@@ -2078,8 +2064,8 @@ where
     #[allow(clippy::type_complexity)]
     pub(crate) fn compatible<'a, E, C, I, const N: usize>(
         &self,
-        db: &'a Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Compatible<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
+        db: &'a Db<F, E, C, I, H, U, S, N>,
+    ) -> Result<Compatible<'a, Db<F, E, C, I, H, U, S, N>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -2095,7 +2081,7 @@ where
     /// subsequent merkleization reads.
     pub(crate) fn prepare<'a, E, C, I, const N: usize>(
         self,
-        db: &'a Db<F, E, C, I, H, U, N, S>,
+        db: &'a Db<F, E, C, I, H, U, S, N>,
     ) -> PrepareResult<'a, F, E, C, I, H, U, N, S>
     where
         E: Context,
@@ -2155,7 +2141,7 @@ where
     /// Read unresolved slots from the database and merge them back into `results`.
     async fn fill_committed_reads<E, C, I, T: Send, const N: usize>(
         unresolved: Vec<PendingRead<'_, U::Key>>,
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
         results: &mut [Option<U::Value>],
         map: impl Fn(U, Location<F>) -> T + Send + Sync,
         mut apply: impl FnMut(usize, T) -> U::Value,
@@ -2185,7 +2171,7 @@ where
     pub async fn get<E, C, I, const N: usize>(
         &self,
         key: &U::Key,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2211,7 +2197,7 @@ where
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2260,7 +2246,7 @@ where
     pub async fn stage<E, C, I, const N: usize>(
         self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<(Staged<F, H, U, S>, Vec<Option<U::Value>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2289,7 +2275,7 @@ where
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[U::Key],
-        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, S, N>>,
     ) -> Result<(Vec<Option<U::Value>>, Vec<StagedResolution<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2360,7 +2346,7 @@ where
     /// or an unapplied ancestor was dropped.
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
@@ -2380,7 +2366,7 @@ where
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
@@ -2391,10 +2377,9 @@ where
     {
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(Vec::new(), fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 }
 
@@ -2420,7 +2405,7 @@ where
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         source: T,
         policy: &mut P,
-    ) -> RetainedMerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         P: Policy<F, K, V::Value>,
     {
@@ -2552,7 +2537,7 @@ where
     /// or an unapplied ancestor was dropped.
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
@@ -2572,7 +2557,7 @@ where
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
@@ -2583,10 +2568,9 @@ where
     {
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
-        let (batch, _retained_ancestors) = prepared
+        prepared
             .walk_floor_and_merkleize(Vec::new(), fill, policy)
-            .await?;
-        Ok(batch)
+            .await
     }
 }
 
@@ -2613,7 +2597,7 @@ where
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         source: T,
         policy: &mut P,
-    ) -> RetainedMerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         P: Policy<F, K, V::Value>,
     {
@@ -2687,7 +2671,7 @@ where
                     .map(|(key, ..)| key),
             )
         {
-            let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = db.snapshot.prev_translated_key(key.as_ref()) else {
                 continue;
             };
             prev_locations.extend(iter.copied());
@@ -2912,7 +2896,7 @@ where
         &self,
         walked: &Walked<F, update::Ordered<K, V>>,
         mut decided: Vec<Decided<F, update::Ordered<K, V>>>,
-        db: Compatible<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, update::Ordered<K, V>, S, N>>,
     ) -> Result<Vec<Decided<F, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -2940,8 +2924,8 @@ where
         // batch leaves alone.
         let mut locations = Vec::new();
         for key in &evicted {
-            locations.extend(db.snapshot.get(key).copied());
-            if let Some((bucket, _)) = db.snapshot.prev_translated_key(key) {
+            locations.extend(db.snapshot.get(key.as_ref()).copied());
+            if let Some((bucket, _)) = db.snapshot.prev_translated_key(key.as_ref()) {
                 locations.extend(bucket.copied());
             }
         }
@@ -3041,7 +3025,7 @@ where
     pub async fn get_next_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> Result<Option<K>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3070,7 +3054,7 @@ where
     pub async fn get_prev_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, S, N>,
     ) -> Result<Option<K>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3267,20 +3251,20 @@ where
     /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
     /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are flushed (by a commit or sync
-    /// after apply).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Db::to_batch`]).
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned, and
+    /// [`crate::merkle::Error::Empty`] if the batch has no operations (such as a batch from
+    /// [`Db::to_batch`]).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Proof<F, D>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3300,19 +3284,18 @@ where
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
     /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are flushed (by a commit or sync
-    /// after apply).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// and [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to
-    /// a dropped unapplied ancestor.
+    /// and [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub fn pinned_nodes<E, C, I, H, const N: usize>(
         &self,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Vec<D>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3334,7 +3317,7 @@ where
     pub async fn get<E, C, I, H, const N: usize>(
         &self,
         key: &U::Key,
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3361,7 +3344,7 @@ where
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
         keys: &[impl Borrow<U::Key> + Sync],
-        db: &Db<F, E, C, I, H, U, N, S>,
+        db: &Db<F, E, C, I, H, U, S, N>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3395,7 +3378,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,
@@ -3453,6 +3436,29 @@ where
             ancestor_base_locs: Vec::new(),
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
+    }
+}
+
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> crate::qmdb::sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, U, S>
+where
+    Operation<F, U>: Codec,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(
+                self.bounds.inactivity_floor,
+                self.bounds.tip.size
+            ),
+        }
     }
 }
 
@@ -4808,6 +4814,7 @@ pub(crate) mod tests {
     #[test]
     fn proportional_floor_passes_trailing_superseded_candidates() {
         deterministic::Runner::default().start(|context| async move {
+            // Use a fresh database so the floor candidates have predictable operation locations.
             let config = fixed_db_config::<OneCap>("proportional-trailing");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
@@ -4833,7 +4840,7 @@ pub(crate) mod tests {
                 .write(keys[3], None)
                 .prepare(&db)
                 .unwrap();
-            let (merkleized, _) = prepared
+            let merkleized = prepared
                 .walk_floor_and_merkleize(
                     Vec::new(),
                     FnCandidates(|floor, tip: u64, limit, out: &mut Vec<_>| {
@@ -4861,6 +4868,7 @@ pub(crate) mod tests {
     #[test]
     fn eviction_before_predecessor_matches_across_rounds() {
         deterministic::Runner::default().start(|context| async move {
+            // Use ordered keys so evicting the middle key requires relinking its predecessor.
             let config = fixed_db_config::<OneCap>("eviction-rounds");
             let db = AnyOrdered::init(context.child("db"), config, None)
                 .await
@@ -4916,6 +4924,8 @@ pub(crate) mod tests {
                         |value| db.new_batch().write(a, Some(value)),
                     );
                     let mut prepared = batch.prepare(&db).unwrap();
+
+                    // Split after the evicted key so its predecessor is visited in another round.
                     if split {
                         prepared.prefetched = Some((
                             Round {
@@ -4925,7 +4935,9 @@ pub(crate) mod tests {
                             loc(3),
                         ));
                     }
-                    let (merkleized, _) = prepared
+
+                    // Candidate visits must retain their order across the prefetch boundary.
+                    let merkleized = prepared
                         .walk_floor_and_merkleize(Vec::new(), db.bitmap.as_ref(), &mut policy)
                         .await
                         .unwrap();
@@ -4933,6 +4945,8 @@ pub(crate) mod tests {
                     assert_eq!(policy.locations(), [loc(2), loc(3), loc(predecessor)]);
                     batches.push(merkleized);
                 }
+
+                // The batch's operations and root must be independent of round boundaries.
                 assert_same(&db, &batches[0], &batches[1]);
 
                 // After its write, if any, the batch deletes the evicted key and rewrites the
@@ -4959,6 +4973,8 @@ pub(crate) mod tests {
                 assert_eq!(merkleized.get_prev_key(&c, &db).await.unwrap(), Some(a));
                 applied = Some(merkleized);
             }
+
+            // The applied database must expose the repaired links and omit the evicted key.
             let db = db.apply_batch(applied.unwrap()).await.unwrap();
             assert_links(&db, &BTreeMap::from([(a, again), (c, c)]), &[b]).await;
             db.destroy().await.unwrap();

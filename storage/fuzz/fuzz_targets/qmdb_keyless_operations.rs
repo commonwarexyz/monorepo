@@ -7,8 +7,8 @@ use commonware_runtime::{
     Runner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
-    merkle::{Family, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
+    merkle::{Family, Location, mmb, mmr},
     qmdb::{
         Error, ProofExt as _,
         keyless::variable::{Config, Db as Keyless},
@@ -233,13 +233,10 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
-            journal_partition: format!("{test_name}-journal"),
-            metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
-            write_buffer: NZUsize!(1024),
+            partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy,
-            page_cache: page_cache.clone(),
+            resident_height: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("{test_name}-log"),
@@ -250,6 +247,7 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
             items_per_section: NZU64!(7),
             page_cache,
         },
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -419,7 +417,20 @@ fn fuzz_family<F: Family, S: Strategy>(
                     let bounds = db.bounds();
                     if bounds.start < bounds.end {
                         let retained = (bounds.end - bounds.start).as_u64();
-                        let loc = bounds.start + (*loc_offset as u64 % retained);
+                        let mut loc = bounds.start + (*loc_offset as u64 % retained);
+                        let floor = db.inactivity_floor();
+                        if loc < floor {
+                            assert!(matches!(
+                                db.get(loc).await,
+                                Err(Error::BelowInactivityFloor(below)) if below == loc
+                            ));
+                            assert!(matches!(
+                                db.get_many(&[loc]).await,
+                                Err(Error::BelowInactivityFloor(below)) if below == loc
+                            ));
+                            // `loc < floor <= last commit`, so the floor is retained and readable.
+                            loc = floor;
+                        }
                         let value = db.get(loc).await.expect("retained get should not fail");
                         assert_eq!(db.get_many(&[loc]).await.unwrap(), vec![value]);
                     }
@@ -439,6 +450,24 @@ fn fuzz_family<F: Family, S: Strategy>(
                         ];
                         locs.sort();
                         locs.dedup();
+                        let floor = db.inactivity_floor();
+                        let split = locs.partition_point(|loc| *loc < floor);
+                        for loc in &locs[..split] {
+                            assert!(matches!(
+                                db.get(*loc).await,
+                                Err(Error::BelowInactivityFloor(below)) if below == *loc
+                            ));
+                        }
+                        if split > 0 {
+                            assert!(matches!(
+                                db.get_many(&locs).await,
+                                Err(Error::BelowInactivityFloor(below)) if below == locs[0]
+                            ));
+                            locs.drain(..split);
+                            if locs.is_empty() {
+                                locs.push(floor);
+                            }
+                        }
                         let mut expected = Vec::with_capacity(locs.len());
                         for loc in &locs {
                             expected.push(db.get(*loc).await.unwrap());
@@ -457,8 +486,8 @@ fn fuzz_family<F: Family, S: Strategy>(
                     if bounds.start < batch.size() {
                         let len = (batch.size() - bounds.start).as_u64();
                         let loc = bounds.start + (*loc_offset as u64 % len);
-                        // Batch reads below the batch's inactivity floor are refused however far
-                        // the database retains the location; the database itself still serves it.
+                        // Reads below the inactivity floor are refused however far the database
+                        // retains the location, by the batch as by the database itself.
                         let floor = db.inactivity_floor();
                         if loc < floor {
                             assert!(matches!(
@@ -797,10 +826,11 @@ fn fuzz_family<F: Family, S: Strategy>(
                             reopened
                         }
                         Err(error @ (Error::InvalidInitializationBound
-                            | Error::Journal(commonware_storage::journal::Error::ItemPruned(_)))) => {
+                            | Error::NoRetainedCommit(_))) => {
                             match error {
                                 Error::InvalidInitializationBound => assert_eq!(cap, 0),
-                                Error::Journal(_) => {
+                                Error::NoRetainedCommit(bound) => {
+                                    assert_eq!(bound, cap);
                                     assert_ne!(cap, 0);
                                     assert!(selected.is_none_or(|(end, _)| end <= before_bounds.start));
                                 }

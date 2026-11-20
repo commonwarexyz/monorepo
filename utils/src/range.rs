@@ -2,13 +2,13 @@
 
 use bytes::BufMut;
 use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, MaxEncodeSize, Read, Write};
-use commonware_macros::stability;
-#[stability(ALPHA)]
-use core::ops::{
-    Bound::{Excluded, Included, Unbounded},
-    RangeBounds,
+use core::{
+    fmt,
+    ops::{
+        Bound::{Excluded, Included, Unbounded},
+        Range, RangeBounds,
+    },
 };
-use core::{fmt, ops::Range};
 
 /// Whether `key` is in the cyclic span described by the current bounds of `span`.
 ///
@@ -28,7 +28,6 @@ use core::{fmt, ops::Range};
 /// assert!(contains_cyclic(6..2, &0));
 /// assert!(contains_cyclic(3..3, &9));
 /// ```
-#[stability(ALPHA)]
 pub fn contains_cyclic<K: Ord + ?Sized>(span: impl RangeBounds<K>, key: &K) -> bool {
     let start = span.start_bound();
     let end = span.end_bound();

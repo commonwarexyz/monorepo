@@ -175,11 +175,24 @@ fn execute<S: Stack>(
     input: DkgReshareRestartsFuzzInput,
     wrap: impl FnOnce(Cluster) -> S,
 ) -> (ReshareRestartsReport, Trace, Reshare) {
+    let program = Program::new(
+        &input.environment,
+        input.raw_bytes.clone(),
+        RESHARE_IDENTITIES as usize,
+    );
+    execute_under(input, program, wrap)
+}
+
+/// Run `input` under `program` over the stack `wrap` makes of the cluster,
+/// as [`execute`] does under the program the input lays out.
+fn execute_under<S: Stack>(
+    input: DkgReshareRestartsFuzzInput,
+    program: Program,
+    wrap: impl FnOnce(Cluster) -> S,
+) -> (ReshareRestartsReport, Trace, Reshare) {
     let entropy = input.raw_bytes.clone();
     let asked = input.session.epochs;
-    let (observed, panics) = runner::execute(entropy.clone(), |context| {
-        run(context, input, entropy, wrap)
-    });
+    let (observed, panics) = runner::execute(entropy, |context| run(context, input, program, wrap));
 
     // Measurement point, outside the runtime so a violation is never caught.
     // No identity is compromised, so no panic is tolerated.
@@ -206,6 +219,21 @@ fn execute<S: Stack>(
         judged: counts.judged(Target::ReshareRestarts),
     };
     (report, observed.paced, observed.reshare)
+}
+
+/// Run `input` as [`run_dkg_reshare_restarts`] does, with `program` handed to
+/// the driver in place of the one the input lays out, at the same point.
+/// Returns what the run measured, what its pacing did, and the records the
+/// oracle judged it by.
+///
+/// Only the regression suite runs it, to place a crash after the writes it
+/// names; everything else the run uses is the input's.
+#[cfg(test)]
+pub(super) fn run_dkg_reshare_restarts_under(
+    input: DkgReshareRestartsFuzzInput,
+    program: Program,
+) -> (ReshareRestartsReport, Trace, Reshare) {
+    execute_under(input, program, |cluster| cluster)
 }
 
 /// What a run observed, to be checked once the runtime has stopped.
@@ -237,13 +265,12 @@ struct Observations {
 async fn run<S: Stack>(
     mut context: deterministic::Context,
     input: DkgReshareRestartsFuzzInput,
-    entropy: Vec<u8>,
+    program: Program,
     wrap: impl FnOnce(Cluster) -> S,
 ) -> Observations {
     let session = Session::deal(&mut context, signers(RESHARE_IDENTITIES), &input.session);
     let participants = session.participants.clone();
     let link = input.environment.links.link();
-    let program = Program::new(&input.environment, entropy, participants.len());
     let oracle = network_sized(
         &context,
         &participants,
@@ -289,17 +316,17 @@ async fn run<S: Stack>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::dkg::{
         COMMITTEE, Cut, CutScope, EnvironmentControls, Info, LinkControls, MockGroup, Rotation,
         context::EngineContext,
         environment::{CUT_STEP, Event, FOLLOW, Landing},
         fixtures::{
-            self, CLEAN, LOSSY, OUTSIDER, ROTATE, Retaining, STAY, Sample, Sampled, Watched, cut,
-            decode, journal, sample, tape, votes,
+            self, CLEAN, LOSSY, OUTSIDER, Planned, Preseeded, ROTATE, Recovery, Retaining, STAY,
+            Sample, Sampled, Watched, cut, decode, journal, sample, tape, votes,
         },
-        pacing::{Change, Operation, Partition, Secret, Stage},
+        pacing::{Change, Operation, Partition, Secret, Stage, tests::Write},
         reshare_input::ROTATIONS,
         reshare_restarts_input::{ROOMY_MAILBOX, SessionControls},
         reshare_stack,
@@ -358,32 +385,32 @@ mod tests {
     /// what the restart found of the run.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(in crate::dkg) struct Retained {
-        engine: usize,
+        pub(in crate::dkg) engine: usize,
         /// The epoch the engine resumes in, and where its crash found it.
-        epoch: Epoch,
-        landing: Landing,
+        pub(in crate::dkg) epoch: Epoch,
+        pub(in crate::dkg) landing: Landing,
         /// Whether its secret store held its dealer seed for that epoch.
-        seed: bool,
+        pub(in crate::dkg) seed: bool,
         /// How many private dealings of that epoch's ceremony its secret
         /// store held.
-        dealings: usize,
+        pub(in crate::dkg) dealings: usize,
         /// Whether its secret store held its share for that epoch.
-        share: bool,
+        pub(in crate::dkg) share: bool,
         /// Whether its secret store held its share for the epoch after that
         /// one, which is its share of the output of that epoch's ceremony.
-        next_share: bool,
+        pub(in crate::dkg) next_share: bool,
         /// The earliest epoch its secret store held a dealer seed for.
-        oldest: Option<Epoch>,
+        pub(in crate::dkg) oldest: Option<Epoch>,
         /// The durable length of the reshare actor's journal.
-        journal: u64,
+        pub(in crate::dkg) journal: u64,
         /// The durable length of the journal its Simplex engine kept for
         /// that epoch, which holds the votes the engine cast in it.
-        votes: u64,
+        pub(in crate::dkg) votes: u64,
         /// How many schemes the instances of its engine had registered.
-        registered: usize,
+        pub(in crate::dkg) registered: usize,
         /// The latest epoch whose scheme the engine of another identity had
         /// registered.
-        peers: Epoch,
+        pub(in crate::dkg) peers: Epoch,
     }
 
     impl Retaining for Cluster {
@@ -424,16 +451,19 @@ mod tests {
     }
 
     /// One run of an input over the watched cluster.
-    struct Run {
-        input: DkgReshareRestartsFuzzInput,
-        report: ReshareRestartsReport,
+    pub(in crate::dkg) struct Run {
+        pub(in crate::dkg) input: DkgReshareRestartsFuzzInput,
+        pub(in crate::dkg) report: ReshareRestartsReport,
         /// What the pacing did.
-        trace: Trace,
+        pub(in crate::dkg) trace: Trace,
         /// What each restart found, in the order of the restarts.
-        retained: Vec<Retained>,
+        pub(in crate::dkg) retained: Vec<Retained>,
         /// What every instance of every engine reported and every share
         /// every secret store held, as the oracle read them.
-        reshare: Reshare,
+        pub(in crate::dkg) reshare: Reshare,
+        /// How each restarted engine recovered its epoch, in the order of the
+        /// restarts.
+        pub(in crate::dkg) recoveries: Vec<Recovery>,
     }
 
     impl Run {
@@ -445,20 +475,67 @@ mod tests {
 
     /// Run `input` over the watched cluster, and assert that no two
     /// identities were impaired at once.
-    fn watched(input: DkgReshareRestartsFuzzInput) -> Run {
+    pub(in crate::dkg) fn watched(input: DkgReshareRestartsFuzzInput) -> Run {
+        observed(input, None, None)
+    }
+
+    /// Run `input` under `program` over the watched cluster, and assert that
+    /// no two identities were impaired at once.
+    pub(in crate::dkg) fn watched_under(
+        input: DkgReshareRestartsFuzzInput,
+        program: Program,
+    ) -> Run {
+        watched_preseeded(input, program, None)
+    }
+
+    /// Run `input` under `program` over the watched cluster, with the
+    /// checkpoint record `preseed` names, an identity and an epoch, written
+    /// before that identity's engine first starts (see
+    /// [`fixtures::preseed_checkpoint`]), and assert that no two identities
+    /// were impaired at once.
+    pub(in crate::dkg) fn watched_preseeded(
+        input: DkgReshareRestartsFuzzInput,
+        program: Program,
+        preseed: Option<(usize, Epoch)>,
+    ) -> Run {
+        observed(input, Some(program), preseed)
+    }
+
+    /// Run `input` over the watched cluster, with the checkpoint record
+    /// `preseed` names written first, and assert that no two identities were
+    /// impaired at once. The run takes the path the run function takes if
+    /// `program` is none, and is handed `program` below it otherwise.
+    fn observed(
+        input: DkgReshareRestartsFuzzInput,
+        program: Option<Program>,
+        preseed: Option<(usize, Epoch)>,
+    ) -> Run {
         let retained = Arc::new(Mutex::new(Vec::new()));
-        let (report, trace, reshare) = execute(input.clone(), |cluster| {
-            Watched::new(cluster, Arc::clone(&retained))
-        });
+        let plans = Arc::new(Mutex::new(Vec::new()));
+        let wrap = |cluster: Cluster| {
+            let storage = cluster.context.child("plans");
+            let preseeding = cluster.context.child("preseed");
+            let record =
+                preseed.map(|(engine, epoch)| (engine, epoch, cluster.session.genesis.clone()));
+            let watched = Watched::new(cluster, Arc::clone(&retained));
+            let preseeded = Preseeded::new(watched, preseeding, record);
+            Planned::new(preseeded, storage, Arc::clone(&plans))
+        };
+        let (report, trace, reshare) = match program {
+            None => execute(input.clone(), wrap),
+            Some(program) => execute_under(input.clone(), program, wrap),
+        };
         println!("{report}");
         assert_eq!(trace.overlaps(), 0, "{:?}", trace.impairments());
         let retained = retained.lock().clone();
+        let recoveries = fixtures::recoveries(&plans.lock(), trace.log());
         Run {
             input,
             report,
             trace,
             retained,
             reshare,
+            recoveries,
         }
     }
 
@@ -507,6 +584,14 @@ mod tests {
         run
     }
 
+    /// Run one fixed input under `program` and assert that its checks were
+    /// not vacuous.
+    fn succeeded_under(input: DkgReshareRestartsFuzzInput, program: Program) -> Run {
+        let run = watched_under(input, program);
+        assert_succeeded(&run);
+        run
+    }
+
     /// A reshare actor whose mailbox holds one message overflows when
     /// marshal and the application call it while it is busy, as it is while
     /// a write of its engine is held before a crash. Its run is judged like
@@ -529,10 +614,23 @@ mod tests {
         assert_eq!(roomy.report.overflows, 0, "{}", roomy.report);
     }
 
+    /// Every restart of a run has its recovery on record, and each names
+    /// where the engine read the epoch it started in from.
+    #[test]
+    fn every_restart_records_its_recovery() {
+        let run = watched(input(2, STAY, 3, CLEAN, vec![], 0));
+        assert!(!run.retained.is_empty(), "{}", run.report);
+        assert_eq!(run.recoveries.len(), run.retained.len());
+        for (recovery, found) in run.recoveries.iter().zip(&run.retained) {
+            println!("{recovery:?} {:?}", recovery.source());
+            assert_eq!(recovery.engine, found.engine);
+            assert!(recovery.source().is_some(), "{recovery:?}");
+        }
+    }
+
     /// Lists, for each seed of a range, the schedule of the input over
     /// clean links and an unchanging committee, what its run came to, the
-    /// held writes each crash dropped, and what each restart found. The
-    /// fixed inputs of the tests here were chosen from this listing.
+    /// held writes each crash dropped, and what each restart found.
     ///
     /// `SURVEY` names the number of epochs, the number of restarts, the
     /// seeds, and optionally the identity outside the first committee, as
@@ -637,18 +735,24 @@ mod tests {
     }
 
     /// Schemes an engine registered, each with its epoch, in order.
-    type Registered = [(Epoch, Registration)];
+    pub(in crate::dkg) type Registered = [(Epoch, Registration)];
 
     /// The schemes the engine `found` describes registered before the
     /// restart and after it.
-    fn registered<'a>(run: &'a Run, found: &Retained) -> (&'a Registered, &'a Registered) {
+    pub(in crate::dkg) fn registered<'a>(
+        run: &'a Run,
+        found: &Retained,
+    ) -> (&'a Registered, &'a Registered) {
         run.reshare.nodes[found.engine]
             .registered
             .split_at(found.registered)
     }
 
     /// The latest scheme among `registered` that is the scheme of `epoch`.
-    fn registration(registered: &Registered, epoch: Epoch) -> Option<&Registration> {
+    pub(in crate::dkg) fn registration(
+        registered: &Registered,
+        epoch: Epoch,
+    ) -> Option<&Registration> {
         registered
             .iter()
             .rev()
@@ -670,7 +774,7 @@ mod tests {
     /// was: the first scheme it registered after the restart is the scheme
     /// of the epoch it resumed in, and the one it had registered for that
     /// epoch before the crash, with its share.
-    fn assert_registered_again(run: &Run, found: &Retained) {
+    pub(in crate::dkg) fn assert_registered_again(run: &Run, found: &Retained) {
         let (before, after) = registered(run, found);
         let again = after.first().expect("a restarted engine registers");
         assert_eq!(again.0, found.epoch, "{found:?}");
@@ -687,7 +791,7 @@ mod tests {
 
     /// Assert that the engine `found` describes, once restarted, entered
     /// `epoch` as a signer, with one share for that epoch on its record.
-    fn assert_entered(run: &Run, found: &Retained, epoch: Epoch) {
+    pub(in crate::dkg) fn assert_entered(run: &Run, found: &Retained, epoch: Epoch) {
         let (_, after) = registered(run, found);
         let entered = registration(after, epoch);
         assert!(
@@ -1117,59 +1221,323 @@ mod tests {
     }
 
     /// The write that stores the private half of a dealing.
-    const PRIVATE_HALF: Operation = Operation::Secret(Secret::Dealing);
+    pub(in crate::dkg) const PRIVATE_HALF: Operation = Operation::Secret(Secret::Dealing);
 
     /// The write that stores a share.
-    const SHARE: Operation = Operation::Secret(Secret::Share);
+    pub(in crate::dkg) const SHARE: Operation = Operation::Secret(Secret::Share);
 
     /// The write that removes the secrets of old epochs.
-    const PRUNE: Operation = Operation::Secret(Secret::Prune);
+    pub(in crate::dkg) const PRUNE: Operation = Operation::Secret(Secret::Prune);
+
+    /// The write of a journal entry that is synced after it is made.
+    pub(in crate::dkg) const JOURNAL_ENTRY: Operation =
+        Operation::Blob(Partition::Journal, Change::Write { synced: false });
+
+    /// The write that records the checkpoint of an epoch, which the
+    /// orchestrator makes as it enters the epoch: the first epoch as the
+    /// engine starts, each later one at its boundary.
+    pub(in crate::dkg) const CHECKPOINT: Operation =
+        Operation::Blob(Partition::Checkpoint, Change::Write { synced: true });
+
+    /// An identity of every committee of a state test whose outside identity
+    /// is [`OUTSIDER`].
+    pub(in crate::dkg) const HOLDER: usize = 3;
 
     /// The identity whose engine is started last. Its first writes are the
     /// only ones an engine makes at its first start that may be held: a
     /// write is held only while every identity is up. It is a player of the
     /// first ceremony when another identity is the outside one.
-    const LAST_STARTED: usize = RESHARE_IDENTITIES as usize - 1;
+    pub(in crate::dkg) const LAST_STARTED: usize = RESHARE_IDENTITIES as usize - 1;
 
     /// What the one restart of `run` found.
-    fn found(run: &Run) -> &Retained {
+    pub(in crate::dkg) fn found(run: &Run) -> &Retained {
         let [found] = &run.retained[..] else {
             panic!("the run has one restart: {:?}", run.retained);
         };
         found
     }
 
-    /// Run the fixed input of a state test: `epochs` epochs over clean links
-    /// and an unchanging committee that `outsider` is outside of, under one
-    /// restart. Its ceremonies succeed.
+    /// How long the crash of a state test keeps its engine down.
+    pub(in crate::dkg) const DOWNTIME: Duration = Duration::from_millis(500);
+
+    /// The program of a state test: one crash of `victim`, due `at`, whose
+    /// window reaches back to the start of the run, holding `writes` and no
+    /// other write. No crash at all if `at` is none.
+    pub(in crate::dkg) fn forcing(
+        input: &DkgReshareRestartsFuzzInput,
+        victim: usize,
+        at: Option<Duration>,
+        writes: &[Write],
+    ) -> Program {
+        let events = at.map_or_else(Vec::new, |at| {
+            vec![
+                (at, Event::Crash(victim)),
+                (at + DOWNTIME, Event::Restart(victim)),
+            ]
+        });
+        let reach = at.unwrap_or_default();
+        Program::scripted(
+            events,
+            &input.raw_bytes,
+            RESHARE_IDENTITIES as usize,
+            reach,
+            0,
+        )
+        .naming(writes)
+    }
+
+    /// Run the fixed input of the state test `state` under one crash of its
+    /// victim that drops its named writes. Its ceremonies succeed.
     ///
-    /// Which write a crash drops depends on which writes its engine made in
-    /// the crash's window and on the draws the tape gives them, so these
-    /// tests fix their inputs, as those of the bootstrap restart driver do.
-    /// Each seed is taken from a listing of [`survey`], which finds another
-    /// if the timing of a run changes. Three of the states do not depend on
-    /// how long a block takes, and their runs show them over links of 10 ms,
-    /// of 14 ms, and of 20 ms alike: the two splits of a dealing arise as
-    /// the engine of the last identity starts, and the share that is stored
-    /// unseen is held from the final block until a crash that is due well
-    /// after it. The other three need their crash within a fraction of a
-    /// second of an epoch's final block, and their seeds show them over the
-    /// links of [`CLEAN`] only.
-    fn pinned(epochs: u8, outsider: u8, seed: u16) -> Run {
-        let mut input = input(epochs, STAY, 1, CLEAN, Vec::new(), seed);
-        input.session.outsider = outsider;
-        succeeded(input)
+    /// The tape seeds the runtime and the trusted deal, and the crash is
+    /// placed by what the run does, not by the schedule the tape draws, so
+    /// the state does not depend on how long a block takes. A run without a
+    /// crash shows how long the run takes. A second run holds `writes` until
+    /// a crash due twice that long into the run, and shows when each of them
+    /// was held. The run returned is the second one up to the moment the
+    /// last of them was held, and its crash comes right after it.
+    pub(in crate::dkg) fn forced(state: &NamedCrash) -> Run {
+        forced_preseeded(state, None)
+    }
+
+    /// Run the state test `state` as [`forced`] does, with a checkpoint
+    /// record of the epoch `preseeded` names written to the victim's plan
+    /// before its engine first starts, in each of the three runs, if it names
+    /// one (see [`fixtures::preseed_checkpoint`]).
+    pub(in crate::dkg) fn forced_preseeded(state: &NamedCrash, preseeded: Option<Epoch>) -> Run {
+        let NamedCrash { victim, writes, .. } = *state;
+        let preseed = preseeded.map(|epoch| (victim, epoch));
+        let input = named_input(state);
+        let run = |at| {
+            let program = forcing(&input, victim, at, writes);
+            match preseed {
+                None => run_dkg_reshare_restarts_under(input.clone(), program),
+                Some(_) => {
+                    let run = watched_preseeded(input.clone(), program, preseed);
+                    (run.report, run.trace, run.reshare)
+                }
+            }
+        };
+        let (unforced, _, _) = run(None);
+        let (_, trace, _) = run(Some(unforced.elapsed * 2));
+        let held = trace
+            .holds()
+            .iter()
+            .map(|hold| hold.from)
+            .max()
+            .expect("the named writes were held");
+        let program = forcing(
+            &input,
+            victim,
+            Some(held + Duration::from_millis(1)),
+            writes,
+        );
+        match preseed {
+            None => succeeded_under(input, program),
+            Some(_) => {
+                let run = watched_preseeded(input, program, preseed);
+                assert_succeeded(&run);
+                run
+            }
+        }
+    }
+
+    /// The first write of `operation` the engine of `engine` starts once it
+    /// has started `count` writes of `anchor`, held at `stage`.
+    pub(in crate::dkg) const fn write(
+        engine: usize,
+        operation: Operation,
+        (anchor, count): (Operation, usize),
+        stage: Stage,
+    ) -> Write {
+        Write {
+            engine,
+            operation,
+            after: (anchor, count),
+            stage,
+        }
+    }
+
+    /// The fixed input of a state test and the writes its one crash names.
+    #[derive(Clone, Copy, Debug)]
+    pub(in crate::dkg) struct NamedCrash {
+        /// How many epochs the run is asked to complete.
+        pub(in crate::dkg) epochs: u8,
+        /// The identity outside the unchanging committee.
+        pub(in crate::dkg) outsider: u8,
+        /// The seed of the tape, which seeds the runtime and the trusted
+        /// deal.
+        pub(in crate::dkg) seed: u16,
+        /// The identity whose engine is crashed.
+        pub(in crate::dkg) victim: usize,
+        /// The writes the crash holds, and no other.
+        pub(in crate::dkg) writes: &'static [Write],
+    }
+
+    /// The input of the state test `state`: its epochs over clean links and
+    /// an unchanging committee that its outside identity is outside of.
+    pub(in crate::dkg) fn named_input(state: &NamedCrash) -> DkgReshareRestartsFuzzInput {
+        let mut input = input(state.epochs, STAY, 1, CLEAN, Vec::new(), state.seed);
+        input.session.outsider = state.outsider;
+        input
+    }
+
+    /// A journaled dealing without its private half.
+    pub(in crate::dkg) const JOURNALED_DEALING_WITHOUT_PRIVATE_HALF: NamedCrash = NamedCrash {
+        epochs: 1,
+        outsider: 0,
+        seed: 59,
+        victim: LAST_STARTED,
+        writes: &[write(
+            LAST_STARTED,
+            PRIVATE_HALF,
+            (PRIVATE_HALF, 0),
+            Stage::Before,
+        )],
+    };
+
+    /// A private half without its journal entry.
+    pub(in crate::dkg) const PRIVATE_HALF_WITHOUT_JOURNAL_ENTRY: NamedCrash = NamedCrash {
+        epochs: 1,
+        outsider: 0,
+        seed: 1035,
+        victim: LAST_STARTED,
+        writes: &[
+            write(LAST_STARTED, PRIVATE_HALF, (PRIVATE_HALF, 0), Stage::After),
+            write(
+                LAST_STARTED,
+                JOURNAL_ENTRY,
+                (PRIVATE_HALF, 1),
+                Stage::Before,
+            ),
+        ],
+    };
+
+    /// The share of the new output, held before it is stored.
+    pub(in crate::dkg) const BEFORE_THE_NEW_SHARE: NamedCrash = NamedCrash {
+        epochs: 1,
+        outsider: OUTSIDER,
+        seed: 330,
+        victim: HOLDER,
+        writes: &[write(HOLDER, SHARE, (CHECKPOINT, 1), Stage::Before)],
+    };
+
+    /// The share of the new output, held after it is stored.
+    pub(in crate::dkg) const AFTER_THE_NEW_SHARE: NamedCrash = NamedCrash {
+        epochs: 1,
+        outsider: OUTSIDER,
+        seed: 1677,
+        victim: HOLDER,
+        writes: &[write(HOLDER, SHARE, (CHECKPOINT, 1), Stage::After)],
+    };
+
+    /// The prune into the third epoch, held before it is applied.
+    pub(in crate::dkg) const BEFORE_THE_PRUNE: NamedCrash = NamedCrash {
+        epochs: 2,
+        outsider: OUTSIDER,
+        seed: 167,
+        victim: HOLDER,
+        writes: &[write(HOLDER, PRUNE, (CHECKPOINT, 2), Stage::Before)],
+    };
+
+    /// The prune into the third epoch, held after it is applied.
+    pub(in crate::dkg) const AFTER_THE_PRUNE: NamedCrash = NamedCrash {
+        epochs: 2,
+        outsider: OUTSIDER,
+        seed: 2602,
+        victim: HOLDER,
+        writes: &[write(HOLDER, PRUNE, (CHECKPOINT, 2), Stage::After)],
+    };
+
+    /// The epoch of the checkpoint record the startup tests write before the
+    /// victim first starts: one no run of theirs reaches, so the engine
+    /// neither reads nor replaces it, and it is the earlier durable record
+    /// their crash must leave in place.
+    pub(in crate::dkg) const PRESEEDED_EPOCH: Epoch = Epoch::new(64);
+
+    /// The checkpoint the last engine to start records of the first epoch
+    /// from marshal as it starts, held before it is applied. Run with
+    /// [`forced_preseeded`] and [`PRESEEDED_EPOCH`], the plan already holds a
+    /// durable record of another epoch: the engine that comes back finds the
+    /// earlier record only, and records the first epoch's from marshal again.
+    pub(in crate::dkg) const BEFORE_THE_STARTUP_CHECKPOINT: NamedCrash = NamedCrash {
+        epochs: 1,
+        outsider: 0,
+        seed: 59,
+        victim: LAST_STARTED,
+        writes: &[write(
+            LAST_STARTED,
+            CHECKPOINT,
+            (CHECKPOINT, 0),
+            Stage::Before,
+        )],
+    };
+
+    /// The same checkpoint, held after it is applied: the engine that comes
+    /// back finds it, beside the earlier record if one was preseeded, and
+    /// starts in its epoch.
+    pub(in crate::dkg) const AFTER_THE_STARTUP_CHECKPOINT: NamedCrash = NamedCrash {
+        epochs: 1,
+        outsider: 0,
+        seed: 59,
+        victim: LAST_STARTED,
+        writes: &[write(
+            LAST_STARTED,
+            CHECKPOINT,
+            (CHECKPOINT, 0),
+            Stage::After,
+        )],
+    };
+
+    /// Each named crash of the startup checkpoint holds that write, at its
+    /// stage, and drops it, and its run's ceremonies succeed.
+    #[test]
+    fn startup_checkpoint_crashes_drop_the_named_write() {
+        for (state, stage) in [
+            (BEFORE_THE_STARTUP_CHECKPOINT, Stage::Before),
+            (AFTER_THE_STARTUP_CHECKPOINT, Stage::After),
+        ] {
+            let run = forced_preseeded(&state, Some(PRESEEDED_EPOCH));
+            assert_eq!(found(&run).engine, LAST_STARTED);
+            assert_dropped(&run, &[(CHECKPOINT, stage)]);
+        }
+    }
+
+    /// The six state tests, in the order they appear below.
+    pub(in crate::dkg) const NAMED_CRASHES: [NamedCrash; 6] = [
+        JOURNALED_DEALING_WITHOUT_PRIVATE_HALF,
+        PRIVATE_HALF_WITHOUT_JOURNAL_ENTRY,
+        BEFORE_THE_NEW_SHARE,
+        AFTER_THE_NEW_SHARE,
+        BEFORE_THE_PRUNE,
+        AFTER_THE_PRUNE,
+    ];
+
+    /// Each state test names writes of the engine it crashes and of no
+    /// other, and no two tests share a tape.
+    #[test]
+    fn named_crashes_name_writes_of_their_victim() {
+        for state in NAMED_CRASHES {
+            assert!(!state.writes.is_empty(), "{state:?}");
+            assert!(
+                state
+                    .writes
+                    .iter()
+                    .all(|write| write.engine == state.victim),
+                "{state:?}"
+            );
+        }
+        let mut seeds: Vec<_> = NAMED_CRASHES.iter().map(|state| state.seed).collect();
+        seeds.sort_unstable();
+        seeds.dedup();
+        assert_eq!(seeds.len(), NAMED_CRASHES.len());
     }
 
     /// Assert that the one crash of `run` dropped the held writes `dropped`,
     /// in the order their holds began, and that no other write was held.
-    fn assert_dropped(run: &Run, dropped: &[(Operation, Stage)]) {
+    pub(in crate::dkg) fn assert_dropped(run: &Run, dropped: &[(Operation, Stage)]) {
         let found = found(run);
-        assert_eq!(
-            run.trace.dropped(found.engine),
-            dropped,
-            "the seed does not show its state, take another from the survey: {found:?}"
-        );
+        assert_eq!(run.trace.dropped(found.engine), dropped, "{found:?}");
         assert_eq!(run.trace.holds().len(), dropped.len());
     }
 
@@ -1182,13 +1550,9 @@ mod tests {
     /// records as it starts. The engine that comes back drops it when it
     /// replays its journal, deals it to itself again, and ends the ceremony
     /// with a valid share.
-    ///
-    /// The seed is the first of the seeds 0 to 11999 on which, in the
-    /// listing of [`survey`] for `1:1:0..12000:0`, the crash dropped that
-    /// write and no other while the secret store held no dealing.
     #[test]
     fn crash_that_leaves_a_journaled_dealing_without_its_private_half_is_survived() {
-        let run = pinned(1, 0, 59);
+        let run = forced(&JOURNALED_DEALING_WITHOUT_PRIVATE_HALF);
         let found = found(&run);
         assert_eq!(found.engine, LAST_STARTED);
 
@@ -1215,23 +1579,14 @@ mod tests {
     /// comes back finds a private half it has no record of, deals the
     /// dealing to itself again, and the ceremony's result is checked at all
     /// five.
-    ///
-    /// The seed is the first of the same listing whose crash dropped these
-    /// two writes and no other while the journal was empty.
     #[test]
     fn crash_that_leaves_a_private_half_without_its_journal_entry_is_survived() {
-        let run = pinned(1, 0, 1035);
+        let run = forced(&PRIVATE_HALF_WITHOUT_JOURNAL_ENTRY);
         let found = found(&run);
         assert_eq!(found.engine, LAST_STARTED);
         assert_dropped(
             &run,
-            &[
-                (PRIVATE_HALF, Stage::After),
-                (
-                    Operation::Blob(Partition::Journal, Change::Write { synced: false }),
-                    Stage::Before,
-                ),
-            ],
+            &[(PRIVATE_HALF, Stage::After), (JOURNAL_ENTRY, Stage::Before)],
         );
 
         // The two writes were in flight together, until the crash.
@@ -1258,12 +1613,12 @@ mod tests {
     /// applies the final block again, and derives and stores the share
     /// anew.
     ///
-    /// The seed is the first of the seeds 0 to 2999 on which, in the
-    /// listing of [`survey`] for `1:1:0..3000`, the crash dropped that write
-    /// and no other.
+    /// The engine stores its share of the first output as it starts, before
+    /// its orchestrator records the first epoch's checkpoint, so the share of
+    /// the new output is the first share it stores after that checkpoint.
     #[test]
     fn crash_before_the_new_share_is_stored_is_survived() {
-        let run = pinned(1, OUTSIDER, 330);
+        let run = forced(&BEFORE_THE_NEW_SHARE);
         let found = found(&run);
         assert_dropped(&run, &[(SHARE, Stage::Before)]);
         assert_eq!(
@@ -1282,13 +1637,9 @@ mod tests {
     /// back is in the inclusion window again with the new share already in
     /// its store. It applies the final block again, derives the same share,
     /// and enters the next epoch with it.
-    ///
-    /// The seed is the first of the same listing whose crash dropped that
-    /// write, after it was applied, and no other, and did so again in the
-    /// listings for `SURVEY_LATENCY=14` and `SURVEY_LATENCY=20`.
     #[test]
     fn crash_after_the_new_share_is_stored_is_survived() {
-        let run = pinned(1, OUTSIDER, 1677);
+        let run = forced(&AFTER_THE_NEW_SHARE);
         let found = found(&run);
         assert_dropped(&run, &[(SHARE, Stage::After)]);
         assert_eq!(
@@ -1312,12 +1663,12 @@ mod tests {
     /// engine that comes back still holds the first epoch's secrets. It is
     /// at the boundary into the third epoch, and repeats it.
     ///
-    /// The seed is the first of the seeds 0 to 2999 on which, in the
-    /// listing of [`survey`] for `2:1:0..3000`, the crash dropped that
-    /// write and no other at an engine that had entered the third epoch.
+    /// The engine prunes as it enters each epoch, and its orchestrator
+    /// records the checkpoint of an epoch after that prune, so the prune into
+    /// the third epoch is the first one after the second epoch's checkpoint.
     #[test]
     fn crash_before_old_secrets_are_pruned_is_survived() {
-        let run = pinned(2, OUTSIDER, 167);
+        let run = forced(&BEFORE_THE_PRUNE);
         let found = found(&run);
         assert_dropped(&run, &[(PRUNE, Stage::Before)]);
         let (second, third) = (Epoch::new(1), Epoch::new(2));
@@ -1335,13 +1686,9 @@ mod tests {
     /// engine never saw them removed. The engine that comes back holds
     /// nothing of the first epoch, repeats the boundary into the third, and
     /// needs none of it.
-    ///
-    /// The seed is the first of the same listing whose crash dropped that
-    /// write, after it was applied, and no other at a share holder that had
-    /// entered the third epoch.
     #[test]
     fn crash_after_old_secrets_are_pruned_is_survived() {
-        let run = pinned(2, OUTSIDER, 2602);
+        let run = forced(&AFTER_THE_PRUNE);
         let found = found(&run);
         assert_dropped(&run, &[(PRUNE, Stage::After)]);
         let (second, third) = (Epoch::new(1), Epoch::new(2));
@@ -1504,9 +1851,10 @@ mod tests {
 
     /// What a partition holds decides how often the pacing holds its writes
     /// and how the report counts them, and is told by the partition's name.
-    /// Every engine opens the reshare actor's journal, the state-sync plan,
-    /// a Simplex journal, and the chain's partitions, and none the pacing
-    /// does not know: a partition the DKG module names otherwise fails here.
+    /// Every engine opens the reshare actor's journal, the state-sync plan's
+    /// material and checkpoints, a Simplex journal, and the chain's
+    /// partitions, and none the pacing does not know: a partition the DKG
+    /// module names otherwise fails here.
     #[test]
     fn engines_open_the_partitions_the_pacing_knows() {
         let trace = watched(input(2, ROTATE, 1, CLEAN, Vec::new(), 21)).trace;
@@ -1516,6 +1864,7 @@ mod tests {
                 vec![
                     Partition::Journal,
                     Partition::StateSync,
+                    Partition::Checkpoint,
                     Partition::Consensus,
                     Partition::Chain,
                 ],

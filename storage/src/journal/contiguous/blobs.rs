@@ -362,6 +362,22 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
+    /// Return the first blob to retain and its first item position if pruning advances.
+    pub(super) fn prune_target(
+        &self,
+        min_position: u64,
+        items_per_blob: u64,
+    ) -> Option<(u64, u64)> {
+        let blob =
+            super::position_to_blob(min_position, items_per_blob).min(self.tail_blob_index());
+        if blob <= self.oldest_blob_index() {
+            return None;
+        }
+
+        // The retained blob starts at or before min_position, so the product fits.
+        Some((blob, blob * items_per_blob))
+    }
+
     /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
     /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
     /// valid.
@@ -394,7 +410,6 @@ impl<E: Context> Writable<E> {
     ///
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear(mut self, tail_blob: u64) -> Result<Self, Error> {
         // Observe outstanding sync failures before removing any retained data.
         self.drain_tail_predecessor_sync().await?;

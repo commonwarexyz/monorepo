@@ -1,3 +1,8 @@
+//! Ordered variants of the [Any database](crate::qmdb::any).
+//!
+//! Span lookups use the lexicographic byte order defined by [`Key`], including when the
+//! queried key is absent.
+
 use crate::{
     Context,
     index::Ordered as Index,
@@ -59,7 +64,7 @@ impl<
     H: Hasher,
     const N: usize,
     S: Strategy,
-> Db<F, E, C, I, H, Update<K, V>, N, S>
+> Db<F, E, C, I, H, Update<K, V>, S, N>
 where
     Operation<F, K, V>: Codec,
 {
@@ -94,13 +99,16 @@ where
             }
 
             // If the translated key is in the snapshot, search its conflicts for the span.
-            if let Some(span) = self.find_span(self.snapshot.get(key).copied(), key).await? {
+            if let Some(span) = self
+                .find_span(self.snapshot.get(key.as_ref()).copied(), key)
+                .await?
+            {
                 return Ok(Some(span));
             }
 
             // The remaining span owner is in the previous translated key. Allow wrapping because
             // spans connect the last active key back to the first.
-            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = self.snapshot.prev_translated_key(key.as_ref()) else {
                 // DB is empty.
                 return Ok(None);
             };
@@ -135,7 +143,7 @@ where
         async move {
             // The strict predecessor can share the query's translated key.
             if let Some(prev) = self
-                .find_strict_prev_key(self.snapshot.get(key).copied(), key)
+                .find_strict_prev_key(self.snapshot.get(key.as_ref()).copied(), key)
                 .await?
             {
                 return Ok(Some(prev));
@@ -143,7 +151,7 @@ where
 
             // The previous translated key is the only remaining candidate. Reject wrapping so
             // queries at or below the first active key have no predecessor.
-            let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
+            let Some((iter, false)) = self.snapshot.prev_translated_key(key.as_ref()) else {
                 return Ok(None);
             };
 
@@ -248,7 +256,7 @@ where
         let updates = match cursor {
             Cursor::Done => return Ok(None),
             Cursor::Next(key) => {
-                self.fetch_all_updates(self.snapshot.get(key).copied())
+                self.fetch_all_updates(self.snapshot.get(key.as_ref()).copied())
                     .await?
             }
             Cursor::Start => match start {
@@ -261,11 +269,12 @@ where
                 Included(start) | Excluded(start) => {
                     // The bound's own bucket may hold keys below it. When no active key shares
                     // its translated key, the following bucket starts.
-                    let mut locs = self.snapshot.get(start).copied().peekable();
+                    let mut locs = self.snapshot.get(start.as_ref()).copied().peekable();
                     if locs.peek().is_some() {
                         self.fetch_all_updates(locs).await?
                     } else {
-                        let Some((iter, false)) = self.snapshot.next_translated_key(start) else {
+                        let Some((iter, false)) = self.snapshot.next_translated_key(start.as_ref())
+                        else {
                             return Ok(None);
                         };
                         self.fetch_all_updates(iter.copied()).await?
@@ -435,7 +444,7 @@ mod test {
         mmb, mmr,
         qmdb::{
             any::{
-                self, BITMAP_CHUNK_BYTES,
+                self,
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current,
@@ -1918,7 +1927,6 @@ mod test {
         OrderedIndex<TwoCap, Location<mmr::Family>>,
         Sha256,
         fixed::Update<Digest, Digest>,
-        BITMAP_CHUNK_BYTES,
         Sequential,
     >;
 
@@ -1970,11 +1978,15 @@ mod test {
         } = db;
         let authenticated::Journal {
             merkle,
+            frontier,
+            boundary_recorded,
             journal,
             hasher,
         } = log;
         let log = authenticated::Journal {
             merkle,
+            frontier,
+            boundary_recorded,
             journal: Controlled {
                 inner: journal,
                 mode,

@@ -1,136 +1,14 @@
-# commonware-consensus fuzzing
+# commonware-consensus-fuzz
 
-Fuzzers for the `commonware-consensus` crate protocols and data structures,
+This is a fuzzer for the `commonware-consensus` crate protocols and data structures,
 designed to test protocol correctness under adversarial conditions.
 
-## Layout
+## Data Structures Fuzzing
 
-`consensus/fuzz/` is a plain directory. The fuzzers live in five packages under it:
-
-| Package | Crate | Contents |
-| ------- | ----- | -------- |
-| [`core/`](./core) | `commonware-consensus-fuzz-core` | Shared harness library: simulated network, Disrupter, twins network, fuzz input types, and mutation strategies. Library only, no fuzz targets. |
-| [`simplex/`](./simplex) | `commonware-consensus-fuzz-simplex` | Simplex consensus harnesses: mode dispatch, invariants, happens-before and state coverage, ByzzFuzz, Mallory, and chaos. |
-| [`marshal/`](./marshal) | `commonware-consensus-fuzz-marshal` | Marshal store, end-to-end, and scenario harnesses. |
-| [`structures/`](./structures) | `commonware-consensus-fuzz-structures` | Data-structure and message targets. Self-contained, no library. |
-| [`aggregation/`](./aggregation) | `commonware-consensus-fuzz-aggregation` | Aggregation engine and decode harnesses. |
-
-`simplex`, `marshal`, and `aggregation` depend on `core`. `structures` depends only on
-the published crates.
-
-[`COMPONENTS.md`](./COMPONENTS.md) catalogs the reusable harness and test components.
-
-## Running
-
-Every target-bearing package is its own `cargo-fuzz` project, and none of them is
-named `fuzz`.
-`cargo fuzz` resolves `<cwd-or-ancestor>/fuzz/Cargo.toml` when it is not told otherwise,
-and `consensus/fuzz/` holds no manifest, so a bare `cargo fuzz run <target>` does not work
-from `consensus/` or from a package directory. Pass `--fuzz-dir`:
-
-```bash
-cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock
-cargo +nightly fuzz list --fuzz-dir consensus/fuzz/marshal
-```
-
-The sanitizer build needs nightly, and the repository root is pinned to stable. Prefer the
-nightly CI pins as `nightly` under `[tools]` in [`.github/toolchains.toml`](../../.github/toolchains.toml):
-a newer nightly can fail to build the workspace on a lint that does not fire on the pinned
-version.
-
-Or use `just`, which builds every target in the package once and then runs each for
-`max_time` seconds. It takes its toolchain from the `NIGHTLY_VERSION` variable,
-defaulting to the CI pin:
-
-```bash
-NIGHTLY_VERSION=<pinned> just fuzz consensus/fuzz/simplex 60
-```
-
-The `simplex` package splits its targets into two build partitions, `twins` (every
-target with `twins` in its name) and `base` (everything else). Each is a feature that the targets list
-in `required-features`, so `features=<partition>` builds and runs only that group. CI runs
-one job per partition to keep each job from compiling binaries it never fuzzes:
-
-```bash
-NIGHTLY_VERSION=<pinned> just features=twins fuzz consensus/fuzz/simplex 60
-```
-
-The local [`justfile`](./justfile) works across all packages here without naming one,
-and defaults to the CI nightly pin. Any other recipe falls back to the root justfile:
-
-```bash
-cd consensus/fuzz
-just list                                  # every target, grouped by package
-just build                                 # build every target; `just build simplex` for one package
-just features=twins build simplex          # build one partition
-just run simplex_cert_mock                 # fuzz one target, whichever package defines it
-just run simplex_cert_mock -- -max_total_time=60
-just run simplex_cert_mock simplex/artifacts/simplex_cert_mock/<crash_file>
-```
-
-Reproduce a failure from a crash file. Artifacts are written under the package that owns
-the target:
-
-```bash
-cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock \
-    consensus/fuzz/simplex/artifacts/simplex_cert_mock/<crash_file>
-```
-
-## Targets
-
-### `simplex` (`--fuzz-dir consensus/fuzz/simplex`)
-
-- `simplex_cert_mock`
-- `simplex_cert_mock_audit`
-- `simplex_cert_mock_audit_notarize_omission`
-- `simplex_cert_mock_byzantine_first_leader`
-- `simplex_cert_mock_byzzfuzz`
-- `simplex_cert_mock_chaos`
-- `simplex_cert_mock_chaos_twins`
-- `simplex_cert_mock_faulty_net`
-- `simplex_cert_mock_hb`
-- `simplex_cert_mock_hb_state_cov`
-- `simplex_cert_mock_mallory`
-- `simplex_cert_mock_shuffled_twins_mutator`
-- `simplex_cert_mock_state_cov`
-- `simplex_cert_mock_twins_campaign`
-- `simplex_cert_mock_twins_campaign_audit`
-- `simplex_cert_mock_twins_campaign_hb`
-- `simplex_cert_mock_twins_campaign_state_cov`
-- `simplex_cert_mock_twins_mutator`
-- `simplex_cert_mock_twins_mutator_audit`
-- `simplex_cert_mock_twins_mutator_hb`
-- `simplex_cert_mock_twins_mutator_state_cov`
-
-### `marshal` (`--fuzz-dir consensus/fuzz/marshal`)
-
-- `marshal_actor_standard_store_cert_mock`
-- `marshal_e2e_coding_app_cert_mock_twins`
-- `marshal_e2e_coding_cert_mock_disrupter`
-- `marshal_e2e_coding_cert_mock_poison`
-- `marshal_e2e_standard_app_cert_mock_twins`
-- `marshal_e2e_standard_deferred_cert_mock_block_dissemination`
-- `marshal_e2e_standard_deferred_cert_mock_disrupter`
-- `marshal_e2e_standard_deferred_cert_mock_poison`
-- `marshal_e2e_standard_deferred_cert_mock_scenarios`
-- `marshal_e2e_standard_deferred_cert_mock_twins_split_header`
-- `marshal_e2e_standard_inline_cert_mock_twins_split_header`
-- `marshal_scenario_standard_deferred_cert_mock`
-- `marshal_scenario_standard_inline_cert_mock`
-
-### `structures` (`--fuzz-dir consensus/fuzz/structures`)
-
-- `attributable_map`
-- `automaton_defaults`
+Implemented using `cargo-fuzz`. The following fuzz targets are available:
 - `simplex_elector`
 - `simplex_messages`
-- `simplex_reporter_filtering`
-- `simplex_threshold_vrf`
-
-### `aggregation` (`--fuzz-dir consensus/fuzz/aggregation`)
-
-- `aggregation_cert_mock`
-- `aggregation_decode`
+- `attributable_map`
 
 ## Simplex Fuzzing
 
@@ -153,87 +31,59 @@ if possible in the current configuration, demonstrating the protocol's resilienc
 ### Invariant Checking
 
 After test completion, the framework verifies that all invariants defined
-in the `invariants` [module](./simplex/src/invariants.rs) hold true for correct nodes at each view.
+in the `invariants` [module](../src/fuzz/simplex/invariants.rs) hold true for correct nodes at each view.
 This ensures protocol safety properties are maintained despite a byzantine node.
 
-## Marshal Fuzzing
+### Running Tests
 
-The marshal end-to-end targets exercise proposal, verification, certification,
-broadcast, and application-result transitions through real Simplex stacks:
+#### Unit Tests
 
+Run deterministic tests, including the fixed seed regression and handoff boundaries:
 ```bash
-cargo +nightly fuzz run --fuzz-dir consensus/fuzz/marshal marshal_e2e_standard_deferred_cert_mock_disrupter
+cargo test -p commonware-consensus fuzz::
 ```
 
-The disrupter targets check post-prefix liveness over the standard deferred and
-coding marshal stacks. The Twins targets are Byzantine mutators over the
-end-to-end standard and coding stacks, and the split-header variants include
-proposal-header equivocation in their action space. The general Standard Twins
-target shares one corpus across the Basic and Faulty applications with both
-Inline and Deferred wrappers. The Coding Twins targets share the application
-axis but use Coding's Marshaled adapter directly; Deferred and Inline do not
-apply. The fuzz targets use `SimplexCertificateMock` to avoid repeating the
-same harnesses across multiple mock schemes.
-Three honest validators each run
-`Simplex -> Inline|Deferred|Marshaled -> Marshal -> Application`; the
-compromised identity runs one full Simplex engine over the same real
-marshal/application data plane plus a Byzantine secondary. On Standard, the
-secondary is the existing `Disrupter`, which can preserve an observed payload
-digest while mutating its proposal header. Coding uses a Commitment-typed
-secondary that signs both an observed proposal and a conflicting commitment
-with the compromised identity's key.
+#### Property-Based Tests
 
-The shared fuzz-layer Twins helpers sample leaders and recipient partitions for
-an adversarial prefix, then restore full synchrony. The target checks that every
-honest marshal makes post-prefix progress, preserves in-order delivery, and
-agrees on every delivered height. It also passively observes each honest
-marshal wrapper and asserts that certification never reuses a rejection caused
-by verifying the same `(round, digest)` under a different header context.
-
-The Marshal Twins observation wrappers forward automaton completions through
-spawned tasks. Changes to that forwarding can alter deterministic scheduling,
-so saved artifacts from these targets must be re-triaged against the new
-execution before a non-reproduction is classified as fixed.
-
-## Running Tests
-
-### Unit Tests
-
-Run deterministic tests with a fixed seed:
+Run minifuzz tests that explore 100 cases per signature scheme:
 ```bash
-cargo test -p commonware-consensus-fuzz-core
-cargo test -p commonware-consensus-fuzz-simplex test_
-cargo test -p commonware-consensus-fuzz-marshal
+cargo test -p commonware-consensus fuzz::simplex::schemes::tests::minifuzz_
 ```
 
-### Adversary Smoke Tests
-
-Every Byzantine actor counts its actions under its own label through
-`commonware_consensus_fuzz_core::byzantine`: a message the simulated network
-accepted from the actor's sender, a twin secondary message the split forwarder
-addressed to a node other than the twin, or a receiver-side forgery such as the
-certificate poison. The counts never gate a fuzz run. Each target with a
-Byzantine actor has a smoke test that runs one fixed input and requires the actor
-the target exists for to have acted, so a change that silences it (a twin
-secondary the split routes to nobody, a gossip engine that dies before it sends)
-fails there even while another actor of the same run keeps sending. Honest
-configurations must count nothing.
+Reproduce a failure by passing the reported `MINIFUZZ_BRANCH` token to the same test:
 ```bash
-cargo test -p commonware-consensus-fuzz-simplex adversary_smoke
-cargo test -p commonware-consensus-fuzz-marshal
+MINIFUZZ_BRANCH=0x... cargo test -p commonware-consensus minifuzz_ed25519_connected -- --nocapture
 ```
 
-### Property-Based Tests
+#### Continuous Fuzzing
 
-Run proptest-based tests that explore many seeds:
+The `consensus` target runs the shared Simplex property plan across signature schemes:
 ```bash
-cargo test -p commonware-consensus-fuzz-simplex property_test
+cargo fuzz run consensus
 ```
 
-Reproduce a failure with a specific seed:
+Run continuous fuzzing for a specific target:
 ```bash
-PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p commonware-consensus-fuzz-simplex property_test_certificate_mock_connected -- --nocapture
+cargo fuzz run simplex_ed25519
 ```
 
-Proptest keys its regression file to the source file holding the tests, so saved seeds
-live at [`simplex/proptest-regressions/lib.txt`](./simplex/proptest-regressions/lib.txt).
+Available fuzz targets (standard mode):
+- `simplex_ed25519`
+- `simplex_secp256r1`
+- `simplex_bls12381_multisig_minpk`
+- `simplex_bls12381_multisig_minsig`
+- `simplex_bls12381_threshold_minpk`
+- `simplex_bls12381_threshold_minsig`
+
+Available fuzz targets (twin mode with mutating adversary):
+- `simplex_ed25519_twin`
+- `simplex_secp256r1_twin`
+- `simplex_bls12381_multisig_minpk_twin`
+- `simplex_bls12381_multisig_minsig_twin`
+- `simplex_bls12381_threshold_minpk_twin`
+- `simplex_bls12381_threshold_minsig_twin`
+
+Reproduce a failure from a crash file:
+```bash
+cargo fuzz run simplex_ed25519 artifacts/simplex_ed25519/<crash_file>
+```

@@ -263,10 +263,10 @@ where
     pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
         if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.range.start(),
-                upper_bound_pos: config.target.range.end(),
+                bounds: config.target.range.clone(),
             }));
         }
+        DB::validate_target(&config.target).map_err(SyncError::Engine)?;
 
         // Recover the operation prefix that can resume this target.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
@@ -426,15 +426,14 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
-        let start_moved = self.target.range.start() != new_target.range.start();
-        self.journal = self.journal.resize(new_target.range.start()).await?;
-        if start_moved {
+        let new_start = new_target.range.start();
+        self.journal = self.journal.resize(new_start).await?;
+        if new_start != self.target.range.start() {
             self.pinned_nodes = None;
 
             // A source may prune up to the new lower bound, so a request below a moved bound
             // may never be answered. Requests are also tracked by start location, so one kept at the
             // new bound would block the boundary request there.
-            let new_start = new_target.range.start();
             self.outstanding_requests
                 .retain(|request| request.start() > new_start);
         }
@@ -640,6 +639,7 @@ where
                 if new_target.root == self.target.root {
                     return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
                 }
+                DB::validate_target(&new_target).map_err(SyncError::Engine)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress();
@@ -747,7 +747,7 @@ where
         )
         .await?;
 
-        let got_root = database.ops_root();
+        let got_root = database.target().root;
         let expected_root = self.target.root;
         if got_root != expected_root {
             return Err(SyncError::Engine(EngineError::RootMismatch {
@@ -779,18 +779,18 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         merkle::{Proof, mmr::Family as MmrFamily},
-        qmdb::sync::{
-            harness::{
-                DbOf, INTERRUPTED_DESTROY_OPS, InterruptedDestroy, OpOf, SyncTestHarness,
-                interrupt_destroy, prune_to_sync_boundary,
+        qmdb::{
+            operation::Committable,
+            sync::{
+                Hooks,
+                harness::{DbOf, InterruptedDestroy, OpOf, SyncTestHarness},
+                source::{self, tests::FailSource},
             },
-            source::{self, tests::FailSource},
         },
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, NZUsize, non_empty_range};
-    use rand::Rng as _;
     use std::{
         convert::Infallible,
         sync::{
@@ -811,6 +811,16 @@ pub(crate) mod tests {
 
         fn journal_config(&self) -> Self::JournalConfig {
             self.journal_size
+        }
+    }
+
+    impl Committable<MmrFamily> for i32 {
+        fn inactivity_floor(&self) -> Option<Location<MmrFamily>> {
+            None
+        }
+
+        fn initial_commit() -> Self {
+            0
         }
     }
 
@@ -862,41 +872,61 @@ pub(crate) mod tests {
         type Journal = TestJournal;
         type Op = i32;
 
-        async fn from_sync_result(
+        async fn init(
             _context: Self::Context,
             _config: Self::Config,
-            _journal: Self::Journal,
-            _pinned_nodes: Option<Vec<Self::Digest>>,
-            _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
-            _apply_batch_size: NonZeroU64,
+            _max_size: Option<Location<Self::Family>>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             Ok(Self)
         }
 
-        async fn persist_sync_result(self) -> Result<Self, qmdb::Error<Self::Family>> {
+        fn target(&self) -> Target<MmrFamily, sha256::Digest> {
+            Target {
+                root: sha256::Digest::from([0u8; 32]),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            }
+        }
+
+        async fn prune_to_target(
+            self,
+            _target: &Target<MmrFamily, sha256::Digest>,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(self)
+        }
+    }
+
+    impl Hooks<Self> for TestDb {
+        async fn from_sync_result(
+            _context: deterministic::Context,
+            _config: TestConfig,
+            _journal: TestJournal,
+            _pinned_nodes: Option<Vec<sha256::Digest>>,
+            _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
+            _apply_batch_size: NonZeroU64,
+        ) -> Result<Self, qmdb::Error<MmrFamily>> {
+            Ok(Self)
+        }
+
+        async fn persist_sync_result(self) -> Result<Self, qmdb::Error<MmrFamily>> {
             Ok(self)
         }
 
         async fn discard_local_state(
-            _context: Self::Context,
-            config: &Self::Config,
-        ) -> Result<(), qmdb::Error<Self::Family>> {
+            _context: deterministic::Context,
+            config: &TestConfig,
+        ) -> Result<(), qmdb::Error<MmrFamily>> {
             config.local_state_discards.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
         async fn local_pinned_nodes(
-            _context: Self::Context,
-            config: &Self::Config,
-            _target: &Target<Self::Family, Self::Digest>,
-            _journal: &Self::Journal,
-        ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<Self::Family>> {
+            _context: deterministic::Context,
+            config: &TestConfig,
+            _target: &Target<MmrFamily, sha256::Digest>,
+            _journal: &TestJournal,
+        ) -> Result<Option<Vec<sha256::Digest>>, qmdb::Error<MmrFamily>> {
             config.pinned_node_probes.fetch_add(1, Ordering::SeqCst);
             Ok(Some(vec![]))
-        }
-
-        fn ops_root(&self) -> Self::Digest {
-            sha256::Digest::from([0u8; 32])
         }
     }
 
@@ -1253,10 +1283,10 @@ pub(crate) mod tests {
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
     ///
-    /// A sync into storage whose destroy stopped after emptying the log is stopped once fetched
-    /// operations are durable in its journal, and the sync that restarts over that journal
-    /// completes with the target's roots. The cases vary whether the target's range starts at
-    /// zero and whether the first sync stops with the range partly or wholly fetched.
+    /// A sync into the storage that [`InterruptedDestroy`] builds is stopped once fetched
+    /// operations are durable, and a second sync resumes from them and reaches the target's
+    /// roots. The target's range starts above zero when `pruned`. The first sync stops with the
+    /// whole range fetched when `fetched`, and with part of it otherwise.
     pub(crate) fn issue_5669_regression_sync_restart_after_destroy<H: SyncTestHarness>(
         pruned: bool,
         fetched: bool,
@@ -1269,7 +1299,8 @@ pub(crate) mod tests {
                 target,
                 canonical_root,
                 db_config,
-            } = InterruptedDestroy::<H>::new(&mut context, pruned, false).await;
+                ..
+            } = InterruptedDestroy::<H>::new(&mut context, pruned).await;
             let config = |context: deterministic::Context| Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(10),
@@ -1318,49 +1349,31 @@ pub(crate) mod tests {
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
     ///
-    /// A sync into storage whose destroy stopped after emptying the log is stopped once a commit
-    /// of the target is durable in its journal, and opening the database then recovers the
-    /// target's state at that commit. The destroyed database was pruned, so what it derived from
-    /// its operations includes Merkle pins and, where the database grafts a bitmap, pruned chunks.
-    pub(crate) fn issue_5669_regression_open_after_stopped_sync<H: SyncTestHarness>()
+    /// A sync into the storage that [`InterruptedDestroy`] builds is stopped once the target's
+    /// penultimate commit is durable. Opening the database then recovers that commit. When
+    /// `pruned`, the target's range starts above zero and the open fails instead. Either way it
+    /// never applies the client's stale state to the fetched operations, and a retried sync
+    /// reaches the target.
+    pub(crate) fn issue_5669_regression_open_after_stopped_sync<H: SyncTestHarness>(pruned: bool)
     where
         Arc<DbOf<H>>: SourceFor<DbOf<H>>,
     {
         deterministic::Runner::default().start(|mut context| async move {
-            // The target rewrites the same keys before its first commit. A database that derives
-            // its inactivity floor then commits one past every chunk the client pruned, so the
-            // commit is recoverable whether or not those chunks are still recorded.
-            let mut target_db = H::init_db(context.child("target")).await;
-            for _ in 0..3 {
-                let ops = H::create_ops(INTERRUPTED_DESTROY_OPS);
-                target_db = H::apply_ops(target_db, ops, None).await;
-            }
-            let first_commit_end = H::bounds(&target_db).end;
-            let first_commit_root = H::ops_root(&target_db);
-            let first_commit_canonical_root = H::canonical_root(&target_db);
-            let ops = H::create_ops_seeded(INTERRUPTED_DESTROY_OPS, 2);
-            let target_db = H::apply_ops(target_db, ops, None).await;
-            let target = Target {
-                root: H::ops_root(&target_db),
-                range: non_empty_range!(Location::new(0), H::bounds(&target_db).end),
-            };
-            let target_db = Arc::new(target_db);
-
-            // The client pruned a different history before its destroy was interrupted.
-            let db_config = H::config(&context.next_u64().to_string());
-            let local_db = H::init_db_with_config(context.child("local"), db_config.clone()).await;
-            let ops = H::create_ops_seeded(INTERRUPTED_DESTROY_OPS, 1);
-            let local_db = H::apply_ops(local_db, ops, None).await;
-            let local_db = prune_to_sync_boundary::<H>(local_db, 1).await;
-            let local_db = H::db_sync(local_db).await;
-            interrupt_destroy::<H>(&context, local_db, &db_config).await;
-
-            // Stop the sync between the target's commits, with its journal durable.
-            let config = Config {
+            let InterruptedDestroy {
+                target_db,
+                target,
+                canonical_root,
+                penultimate_end,
+                penultimate_root,
+                penultimate_canonical_root,
+                stale_boundary,
+                db_config,
+            } = InterruptedDestroy::<H>::new(&mut context, pruned).await;
+            let config = |context: deterministic::Context| Config {
                 db_config: db_config.clone(),
                 fetch_batch_size: NZU64!(10),
                 target: target.clone(),
-                context: context.child("client"),
+                context,
                 source: target_db.clone(),
                 apply_batch_size: NZU64!(1024),
                 max_outstanding_requests: NZUsize!(1),
@@ -1368,8 +1381,11 @@ pub(crate) mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
             };
-            let mut engine: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
-            while engine.journal.size() < first_commit_end {
+
+            // Fetch through the penultimate commit, make the journal durable, and stop.
+            let mut engine: Engine<DbOf<H>, _> =
+                Engine::new(config(context.child("first"))).await.unwrap();
+            while engine.journal.size() < penultimate_end {
                 engine = match engine.step().await.unwrap() {
                     NextStep::Continue(engine) => engine,
                     NextStep::Complete(_) => panic!("sync completed before it was stopped"),
@@ -1379,11 +1395,59 @@ pub(crate) mod tests {
             engine.journal = engine.journal.sync().await.unwrap();
             drop(engine);
 
-            // The reopened database holds the first commit under the target's roots.
+            // The stale boundary lies among the fetched operations, where an open would accept
+            // the stale frontier if the sync had not discarded it.
+            assert!(
+                stale_boundary >= target.range.start(),
+                "test setup requires the client's boundary {stale_boundary} at or above the \
+                 target's start {}",
+                target.range.start()
+            );
+            assert!(
+                stale_boundary < penultimate_end,
+                "test setup requires the client's boundary {stale_boundary} below the \
+                 penultimate commit's end {penultimate_end}"
+            );
+
+            // The sync discarded the stale frontier, so the recorded boundary is zero. A journal
+            // that starts at zero opens at the penultimate commit. One that starts above zero does
+            // not match that boundary, so the open fails.
+            let opened =
+                <DbOf<H> as Database>::init(context.child("opened"), db_config.clone(), None).await;
+            match opened {
+                Ok(opened_db) => {
+                    assert_eq!(H::bounds(&opened_db).end, penultimate_end);
+                    assert_eq!(H::ops_root(&opened_db), penultimate_root);
+                    assert_eq!(H::canonical_root(&opened_db), penultimate_canonical_root);
+                    assert!(
+                        !pruned,
+                        "open recovered operations fetched without their pins"
+                    );
+                }
+                Err(err) => assert!(
+                    pruned
+                        && matches!(
+                            err,
+                            crate::qmdb::Error::Merkle(crate::merkle::Error::DataCorrupted(
+                                "frontier outside operation journal"
+                            ))
+                        ),
+                    "open failed: {err}"
+                ),
+            }
+
+            // A retried sync resumes from the journal and reaches the target, and so does a reopen.
+            let synced_db: DbOf<H> = crate::qmdb::sync::sync(config(context.child("second")))
+                .await
+                .unwrap();
+            assert_eq!(H::ops_root(&synced_db), target.root);
+            assert_eq!(H::canonical_root(&synced_db), canonical_root);
+            assert_eq!(H::bounds(&synced_db).end, target.range.end());
+            drop(synced_db);
             let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
-            assert_eq!(H::bounds(&reopened_db).end, first_commit_end);
-            assert_eq!(H::ops_root(&reopened_db), first_commit_root);
-            assert_eq!(H::canonical_root(&reopened_db), first_commit_canonical_root);
+            assert_eq!(H::ops_root(&reopened_db), target.root);
+            assert_eq!(H::canonical_root(&reopened_db), canonical_root);
+            assert_eq!(H::bounds(&reopened_db).end, target.range.end());
 
             H::destroy(reopened_db).await;
             H::destroy(
@@ -1537,6 +1601,29 @@ pub(crate) mod tests {
                 panic!("engine should retarget instead of completing");
             };
             assert_eq!(engine.target, advancing);
+        });
+    }
+
+    #[test]
+    fn step_fails_on_same_root_advance() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            let same_root = Target {
+                root: config.target.root,
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            assert!(update_tx.send_lossy(same_root));
+
+            let engine = Engine::new(config).await.unwrap();
+            let Err(err) = engine.step().await else {
+                panic!("a same-root advance must fail the sync");
+            };
+            assert!(matches!(
+                err,
+                SyncError::Engine(EngineError::SyncTargetRootUnchanged)
+            ));
         });
     }
 

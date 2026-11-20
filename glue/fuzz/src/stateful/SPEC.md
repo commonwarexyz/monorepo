@@ -61,7 +61,7 @@ after a restart.
 
 The entire Commonware stack, glue included, must work in a byzantine environment.
 
-Consensus-layer fuzzing does not cover this. The end-to-end marshal targets in `consensus/fuzz/marshal`
+Consensus-layer fuzzing does not cover this. The end-to-end marshal targets in `consensus/fuzz/experimental/marshal`
 assert that honest nodes agree on finalized block digests; they never assert anything about the
 database state those blocks produce, because at that layer there is none. A defect in which two
 correct nodes finalize the same chain and arrive at different database state is invisible to every

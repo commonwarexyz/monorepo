@@ -8,8 +8,11 @@
 //! forward and reverse order to two separate databases and asserts root equality.
 
 use crate::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{Family, full::Config as MerkleConfig, mmb, mmr},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    merkle::{Family, mmb, mmr},
     qmdb::{
         any::{
             self,
@@ -121,15 +124,12 @@ type ImmutableMmbCompactVariable =
 const PAGE_SIZE: NonZeroU16 = NZU16!(101);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig<Sequential> {
+fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        journal_partition: format!("{suffix}-mj"),
-        metadata_partition: format!("{suffix}-mm"),
-        items_per_blob: NZU64!(11),
-        write_buffer: NZUsize!(1024),
+        partition: format!("{suffix}-mm"),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: page_cache.clone(),
+        resident_height: Default::default(),
     }
 }
 
@@ -158,60 +158,61 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
 fn any_fixed_config(suffix: &str) -> any::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix),
         log: fixed_log_config(suffix, pc),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
 fn any_variable_config(suffix: &str) -> any::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix),
         log: variable_log_config(suffix, pc, ((), ())),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
 fn current_fixed_config(suffix: &str) -> current::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix),
         log: fixed_log_config(suffix, pc),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
 fn current_variable_config(suffix: &str) -> current::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix),
         log: variable_log_config(suffix, pc, ((), ())),
         grafted_metadata_partition: format!("{suffix}-graft"),
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
 fn immutable_fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix),
         log: fixed_log_config(suffix, pc),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -220,10 +221,11 @@ fn immutable_variable_config(
 ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle: merkle_config(suffix, &pc),
+        merkle: merkle_config(suffix),
         log: variable_log_config(suffix, pc, ((), ())),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -319,8 +321,9 @@ mod tests {
     fn keyless_fixed_config(suffix: &str) -> keyless::fixed::Config<Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
-            merkle: merkle_config(suffix, &pc),
+            merkle: merkle_config(suffix),
             log: fixed_log_config(suffix, pc),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -329,8 +332,9 @@ mod tests {
     ) -> keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
-            merkle: merkle_config(suffix, &pc),
+            merkle: merkle_config(suffix),
             log: variable_log_config(suffix, pc, ((0..=10000).into(), ())),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -350,15 +354,16 @@ mod tests {
         }
     }
 
-    type Store = store::Db<Ctx, Digest, Digest, OneCap>;
+    type Store = store::Db<Ctx, Digest, Digest, OneCap, Sequential>;
 
-    fn store_config(suffix: &str) -> store::Config<OneCap, ((), ())> {
+    fn store_config(suffix: &str) -> store::Config<OneCap, ((), ()), Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         store::Config {
             log: variable_log_config(suffix, pc, ((), ())),
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
+            strategy: Sequential,
         }
     }
 

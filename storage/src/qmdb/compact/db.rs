@@ -14,7 +14,7 @@ use crate::{
     qmdb::{
         self, Error,
         chain::{self, Bounds, Commitment},
-        sync::{CompactTarget, Request, Response, Source, source},
+        sync::{Request, Response, Source, Target, source},
     },
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -237,7 +237,7 @@ where
     /// # Errors
     ///
     /// - [`Error::InvalidInitializationBound`] if `max_size` is zero.
-    /// - [`Error::HistoricalFloorPruned`] if no retained witness is at or below `max_size`.
+    /// - [`Error::NoRetainedCommit`] if no retained witness is at or below `max_size`.
     /// - [`Error::Journal`] if the journal or the selected witness's commit cannot be decoded.
     /// - [`Error::DataCorrupted`] if the selected witness cannot be rebuilt, or the journal holds
     ///   an interrupted compact-sync import (re-sync to recover).
@@ -260,7 +260,7 @@ where
                 return Err(Error::DataCorrupted("witness journal has no tip"));
             }
             let genesis = Witness {
-                commit: O::commit(None, Location::new(0)),
+                commit: O::initial_commit(),
                 size: Location::new(1),
                 pinned_nodes: Vec::new(),
             };
@@ -279,7 +279,7 @@ where
                     }
                 }
                 if end == bounds.start {
-                    return Err(Error::HistoricalFloorPruned(cap));
+                    return Err(Error::NoRetainedCommit(cap));
                 }
             }
             // Decode and validate only the selected witness, before discarding newer history or
@@ -368,12 +368,13 @@ where
         self.tip.metadata().cloned()
     }
 
-    /// Return the compact-sync target described by the current witness.
+    /// Return the sync target described by the current witness. Its range covers only the last
+    /// commit.
     ///
     /// This reflects the most recently applied batch. The target remains non-durable until a
     /// covering [`Self::commit`], [`Self::sync`], or [`Self::prune`] returns, or the handle
     /// returned by a covering [`Self::start_sync`] completes.
-    pub const fn target(&self) -> CompactTarget<F, H::Digest> {
+    pub fn target(&self) -> Target<F, H::Digest> {
         self.tip.target()
     }
 
@@ -840,17 +841,17 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
     /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
     /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are applied (applying it or a
-    /// descendant prunes the store to its frontier).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Db::to_batch`]).
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned, and
+    /// [`crate::merkle::Error::Empty`] if the batch has no operations (such as a batch from
+    /// [`Db::to_batch`]).
     pub fn proof<E, H>(&self, db: &Db<F, E, O, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -874,16 +875,15 @@ impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> MerkleizedBatch<F, D, O
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
     /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are applied (applying it or a
-    /// descendant prunes the store to its frontier).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are applied (applying it or a descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor.
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub fn pinned_nodes<E, H>(&self, db: &Db<F, E, O, H, S>) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
@@ -930,7 +930,7 @@ where
     O: Operation<F>,
     H: Hasher,
 {
-    qmdb::single_operation_root::<F, H>(&O::commit(None, Location::new(0)))
+    qmdb::single_operation_root::<F, H>(&O::initial_commit())
 }
 
 impl<F, E, O, H, S> Source for Db<F, E, O, H, S>
@@ -948,6 +948,26 @@ where
 
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         Ok((self.compact_state(request).await?, None))
+    }
+}
+
+impl<F: Family, D: Digest, O: Operation<F>, S: Strategy> crate::qmdb::sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, O, S>
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    /// The range covers only the last commit, the one operation a compact db holds.
+    fn target(&self) -> Target<F, D> {
+        let size = self.bounds.tip.size;
+        Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(size - 1, size),
+        }
     }
 }
 
@@ -1111,7 +1131,7 @@ pub(crate) mod tests {
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let n = db.target().size;
+            let n = db.target().range.end();
             let boundary = |size: Location<O::Family>, start: Location<O::Family>| {
                 Request::Boundary { size, start }
             };
@@ -1188,9 +1208,9 @@ pub(crate) mod tests {
 
             // The earlier state is served at its size and verifies against its root.
             let first = &targets[0];
-            let start = first.size - 1;
+            let start = first.range.end() - 1;
             let request = Request::Boundary {
-                size: first.size,
+                size: first.range.end(),
                 start,
             };
             let Response::Boundary {
@@ -1211,7 +1231,7 @@ pub(crate) mod tests {
             // An operations request at the earlier size gets the same commit operation.
             let Response::Operations { proof, operations } = db
                 .serve(Request::Operations {
-                    size: first.size,
+                    size: first.range.end(),
                     start,
                     max_ops: NZU64!(1),
                 })
@@ -1228,8 +1248,8 @@ pub(crate) mod tests {
             // A size between retained states is rejected.
             assert!(matches!(
                 db.serve(Request::Boundary {
-                    size: first.size + 1,
-                    start: first.size,
+                    size: first.range.end() + 1,
+                    start: first.range.end(),
                 })
                 .await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
@@ -1781,7 +1801,7 @@ pub(crate) mod tests {
 
             let batch = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(batch).await.unwrap();
-            assert_eq!(db.size(), target.size + 1);
+            assert_eq!(db.size(), target.range.end() + 1);
             assert_eq!(db.get_metadata(), None);
             assert_eq!(witness_entries(&db), entries + 1);
             db.destroy().await.unwrap();
@@ -2232,7 +2252,7 @@ pub(crate) mod tests {
     /// A compact-sync import: a committed state and the pieces [`Db::init_from_sync`] takes.
     #[derive(Clone)]
     struct Import<O: TestOperation> {
-        target: CompactTarget<O::Family, Digest>,
+        target: Target<O::Family, Digest>,
         pinned_nodes: Vec<Digest>,
         commit: O,
     }
@@ -2245,8 +2265,8 @@ pub(crate) mod tests {
             let source = open_db::<O>(context.child("serve"), src).await;
             let (response, _) = source
                 .serve(Request::Boundary {
-                    size: target.size,
-                    start: target.size - 1,
+                    size: target.range.end(),
+                    start: target.range.end() - 1,
                 })
                 .await
                 .unwrap();
@@ -2272,7 +2292,7 @@ pub(crate) mod tests {
             let db = TestDb::<O>::init_from_sync(
                 context,
                 cfg,
-                self.target.size - 1,
+                self.target.range.end() - 1,
                 self.pinned_nodes,
                 self.commit,
             )
@@ -2288,7 +2308,7 @@ pub(crate) mod tests {
         context: deterministic::Context,
         partition: &str,
         seed: u64,
-    ) -> CompactTarget<O::Family, Digest> {
+    ) -> Target<O::Family, Digest> {
         let db = open_db::<O>(context, partition).await;
         let batch = db
             .new_batch()
@@ -2386,7 +2406,7 @@ pub(crate) mod tests {
 
             // Seed the destination partition with a different committed state of the same size.
             let seeded = commit_seed::<O>(context.child("seed"), dst, 1).await;
-            assert_eq!(seeded.size, import.target.size);
+            assert_eq!(seeded.range.end(), import.target.range.end());
             assert_ne!(seeded, import.target);
 
             // Import over the destination and apply a batch on top of it with no durability
@@ -2415,7 +2435,7 @@ pub(crate) mod tests {
             let db = open_bounded::<O>(
                 context.child("imported"),
                 witness_config::<O>(dst),
-                import.target.size,
+                import.target.range.end(),
             )
             .await
             .unwrap();
@@ -2571,14 +2591,14 @@ pub(crate) mod tests {
                     drop(db);
                     if target
                         == (Commitment {
-                            size: seeded.size,
+                            size: seeded.range.end(),
                             root: seeded.root,
                         })
                     {
                         Reopened::Seeded
                     } else if target
                         == (Commitment {
-                            size: import.target.size,
+                            size: import.target.range.end(),
                             root: import.target.root,
                         })
                     {
@@ -2675,7 +2695,7 @@ pub(crate) mod tests {
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
-            let initialization_bound = db.target().size;
+            let initialization_bound = db.target().range.end();
             let batch = db
                 .new_batch()
                 .mutate(2)
@@ -3269,7 +3289,7 @@ pub(crate) mod tests {
                     .unwrap();
                     let imported = Witness {
                         commit: import.commit.clone(),
-                        size: import.target.size,
+                        size: import.target.range.end(),
                         pinned_nodes: import.pinned_nodes.clone(),
                     };
                     let (journal, _) = journal.append(&imported.stored()).await.unwrap();
@@ -3282,7 +3302,7 @@ pub(crate) mod tests {
                             strategy: Sequential,
                             witness: dst_cfg.clone(),
                         },
-                        import.target.size - 1,
+                        import.target.range.end() - 1,
                         import.pinned_nodes.clone(),
                         import.commit.clone(),
                     )
@@ -3301,7 +3321,7 @@ pub(crate) mod tests {
 
                 // Three more commits follow the import. `states` holds the size and root of the
                 // import and each commit.
-                let mut states = vec![(import.target.size, import.target.root)];
+                let mut states = vec![(import.target.range.end(), import.target.root)];
                 states.extend(
                     seed_witness_sections::<O>(context.child("reopen"), dst_cfg.clone(), 3).await,
                 );
@@ -3322,7 +3342,7 @@ pub(crate) mod tests {
 
                 // Only the imported witness remains, and every smaller cap finds nothing without
                 // discarding it.
-                for cap in (1..*import.target.size).map(Location::new) {
+                for cap in (1..*import.target.range.end()).map(Location::new) {
                     assert!(matches!(
                         open_bounded::<O>(
                             context.child("pruned").with_attribute("cap", *cap),
@@ -3330,7 +3350,7 @@ pub(crate) mod tests {
                             cap,
                         )
                         .await,
-                        Err(Error::HistoricalFloorPruned(found)) if found == cap
+                        Err(Error::NoRetainedCommit(found)) if found == cap
                     ));
                 }
                 let db = TestDb::<O>::init(
@@ -3433,7 +3453,7 @@ pub(crate) mod tests {
             // No retained witness fits under the cap, so selection fails.
             assert!(matches!(
                 open_bounded::<O>(context.child("failed"), witness.clone(), cap).await,
-                Err(Error::HistoricalFloorPruned(found)) if found == cap
+                Err(Error::NoRetainedCommit(found)) if found == cap
             ));
 
             // Selection fails before publication, and inspection anchored at the ceiling skips the
@@ -3474,7 +3494,7 @@ pub(crate) mod tests {
             let target = db.target();
             assert_eq!(witness_entries(&db), 4);
 
-            let db = db.prune(target.size + 100).await.unwrap();
+            let db = db.prune(target.range.end() + 100).await.unwrap();
             assert_eq!(db.target(), target);
             assert_eq!(witness_entries(&db), 1);
             drop(db);
@@ -3683,7 +3703,7 @@ pub(crate) mod tests {
 
             assert!(matches!(
                 open_bounded::<O>(context.child("pruned"), witness_cfg, sizes[0]).await,
-                Err(Error::HistoricalFloorPruned(_))
+                Err(Error::NoRetainedCommit(cap)) if cap == sizes[0]
             ));
         });
     }

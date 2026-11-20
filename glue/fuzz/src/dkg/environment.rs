@@ -1125,7 +1125,7 @@ mod tests {
             BOOTSTRAP_RUN_TIMEOUT, LinkControls,
             fixtures::{committee, tape},
             invariants,
-            pacing::{Operation, SETTLE, Secret},
+            pacing::{Operation, SETTLE, Secret, tests::Write},
         },
         stateful::stack::TEST_QUOTA,
     };
@@ -1163,6 +1163,13 @@ mod tests {
                 joining: None,
                 pacing: Pacing::scripted(tape, &crashes, identities, reach, odds),
             }
+        }
+
+        /// The same program, holding `writes` and no other write (see
+        /// [`Pacing::name`]).
+        pub(in crate::dkg) fn naming(self, writes: &[Write]) -> Self {
+            self.pacing.name(writes);
+            self
         }
 
         /// A program of `events` among [`IDENTITIES`] identities that holds

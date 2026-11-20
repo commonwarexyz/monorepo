@@ -6,18 +6,22 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::contiguous::Contiguous,
-    merkle::{Family, Location},
-    qmdb::operation::{Floored, Operation},
+    journal::{
+        authenticated::{Chunk, ChunkHasher, LeafSink},
+        contiguous::Contiguous,
+    },
+    merkle::{self, Family, Location, hasher::Hasher as MerkleHasher},
+    qmdb::operation::{Committable, Operation},
     translator::Translator,
 };
+use commonware_codec::Encode;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     channel::mpsc,
     prefetch::Lookahead,
 };
-use core::{num::NonZeroUsize, ops::Range};
+use core::{convert::Infallible, num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
 use std::{collections::VecDeque, sync::Arc};
 
@@ -87,7 +91,7 @@ where
                         cache.put(loc, op.into_key().expect("operation without key"));
                     }
                 }
-            } else if op.inactivity_floor().is_some() {
+            } else if op.is_commit() {
                 callback(loc == last_commit_loc, None);
             }
         }
@@ -111,7 +115,7 @@ where
     R::Item: Operation<F>,
 {
     // If the translated key is in the snapshot, get a cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut(key) else {
+    let Some(cursor) = snapshot.get_mut(key.as_ref()) else {
         return Ok(None);
     };
     delete_at_cursor::<F, _, _>(cursor, reader, key, cache).await
@@ -164,7 +168,7 @@ where
 {
     // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
     // cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut_or_insert(key, new_loc) else {
+    let Some(cursor) = snapshot.get_mut_or_insert(key.as_ref(), new_loc) else {
         return Ok(None);
     };
     update_at_cursor::<F, _, _>(cursor, reader, key, new_loc, cache).await
@@ -291,20 +295,116 @@ const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
 const SNAPSHOT_DECODE_CHUNK: u64 = 64;
 
-/// Replay `range` and send each worker's keyed operations in log order, in batches of at most
-/// [SNAPSHOT_ROUTE_BATCH] operations.
+/// What a parallel build's decode task does with each operation of its chunk besides routing it.
+trait ChunkVisitor<F: Family, Item>: Send + 'static {
+    /// The chunk's result, passed on in position order once the chunk is routed.
+    type Output: Send + 'static;
+
+    /// See the chunk's next operation, in position order.
+    fn visit(&mut self, item: &Item);
+
+    /// The chunk's result, once every operation in it has been visited.
+    fn finish(self) -> Result<Self::Output, merkle::Error<F>>;
+}
+
+impl<F: Family, Item> ChunkVisitor<F, Item> for () {
+    type Output = ();
+
+    fn visit(&mut self, _: &Item) {}
+
+    fn finish(self) -> Result<(), merkle::Error<F>> {
+        Ok(())
+    }
+}
+
+impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> ChunkVisitor<F, Item>
+    for ChunkHasher<F, H>
+{
+    type Output = Chunk<F, H::Digest>;
+
+    fn visit(&mut self, item: &Item) {
+        Self::push(self, item);
+    }
+
+    fn finish(self) -> Result<Self::Output, merkle::Error<F>> {
+        Self::finish(self)
+    }
+}
+
+/// The operations a parallel build decodes, and what its decode tasks do with them besides routing
+/// those at or after the floor. They do nothing more, or hash them for the journal's Merkle
+/// structure.
+trait Scan<F: Family, Item>: Send + Sync {
+    type Visitor: ChunkVisitor<F, Item>;
+
+    /// The chunks to decode, in position order, for a build from `floor` to `end`.
+    fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static;
+
+    /// The visitor of `chunk`, one of [Self::chunks], that its decode task calls.
+    fn visitor(&self, chunk: Range<u64>) -> Self::Visitor;
+
+    /// Pass a routed chunk's result on. Returns false to stop the build.
+    fn send(
+        &self,
+        output: <Self::Visitor as ChunkVisitor<F, Item>>::Output,
+    ) -> impl Future<Output = bool> + Send;
+}
+
+/// A build that only routes, decoding from the floor.
+struct IndexOnly;
+
+impl<F: Family, Item> Scan<F, Item> for IndexOnly {
+    type Visitor = ();
+
+    fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        (floor..end)
+            .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"))
+            .map(move |start| start..(start + SNAPSHOT_DECODE_CHUNK).min(end))
+    }
+
+    fn visitor(&self, _: Range<u64>) {}
+
+    async fn send(&self, _: ()) -> bool {
+        true
+    }
+}
+
+/// A build that also hashes every operation from the journal's boundary, in the journal's chunks.
+impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for LeafSink<F, H> {
+    type Visitor = ChunkHasher<F, H>;
+
+    // Starts at the journal's pruning boundary, which initialization keeps at or before the floor.
+    fn chunks(&self, _: u64, _: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
+        Self::chunks(self)
+    }
+
+    fn visitor(&self, chunk: Range<u64>) -> ChunkHasher<F, H> {
+        self.chunk_hasher(chunk)
+    }
+
+    async fn send(&self, chunk: Chunk<F, H::Digest>) -> bool {
+        Self::send(self, chunk).await
+    }
+}
+
+/// Replay `range` and send each worker's keyed operations at or after `floor` in log order, in
+/// batches of at most [SNAPSHOT_ROUTE_BATCH] operations. `visitor` sees every replayed operation,
+/// including those before `floor`.
 ///
 /// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
 /// joining them.
-async fn route_snapshot<F, C, Fut>(
+async fn route_snapshot<F, C, T, Fut>(
     log: &C,
     range: Range<u64>,
+    floor: u64,
     routing: SnapshotRouting,
+    visitor: &mut T,
     mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
 ) -> Result<(), Error<F>>
 where
     F: Family,
     C: Contiguous<Item: Operation<F>>,
+    T: ChunkVisitor<F, C::Item>,
     Fut: Future<Output = bool> + Send,
 {
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
@@ -318,6 +418,10 @@ where
         .collect();
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
+            visitor.visit(&op);
+            if loc < floor {
+                continue;
+            }
             let is_delete = op.is_delete();
             let Some(key) = op.into_key() else { continue };
             let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
@@ -392,12 +496,12 @@ where
             };
 
             if is_delete {
-                if let Some(cursor) = index.get_mut(&key) {
+                if let Some(cursor) = index.get_mut(key.as_ref()) {
                     delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
                 }
             } else {
                 let new_loc = Location::new(loc);
-                if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
+                if let Some(cursor) = index.get_mut_or_insert(key.as_ref(), new_loc) {
                     update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
                         .await?;
                 }
@@ -424,7 +528,7 @@ where
 
 /// Build a snapshot serially on the calling task via [build_snapshot_from_log], collecting each
 /// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
-/// activity bitmap (see [SnapshotBuild::build_snapshot]).
+/// activity bitmap (see [Rebuild::build_snapshot]).
 async fn build_snapshot_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
@@ -459,7 +563,7 @@ where
 }
 
 /// Worker counts, partition ranges, and cache allocation for a parallel snapshot build.
-struct ParallelPlan {
+pub struct ParallelPlan {
     /// Total partitions to distribute.
     partitions: usize,
     /// Concurrent decode tasks. Zero means the coordinator decodes inline.
@@ -517,6 +621,21 @@ impl ParallelPlan {
         })
     }
 
+    /// Like [Self::new], but for a build whose decode tasks also hash the journal's operations.
+    /// Hashing costs more than routing, so all `init_concurrency` tasks decode, beside the insert
+    /// workers [Self::new] plans.
+    fn hashing(
+        partitions: usize,
+        init_concurrency: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Option<Self> {
+        let plan = Self::new(partitions, init_concurrency, cache_size)?;
+        Some(Self {
+            decoders: init_concurrency.get(),
+            ..plan
+        })
+    }
+
     /// Each worker's starting partition and partition count, in worker order.
     fn ranges(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
         (0..self.workers).map(|worker| {
@@ -530,34 +649,23 @@ impl ParallelPlan {
 /// Build a snapshot by decoding the log replay in contiguous chunks on concurrent decode tasks
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
-/// [SnapshotBuild::build_snapshot]).
-async fn build_snapshot_parallel<F, E, C, I>(
+/// [Rebuild::build_snapshot]).
+async fn build_snapshot_parallel<F, E, C, I, S>(
     snapshot: &mut I,
+    plan: ParallelPlan,
     context: E,
     inactivity_floor_loc: Location<F>,
     log: &Arc<C>,
-    init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
+    scan: S,
 ) -> Result<(usize, BitMap), Error<F>>
 where
     F: Family,
     E: Spawner,
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
+    S: Scan<F, C::Item>,
 {
-    let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
-    else {
-        return build_snapshot_serial(
-            inactivity_floor_loc,
-            &**log,
-            snapshot,
-            init_buffer,
-            cache_size,
-        )
-        .await;
-    };
-
     let floor = *inactivity_floor_loc;
     let end = log.bounds().end;
 
@@ -614,36 +722,45 @@ where
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
         if plan.decoders == 0 {
             let senders = &senders;
-            return route_snapshot::<F, C, _>(&**log, floor..end, routing, |w, batch| async move {
-                senders[w].send(batch).await.is_ok()
-            })
+            return route_snapshot::<F, C, _, _>(
+                &**log,
+                floor..end,
+                floor,
+                routing,
+                &mut (),
+                |w, batch| async move { senders[w].send(batch).await.is_ok() },
+            )
             .await;
         }
 
-        // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
-        // worker), so every decoder can finish regardless of which chunk is being forwarded.
-        let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
-        let mut starts = (floor..end)
-            .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
+        let mut chunks = scan.chunks(floor, end);
         let mut spawn_next = |pending: &mut VecDeque<_>| {
-            let Some(start) = starts.next() else {
+            let Some(chunk) = chunks.next() else {
                 return false;
             };
             let log = log.clone();
-            let len = SNAPSHOT_DECODE_CHUNK.min(end - start);
-            let (tx, rx) = mpsc::channel(chunk_capacity);
+            let mut visitor = scan.visitor(chunk.clone());
+
+            // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial
+            // per worker), so every decoder can finish regardless of which chunk is being
+            // forwarded.
+            let capacity = (chunk.end - chunk.start) as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
+            let (tx, rx) = mpsc::channel(capacity);
             let handle = context
                 .child("snapshot_decoder")
                 .dedicated()
                 .spawn(move |_| async move {
                     let tx = &tx;
-                    route_snapshot::<F, C, _>(
+                    route_snapshot::<F, C, _, _>(
                         &*log,
-                        start..start + len,
+                        chunk,
+                        floor,
                         routing,
+                        &mut visitor,
                         |w, batch| async move { tx.send((w, batch)).await.is_ok() },
                     )
-                    .await
+                    .await?;
+                    Ok::<_, Error<F>>(visitor.finish()?)
                 });
             pending.push_back((rx, handle.abort_on_drop()));
             true
@@ -665,8 +782,11 @@ where
                 }
             }
             let (_, decoder) = pending.pop_front().expect("front exists");
-            decoder.join().await??;
+            let output = decoder.join().await??;
             spawn_next(&mut pending);
+            if !scan.send(output).await {
+                return Ok(());
+            }
         }
         Ok(())
     }
@@ -709,21 +829,21 @@ where
     Ok((total_items, active))
 }
 
-/// Builds a database's snapshot index from the operations log.
+/// Configures snapshot rebuilding during QMDB initialization.
 ///
-/// Generic over the `Index` type so each index controls how it builds: serially with the default
-/// method body, or split across parallel workers with an override.
-///
-/// Sealed: only in-crate index types implement this, so internal invariants (e.g. builds must
-/// drop every clone of the shared log before returning) are enforced by the implementations
-/// rather than the public contract.
+/// This trait is sealed to the index types provided by this crate.
+#[expect(
+    private_bounds,
+    reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
+)]
 pub trait SnapshotBuild<F: Family>:
-    sealed::SnapshotBuildSealed + Index<Value = Location<F>> + Sized + 'static
+    Index<Value = Location<F>> + Rebuild<F> + Sized + 'static
 {
-    /// The concurrency configuration the build consumes. Index types that always build serially
-    /// declare `()`, so a setting they cannot use is unrepresentable.
-    type Concurrency: Copy + Send + Sync + 'static;
+}
 
+/// Replays the log into an index owned by initialization. Implementations must drop all log
+/// clones before returning, including on error.
+pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
@@ -735,7 +855,7 @@ pub trait SnapshotBuild<F: Family>:
         _context: E,
         inactivity_floor_loc: Location<F>,
         log: &Arc<C>,
-        _init_concurrency: Self::Concurrency,
+        _init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
@@ -747,66 +867,93 @@ pub trait SnapshotBuild<F: Family>:
             build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
         }
     }
-}
 
-mod sealed {
-    use crate::translator::Translator;
+    /// The plan of a build whose decode tasks also hash the journal's operations. Index types
+    /// that never spawn decode tasks declare [Infallible].
+    type HashingPlan: Send + 'static;
 
-    pub trait SnapshotBuildSealed {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::ordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::unordered::Index<T, V, P>
-    {
+    /// The plan of a build at this concurrency and cache size whose decode tasks hash the
+    /// journal's operations as they decode them, or `None` if this index builds without them.
+    fn hashing_plan(
+        &self,
+        _init_concurrency: NonZeroUsize,
+        _cache_size: Option<NonZeroUsize>,
+    ) -> Option<Self::HashingPlan> {
+        None
     }
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
-        for crate::index::partitioned::ordered::Index<T, V, P>
-    {
-    }
+
+    /// Like [Self::build_snapshot], but follows `plan`, whose decode tasks also hash every chunk
+    /// of `leaves` and send them to it in order.
+    fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        plan: Self::HashingPlan,
+        init_buffer: NonZeroUsize,
+        leaves: LeafSink<F, H>,
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static;
 }
 
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {
-    type Concurrency = ();
-}
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {
-    type Concurrency = ();
-}
-
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
-    type Concurrency = NonZeroUsize;
-
-    async fn build_snapshot<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
-        init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build_snapshot_parallel(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            init_concurrency,
-            init_buffer,
-            cache_size,
-        )
-        .await
-    }
 }
-
 impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
-    type Concurrency = NonZeroUsize;
+}
+
+impl<F: Family, T: Translator> Rebuild<F> for crate::index::unordered::Index<T, Location<F>> {
+    type HashingPlan = Infallible;
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        _context: E,
+        _inactivity_floor_loc: Location<F>,
+        _log: &Arc<C>,
+        plan: Infallible,
+        _init_buffer: NonZeroUsize,
+        _leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        match plan {}
+    }
+}
+
+impl<F: Family, T: Translator> Rebuild<F> for crate::index::ordered::Index<T, Location<F>> {
+    type HashingPlan = Infallible;
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        _context: E,
+        _inactivity_floor_loc: Location<F>,
+        _log: &Arc<C>,
+        plan: Infallible,
+        _init_buffer: NonZeroUsize,
+        _leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        match plan {}
+    }
+}
+
+impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
+    type HashingPlan = ParallelPlan;
 
     async fn build_snapshot<E, C>(
         &mut self,
@@ -821,14 +968,59 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
+        let Some(plan) = ParallelPlan::new(self.partition_count(), init_concurrency, cache_size)
+        else {
+            return build_snapshot_serial(
+                inactivity_floor_loc,
+                &**log,
+                self,
+                init_buffer,
+                cache_size,
+            )
+            .await;
+        };
         build_snapshot_parallel(
             self,
+            plan,
             context,
             inactivity_floor_loc,
             log,
-            init_concurrency,
             init_buffer,
-            cache_size,
+            IndexOnly,
+        )
+        .await
+    }
+
+    fn hashing_plan(
+        &self,
+        init_concurrency: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Option<ParallelPlan> {
+        ParallelPlan::hashing(self.partition_count(), init_concurrency, cache_size)
+    }
+
+    async fn build_snapshot_hashing<E, C, H>(
+        &mut self,
+        context: E,
+        inactivity_floor_loc: Location<F>,
+        log: &Arc<C>,
+        plan: ParallelPlan,
+        init_buffer: NonZeroUsize,
+        leaves: LeafSink<F, H>,
+    ) -> Result<(usize, BitMap), Error<F>>
+    where
+        E: Spawner,
+        C: Contiguous<Item: Operation<F> + Encode> + 'static,
+        H: MerkleHasher<F> + 'static,
+    {
+        build_snapshot_parallel(
+            self,
+            plan,
+            context,
+            inactivity_floor_loc,
+            log,
+            init_buffer,
+            leaves,
         )
         .await
     }
@@ -870,6 +1062,24 @@ mod tests {
                     }
                 }
                 assert_eq!(end, partitions);
+            }
+        }
+    }
+
+    #[test]
+    fn test_hashing_plan_decodes_on_the_whole_budget() {
+        for partitions in 0..=64 {
+            for budget in 1..=64 {
+                let budget = NonZeroUsize::new(budget).unwrap();
+                let plan = ParallelPlan::new(partitions, budget, None);
+                let hashing = ParallelPlan::hashing(partitions, budget, None);
+                assert_eq!(hashing.is_none(), plan.is_none());
+                let (Some(plan), Some(hashing)) = (plan, hashing) else {
+                    continue;
+                };
+                assert_eq!(hashing.decoders, budget.get());
+                assert_eq!(hashing.workers, plan.workers);
+                assert!(hashing.workers < budget.get());
             }
         }
     }

@@ -317,6 +317,22 @@ fn execute<S: Stack>(
     (report, observed.paced)
 }
 
+/// Run `input` as [`run_dkg_state_sync`] does, and return as well what its
+/// pacing did and how each restarted engine recovered its epoch, in the order
+/// of the restarts.
+#[cfg(test)]
+pub(super) fn run_dkg_state_sync_recovered(
+    input: DkgStateSyncFuzzInput,
+) -> (StateSyncReport, Trace, Vec<super::fixtures::Recovery>) {
+    let plans = std::sync::Arc::new(commonware_utils::sync::Mutex::new(Vec::new()));
+    let (report, trace) = execute(input, RESTARTS_BEFORE_JOIN, |late| {
+        let storage = commonware_runtime::Supervisor::child(&late.cluster.context, "plans");
+        super::fixtures::Planned::new(late, storage, std::sync::Arc::clone(&plans))
+    });
+    let recoveries = super::fixtures::recoveries(&plans.lock(), trace.log());
+    (report, trace, recoveries)
+}
+
 /// What a run observed, to be checked once the runtime has stopped.
 struct Observations {
     outcome: Outcome,
@@ -1160,18 +1176,20 @@ mod tests {
     /// not know.
     ///
     /// An engine that started at genesis opens all of them in any run. What
-    /// the joiner opens beside its record, the material of its sync, and
-    /// marshal's stores depends on where its floor falls: it writes to its
-    /// journal once it takes part in a ceremony, and its orchestrator opens
-    /// a Simplex journal once it runs an epoch, which a joiner whose run
-    /// ends at the first boundary above its floor may not have done. So the
-    /// joiner is held to that much in every run, and to all of it in one.
+    /// the joiner opens beside its record, the material of its sync, the
+    /// checkpoints, and marshal's stores depends on where its floor falls:
+    /// it writes to its journal once it takes part in a ceremony, and its
+    /// orchestrator opens a Simplex journal once it runs an epoch, which a
+    /// joiner whose run ends at the first boundary above its floor may not
+    /// have done. So the joiner is held to that much in every run, and to
+    /// all of it in one.
     #[test]
     fn engines_open_the_partitions_the_pacing_knows() {
         let joiner = 3u8;
         let reshare = [
             Partition::Journal,
             Partition::StateSync,
+            Partition::Checkpoint,
             Partition::Consensus,
             Partition::Chain,
         ];
@@ -1183,7 +1201,12 @@ mod tests {
                 assert_eq!(trace.opened(engine), reshare, "engine {engine}: {report}");
             }
             let opened = trace.opened(joined);
-            for partition in [Partition::StateSync, Partition::Ledger, Partition::Chain] {
+            for partition in [
+                Partition::StateSync,
+                Partition::Checkpoint,
+                Partition::Ledger,
+                Partition::Chain,
+            ] {
                 assert!(opened.contains(&partition), "{opened:?}: {report}");
             }
             let optional: Vec<_> = opened
@@ -1894,6 +1917,30 @@ mod tests {
     /// Run the input of [`settling_once`] with `plant` planted.
     fn planted(plant: Plant) -> StateSyncReport {
         execute(settling_once(), false, |late| Planted::new(late, plant)).0
+    }
+
+    /// The joiner's restart after its sync has its recovery on record, and
+    /// it names where the joiner read the epoch it started in from.
+    #[test]
+    fn restart_of_the_joiner_records_its_recovery() {
+        let input = restarted_after_its_sync();
+        let (report, _, recoveries) = run_dkg_state_sync_recovered(input.clone());
+        println!("{report}");
+        for recovery in &recoveries {
+            println!("{recovery:?} {:?}", recovery.source());
+        }
+        assert_eq!(recoveries.len(), report.restarts.restarts, "{report}");
+        let joiner = usize::from(input.joiner);
+        assert!(
+            recoveries.iter().any(|recovery| recovery.engine == joiner),
+            "{recoveries:?}"
+        );
+        assert!(
+            recoveries
+                .iter()
+                .all(|recovery| recovery.source().is_some()),
+            "{recoveries:?}"
+        );
     }
 
     /// An input on which the joiner, engine 0, is restarted once, after its

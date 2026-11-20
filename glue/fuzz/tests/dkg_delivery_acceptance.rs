@@ -130,7 +130,7 @@ fn dkg_at_048_report_field_removal_is_a_compile_error() {
         std::fs::copy(source, destination).unwrap();
     }
     // Rename the returned field and its implementation uses, keeping the trait's
-    // method and all reviewer acceptance files intact. Only the API is removed.
+    // method and all DKG acceptance files intact. Only the API is removed.
     let dkg = work.join("glue/fuzz/src/dkg");
     for path in std::fs::read_dir(&dkg).unwrap() {
         let path = path.unwrap().path();

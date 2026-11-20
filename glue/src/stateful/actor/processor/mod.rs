@@ -687,7 +687,7 @@ where
                 .map(|entry| entry.merkleized.clone())
         };
 
-        // Marshal delivers finalizations in height order, so the winner's parent state is the
+        // Marshal delivers finalized blocks in height order, so the winner's parent state is the
         // applied state.
         let batch = if let Some(batch) = cached {
             batch
@@ -1165,8 +1165,10 @@ mod tests {
         ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, Location, full::Config as MmrJournalConfig},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig,
+        },
+        mmr::{self, Location},
         qmdb::{any, sync::Target},
         translator::TwoCap,
     };
@@ -1539,10 +1541,7 @@ mod tests {
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
+                range: merkleized.target().range,
             };
             Some(Proposed { block, merkleized })
         }
@@ -1810,10 +1809,7 @@ mod tests {
                 parent: parent.digest(),
                 height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
+                range: merkleized.target().range,
             };
             (block, merkleized)
         }
@@ -1916,14 +1912,11 @@ mod tests {
     fn qmdb_config(prefix: &str) -> QmdbConfig {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         QmdbConfig {
-            merkle: MmrJournalConfig {
-                journal_partition: format!("{prefix}_mmr_journal"),
-                metadata_partition: format!("{prefix}_mmr_metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
+            merkle: MerkleConfig {
+                partition: format!("{prefix}_mmr_metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
             log: FixedLogConfig {
                 partition: format!("{prefix}_log_journal"),
@@ -1935,7 +1928,7 @@ mod tests {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -3149,10 +3142,7 @@ mod tests {
                 parent: block1.digest(),
                 height: gap_height,
                 state_root: merkleized.root(),
-                range: non_empty_range!(
-                    merkleized.bounds().inactivity_floor,
-                    merkleized.bounds().tip.size
-                ),
+                range: merkleized.target().range,
             };
 
             let provider = ScriptedParentProvider::default();

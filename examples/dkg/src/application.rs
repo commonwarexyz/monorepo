@@ -11,12 +11,12 @@ use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
         Application, Finality, Input, Proposed,
-        db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
+        db::{DatabaseSet, Unmerkleized as _},
     },
 };
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::qmdb::sync::Target;
-use commonware_utils::{non_empty_range, sequence::U64};
+use commonware_utils::sequence::U64;
 use futures::StreamExt;
 
 const HEIGHT_KEY: U64 = U64::new(0);
@@ -73,15 +73,11 @@ where
         let parent = ancestry.next().await?;
         let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
         let block = Block::new(
             context.1,
             parent.digest(),
             height,
-            Target {
-                root: merkleized.root(),
-                range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            },
+            merkleized.target(),
             payload,
         );
         Some(Proposed { block, merkleized })

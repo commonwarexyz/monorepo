@@ -14,7 +14,7 @@
 //! Every backend uses a fixed-size QMDB variant, which covers the adapter
 //! class without multiplying the search space.
 
-use super::{Digest, IO_BUFFER_SIZE, QMDB_INIT_BUFFER, QMDB_INIT_CACHE};
+use super::{Digest, IO_BUFFER_SIZE, QMDB_INIT_BUFFER, QMDB_INIT_CACHE, QMDB_INIT_CONCURRENCY};
 #[cfg(any(
     feature = "stateful-cert-mock-restarts",
     feature = "stateful-cert-mock-restarts-db",
@@ -38,12 +38,15 @@ use commonware_glue::stateful::db::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
+    },
     merkle::Location,
-    mmr::{self, full::Config as MmrJournalConfig},
+    mmr,
     qmdb::{
         self,
-        sync::{CompactTarget, Source, Target},
+        sync::{Source, Target},
     },
 };
 use commonware_utils::{NZU64, non_empty_range, range::NonEmptyRange};
@@ -64,8 +67,7 @@ pub(super) use immutable_backend::{ImmutableCompact, ImmutableStandard};
 pub(super) use keyless_backend::{KeylessCompact, KeylessStandard};
 use std::{fmt::Debug, future::Future, num::NonZeroU64};
 
-/// Items per storage blob of the standard adapters' journals.
-const MERKLE_BLOB_ITEMS: NonZeroU64 = NZU64!(11);
+/// Items per storage blob of the standard adapters' operation logs.
 const LOG_BLOB_ITEMS: NonZeroU64 = NZU64!(7);
 
 /// Witness entries per journal section of the compact adapters.
@@ -108,15 +110,14 @@ pub(super) struct StateCommitment {
     /// the canonical root everywhere else.
     pub(super) sync_root: Digest,
     /// The operation range the sync target covers, ending at the database
-    /// size. The compact adapters, whose target is a size alone, cover the
-    /// whole database.
+    /// size. A compact adapter's target covers only its last commit.
     pub(super) range: NonEmptyRange<Location<mmr::Family>>,
 }
 
 impl StateCommitment {
-    /// A commitment over a journaled adapter's sync target, whose canonical
-    /// root is the target's root.
-    fn journaled(target: Target<mmr::Family, Digest>) -> Self {
+    /// A commitment over a sync target whose canonical root is the target's
+    /// root, as it is for every adapter but `current`.
+    fn from_target(target: Target<mmr::Family, Digest>) -> Self {
         Self {
             root: target.root,
             sync_root: target.root,
@@ -124,15 +125,15 @@ impl StateCommitment {
         }
     }
 
-    /// A commitment over a compact adapter's sync target, whose canonical
-    /// root is the target's root. A compact database always holds at least
-    /// its initial commit, so the range is never empty.
-    fn compact(target: CompactTarget<mmr::Family, Digest>) -> Self {
+    /// A commitment over a compact adapter whose last commit ends at `size`
+    /// with canonical root `root`. Its sync target covers only that commit,
+    /// and a compact database always holds at least its initial commit, so
+    /// `size` is never zero.
+    fn compact(root: Digest, size: Location<mmr::Family>) -> Self {
         Self {
-            root: target.root,
-            sync_root: target.root,
-            range: NonEmptyRange::new(Location::new(0)..target.size)
-                .expect("compact database size is never zero"),
+            root,
+            sync_root: root,
+            range: NonEmptyRange::new(size - 1..size).expect("compact database size is never zero"),
         }
     }
 
@@ -145,11 +146,8 @@ impl StateCommitment {
     }
 
     /// The compact sync target this commitment names.
-    fn compact_target(&self) -> CompactTarget<mmr::Family, Digest> {
-        CompactTarget {
-            root: self.sync_root,
-            size: self.range.end(),
-        }
+    fn compact_target(&self) -> Target<mmr::Family, Digest> {
+        self.journaled_target()
     }
 }
 
@@ -327,15 +325,12 @@ fn digest_to_u64(digest: &Digest) -> u64 {
 }
 
 /// Configuration of the authenticated journal every standard adapter keeps.
-fn merkle_config(prefix: &str, page_cache: CacheRef) -> MmrJournalConfig<Sequential> {
-    MmrJournalConfig {
-        journal_partition: format!("{prefix}-qmdb-mmr-journal"),
-        metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
-        items_per_blob: MERKLE_BLOB_ITEMS,
-        write_buffer: IO_BUFFER_SIZE,
+fn merkle_config(prefix: &str) -> MerkleConfig<Sequential> {
+    MerkleConfig {
+        partition: format!("{prefix}-qmdb-mmr-metadata"),
         replay_buffer: IO_BUFFER_SIZE,
         strategy: Sequential,
-        page_cache,
+        resident_height: Default::default(),
     }
 }
 
@@ -384,17 +379,17 @@ mod any_backend {
 
         fn config(prefix: &str, page_cache: CacheRef) -> Config<Self> {
             any::unordered::fixed::Config {
-                merkle: merkle_config(prefix, page_cache.clone()),
+                merkle: merkle_config(prefix),
                 log: log_config(prefix, page_cache),
                 translator: TwoCap,
                 init_cache: Some(QMDB_INIT_CACHE),
                 init_buffer: QMDB_INIT_BUFFER,
-                init_concurrency: (),
+                init_concurrency: QMDB_INIT_CONCURRENCY,
             }
         }
 
         fn initial() -> StateCommitment {
-            StateCommitment::journaled(<Db as ManagedDb<Runtime>>::initial_sync_target())
+            StateCommitment::from_target(<Db as ManagedDb<Runtime>>::initial_sync_target())
         }
 
         /// Bump a counter and record the height.
@@ -418,7 +413,7 @@ mod any_backend {
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
             let bounds = merkleized.bounds();
-            StateCommitment::journaled(Target {
+            StateCommitment::from_target(Target {
                 root: merkleized.root(),
                 range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             })
@@ -479,13 +474,13 @@ mod current_backend {
 
         fn config(prefix: &str, page_cache: CacheRef) -> Config<Self> {
             current::unordered::fixed::Config {
-                merkle: merkle_config(prefix, page_cache.clone()),
+                merkle: merkle_config(prefix),
                 log: log_config(prefix, page_cache),
                 grafted_metadata_partition: format!("{prefix}-qmdb-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(QMDB_INIT_CACHE),
                 init_buffer: QMDB_INIT_BUFFER,
-                init_concurrency: (),
+                init_concurrency: QMDB_INIT_CONCURRENCY,
             }
         }
 
@@ -565,15 +560,16 @@ mod immutable_backend {
 
         fn config(prefix: &str, page_cache: CacheRef) -> Config<Self> {
             immutable::fixed::Config {
-                merkle: merkle_config(prefix, page_cache.clone()),
+                merkle: merkle_config(prefix),
                 log: log_config(prefix, page_cache),
                 translator: TwoCap,
                 init_buffer: QMDB_INIT_BUFFER,
+                init_concurrency: QMDB_INIT_CONCURRENCY,
             }
         }
 
         fn initial() -> StateCommitment {
-            StateCommitment::journaled(<StandardDb as ManagedDb<Runtime>>::initial_sync_target())
+            StateCommitment::from_target(<StandardDb as ManagedDb<Runtime>>::initial_sync_target())
         }
 
         /// Insert one key the block is the only writer of. Nothing is read:
@@ -591,7 +587,7 @@ mod immutable_backend {
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
             let bounds = merkleized.bounds();
-            StateCommitment::journaled(Target {
+            StateCommitment::from_target(Target {
                 root: merkleized.root(),
                 range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             })
@@ -629,7 +625,7 @@ mod immutable_backend {
         }
 
         fn initial() -> StateCommitment {
-            StateCommitment::compact(<CompactDb as ManagedDb<Runtime>>::initial_sync_target())
+            StateCommitment::from_target(<CompactDb as ManagedDb<Runtime>>::initial_sync_target())
         }
 
         /// Insert one key the block is the only writer of.
@@ -645,10 +641,7 @@ mod immutable_backend {
         }
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
-            StateCommitment::compact(CompactTarget {
-                root: merkleized.root(),
-                size: merkleized.bounds().tip.size,
-            })
+            StateCommitment::compact(merkleized.root(), merkleized.bounds().tip.size)
         }
 
         fn sync_target(commitment: &StateCommitment) -> SyncTarget<Self> {
@@ -687,13 +680,14 @@ mod keyless_backend {
 
         fn config(prefix: &str, page_cache: CacheRef) -> Config<Self> {
             keyless::fixed::Config {
-                merkle: merkle_config(prefix, page_cache.clone()),
+                merkle: merkle_config(prefix),
                 log: log_config(prefix, page_cache),
+                init_concurrency: QMDB_INIT_CONCURRENCY,
             }
         }
 
         fn initial() -> StateCommitment {
-            StateCommitment::journaled(<StandardDb as ManagedDb<Runtime>>::initial_sync_target())
+            StateCommitment::from_target(<StandardDb as ManagedDb<Runtime>>::initial_sync_target())
         }
 
         /// Append the block's value.
@@ -710,7 +704,7 @@ mod keyless_backend {
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
             let bounds = merkleized.bounds();
-            StateCommitment::journaled(Target {
+            StateCommitment::from_target(Target {
                 root: merkleized.root(),
                 range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
             })
@@ -747,7 +741,7 @@ mod keyless_backend {
         }
 
         fn initial() -> StateCommitment {
-            StateCommitment::compact(<CompactDb as ManagedDb<Runtime>>::initial_sync_target())
+            StateCommitment::from_target(<CompactDb as ManagedDb<Runtime>>::initial_sync_target())
         }
 
         /// Append the block's value.
@@ -763,10 +757,7 @@ mod keyless_backend {
         }
 
         fn commitment(merkleized: &MerkleizedBatches<Self>) -> StateCommitment {
-            StateCommitment::compact(CompactTarget {
-                root: merkleized.root(),
-                size: merkleized.bounds().tip.size,
-            })
+            StateCommitment::compact(merkleized.root(), merkleized.bounds().tip.size)
         }
 
         fn sync_target(commitment: &StateCommitment) -> SyncTarget<Self> {

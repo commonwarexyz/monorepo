@@ -162,7 +162,7 @@ pub use invariants::{Counts, ProbeCounts, ReshareCounts, SyncCounts};
 pub use mock::{MockGroup, MockPoint};
 pub use pacing::PacedCounts;
 pub use probe::{ProbeOutcome, ProbeReport, fuzz_dkg_probe, run_dkg_probe};
-pub use probe_input::DkgProbeFuzzInput;
+pub use probe_input::{DkgProbeFuzzInput, SourceCheckpoint};
 pub use report::{
     AGGREGATE_INTERVAL, Aggregate, Emitter, Entry, Invariant, Judged, Report, Sink, Stderr, Tally,
     Target, fold,

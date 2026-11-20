@@ -10,17 +10,7 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-commonware_macros::stability_scope!(ALPHA {
-    extern crate alloc;
-
-    pub mod bmt;
-    pub mod merkle;
-    pub use merkle::{mmb, mmr};
-});
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    mod bitmap;
-    pub mod qmdb;
-    pub use crate::bitmap::{BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap};
     pub mod cache;
     pub mod queue;
     #[cfg(any(test, feature = "test-utils"))]
@@ -34,11 +24,14 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     >;
 
     pub mod archive;
+    mod bitmap;
+    pub use crate::bitmap::{BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap};
     pub mod freezer;
     pub mod index;
     pub mod journal;
     pub mod metadata;
     pub mod ordinal;
+    pub mod qmdb;
     pub mod rmap;
 
     /// Section selector for storage operations that act on one or more sections.
@@ -136,5 +129,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     }
 });
 commonware_macros::stability_scope!(BETA {
+    extern crate alloc;
+
+    pub mod bmt;
+    pub mod merkle;
+    pub use merkle::{mmb, mmr};
     pub mod translator;
 });

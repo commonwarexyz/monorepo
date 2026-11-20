@@ -4,8 +4,11 @@
 //!
 //! Five identities take part. Four are the dealers of every epoch: one runs
 //! the discovering probe and three run source probes, each over a real marshal
-//! actor seeded with the finalized history the input selects. The fifth is
-//! tracked as a next player and is not a dealer; the program sends as it.
+//! actor seeded with the finalized history the input selects and a state-sync
+//! plan opened over the checkpoints the input selects, which the harness
+//! writes to the plan's checkpoint partition before the plan opens. A source
+//! serves an epoch's boundary from that epoch's checkpoint alone. The fifth
+//! is tracked as a next player and is not a dealer; the program sends as it.
 //!
 //! The history is a fabricated chain: blocks of the reshare chain's type in
 //! epochs of two blocks, each final block of an epoch carrying the description
@@ -25,23 +28,25 @@
 //! run's ledger holds, in the probe's own order, every request it sent, every
 //! message it took, and every block it placed.
 //!
-//! Nothing here decodes a probe message or reproduces the probe's
-//! verification, floor selection, or state transitions. The driver records
-//! what happened and [`invariants`] judges it once the runtime has stopped:
-//! the artifact against what each source was seeded with (I12, I13) and every
-//! block against what was delivered (I14). No artifact is required of a run.
+//! Nothing here reproduces the probe's verification, floor selection, or
+//! state transitions; the driver reads no more of a message than the tag and
+//! epoch of the probe's own requests. It records what happened and
+//! [`invariants`] judges it once the runtime has stopped: the artifact
+//! against the request rounds and what each source was seeded with (I12,
+//! I13) and every block against what was delivered (I14). No artifact is
+//! required of a run.
 
 use super::{
-    COMMITTEE, DkgProbeFuzzInput, Info, MockGroup, PublicKey, RESHARE_NAMESPACE,
+    COMMITTEE, Digest, DkgProbeFuzzInput, Info, MockGroup, PublicKey, RESHARE_NAMESPACE,
     app::{BLOCK_CFG, Block, BlockContext},
     context::EngineContext,
     invariants::{
-        self, PROBE_TAGS, ProbeArtifact, ProbeChain, ProbeCounts, ProbeFinalization, ProbeLedger,
-        ProbeRun, ProbeSend, ProbeShape, ProbeSource, ProbeStep,
+        self, PROBE_TAGS, ProbeArtifact, ProbeChain, ProbeCheckpoint, ProbeCounts,
+        ProbeFinalization, ProbeLedger, ProbeRun, ProbeSend, ProbeShape, ProbeSource, ProbeStep,
     },
     joiner::Probe,
     network::harness,
-    probe_input::SOURCES,
+    probe_input::{CHECKPOINT_EPOCHS, SOURCES, SourceCheckpoint, introducing},
     public_keys,
     report::{Judged, Report},
     reshare_stack::{Variant, archives, backfill_config, marshal_config, max_message_size, peers},
@@ -49,6 +54,7 @@ use super::{
     schedule::directory_of,
     scheme::{Scheme, certificate_verifier},
     signers,
+    stack::MAX_SUPPORTED_MODE,
 };
 use crate::stateful::{
     MAILBOX_SIZE, MAX_ADVANCE_STEPS, MAX_RAW_PAYLOAD, MAX_SOURCE_HEIGHT, PAGE_CACHE_SIZE,
@@ -72,10 +78,12 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{Dealer, Info as Ceremony, Logs, Output, Player, Reveal, deal},
         primitives::{group::Share, sharing::Mode},
     },
+    certificate::Verifier as _,
     ed25519,
 };
 use commonware_glue::dkg::{
     probe,
+    state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan},
     types::{EpochOutcome, Payload},
 };
 use commonware_macros::select;
@@ -87,10 +95,12 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Handle, IoBuf, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
+use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{
     N3f1, NZDuration, NZUsize,
     channel::oneshot::{self, error::TryRecvError},
     ordered::{Map, Set},
+    sequence::U64,
 };
 use futures::future::select_all;
 use std::{collections::BTreeMap, fmt, time::Duration};
@@ -246,17 +256,17 @@ pub fn run_dkg_probe(input: DkgProbeFuzzInput) -> ProbeReport {
 }
 
 /// What a run observed, to be checked once the runtime has stopped.
-struct Observations {
-    outcome: ProbeOutcome,
-    events: [usize; KINDS.len()],
-    run: ProbeRun,
+pub(super) struct Observations {
+    pub(super) outcome: ProbeOutcome,
+    pub(super) events: [usize; KINDS.len()],
+    pub(super) run: ProbeRun,
     /// Engines of which a marshal or a probe stopped before the run ended.
-    stopped: Vec<usize>,
+    pub(super) stopped: Vec<usize>,
 }
 
 /// Where a run stands when a negative control may plant a fault in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stage {
+pub(super) enum Stage {
     /// Every actor has started and no event has been executed.
     Started,
     /// Every event has been executed and the closing window begins.
@@ -274,20 +284,104 @@ fn observe(input: DkgProbeFuzzInput) -> Observations {
 /// libFuzzer plants nothing. A test plants a fault in the running harness, so
 /// that the fault is rejected by the measurement every run goes through. No
 /// engine of this target is compromised, so no panic is tolerated.
-fn observe_planted(
+pub(super) fn observe_planted(
     input: DkgProbeFuzzInput,
     plant: impl AsyncFn(&mut Harness, Stage),
 ) -> Observations {
+    observe_seeded(input, Seeding::default(), plant)
+}
+
+/// Run one event program whose sources' plans open over `seeding`, with
+/// `plant` called at every [`Stage`], and return what was observed of it.
+fn observe_seeded(
+    input: DkgProbeFuzzInput,
+    seeding: Seeding<'_>,
+    plant: impl AsyncFn(&mut Harness, Stage),
+) -> Observations {
     let (observed, panics) = runner::execute(input.raw_bytes.clone(), |context| {
-        run(context, input, plant)
+        run(context, input, seeding, plant)
     });
     invariants::check_panics(&panics, &[]);
     invariants::check_engines_running(&observed.stopped);
     observed
 }
 
+/// Records a regression test writes to a source's checkpoint partition in
+/// place of those the input selects: given the source's position, the
+/// fabricated chain, and the foreign chain, the records to write.
+#[cfg(test)]
+pub(super) type Seed = dyn Fn(usize, &Chain, &Chain) -> Vec<ProbeCheckpoint> + Sync;
+
+/// What the sources' plans open over: the checkpoints the input selects, or
+/// the records a regression test builds; and where a regression test that
+/// watches the seeding has what it saw recorded.
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+pub(super) struct Seeding<'a>(
+    pub(super) Option<&'a Seed>,
+    pub(super) Option<&'a commonware_utils::sync::Mutex<Vec<Seeded>>>,
+);
+
+/// What a regression test saw of the seeding of one member's plan.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Seeded {
+    /// The member, the discovering probe's being 0.
+    pub(super) member: usize,
+    /// What the partitions of its plan held before it was seeded.
+    pub(super) before: super::fixtures::Plan,
+    /// The partition of every blob the seeding opened or removed, in order.
+    pub(super) touched: Vec<String>,
+    /// What the partitions of its plan held when its plan opened over them.
+    pub(super) opened: super::fixtures::Plan,
+}
+
+/// What a watched seeding of one member has seen so far.
+#[cfg(test)]
+struct Watch(Option<(super::fixtures::Plan, super::context::Touched)>);
+
+/// What a seeding that nothing watches has seen: nothing.
+#[cfg(not(test))]
+struct Watch;
+
+/// What the sources' plans open over: the checkpoints the input selects.
+#[cfg(not(test))]
+#[derive(Clone, Copy, Default)]
+struct Seeding<'a>(std::marker::PhantomData<&'a ()>);
+
+/// Run one event program whose sources' plans open over the records `seed`
+/// builds in place of the checkpoints the input selects, with `plant` called
+/// at every [`Stage`], and return what was observed of it.
+///
+/// Only a regression test seeds records the input cannot select, such as a
+/// checkpoint whose introducing block lies above its source's heights.
+#[cfg(test)]
+pub(super) fn observe_with_seed(
+    input: DkgProbeFuzzInput,
+    seed: &Seed,
+    plant: impl AsyncFn(&mut Harness, Stage),
+) -> Observations {
+    observe_seeded(input, Seeding(Some(seed), None), plant)
+}
+
+/// Run one event program, whose sources' plans open over the records `seed`
+/// builds if there is one and over those the input selects otherwise, with
+/// `plant` called at every [`Stage`]. Return what was observed of it, and
+/// what was seen of the seeding of each member's plan, in the order of the
+/// members.
+#[cfg(test)]
+pub(super) fn observe_seeding(
+    input: DkgProbeFuzzInput,
+    seed: Option<&Seed>,
+    plant: impl AsyncFn(&mut Harness, Stage),
+) -> (Observations, Vec<Seeded>) {
+    let seeded = commonware_utils::sync::Mutex::new(Vec::new());
+    let observed = observe_seeded(input, Seeding(seed, Some(&seeded)), plant);
+    (observed, seeded.into_inner())
+}
+
 /// Measurement point, outside the runtime so a violation is never caught.
-fn measure(observed: &Observations) -> ProbeReport {
+pub(super) fn measure(observed: &Observations) -> ProbeReport {
     let counts = invariants::check_probe(&observed.run);
     ProbeReport {
         outcome: observed.outcome,
@@ -299,15 +393,15 @@ fn measure(observed: &Observations) -> ProbeReport {
 
 /// A chain the harness fabricates: the description of every epoch, the block
 /// at every height a source may hold, and the finalization of each.
-struct Chain {
+pub(super) struct Chain {
     /// Verifies the chain's finalizations, in every epoch.
     verifier: Scheme,
     /// The description of each epoch, from epoch zero.
-    infos: Vec<Info>,
+    pub(super) infos: Vec<Info>,
     /// The block at each height, from genesis.
-    blocks: Vec<Block>,
+    pub(super) blocks: Vec<Block>,
     /// The finalization of the block at each height, from height one.
-    finalizations: Vec<ProbeFinalization>,
+    pub(super) finalizations: Vec<ProbeFinalization>,
 }
 
 impl Chain {
@@ -405,8 +499,42 @@ impl Chain {
     }
 
     /// The finalization of the block at `height`, which is at least one.
-    fn finalization(&self, height: u64) -> &ProbeFinalization {
+    pub(super) fn finalization(&self, height: u64) -> &ProbeFinalization {
         &self.finalizations[height as usize - 1]
+    }
+
+    /// The checkpoint record of `epoch` on this chain: the block that
+    /// introduces the epoch, its commitment, and, if `finalized` and the
+    /// epoch is past zero, the chain's finalization of that block, which is
+    /// of the epoch before. Genesis has no finalization.
+    pub(super) fn checkpoint(&self, epoch: usize, finalized: bool) -> ProbeCheckpoint {
+        let height = introducing(epoch);
+        let block = self.blocks[height as usize].clone();
+        ProbeCheckpoint {
+            epoch: Epoch::new(epoch as u64),
+            commitment: block.digest(),
+            finalization: (finalized && epoch > 0).then(|| self.finalization(height).clone()),
+            block,
+        }
+    }
+
+    /// The checkpoint records `held` selects for a source whose marshal holds
+    /// this chain up to `height`: one for each epoch whose introducing block
+    /// lies within that height and for which a checkpoint is selected.
+    fn checkpoints(
+        &self,
+        held: &[SourceCheckpoint; CHECKPOINT_EPOCHS],
+        height: u8,
+    ) -> Vec<ProbeCheckpoint> {
+        held.iter()
+            .enumerate()
+            .take_while(|(epoch, _)| introducing(*epoch) <= u64::from(height))
+            .filter_map(|(epoch, held)| match held {
+                SourceCheckpoint::Missing => None,
+                SourceCheckpoint::Unfinalized => Some(self.checkpoint(epoch, false)),
+                SourceCheckpoint::Finalized => Some(self.checkpoint(epoch, true)),
+            })
+            .collect()
     }
 
     /// What the oracle is told of this chain.
@@ -547,12 +675,15 @@ struct Member {
     identity: PublicKey,
     probe: Probe,
     marshal: Marshal,
+    /// The state-sync plan attached with marshal. No orchestrator runs, so it
+    /// holds the checkpoints written before it opened and records no other.
+    plan: StateSyncPlan<Scheme, Variant>,
     sender: RawSender,
     /// The captured response this member most recently delivered as itself.
     released: Option<(usize, Vec<u8>)>,
 }
 
-struct Harness {
+pub(super) struct Harness {
     context: deterministic::Context,
     oracle: Oracle<PublicKey, deterministic::Context>,
     ledger: ProbeLedger,
@@ -581,9 +712,10 @@ struct Fixture {
 async fn run(
     context: deterministic::Context,
     input: DkgProbeFuzzInput,
+    seeding: Seeding<'_>,
     plant: impl AsyncFn(&mut Harness, Stage),
 ) -> Observations {
-    let (mut harness, fixture) = Harness::setup(context, &input).await;
+    let (mut harness, fixture) = Harness::setup(context, &input, seeding).await;
     let (engines, handles): (Vec<usize>, Vec<Handle<()>>) = fixture.handles.into_iter().unzip();
     let timeout = harness.context.sleep(RUN_TIMEOUT);
     let mut stopped = Vec::new();
@@ -639,11 +771,12 @@ async fn run(
 
 impl Harness {
     /// Fabricate the chains, start the network, and start every dealer's
-    /// marshal and probe, seeding each source with the history the input
-    /// selects.
+    /// marshal and probe, seeding each source with the history and the
+    /// checkpoints the input selects.
     async fn setup(
         mut context: deterministic::Context,
         input: &DkgProbeFuzzInput,
+        seeding: Seeding<'_>,
     ) -> (Self, Fixture) {
         let keys = signers(COMMITTEE.get() + 1);
         let identities: Vec<PublicKey> = public_keys(&keys);
@@ -720,6 +853,31 @@ impl Harness {
             let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let prefix = format!("member-{member}");
 
+            // A source's checkpoints are written to the partition its plan
+            // loads them from before the plan opens, as a restarted node's
+            // are. The discovering probe's plan holds nothing.
+            let watch = seeding.watch(&context, member, &prefix).await;
+            let checkpoints = match source {
+                Some(source) => {
+                    let records = seeding.records(input, source, history, [&chain, &foreign]);
+                    seed_checkpoints(&node, &watch, &prefix, &records).await;
+                    records
+                }
+                None => Vec::new(),
+            };
+            seeding.opened(&context, member, &prefix, watch).await;
+            let plan = StateSyncPlan::init(
+                node.child("state_sync_plan"),
+                StateSyncConfig {
+                    partition_prefix: prefix.clone(),
+                    max_participants: COMMITTEE,
+                    max_supported_mode: MAX_SUPPORTED_MODE,
+                    block_codec_config: BLOCK_CFG,
+                },
+                None,
+            )
+            .await;
+
             // Marshal, with its backfill resolver and archives, starting from
             // the genesis of the chain the member holds.
             let backfill = control
@@ -788,6 +946,7 @@ impl Harness {
                     identity: identity.clone(),
                     foreign: input.foreign[source],
                     finalizations: held,
+                    checkpoints,
                 });
             }
 
@@ -860,6 +1019,7 @@ impl Harness {
                 identity: identity.clone(),
                 probe: mailbox,
                 marshal,
+                plan,
                 sender,
                 released: None,
             });
@@ -958,7 +1118,9 @@ impl Harness {
             ProbeEvent::Attach { node } => {
                 let node = usize::from(*node) % self.members.len();
                 let member = &self.members[node];
-                member.probe.attach(member.marshal.clone());
+                member
+                    .probe
+                    .attach(member.marshal.clone(), member.plan.clone());
                 if node == DISCOVERER {
                     self.attached = true;
                     self.ledger.note(ProbeStep::Attached);
@@ -1033,12 +1195,13 @@ impl Harness {
         self.context.sleep(PROBE_STEP).await;
         self.observe();
 
-        // The block the probe awaits, from the responder it asked, resolves
-        // the artifact unseen while no subscription is open. One is opened so
-        // that the artifact shows before the next event: a probe that holds
-        // it answers at once and is otherwise left as it was. A probe whose
-        // marshal is attached serves by then and ignored the block.
-        if self.subscriptions.is_empty() && !self.attached && self.ledger.answered_alone() {
+        // The block of a fetch under way, from a peer the probe asked for it,
+        // resolves the artifact unseen while no subscription is open. One is
+        // opened so that the artifact shows before the next event: a probe
+        // that holds it answers at once and is otherwise left as it was. A
+        // probe whose marshal is attached serves by then and ignored the
+        // block.
+        if self.subscriptions.is_empty() && !self.attached && self.ledger.delivered_block() {
             self.subscribe();
             self.context.sleep(PROBE_STEP).await;
             self.observe();
@@ -1087,14 +1250,169 @@ impl Harness {
 
     /// Let whatever is in flight settle, and learn whether an artifact was
     /// resolved while no subscription was open: the probe keeps it, and a
-    /// final subscription surfaces it.
+    /// final subscription surfaces it. No final subscription is opened once
+    /// an artifact is on record, so the run records the artifact once.
     async fn finish(&mut self) {
         self.context.sleep(PROBE_STEP).await;
         self.observe();
-        self.subscribe();
+        if !self.ledger.resolved() {
+            self.subscribe();
+        }
         self.context.sleep(PROBE_STEP).await;
         self.observe();
     }
+}
+
+#[cfg(test)]
+impl Harness {
+    /// Deliver `bytes`, which a regression test built, to the discovering
+    /// probe as the identity `origin` names.
+    pub(super) fn craft(&self, origin: u8, bytes: Vec<u8>) {
+        self.send(self.origin(origin), ProbeShape::Crafted, bytes);
+    }
+
+    /// Deliver `bytes`, which a regression test built, to the source at
+    /// position `source` as the identity that is not a dealer. What the
+    /// source answers is captured like any of its responses.
+    pub(super) fn ask(&self, source: usize, bytes: Vec<u8>) {
+        let mut sender = self.outsider.1.clone();
+        let target = self.members[source + 1].identity.clone();
+        sender.send(Recipients::One(target), bytes, false);
+    }
+
+    /// Execute one event of a program, as the run does.
+    pub(super) async fn execute(&mut self, event: &ProbeEvent) {
+        self.step(event).await;
+    }
+}
+
+impl Watch {
+    /// `context`, with what is opened or removed through it recorded if the
+    /// seeding is watched.
+    fn touching(&self, context: EngineContext) -> EngineContext {
+        #[cfg(test)]
+        if let Some((_, touched)) = &self.0 {
+            return context.touching(touched.clone());
+        }
+        context
+    }
+}
+
+impl Seeding<'_> {
+    /// Begin watching the seeding of `member`, whose plan's partitions are
+    /// named under `prefix` in `storage`, if a test watches it: read what
+    /// they hold before it.
+    async fn watch(self, storage: &deterministic::Context, member: usize, prefix: &str) -> Watch {
+        #[cfg(test)]
+        {
+            if self.1.is_none() {
+                return Watch(None);
+            }
+            let context = storage
+                .child("watched_plan")
+                .with_attribute("member", member)
+                .with_attribute("read", "before");
+            let before = super::fixtures::plan_under(storage, context, prefix).await;
+            Watch(Some((before, Default::default())))
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (storage, member, prefix);
+            Watch
+        }
+    }
+
+    /// End watching the seeding of `member`: read what its plan's partitions
+    /// hold as its plan opens over them, and record what was seen.
+    async fn opened(
+        self,
+        storage: &deterministic::Context,
+        member: usize,
+        prefix: &str,
+        watch: Watch,
+    ) {
+        #[cfg(test)]
+        if let (Some(seeded), Watch(Some((before, touched)))) = (self.1, watch) {
+            let context = storage
+                .child("watched_plan")
+                .with_attribute("member", member)
+                .with_attribute("read", "opened");
+            let opened = super::fixtures::plan_under(storage, context, prefix).await;
+            let touched = touched.lock().clone();
+            seeded.lock().push(Seeded {
+                member,
+                before,
+                touched,
+                opened,
+            });
+        }
+        #[cfg(not(test))]
+        let _ = (storage, member, prefix, watch);
+    }
+
+    /// The records the plan of the source at `source`, which holds `history`,
+    /// opens over: those the input selects within the source's height, or
+    /// those a regression test builds from the fabricated and foreign
+    /// `chains`.
+    fn records(
+        self,
+        input: &DkgProbeFuzzInput,
+        source: usize,
+        history: &Chain,
+        chains: [&Chain; 2],
+    ) -> Vec<ProbeCheckpoint> {
+        let selected = || {
+            let height = input.sources[source].min(MAX_SOURCE_HEIGHT);
+            history.checkpoints(&input.checkpoints[source], height)
+        };
+        #[cfg(test)]
+        return self
+            .0
+            .map_or_else(selected, |seed| seed(source, chains[0], chains[1]));
+        #[cfg(not(test))]
+        {
+            let _ = chains;
+            selected()
+        }
+    }
+}
+
+/// Write `records` to the checkpoint partition of the node whose storage
+/// partitions are named under `prefix`, in the record format the DKG module
+/// stores: keyed by the epoch, the block as marshal stores it, its
+/// commitment, and an optional finalization.
+async fn seed_checkpoints(
+    node: &EngineContext,
+    watch: &Watch,
+    prefix: &str,
+    records: &[ProbeCheckpoint],
+) {
+    if records.is_empty() {
+        return;
+    }
+    let mut store: Metadata<_, U64, (Block, Digest, Option<ProbeFinalization>)> = Metadata::init(
+        watch.touching(node.child("seeded_checkpoints")),
+        metadata::Config {
+            partition: format!("{prefix}_dkg_checkpoint"),
+            codec_config: (BLOCK_CFG, (), Scheme::certificate_codec_config_unbounded()),
+        },
+    )
+    .await
+    .expect("the checkpoint partition must open");
+    for record in records {
+        store.put(
+            U64::new(record.epoch.get()),
+            (
+                record.block.clone(),
+                record.commitment,
+                record.finalization.clone(),
+            ),
+        );
+    }
+    store
+        .sync()
+        .await
+        .expect("the checkpoint partition must sync");
 }
 
 #[cfg(test)]
@@ -1102,9 +1420,9 @@ mod tests {
     use super::*;
     use crate::dkg::{
         fixtures::{decode, sample},
-        probe_input::drawable,
+        probe_input::{FINALIZED, drawable},
     };
-    use commonware_consensus::Epochable as _;
+    use commonware_consensus::{Epochable as _, Heightable as _};
     use commonware_runtime::{Runner as _, Spawner as _};
 
     /// Run one input whose program the decoder can draw, and return what was
@@ -1143,6 +1461,7 @@ mod tests {
             floor: None,
             sharing_mode: Mode::NonZeroCounter,
             events,
+            checkpoints: [FINALIZED; SOURCES],
             raw_bytes: tape(seed),
         }
     }
@@ -1544,8 +1863,10 @@ mod tests {
     /// The whole block from an identity the block was not requested from
     /// resolves nothing, so the probe still awaits its boundary and what it
     /// is sent next is still judged: a foreign boundary finalization and a
-    /// cut block from the responder are blocked, and the run resolves from
-    /// the responder once it is asked again.
+    /// cut block from the responder are blocked. The fetch then no longer
+    /// counts the responder among the peers it asked for the block, so the
+    /// responder's whole block resolves nothing until a new pass asks it
+    /// again, and none does without a retry.
     #[test]
     fn block_from_another_identity_leaves_the_boundary_awaited() {
         let events = [
@@ -1560,9 +1881,8 @@ mod tests {
         let observed = observe(input);
         let report = measure(&observed);
         println!("{report}");
-        assert!(report.measured());
-        assert_eq!(report.counts.artifacts, 2, "{report}");
-        assert_eq!(report.counts.block_replies, 2, "{report}");
+        assert_eq!(report.counts.artifacts, 0, "{report}");
+        assert_eq!(report.counts.block_replies, 1, "{report}");
         assert_eq!(report.counts.deliveries, 8, "{report}");
         assert_eq!(report.counts.refusals, 2, "{report}");
         assert_eq!(report.counts.blocks, 2, "{report}");
@@ -1581,7 +1901,7 @@ mod tests {
     /// from the responder the block was requested from must not be blocked,
     /// nor one from anyone else. That holds as well when the responder
     /// delivered the whole block with no subscription open: the subscription
-    /// the driver then opens shows the artifact.
+    /// the driver then opens shows the artifact, once.
     #[test]
     fn cut_block_after_the_block_is_judged_once_the_artifact_is_seen() {
         let cuts = [
@@ -1603,7 +1923,7 @@ mod tests {
         let mut events = UNSEEN.to_vec();
         events.extend(cuts);
         let report = discovered(input([3, 3, 3], program(&[0, 1], &events), 44));
-        assert_eq!(report.counts.artifacts, 2, "{report}");
+        assert_eq!(report.counts.artifacts, 1, "{report}");
         assert_eq!(report.counts.deliveries, 7, "{report}");
         assert_eq!(report.counts.admissions, 7, "{report}");
         assert_eq!(report.counts.unsettled, 0, "{report}");
@@ -1786,15 +2106,15 @@ mod tests {
     }
 
     /// An artifact resolved while no subscription is open is kept: the
-    /// subscription the driver opens to show it and the run's closing one
-    /// both resolve with it.
+    /// subscription the driver opens to show it resolves with it, and the run
+    /// opens no closing subscription once it is on record.
     #[test]
     fn artifact_resolved_unseen_is_checked() {
         let observed = observe(input([3, 3, 3], program(&[0, 1], &UNSEEN), 23));
         let report = measure(&observed);
         println!("{report}");
         assert!(report.measured(), "{report}");
-        assert_eq!(report.counts.artifacts, 2, "{report}");
+        assert_eq!(report.counts.artifacts, 1, "{report}");
         let steps = &observed.run.steps;
         let block = steps
             .iter()
@@ -1831,15 +2151,17 @@ mod tests {
         assert_eq!(subscribed, 2, "{report}");
     }
 
-    /// A selector reaches a source's older responses: its block while the
-    /// probe awaits a boundary finalization again, which is ignored, and its
-    /// latest finalization from the identity that is not a dealer, which is
-    /// no longer judged.
+    /// A selector reaches a source's older responses: its boundary
+    /// finalization of the second pass behind its newest latest reply, and
+    /// that finalization again, relayed by the identity that is not a dealer,
+    /// which the probe takes from it.
     #[test]
     fn older_responses_are_released_by_selector() {
-        // After the retry the probe has no responder left and asks everyone
-        // for the boundary finalization again, so the first source's newest
-        // response is that finalization and the one before it its block.
+        // After the retry the pass has no responder left, so the probe asks
+        // everyone for the boundary finalization again and the dealers for
+        // their latest finalizations: the first source's newest response is
+        // its latest finalization and the one before it that boundary
+        // finalization.
         let events = [
             RETRY,
             ProbeEvent::Release {
@@ -1853,7 +2175,7 @@ mod tests {
         let report = measure(&observed);
         println!("{report}");
         assert_eq!(report.counts.artifacts, 0, "{report}");
-        assert_eq!(report.counts.block_replies, 1, "{report}");
+        assert_eq!(report.counts.block_replies, 2, "{report}");
         assert_eq!(report.counts.admissions, 5, "{report}");
         assert_eq!(report.counts.blocks, 0, "{report}");
         let sent: Vec<_> = observed
@@ -1867,7 +2189,9 @@ mod tests {
             .collect();
 
         // The first source built its latest finalization, the boundary
-        // finalization, its block, and the boundary finalization again.
+        // finalization, its block, the boundary finalization of the second
+        // pass, its latest finalization of the second round, and its block
+        // again, asked for once the probe accepted that boundary finalization.
         let first: Vec<_> = observed
             .run
             .captures
@@ -1876,13 +2200,13 @@ mod tests {
             .filter(|(_, capture)| capture.source == 0)
             .map(|(position, _)| position)
             .collect();
-        assert_eq!(first.len(), 4);
+        assert_eq!(first.len(), 6);
         assert_eq!(
             sent[2..],
             [
                 ProbeShape::Response(first[1]),
-                ProbeShape::Response(first[2]),
-                ProbeShape::Response(first[0]),
+                ProbeShape::Response(first[3]),
+                ProbeShape::Response(first[3]),
             ]
         );
 
@@ -1893,6 +2217,23 @@ mod tests {
             ProbeEvent::Release { source: 0 },
         ]);
         discovered(input([3, 3, 3], program(&[0, 1, 0], &events), 41));
+    }
+
+    /// A watched seeding has what it saw of every member's plan on record,
+    /// the discovering probe's first.
+    #[test]
+    fn watched_seeding_lists_every_member() {
+        let (observed, seeded) = observe_seeding(
+            input([3, 3, 3], program(&DISCOVERY, &[]), 31),
+            None,
+            async |_, _| {},
+        );
+        for seen in &seeded {
+            println!("{seen:?}");
+        }
+        let members: Vec<_> = seeded.iter().map(|seen| seen.member).collect();
+        assert_eq!(members, [0, 1, 2, 3]);
+        assert_eq!(observed.run.sources.len(), 3);
     }
 
     /// A control beyond what the fabricated chain holds selects the last the
@@ -2479,24 +2820,25 @@ mod tests {
         measure(&observed);
     }
 
-    /// I13 negative control: a second subscription resolved with another
-    /// artifact than the first.
+    /// I13 negative control: a second subscription, opened after the run,
+    /// resolved with another artifact than the first.
     #[test]
     #[should_panic(expected = "I13 violated: engine 0 emitted a second, different artifact")]
     fn second_different_artifact_is_rejected() {
         let mut observed = sampled();
         let other = observed.run.chain.boundaries[&Epoch::new(2)].1.clone();
-        let second = observed
+        let mut second = observed
             .run
             .steps
-            .iter_mut()
-            .filter_map(|step| match step {
-                ProbeStep::Resolved(artifact) => Some(artifact),
+            .iter()
+            .find_map(|step| match step {
+                ProbeStep::Resolved(artifact) => Some(artifact.clone()),
                 _ => None,
             })
-            .nth(1)
-            .expect("the closing subscription resolved");
+            .expect("the run resolved an artifact");
         second.info = other;
+        observed.run.steps.push(ProbeStep::Subscribed);
+        observed.run.steps.push(ProbeStep::Resolved(second));
         measure(&observed);
     }
 
@@ -2657,15 +2999,6 @@ mod tests {
         measure(&observed);
     }
 
-    /// Remove every block the discovering probe placed from the record.
-    fn unblock(observed: &mut Observations) {
-        observed
-            .run
-            .steps
-            .retain(|step| !matches!(step, ProbeStep::Blocked { .. }));
-        observed.run.blocked.clear();
-    }
-
     /// Plant a block of the sender of the run's last delivery, placed while
     /// the probe processed it and recorded by the network.
     fn block_last(observed: &mut Observations) {
@@ -2707,9 +3040,10 @@ mod tests {
     }
 
     /// A foreign boundary finalization relayed by the identity that is not a
-    /// dealer is ignored while the probe holds that identity as its
-    /// responder, and blocked once the probe has asked the next responder
-    /// instead, which shows that it dropped the identity.
+    /// dealer is ignored while the fetch holds that identity as a responder
+    /// of its pass, and still ignored once the retry has asked the next
+    /// responder for the block: the pass has not ended, so the identity is
+    /// held for the rest of it.
     #[test]
     fn foreign_boundary_is_judged_by_the_responders_held() {
         let foreign = ProbeEvent::Replay { source: 2 };
@@ -2725,14 +3059,10 @@ mod tests {
         let report = measure(&observed);
         println!("{report}");
         assert_eq!(report.counts.deliveries, 5, "{report}");
-        assert_eq!(report.counts.refusals, 1, "{report}");
+        assert_eq!(report.counts.admissions, 5, "{report}");
         assert_eq!(report.counts.unsettled, 0, "{report}");
-        assert_eq!(report.counts.blocks, 1, "{report}");
+        assert_eq!(report.counts.blocks, 0, "{report}");
         let run = &observed.run;
-        assert_eq!(
-            run.blocked,
-            vec![(run.discoverer.clone(), run.outsider.clone())]
-        );
         let asked: Vec<_> = run
             .steps
             .iter()
@@ -2751,14 +3081,15 @@ mod tests {
     }
 
     /// I14 negative control: a foreign boundary finalization relayed by a
-    /// responder the probe dropped, whose sender was not blocked.
+    /// responder the probe still holds after the retry asked the next
+    /// responder for the block, whose sender was blocked.
     #[test]
     #[should_panic(
-        expected = "I14 violated: the identity that is not a dealer was not blocked for delivery 4"
+        expected = "I14 violated: the identity that is not a dealer was blocked for delivery 4"
     )]
-    fn unblocked_foreign_boundary_from_a_dropped_responder_is_rejected() {
+    fn block_of_a_held_responder_after_the_retry_for_a_foreign_boundary_is_rejected() {
         let mut observed = observe(responders(&[RETRY, ProbeEvent::Replay { source: 2 }]));
-        unblock(&mut observed);
+        block_last(&mut observed);
         measure(&observed);
     }
 
@@ -2787,29 +3118,29 @@ mod tests {
     ];
 
     /// A probe with no subscriber selects no floor however many replies it
-    /// is sent, so it still refuses a latest reply from the identity that is
-    /// not a dealer.
+    /// is sent, and ignores every latest reply before any check, so a latest
+    /// reply from the identity that is not a dealer is ignored too.
     #[test]
-    fn non_dealer_is_refused_while_no_subscriber_holds_the_sample() {
+    fn non_dealer_is_ignored_while_no_subscriber_holds_the_sample() {
         let mut events = DROPPED.to_vec();
         events.push(ProbeEvent::Replay { source: 0 });
         let report = undiscovered(input([3, 3, 3], program(&[], &events), 50));
         assert_eq!(report.counts.fetches, 0, "{report}");
-        assert_eq!(report.counts.refusals, 1, "{report}");
-        assert_eq!(report.counts.blocks, 1, "{report}");
+        assert_eq!(report.counts.refusals, 0, "{report}");
+        assert_eq!(report.counts.blocks, 0, "{report}");
         assert_eq!(report.counts.unsettled, 0, "{report}");
     }
 
     /// I14 negative control: a latest reply from the identity that is not a
     /// dealer, sent to a probe with no subscriber after two valid replies,
-    /// whose sender was not blocked.
+    /// which the probe ignores, whose sender was blocked.
     #[test]
-    #[should_panic(expected = "I14 violated: the identity that is not a dealer was not blocked")]
-    fn unblocked_non_dealer_after_a_dropped_sample_is_rejected() {
+    #[should_panic(expected = "I14 violated: the identity that is not a dealer was blocked")]
+    fn block_of_a_non_dealer_after_a_dropped_sample_is_rejected() {
         let mut events = DROPPED.to_vec();
         events.push(ProbeEvent::Replay { source: 0 });
         let mut observed = observe(input([3, 3, 3], program(&[], &events), 50));
-        unblock(&mut observed);
+        block_last(&mut observed);
         measure(&observed);
     }
 
@@ -2934,5 +3265,106 @@ mod tests {
     #[should_panic(expected = "I8 violated: a task of no engine panicked")]
     fn harness_panic_is_rejected() {
         faulted(Stage::Started, Fault::HarnessPanic);
+    }
+
+    /// A source's plan opens over the checkpoints the input selects within
+    /// its height, each record the source chain's introducing block.
+    #[test]
+    fn selected_checkpoints_stay_within_each_source_height() {
+        let mut input = input([1, 3, 5], vec![], 60);
+        input.checkpoints[2][1] = SourceCheckpoint::Missing;
+        input.checkpoints[2][2] = SourceCheckpoint::Unfinalized;
+        let observed = observe(input);
+        let held = |source: usize| -> Vec<(u64, bool)> {
+            observed.run.sources[source]
+                .checkpoints
+                .iter()
+                .map(|record| (record.epoch.get(), record.finalization.is_some()))
+                .collect()
+        };
+        assert_eq!(held(0), [(0, false), (1, true)]);
+        assert_eq!(held(1), [(0, false), (1, true), (2, true)]);
+        assert_eq!(held(2), [(0, false), (2, false), (3, true)]);
+        for record in observed
+            .run
+            .sources
+            .iter()
+            .flat_map(|source| &source.checkpoints)
+        {
+            assert_eq!(
+                record.block.height().get(),
+                introducing(record.epoch.get() as usize)
+            );
+            assert_eq!(record.commitment, record.block.digest());
+            if let Some(finalization) = &record.finalization {
+                assert_eq!(finalization.proposal.payload, record.commitment);
+            }
+        }
+    }
+
+    /// Records a seed builds replace those the input selects, beyond the
+    /// source's height too.
+    #[test]
+    fn seeded_records_replace_the_selected_checkpoints() {
+        let seed = |source: usize, chain: &Chain, _: &Chain| {
+            if source == 0 {
+                vec![chain.checkpoint(2, true)]
+            } else {
+                Vec::new()
+            }
+        };
+        let observed = observe_with_seed(input([1, 3, 3], vec![], 61), &seed, async |_, _| {});
+        let records = &observed.run.sources[0].checkpoints;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].epoch, Epoch::new(2));
+        assert!(records[0].finalization.is_some());
+        assert!(observed.run.sources[1].checkpoints.is_empty());
+    }
+
+    /// A request a test delivers to a source is answered, and the answer is
+    /// captured with the request it answers.
+    #[test]
+    fn asked_source_answers_are_captured_with_their_request() {
+        let observed = observe_planted(
+            input([3, 3, 3], vec![ProbeEvent::Attach { node: 1 }], 62),
+            async |harness, stage| {
+                if stage == Stage::Closing {
+                    // A request for latest finalizations is taken whatever
+                    // follows its tag, so this one is told from the probe's.
+                    harness.ask(0, vec![4, 9]);
+                    harness.execute(&ProbeEvent::Advance { steps: 1 }).await;
+                }
+            },
+        );
+        let answers: Vec<_> = observed
+            .run
+            .captures
+            .iter()
+            .filter(|capture| capture.request == [4, 9])
+            .collect();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].source, 0);
+    }
+
+    /// Bytes a test builds are delivered as its origin and judged by their
+    /// tag.
+    #[test]
+    fn crafted_bytes_are_judged_by_their_tag() {
+        let observed = observe_planted(input([3, 3, 3], vec![], 63), async |harness, stage| {
+            if stage == Stage::Started {
+                harness.craft(SOURCES as u8, vec![PROBE_TAGS]);
+                harness.execute(&ProbeEvent::Advance { steps: 1 }).await;
+            }
+        });
+        let report = measure(&observed);
+        assert_eq!(report.counts.deliveries, 1, "{report}");
+        assert_eq!(report.counts.refusals, 1, "{report}");
+        assert_eq!(
+            observed.run.blocked,
+            vec![(
+                observed.run.discoverer.clone(),
+                observed.run.outsider.clone()
+            )]
+        );
     }
 }

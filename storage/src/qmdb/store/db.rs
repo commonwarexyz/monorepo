@@ -11,22 +11,25 @@ use crate::{
     merkle::mmr::Location,
     qmdb::{
         any::{
-            BITMAP_CHUNK_BYTES,
+            BITMAP_CHUNK_BYTES, read_many_map,
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
         build_snapshot_from_log, delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
-        operation::{Committable as _, Floored as _, Key, Operation as _},
-        update_known_loc,
-        value::VariableValue,
+        metrics::Metrics,
+        operation::{Committable as _, Key, Operation as _},
+        selection_error, update_known_loc, validate_initialization_bound,
+        validate_initialization_commit,
+        value::{VariableEncoding, VariableValue},
     },
     translator::Translator,
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
+use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
-use commonware_utils::{Widen, bitmap, iter::zip_eq};
+use commonware_utils::{Widen, bitmap};
 use core::{borrow::Borrow, num::NonZeroUsize};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
@@ -35,7 +38,7 @@ type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 /// Configuration for initializing a [Db].
 #[derive(Clone)]
-pub struct Config<T: Translator, C> {
+pub struct Config<T: Translator, C, S: Strategy> {
     /// Configuration for the variable-size operations log journal.
     pub log: JournalConfig<C>,
 
@@ -48,6 +51,9 @@ pub struct Config<T: Translator, C> {
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
+
+    /// The strategy used to parallelize batched reads.
+    pub strategy: S,
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
@@ -72,26 +78,28 @@ impl<K: Key, V: CodecShared + Clone, const N: usize> From<[(K, Option<V>); N]> f
 }
 
 /// A mutable batch of writes and deletes staged against the current store state.
-pub struct Batch<'a, E, K, V, T>
+pub struct Batch<'a, E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
-    db: &'a Db<E, K, V, T>,
+    db: &'a Db<E, K, V, T, S>,
     diff: BTreeMap<K, Option<V>>,
     metadata: Option<V>,
 }
 
-impl<'a, E, K, V, T> Batch<'a, E, K, V, T>
+impl<'a, E, K, V, T, S> Batch<'a, E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
-    const fn new(db: &'a Db<E, K, V, T>) -> Self {
+    const fn new(db: &'a Db<E, K, V, T, S>) -> Self {
         Self {
             db,
             diff: BTreeMap::new(),
@@ -159,12 +167,13 @@ where
 }
 
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
-pub struct Db<E, K, V, T>
+pub struct Db<E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
     /// A log of all [Operation]s that have been applied to the store.
     ///
@@ -197,14 +206,21 @@ where
     /// A location before which all operations are "inactive" (that is, operations before this point
     /// are over keys that have been updated by some operation at or after this point).
     inactivity_floor_loc: Location,
+
+    /// Metrics for this database.
+    metrics: Metrics<E>,
+
+    /// The strategy used to parallelize batched reads.
+    strategy: S,
 }
 
-impl<E, K, V, T> std::fmt::Debug for Db<E, K, V, T>
+impl<E, K, V, T, S> std::fmt::Debug for Db<E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
@@ -214,17 +230,23 @@ where
     }
 }
 
-impl<E, K, V, T> Db<E, K, V, T>
+impl<E, K, V, T, S> Db<E, K, V, T, S>
 where
     E: Context,
     K: Key,
     V: VariableValue,
     T: Translator,
+    S: Strategy,
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for &loc in self.snapshot.get(key) {
-            let Operation::Update(Update(k, v)) = self.get_op(loc).await? else {
+        let _timer = self.metrics.get_timer();
+        self.metrics.get_calls.inc();
+        self.metrics.lookups_requested.inc();
+
+        // Translated keys can collide, so read candidates until the full key matches.
+        for &loc in self.snapshot.get(key.as_ref()) {
+            let Operation::Update(Update(k, v)) = self.log.read(*loc).await? else {
                 unreachable!("location does not reference update operation. loc={loc}");
             };
 
@@ -240,68 +262,26 @@ where
     ///
     /// Accepts slices of owned or borrowed keys and returns results in input order.
     pub async fn get_many(&self, keys: &[impl Borrow<K> + Sync]) -> Result<Vec<Option<V>>, Error> {
-        // Read every location the index reports for any key in one batched read.
-        let mut candidates: Vec<(Location, usize)> = keys
-            .iter()
-            .enumerate()
-            .flat_map(|(index, key)| {
-                self.snapshot
-                    .get(key.borrow())
-                    .map(move |&loc| (loc, index))
-            })
-            .collect();
-        candidates.sort();
-        let mut locs: Vec<u64> = candidates.iter().map(|&(loc, _)| *loc).collect();
-        locs.dedup();
-        let ops = self.log.read_many(&locs).await.map_err(|e| match e {
-            crate::journal::Error::ItemPruned(pos) => Error::OperationPruned(Location::new(pos)),
-            e => Error::Journal(e),
-        })?;
-
-        let mut values = vec![None; keys.len()];
-        for (op, group) in zip_eq(ops, candidates.chunk_by(|a, b| a.0 == b.0)) {
-            let Operation::Update(Update(k, v)) = op else {
-                unreachable!(
-                    "location does not reference update operation. loc={}",
-                    group[0].0
-                );
-            };
-            // Clone for earlier matching slots and move the decoded value into the last.
-            let mut pending = None;
-            for &(_, index) in group {
-                if &k != keys[index].borrow() {
-                    continue;
-                }
-                if let Some(previous) = pending.replace(index) {
-                    values[previous] = Some(v.clone());
-                }
-            }
-            if let Some(last) = pending {
-                values[last] = Some(v);
-            }
+        if keys.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(values)
+
+        let _timer = self.metrics.get_many_timer();
+        self.metrics.get_many_calls.inc();
+        self.metrics.lookups_requested.inc_by(keys.len() as u64);
+
+        let value = |update: Update<K, VariableEncoding<V>>, _| update.1;
+        Ok(read_many_map(&self.snapshot, &self.log, &self.strategy, keys, value).await?)
     }
 
     /// Returns a new empty batch of changes.
-    pub const fn new_batch(&self) -> Batch<'_, E, K, V, T> {
+    pub const fn new_batch(&self) -> Batch<'_, E, K, V, T, S> {
         Batch::new(self)
     }
 
     /// Whether the db currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
-    }
-
-    /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
-    /// if the location precedes the oldest retained location. The location is otherwise assumed
-    /// valid.
-    async fn get_op(&self, loc: Location) -> Result<Operation<crate::mmr::Family, K, V>, Error> {
-        assert!(*loc < self.log.bounds().end);
-        self.log.read(*loc).await.map_err(|e| match e {
-            crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
-            e => Error::Journal(e),
-        })
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
@@ -315,6 +295,17 @@ where
     /// known to be inactive. Operations before this point can be safely pruned.
     pub const fn inactivity_floor(&self) -> Location {
         self.inactivity_floor_loc
+    }
+
+    /// Update state gauges from the current database state.
+    fn update_metrics(&self) {
+        let bounds = self.log.bounds();
+        self.metrics.update(
+            bounds.end,
+            bounds.start,
+            *self.inactivity_floor_loc,
+            bounds.end - 1,
+        );
     }
 
     /// Get the metadata associated with the last commit.
@@ -332,8 +323,11 @@ where
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
+    #[tracing::instrument(name = "qmdb.store.db.prune", level = "info", skip_all)]
     #[boxed]
     pub async fn prune(mut self, prune_loc: Location) -> Result<Self, Error> {
+        let _timer = self.metrics.prune_timer();
+        self.metrics.prune_calls.inc();
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -364,6 +358,7 @@ where
             ?prune_loc,
             "pruned inactive ops"
         );
+        self.update_metrics();
 
         Ok(self)
     }
@@ -374,28 +369,30 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
+        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg, S>,
         max_size: Option<Location>,
     ) -> Result<Self, Error> {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
         // recovery owner unpublished until that commit and its replay floor are validated.
-        crate::qmdb::validate_initialization_bound(max_size)?;
+        validate_initialization_bound(max_size)?;
         let pending = Journal::<E, Operation<crate::mmr::Family, K, V>>::recover(
             context.child("log"),
             cfg.log,
             max_size.map(|size| *size),
         )
-        .await?;
+        .await
+        .map_err(|err| selection_error(err, max_size))?;
         let size = pending
             .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
-            .await?;
+            .await
+            .map_err(|err| selection_error(err, max_size))?;
         let bounds = pending.bounds();
         let commit = if size == 0 {
             None
         } else {
             Some(pending.read(size - 1).await?)
         };
-        crate::qmdb::validate_initialization_commit(
+        validate_initialization_commit(
             bounds.start,
             size,
             bounds == (0..0),
@@ -415,23 +412,21 @@ where
         let mut log = pending.finish(size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
-            (log, _) = log
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (log, _) = log.append(&Operation::initial_commit()).await?;
         }
 
         // Persist recovery repairs and any genesis commit so the next startup need not repeat them.
         let log = log.sync().await?;
 
-        let last_commit_loc =
-            Location::new(log.size().checked_sub(1).expect("commit should exist"));
+        let size = Location::new(log.size());
+        let inactivity_floor_loc = crate::qmdb::commit_floor_at(&log, size)
+            .await?
+            .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
 
         // Build the snapshot only from the durable selected prefix.
         let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-        let op = log.read(*last_commit_loc).await?;
-        let inactivity_floor_loc = op.inactivity_floor().expect("last op should be a commit");
 
         // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
         // below the inactivity floor are inactive.
@@ -461,20 +456,27 @@ where
         .await?;
         assert_eq!(bitmap.len(), bounds.end);
 
-        Ok(Self {
+        let db = Self {
             log,
             snapshot,
             active_keys,
             bitmap,
             inactivity_floor_loc,
-        })
+            metrics: Metrics::new(context),
+            strategy: cfg.strategy,
+        };
+        db.update_metrics();
+        Ok(db)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
+    #[tracing::instrument(name = "qmdb.store.db.sync", level = "info", skip_all)]
     #[boxed]
     pub async fn sync(mut self) -> Result<Self, Error> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
         self.log = self.log.sync().await?;
         Ok(self)
     }
@@ -503,6 +505,7 @@ where
 
     /// Like [`Self::apply_batch`], but walks the inactivity floor with `policy` instead of
     /// [`Proportional`].
+    #[tracing::instrument(name = "qmdb.store.db.apply_batch", level = "info", skip_all)]
     #[boxed]
     pub async fn apply_batch_with<P>(
         mut self,
@@ -512,69 +515,12 @@ where
     where
         P: Policy<crate::mmr::Family, K, V>,
     {
+        let _timer = self.metrics.apply_batch_timer();
+        self.metrics.apply_batch_calls.inc();
         let start_loc = Location::new(self.log.size());
         let Changeset { diff, metadata } = batch;
 
-        let mut resolved = {
-            // Resolve each written key to its applied update, if any, by reading its
-            // translated-key bucket in rounds sized by the bucket's unresolved batch keys: a
-            // sparse write stops at its matching update, while a batch covering the bucket reads
-            // all its updates together.
-            //
-            // Keys sharing a translated key see the same bucket in the same order, so the
-            // bucket's first location identifies it. Each source pairs a bucket's unread
-            // locations with the number of its batch keys still unresolved. A key with an empty
-            // bucket is absent and needs no read.
-            let mut buckets = HashMap::<Location, usize>::new();
-            let mut sources: Vec<(_, usize)> = Vec::new();
-            for key in diff.keys() {
-                let mut locations = self.snapshot.get(key);
-                let Some(&first) = locations.next() else {
-                    continue;
-                };
-                if let Some(&index) = buckets.get(&first) {
-                    sources[index].1 += 1;
-                } else {
-                    buckets.insert(first, sources.len());
-                    sources.push((core::iter::once(first).chain(locations.copied()), 1));
-                }
-            }
-
-            // A round takes from every live source as many unread locations as it has
-            // unresolved keys and reads them in one ascending batch. A source that yields
-            // nothing has run out, so its remaining keys are absent, and it leaves at the next
-            // round.
-            let mut resolved = HashMap::new();
-            let mut candidates = Vec::new();
-            loop {
-                candidates.clear();
-                sources.retain(|(_, pending)| *pending > 0);
-                for (index, (locations, pending)) in sources.iter_mut().enumerate() {
-                    let before = candidates.len();
-                    candidates.extend(locations.by_ref().take(*pending).map(|loc| (loc, index)));
-                    if candidates.len() == before {
-                        *pending = 0;
-                    }
-                }
-                if candidates.is_empty() {
-                    break;
-                }
-                candidates.sort_unstable_by_key(|(loc, _)| *loc);
-                let positions: Vec<_> = candidates.iter().map(|(loc, _)| **loc).collect();
-                let read = self.log.read_many(&positions).await?;
-
-                // A read update resolves its key when the batch writes that key; a collision
-                // sibling the batch leaves alone is passed over.
-                for ((loc, index), op) in candidates.iter().zip(read) {
-                    let key = op.into_key().expect("snapshot operation has key");
-                    if diff.contains_key(&key) {
-                        resolved.insert(key, *loc);
-                        sources[*index].1 -= 1;
-                    }
-                }
-            }
-            resolved
-        };
+        let mut resolved = self.resolve_written(&diff).await?;
 
         // Generate operations in key order. Earlier writes can change a bucket's layout, but
         // each surviving original update still has its resolved location.
@@ -585,7 +531,7 @@ where
             let old_loc = resolved.remove(&key);
             let matches = |loc: &Location| Some(*loc) == old_loc;
             if let Some(value) = value {
-                if let Some(mut cursor) = self.snapshot.get_mut_or_insert(&key, new_loc) {
+                if let Some(mut cursor) = self.snapshot.get_mut_or_insert(key.as_ref(), new_loc) {
                     if cursor.find(matches) {
                         cursor.update(new_loc);
                     } else {
@@ -601,7 +547,7 @@ where
                 self.bitmap.push(true);
                 ops.push(Operation::Update(Update(key, value)));
             } else if let Some(old_loc) = old_loc {
-                delete_known_loc(&mut self.snapshot, &key, old_loc);
+                delete_known_loc(&mut self.snapshot, key.as_ref(), old_loc);
                 self.bitmap.set_bit(*old_loc, false);
                 self.bitmap.push(false);
                 ops.push(Operation::Delete(key));
@@ -631,8 +577,88 @@ where
         self.bitmap.push(true);
         ops.push(Operation::Commit(metadata, self.inactivity_floor_loc));
         (self.log, _) = self.log.append_many(Many::Flat(&ops)).await?;
+        self.update_metrics();
+        self.metrics.operations_applied.inc_by(ops.len() as u64);
 
         Ok(self)
+    }
+
+    /// Resolve each key that `diff` writes to the location of its applied update, if it has one.
+    ///
+    /// Each translated-key bucket is read in rounds sized by its unresolved batch keys: a sparse
+    /// write stops at its matching update, while a batch covering the bucket reads all its updates
+    /// together.
+    async fn resolve_written(
+        &self,
+        diff: &BTreeMap<K, Option<V>>,
+    ) -> Result<HashMap<K, Location>, Error> {
+        /// A translated-key bucket that at least one written key maps to.
+        struct Bucket<L> {
+            /// The bucket's locations not yet read.
+            unread: L,
+            /// The number of written keys in the bucket not yet resolved.
+            pending: usize,
+        }
+
+        // Keys sharing a translated key see the same bucket in the same order, so the bucket's
+        // first location identifies it. A key with an empty bucket is absent and needs no read.
+        let mut indices = HashMap::<Location, usize>::new();
+        let mut buckets: Vec<Bucket<_>> = Vec::new();
+        for key in diff.keys() {
+            let mut locations = self.snapshot.get(key.as_ref());
+            let Some(&first) = locations.next() else {
+                continue;
+            };
+            if let Some(&index) = indices.get(&first) {
+                buckets[index].pending += 1;
+            } else {
+                indices.insert(first, buckets.len());
+                buckets.push(Bucket {
+                    unread: core::iter::once(first).chain(locations.copied()),
+                    pending: 1,
+                });
+            }
+        }
+
+        // A round takes from every live bucket as many unread locations as it has unresolved
+        // keys and reads them in one ascending batch. A bucket that yields nothing has run out,
+        // so its remaining keys are absent, and it leaves at the next round.
+        let mut resolved = HashMap::new();
+        let mut candidates = Vec::new();
+        loop {
+            candidates.clear();
+            buckets.retain(|bucket| bucket.pending > 0);
+            for (index, bucket) in buckets.iter_mut().enumerate() {
+                let before = candidates.len();
+                candidates.extend(
+                    bucket
+                        .unread
+                        .by_ref()
+                        .take(bucket.pending)
+                        .map(|loc| (loc, index)),
+                );
+                if candidates.len() == before {
+                    bucket.pending = 0;
+                }
+            }
+            if candidates.is_empty() {
+                break;
+            }
+            candidates.sort_unstable_by_key(|(loc, _)| *loc);
+            let positions: Vec<_> = candidates.iter().map(|(loc, _)| **loc).collect();
+            let read = self.log.read_many(&positions).await?;
+
+            // A read update resolves its key when the batch writes that key. A collision sibling
+            // the batch leaves alone is passed over.
+            for ((loc, index), op) in candidates.iter().zip(read) {
+                let key = op.into_key().expect("snapshot operation has key");
+                if diff.contains_key(&key) {
+                    resolved.insert(key, *loc);
+                    buckets[*index].pending -= 1;
+                }
+            }
+        }
+        Ok(resolved)
     }
 
     /// Advance `walk` over the active updates below its end, deciding each one with `policy`.
@@ -695,12 +721,17 @@ where
                 .into_action();
             let op = match action {
                 Action::Write(value) => {
-                    update_known_loc(&mut self.snapshot, &key, Location::new(loc), new_loc);
+                    update_known_loc(
+                        &mut self.snapshot,
+                        key.as_ref(),
+                        Location::new(loc),
+                        new_loc,
+                    );
                     self.bitmap.push(true);
                     Operation::Update(Update(key, value))
                 }
                 Action::Evict => {
-                    delete_known_loc(&mut self.snapshot, &key, Location::new(loc));
+                    delete_known_loc(&mut self.snapshot, key.as_ref(), Location::new(loc));
                     self.active_keys -= 1;
                     self.bitmap.push(false);
                     Operation::Delete(key)
@@ -733,16 +764,21 @@ where
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed offsets or recovery-watermark sync is not
     /// observed by [Self::commit] and resurfaces on the next [Self::sync].
+    #[tracing::instrument(name = "qmdb.store.db.start_sync", level = "info", skip_all)]
     #[boxed]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        self.metrics.start_sync_calls.inc();
         let handle;
         (self.log, handle) = self.log.start_sync().await?;
         Ok((self, handle))
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`] calls.
+    #[tracing::instrument(name = "qmdb.store.db.commit", level = "info", skip_all)]
     #[boxed]
     pub async fn commit(mut self) -> Result<Self, Error> {
+        let _timer = self.metrics.commit_timer();
+        self.metrics.commit_calls.inc();
         self.log = self.log.commit().await?;
         Ok(self)
     }
@@ -771,8 +807,9 @@ mod test {
     };
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Runner, Spawner as _, Supervisor as _,
+        Metrics as _, Runner, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -798,10 +835,13 @@ mod test {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     /// The type of the store used in tests.
-    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
+    type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>;
 
-    fn test_config() -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg>
-    {
+    /// The configuration type of [TestStore].
+    type TestConfig =
+        Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg, Sequential>;
+
+    fn test_config() -> TestConfig {
         Config {
             log: JournalConfig {
                 partition: "journal".into(),
@@ -815,6 +855,7 @@ mod test {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
+            strategy: Sequential,
         }
     }
 
@@ -831,6 +872,79 @@ mod test {
         let db = db.apply_batch(iter.into_iter().collect()).await.unwrap();
         let applied_end = db.bounds().end;
         (db, applied_start..applied_end)
+    }
+
+    #[test_traced("INFO")]
+    fn test_store_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = create_test_store(ctx.child("db")).await;
+            let key = Digest::random(ctx.child("key"));
+            let value = vec![7u8; 8];
+            let batch = db.new_batch().write(key, Some(value.clone())).finalize();
+            let db = db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap(), Some(value.clone()));
+            assert_eq!(db.get_many(&[key]).await.unwrap(), vec![Some(value)]);
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            let (db, handle) = db.start_sync().await.unwrap();
+            handle.await.unwrap();
+            let _db = db.prune(Location::new(0)).await.unwrap();
+
+            // The log holds the initial commit, the update, the copy the floor walk moved to
+            // the tip, and the batch's commit.
+            let metrics = ctx.encode();
+            for expected in [
+                "db_size 4",
+                "db_pruning_boundary 0",
+                "db_retained 4",
+                "db_inactivity_floor 2",
+                "db_last_commit 3",
+                "db_operations_applied_total 3",
+                "db_get_calls_total 1",
+                "db_get_many_calls_total 1",
+                "db_lookups_requested_total 2",
+                "db_apply_batch_calls_total 1",
+                "db_commit_calls_total 1",
+                "db_sync_calls_total 1",
+                "db_start_sync_calls_total 1",
+                "db_prune_calls_total 1",
+                "db_get_duration_count 1",
+                "db_get_many_duration_count 1",
+                "db_apply_batch_duration_count 1",
+                "db_commit_duration_count 1",
+                "db_sync_duration_count 1",
+                "db_prune_duration_count 1",
+            ] {
+                assert!(metrics.contains(expected), "missing {expected}\n{metrics}");
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_store_prune_updates_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut cfg = test_config();
+            cfg.log.items_per_section = NZU64!(2);
+            let db = TestStore::init(ctx.child("db"), cfg, None).await.unwrap();
+            let key = Blake3::hash(&[b"key"]);
+            let (db, _) = apply_entries(db, [(key, Some(vec![7; 8]))]).await;
+
+            let assert_gauges = |expected: [&str; 2]| {
+                let metrics = ctx.encode();
+                for sample in expected {
+                    assert!(
+                        metrics.lines().any(|line| line == sample),
+                        "missing {sample}\n{metrics}"
+                    );
+                }
+            };
+            assert_gauges(["db_pruning_boundary 0", "db_retained 4"]);
+
+            let floor = db.inactivity_floor();
+            let db = db.prune(floor).await.unwrap();
+            assert_eq!(db.bounds().start, Location::new(2));
+            assert_gauges(["db_pruning_boundary 2", "db_retained 2"]);
+        });
     }
 
     #[test_traced]
@@ -973,7 +1087,16 @@ mod test {
             let db = db.prune(prune_loc).await.unwrap();
             let bounds = db.bounds();
             assert!(bounds.start > *target_floor && bounds.start < *target);
+            assert!(!db.log.read(*bounds.start).await.unwrap().is_commit());
             _ = db.sync().await.unwrap();
+
+            // One cap precedes the retained operations. The other includes just the first write.
+            for cap in [Location::new(1), bounds.start + 1] {
+                assert!(matches!(
+                    TestStore::init(context.child("no_commit"), cfg.clone(), Some(cap)).await,
+                    Err(Error::NoRetainedCommit(found)) if found == cap
+                ));
+            }
             assert!(matches!(
                 TestStore::init(context.child("cap"), cfg.clone(), Some(target)).await,
                 Err(Error::HistoricalFloorPruned(size)) if size == target
@@ -989,7 +1112,8 @@ mod test {
     }
 
     /// A store over a delayed-sync storage backend.
-    type DelayedStore = Db<DelayedSyncContext<deterministic::Context>, Digest, Vec<u8>, TwoCap>;
+    type DelayedStore =
+        Db<DelayedSyncContext<deterministic::Context>, Digest, Vec<u8>, TwoCap, Sequential>;
 
     /// Open a [DelayedStore] whose blob syncs park on `pending`.
     ///
@@ -1015,6 +1139,7 @@ mod test {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
+            strategy: Sequential,
         };
         DelayedStore::init(
             DelayedSyncContext {
@@ -1598,6 +1723,57 @@ mod test {
         });
     }
 
+    /// A batched read answers alike whether the page cache serves a position or the log does,
+    /// and one the page cache serves in full makes no batched read of the log.
+    #[test_traced("WARN")]
+    fn test_store_get_many_cached_and_uncached() {
+        deterministic::Runner::default().start(|context| async move {
+            // Half the keys share a translated key, and the values outgrow the page cache.
+            let key = |i: u64| {
+                let mut bytes = [0u8; 32];
+                if i.is_multiple_of(2) {
+                    bytes[..2].copy_from_slice(&[0xa5, 0x5a]);
+                } else {
+                    bytes[..2].copy_from_slice(&(i as u16).to_be_bytes());
+                }
+                bytes[24..].copy_from_slice(&i.to_be_bytes());
+                Digest::from(bytes)
+            };
+            let db = create_test_store(context.child("seed")).await;
+            let writes = (0..32u64).map(|i| (key(i), Some(vec![i as u8; 64])));
+            let (db, _) = apply_entries(db, writes).await;
+            drop(db.sync().await.unwrap());
+
+            // A reopened store starts with an empty page cache.
+            let db = create_test_store(context.child("reopened")).await;
+            let keys: Vec<_> = [3, 40, 8, 3, 17, 8, 30, 1].into_iter().map(key).collect();
+            let expected: Vec<_> = [3u8, 40, 8, 3, 17, 8, 30, 1]
+                .into_iter()
+                .map(|i| (i < 32).then(|| vec![i; 64]))
+                .collect();
+            let hits = || counter(&context, "reopened_log_cache_hits_total");
+            let reads = || counter(&context, "reopened_log_items_read_total");
+
+            // The first read finds little in the cache and the second finds what the first left
+            // there, so between them both paths serve positions.
+            let (hits_before, reads_before) = (hits(), reads());
+            assert_eq!(db.get_many(&keys).await.unwrap(), expected);
+            assert_eq!(db.get_many(&keys).await.unwrap(), expected);
+            let (hits, reads) = (hits() - hits_before, reads() - reads_before);
+            assert!(hits > 0 && hits < reads, "hits={hits} reads={reads}");
+
+            // Reading one key leaves its pages in the cache, so reading it again never reaches
+            // the log's batched read.
+            let calls = || counter(&context, "reopened_log_read_many_calls_total");
+            assert_eq!(db.get_many(&keys[..1]).await.unwrap(), expected[..1]);
+            let calls_before = calls();
+            assert_eq!(db.get_many(&keys[..1]).await.unwrap(), expected[..1]);
+            assert_eq!(calls(), calls_before);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Decoded values move to their final matching slot, cloning only for earlier duplicates.
     #[test_traced("DEBUG")]
     fn test_store_get_many_moves_values() {
@@ -1755,7 +1931,7 @@ mod test {
         let mut updated = BTreeMap::new();
         for loc in *range.start..*range.end {
             let loc = Location::new(loc);
-            match db.get_op(loc).await.unwrap() {
+            match db.log.read(*loc).await.unwrap() {
                 Operation::Update(Update(key, _)) => {
                     let count = updated.entry(key).or_insert(0usize);
                     *count += 1;
@@ -1897,7 +2073,7 @@ mod test {
                 .collect();
             assert_eq!(Widen::widen(expected.len()), range.end - range.start);
             for (loc, op) in range.zip(expected) {
-                assert_eq!(db.get_op(Location::new(loc)).await.unwrap(), op);
+                assert_eq!(db.log.read(loc).await.unwrap(), op);
             }
 
             // The survivors keep their latest values.
@@ -2130,7 +2306,7 @@ mod test {
     }
 
     /// A [Db] keyed by variable-length byte keys.
-    type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap>;
+    type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap, Sequential>;
 
     #[test_traced("DEBUG")]
     fn test_store_variable_length_keys() {
@@ -2150,6 +2326,7 @@ mod test {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
+                strategy: Sequential,
             };
 
             // Commit two keys of different lengths that share a translated prefix.
@@ -2185,7 +2362,7 @@ mod test {
     }
 
     /// A store keyed by SHA-256 digests whose translator buckets keys by their first byte.
-    type PolicyStore<V> = Db<deterministic::Context, sha256::Digest, V, OneCap>;
+    type PolicyStore<V> = Db<deterministic::Context, sha256::Digest, V, OneCap, Sequential>;
 
     async fn open<V: VariableValue + Read<Cfg = ()>>(
         context: deterministic::Context,
@@ -2204,6 +2381,7 @@ mod test {
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
+            strategy: Sequential,
         };
         PolicyStore::init(context, cfg, None).await.unwrap()
     }
@@ -2344,7 +2522,8 @@ mod test {
         }
 
         deterministic::Runner::default().start(|context| async move {
-            type CountedStore = Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator>;
+            type CountedStore =
+                Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator, Sequential>;
             let lookups = Arc::new(AtomicUsize::new(0));
             let cfg = test_config();
             let db = CountedStore::init(
@@ -2354,6 +2533,7 @@ mod test {
                     translator: CountingTranslator(lookups.clone()),
                     init_cache: cfg.init_cache,
                     init_buffer: cfg.init_buffer,
+                    strategy: cfg.strategy,
                 },
                 None,
             )
@@ -2409,7 +2589,7 @@ mod test {
             assert_eq!(*range.start..*range.end, 5..9);
             let writes = [seed[0], (replaced, Some(value)), seed[2]];
             for (loc, (key, value)) in (5..).zip(writes) {
-                let op = db.get_op(Location::new(loc)).await.unwrap();
+                let op = db.log.read(loc).await.unwrap();
                 assert_eq!(op, Operation::Update(Update(key, value.unwrap())));
                 assert_eq!(db.get(&key).await.unwrap(), value);
             }
@@ -2463,16 +2643,15 @@ mod test {
             // The batch appends its write, a delete of each evicted key, and its commit. The
             // empty store commits the commit's own location as the floor.
             assert_eq!(*range.start..*range.end, 6..12);
-            let Operation::Update(Update(key, value)) = db.get_op(Location::new(6)).await.unwrap()
-            else {
+            let Operation::Update(Update(key, value)) = db.log.read(6).await.unwrap() else {
                 panic!("expected the write at 6");
             };
             assert_eq!((key, value.0), (colliding(0), 20));
             for (loc, evicted) in (7..).zip([colliding(1), colliding(2), other, colliding(0)]) {
-                let op = db.get_op(Location::new(loc)).await.unwrap();
+                let op = db.log.read(loc).await.unwrap();
                 assert!(matches!(op, Operation::Delete(key) if key == evicted));
             }
-            let op = db.get_op(Location::new(11)).await.unwrap();
+            let op = db.log.read(11).await.unwrap();
             assert!(matches!(op, Operation::Commit(None, floor) if *floor == 11));
 
             // Every key reads `None`.
@@ -2509,12 +2688,11 @@ mod test {
             assert_eq!(witness.clones(), 1);
 
             // The batch appends only its write and its commit.
-            let Operation::Update(Update(key, value)) = db.get_op(Location::new(1)).await.unwrap()
-            else {
+            let Operation::Update(Update(key, value)) = db.log.read(1).await.unwrap() else {
                 panic!("expected the write at 1");
             };
             assert_eq!((key, value.0), (digest(0), 7));
-            let op = db.get_op(Location::new(2)).await.unwrap();
+            let op = db.log.read(2).await.unwrap();
             assert!(matches!(op, Operation::Commit(None, floor) if *floor == 0));
             assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
@@ -2758,7 +2936,7 @@ mod test {
                             12..tip + 1 + Widen::widen(decided.len())
                         );
                         for (loc, (_, key, value)) in (tip..).zip(&decided) {
-                            let op = db.get_op(Location::new(loc)).await.unwrap();
+                            let op = db.log.read(loc).await.unwrap();
                             assert_eq!(op, Operation::Update(Update(*key, *value)));
                         }
                         for (key, value) in live.values() {
@@ -2828,7 +3006,7 @@ mod test {
                 Operation::Commit(None, Location::new(10)),
             ];
             for (loc, expected) in (11..).zip(expected) {
-                assert_eq!(db.get_op(Location::new(loc)).await.unwrap(), expected);
+                assert_eq!(db.log.read(loc).await.unwrap(), expected);
             }
             let values = [
                 (key(1), Some(written(1))),
@@ -2889,12 +3067,13 @@ mod test {
     /// unpruned bit is set if and only if its location holds a live update or the last commit,
     /// and every live update lies at or above the inactivity floor. The snapshot maps each live
     /// key to its update and holds no other entry.
-    async fn assert_bitmap_consistent<E, K, V, T>(db: &Db<E, K, V, T>)
+    async fn assert_bitmap_consistent<E, K, V, T, S>(db: &Db<E, K, V, T, S>)
     where
         E: Context,
         K: Key,
         V: VariableValue,
         T: Translator,
+        S: Strategy,
     {
         let bounds = db.log.bounds();
         assert_eq!(db.bitmap.len(), bounds.end);
@@ -2917,7 +3096,7 @@ mod test {
         assert_eq!(db.snapshot.items(), live.len());
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
+                db.snapshot.get(key.as_ref()).any(|entry| entry == loc),
                 "snapshot misses the live update at {loc}",
             );
         }
@@ -3103,7 +3282,7 @@ mod test {
 
     #[allow(dead_code)]
     fn assert_write_futures_are_send(
-        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap>,
+        db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>,
         key: Digest,
         value: Vec<u8>,
     ) {
@@ -3114,7 +3293,7 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_commit_is_send(db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap>) {
+    fn assert_commit_is_send(db: Db<deterministic::Context, Digest, Vec<u8>, TwoCap, Sequential>) {
         is_send(db.commit());
     }
 }

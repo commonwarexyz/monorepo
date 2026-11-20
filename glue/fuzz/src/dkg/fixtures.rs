@@ -3,29 +3,43 @@
 //! the tests of the restart drivers sample, watch, and search runs with.
 
 use super::{
-    COMMITTEE, Cut, CutScope, EnvironmentControls, Info, LinkControls, MockGroup, Outcome,
+    COMMITTEE, Cut, CutScope, Digest, EnvironmentControls, Info, LinkControls, MockGroup, Outcome,
     PublicKey, RESHARE_IDENTITIES, Rotation,
+    app::{BLOCK_CFG, Block},
     environment::{Event, Program, Stack},
-    pacing::PacedCounts,
+    invariants::ProbeFinalization,
+    joiner::Sync as Material,
+    pacing::{Change, Operation, PacedCounts, Partition, tests::Paced},
     public_keys,
     reshare_input::ROTATIONS,
     schedule::directory,
+    scheme::Scheme,
     signers,
+    stack::MAX_SUPPORTED_MODE,
 };
 use crate::stateful::runner::Panic;
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Copying, Encode as _, Read as _};
-use commonware_consensus::types::Epoch;
-use commonware_cryptography::bls12381::{
-    dkg::feldman_desmedt::{Output, deal},
-    primitives::{
-        group::Share,
-        sharing::{Mode, ModeVersion},
+use commonware_consensus::types::{Epoch, Height};
+use commonware_cryptography::{
+    bls12381::{
+        dkg::feldman_desmedt::{Output, deal},
+        primitives::{
+            group::Share,
+            sharing::{Mode, ModeVersion},
+        },
     },
+    certificate::Verifier as _,
 };
 use commonware_glue::dkg::types::EpochOutcome;
-use commonware_runtime::{Handle, Storage as _, deterministic};
-use commonware_utils::{N3f1, TestRng, ordered::Set, sync::Mutex};
+use commonware_runtime::{Handle, Storage as _, Supervisor as _, deterministic};
+use commonware_storage::metadata::{self, Metadata};
+use commonware_utils::{
+    N3f1, TestRng,
+    ordered::Set,
+    sequence::{FixedBytes, U64},
+    sync::Mutex,
+};
 use std::{future::Future, sync::Arc, thread};
 
 /// What a half of the compromised identity says when it stops on the dealing
@@ -429,6 +443,354 @@ impl<S: Retaining + Send> Stack for Watched<S> {
     }
 }
 
+/// What the state-sync plan of an engine held when a restart of the engine
+/// began: the epoch its material resolves to, if it held material, and each
+/// epoch it held a checkpoint for, with whether that checkpoint holds the
+/// epoch's finalization.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Plan {
+    pub(super) material: Option<Epoch>,
+    pub(super) checkpoints: Vec<(Epoch, bool)>,
+}
+
+/// What the plan of the identity at `index`, whose engine is down and whose
+/// storage is `storage`, holds before the engine's start numbered `start`.
+pub(super) async fn plan(storage: &deterministic::Context, index: usize, start: usize) -> Plan {
+    let context = storage
+        .child("held_plan")
+        .with_attribute("engine", index)
+        .with_attribute("start", start);
+    plan_under(storage, context, &format!("engine-{index}")).await
+}
+
+/// What the plan whose partitions are named under `prefix` holds in
+/// `storage`, read through `context`. No blob of those partitions may be open.
+///
+/// It is read with the storage and the codecs the DKG module exposes, and
+/// only from partitions the plan has created.
+pub(super) async fn plan_under(
+    storage: &deterministic::Context,
+    context: deterministic::Context,
+    prefix: &str,
+) -> Plan {
+    let created = |partition: String| async move {
+        !storage
+            .scan(&partition)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    };
+
+    let partition = format!("{prefix}_dkg_state_sync");
+    let material = if created(partition.clone()).await {
+        let store: Metadata<_, FixedBytes<1>, (Material, Option<Height>)> = Metadata::init(
+            context.child("material"),
+            metadata::Config {
+                partition,
+                codec_config: (
+                    (
+                        (COMMITTEE, MAX_SUPPORTED_MODE),
+                        Scheme::certificate_codec_config_unbounded(),
+                    ),
+                    (),
+                ),
+            },
+        )
+        .await
+        .expect("the material partition opens");
+        store
+            .get(&FixedBytes::new([0]))
+            .map(|(material, _)| material.info.epoch)
+    } else {
+        None
+    };
+
+    let partition = format!("{prefix}_dkg_checkpoint");
+    let checkpoints = if created(partition.clone()).await {
+        let store: Metadata<_, U64, (Block, Digest, Option<ProbeFinalization>)> = Metadata::init(
+            context.child("checkpoints"),
+            metadata::Config {
+                partition,
+                codec_config: (BLOCK_CFG, (), Scheme::certificate_codec_config_unbounded()),
+            },
+        )
+        .await
+        .expect("the checkpoint partition opens");
+        let mut held: Vec<_> = store
+            .keys()
+            .map(|epoch| {
+                let (_, _, finalization) = store.get(epoch).expect("a listed key is held");
+                (Epoch::new(epoch.into()), finalization.is_some())
+            })
+            .collect();
+        held.sort();
+        held
+    } else {
+        Vec::new()
+    };
+    Plan {
+        material,
+        checkpoints,
+    }
+}
+
+/// Write to the checkpoint partition of the identity at `index`, whose
+/// engine has not started and whose storage is `storage`, a record for
+/// `epoch` that holds the block every engine of a run described by `info`
+/// starts from and no finalization, through the storage and the record
+/// format the DKG module uses.
+pub(super) async fn preseed_checkpoint(
+    storage: &deterministic::Context,
+    index: usize,
+    epoch: Epoch,
+    info: &Info,
+) {
+    let block = super::reshare_stack::genesis_block(info);
+    let commitment = commonware_cryptography::Digestible::digest(&block);
+    let mut store: Metadata<_, U64, (Block, Digest, Option<ProbeFinalization>)> = Metadata::init(
+        storage
+            .child("preseeded_checkpoint")
+            .with_attribute("engine", index),
+        metadata::Config {
+            partition: format!("engine-{index}_dkg_checkpoint"),
+            codec_config: (BLOCK_CFG, (), Scheme::certificate_codec_config_unbounded()),
+        },
+    )
+    .await
+    .expect("the checkpoint partition opens");
+    store.put(U64::new(epoch.get()), (block, commitment, None));
+    store.sync().await.expect("the checkpoint partition syncs");
+}
+
+/// A stack with a checkpoint record of an engine written before that
+/// engine's first start (see [`preseed_checkpoint`]).
+pub(super) struct Preseeded<S: Stack> {
+    stack: S,
+    storage: deterministic::Context,
+    /// The identity whose engine is preseeded, the epoch of its record, and
+    /// the description of the run its block is taken from, until the record
+    /// is written.
+    record: Option<(usize, Epoch, Info)>,
+}
+
+impl<S: Stack> Preseeded<S> {
+    /// `stack`, whose engines keep their storage in `storage`, with the
+    /// record `record` names written before that engine first starts, if it
+    /// names one.
+    pub(super) const fn new(
+        stack: S,
+        storage: deterministic::Context,
+        record: Option<(usize, Epoch, Info)>,
+    ) -> Self {
+        Self {
+            stack,
+            storage,
+            record,
+        }
+    }
+}
+
+impl<S: Stack + Send> Stack for Preseeded<S> {
+    async fn start(&mut self, index: usize) -> Handle<()> {
+        if self
+            .record
+            .as_ref()
+            .is_some_and(|(engine, _, _)| *engine == index)
+            && let Some((engine, epoch, info)) = self.record.take()
+        {
+            preseed_checkpoint(&self.storage, engine, epoch, &info).await;
+        }
+        self.stack.start(index).await
+    }
+
+    fn crashing(&mut self, index: usize) {
+        self.stack.crashing(index);
+    }
+
+    async fn settled(&mut self, absent: &[bool]) {
+        self.stack.settled(absent).await;
+    }
+
+    async fn joined(&mut self) {
+        self.stack.joined().await;
+    }
+
+    fn follows(&self) -> bool {
+        self.stack.follows()
+    }
+}
+
+/// A stack with what the plan of each engine holds put on record before each
+/// restart of the engine.
+pub(super) struct Planned<S: Stack> {
+    stack: S,
+    storage: deterministic::Context,
+    /// The starts of each identity's engine so far.
+    starts: Vec<usize>,
+    plans: Arc<Mutex<Vec<(usize, Plan)>>>,
+}
+
+impl<S: Stack> Planned<S> {
+    /// Watch `stack`, whose engines keep their storage in `storage`,
+    /// recording into `plans` what each restart finds in the restarted
+    /// engine's plan, with the engine's identity, in the order of the
+    /// restarts.
+    pub(super) const fn new(
+        stack: S,
+        storage: deterministic::Context,
+        plans: Arc<Mutex<Vec<(usize, Plan)>>>,
+    ) -> Self {
+        Self {
+            stack,
+            storage,
+            starts: Vec::new(),
+            plans,
+        }
+    }
+}
+
+impl<S: Stack + Send> Stack for Planned<S> {
+    async fn start(&mut self, index: usize) -> Handle<()> {
+        if self.starts.len() <= index {
+            self.starts.resize(index + 1, 0);
+        }
+        let start = self.starts[index];
+        if start > 0 {
+            let plan = plan(&self.storage, index, start).await;
+            self.plans.lock().push((index, plan));
+        }
+        self.starts[index] += 1;
+        self.stack.start(index).await
+    }
+
+    fn crashing(&mut self, index: usize) {
+        self.stack.crashing(index);
+    }
+
+    async fn settled(&mut self, absent: &[bool]) {
+        self.stack.settled(absent).await;
+    }
+
+    async fn joined(&mut self) {
+        self.stack.joined().await;
+    }
+
+    fn follows(&self) -> bool {
+        self.stack.follows()
+    }
+}
+
+/// Where a restarted engine read the epoch it started in from, as far as the
+/// run shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Source {
+    /// The material of its plan.
+    Material,
+    /// The checkpoint its plan held for the epoch.
+    Checkpoint,
+    /// The material or the checkpoint: the plan held both for that epoch,
+    /// and nothing the engine did tells them apart.
+    MaterialOrCheckpoint,
+    /// The epoch's introducing block in marshal, from which the engine
+    /// recorded the epoch's checkpoint before it entered the epoch.
+    Marshal,
+}
+
+/// What a restart of an engine found in its plan, and what the restarted
+/// engine did before it entered its first epoch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Recovery {
+    /// The identity whose engine was restarted.
+    pub(super) engine: usize,
+    /// What its plan held when the restart began.
+    pub(super) plan: Plan,
+    /// The epoch whose consensus journal the restarted engine opened first,
+    /// which its orchestrator opens once it has resolved the epoch it starts
+    /// in, or none if it opened none.
+    pub(super) entered: Option<Epoch>,
+    /// Whether the restarted engine started a write of its checkpoints
+    /// before it opened that journal. An engine writes a checkpoint at its
+    /// start only when it reads the epoch from marshal.
+    pub(super) recorded: bool,
+}
+
+impl Recovery {
+    /// Where the engine read the epoch it started in from, or none if it
+    /// entered no epoch, or entered one that neither its plan nor a
+    /// checkpoint it recorded accounts for.
+    pub(super) fn source(&self) -> Option<Source> {
+        let entered = self.entered?;
+        if self.recorded {
+            return Some(Source::Marshal);
+        }
+        let material = self.plan.material == Some(entered);
+        let checkpoint = self
+            .plan
+            .checkpoints
+            .iter()
+            .any(|(epoch, _)| *epoch == entered);
+        match (material, checkpoint) {
+            (true, true) => Some(Source::MaterialOrCheckpoint),
+            (true, false) => Some(Source::Material),
+            (false, true) => Some(Source::Checkpoint),
+            (false, false) => None,
+        }
+    }
+}
+
+/// The epoch of the consensus journal the orchestrator keeps in the
+/// partition called `name`, if it is one.
+fn consensus_epoch(name: &str) -> Option<Epoch> {
+    let (_, epoch) = name.rsplit_once("-orchestrator_consensus_")?;
+    epoch.parse().ok().map(Epoch::new)
+}
+
+/// The recovery of each restart of `plans`, in their order, from what `log`,
+/// the pacing's record of the run, shows each restarted engine did.
+pub(super) fn recoveries(plans: &[(usize, Plan)], log: &[Paced]) -> Vec<Recovery> {
+    plans
+        .iter()
+        .enumerate()
+        .map(|(position, (engine, plan))| {
+            let engine = *engine;
+            let earlier = plans[..position]
+                .iter()
+                .filter(|(restarted, _)| *restarted == engine)
+                .count();
+            let crash = log
+                .iter()
+                .enumerate()
+                .filter(|(_, paced)| **paced == Paced::Crashed(engine))
+                .nth(earlier)
+                .map_or(log.len(), |(at, _)| at + 1);
+            let mut entered = None;
+            let mut recorded = false;
+            for paced in &log[crash..] {
+                match paced {
+                    Paced::Crashed(crashed) if *crashed == engine => break,
+                    Paced::Started(
+                        started,
+                        Operation::Blob(Partition::Checkpoint, Change::Write { .. }),
+                    ) if *started == engine => recorded = true,
+                    Paced::Opened(opener, name) if *opener == engine => {
+                        if let Some(epoch) = consensus_epoch(name) {
+                            entered = Some(epoch);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Recovery {
+                engine,
+                plan: plan.clone(),
+                entered,
+                recorded,
+            }
+        })
+        .collect()
+}
+
 /// The durable length of the reshare actor's journal of the identity at
 /// `index`, whose engine is down and whose storage is `storage`.
 pub(super) async fn journal(storage: &deterministic::Context, index: usize) -> u64 {
@@ -461,4 +823,90 @@ async fn stored(storage: &deterministic::Context, partition: &str) -> u64 {
         stored += len;
     }
     stored
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHECKPOINT: Operation =
+        Operation::Blob(Partition::Checkpoint, Change::Write { synced: true });
+
+    fn opened(engine: usize, epoch: u64) -> Paced {
+        Paced::Opened(
+            engine,
+            format!("engine-{engine}-orchestrator_consensus_{epoch}"),
+        )
+    }
+
+    fn plan(material: Option<u64>, checkpoints: &[u64]) -> Plan {
+        Plan {
+            material: material.map(Epoch::new),
+            checkpoints: checkpoints
+                .iter()
+                .map(|epoch| (Epoch::new(*epoch), true))
+                .collect(),
+        }
+    }
+
+    /// Each restart reads what its own engine did after its own crash, up to
+    /// the first consensus journal it opened, and the source follows from
+    /// that and from what its plan held.
+    #[test]
+    fn recoveries_read_each_restart_after_its_own_crash() {
+        let log = vec![
+            Paced::Started(1, CHECKPOINT),
+            opened(1, 0),
+            Paced::Crashed(1),
+            Paced::Started(2, CHECKPOINT),
+            opened(1, 1),
+            Paced::Started(1, CHECKPOINT),
+            Paced::Crashed(1),
+            Paced::Started(1, CHECKPOINT),
+            Paced::Opened(1, "engine-1_dkg_checkpoint".to_string()),
+            opened(1, 2),
+            Paced::Crashed(3),
+            opened(3, 4),
+            Paced::Crashed(4),
+            opened(4, 3),
+        ];
+        let plans = [
+            (1, plan(None, &[1])),
+            (1, plan(None, &[1])),
+            (3, plan(Some(4), &[4])),
+            (4, plan(Some(3), &[])),
+            (2, plan(None, &[])),
+        ];
+        let found = recoveries(&plans, &log);
+        let summary: Vec<_> = found
+            .iter()
+            .map(|recovery| (recovery.entered, recovery.recorded, recovery.source()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (Some(Epoch::new(1)), false, Some(Source::Checkpoint)),
+                (Some(Epoch::new(2)), true, Some(Source::Marshal)),
+                (
+                    Some(Epoch::new(4)),
+                    false,
+                    Some(Source::MaterialOrCheckpoint)
+                ),
+                (Some(Epoch::new(3)), false, Some(Source::Material)),
+                (None, false, None),
+            ]
+        );
+    }
+
+    /// An epoch entered that neither the plan nor a recorded checkpoint
+    /// accounts for names no source.
+    #[test]
+    fn unaccounted_epoch_names_no_source() {
+        let log = [Paced::Crashed(0), opened(0, 5)];
+        let [found] = &recoveries(&[(0, plan(Some(4), &[3]))], &log)[..] else {
+            panic!("one restart");
+        };
+        assert_eq!(found.entered, Some(Epoch::new(5)));
+        assert_eq!(found.source(), None);
+    }
 }

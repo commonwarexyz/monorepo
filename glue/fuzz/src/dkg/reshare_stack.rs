@@ -688,10 +688,14 @@ async fn run<A, L, S, R>(
             partition_prefix: partition.clone(),
             max_participants: COMMITTEE,
             max_supported_mode: MAX_SUPPORTED_MODE,
+            block_codec_config: BLOCK_CFG,
         },
         material,
     )
     .await;
+    // The probe serves peers' boundary requests from the checkpoints the
+    // orchestrator records in this plan.
+    let probe_plan = state_sync.clone();
 
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
@@ -778,7 +782,7 @@ async fn run<A, L, S, R>(
         buffer_mailbox,
         backfill,
     );
-    probe_mailbox.attach(marshal);
+    probe_mailbox.attach(marshal, probe_plan);
     if let Some(joiner) = joiner {
         joiner.settle(context.child("joined"));
     }
