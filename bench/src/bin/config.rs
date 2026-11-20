@@ -232,7 +232,7 @@ where
     D: Deserializer<'de>,
 {
     let value = f64::deserialize(deserializer)?;
-    if value < 0.0 {
+    if value.is_nan() || value < 0.0 {
         return Err(de::Error::custom("must be non-negative"));
     }
     Ok(value)
