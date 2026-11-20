@@ -11,21 +11,18 @@
 //! interior fsync holes (skipping any wholly covered by the acknowledged floor), and the
 //! offsets journal only advances after the data it indexes is durable.
 
-#[commonware_macros::stability(ALPHA)]
-use super::checkpoint::Checkpoint;
 use super::{
     Batch, Contiguous, Decoded, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
+    checkpoint::Checkpoint,
     fixed,
     metrics::Metrics,
     position_to_blob,
 };
-#[commonware_macros::stability(ALPHA)]
-use crate::journal::authenticated;
 use crate::{
     Context, SyncCompletion,
     journal::{
-        Error,
+        Error, authenticated,
         durability::Barrier,
         frame::{Limited, decode_item, decode_length_prefix, encode_frame_into, read_frame_at},
     },
@@ -1223,7 +1220,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     ///
     /// Returns [Error::Corruption] when the offsets watermark acknowledges items above the
     /// retained start but no data blob exists.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn span(context: E, cfg: &Config<V::Cfg>) -> Result<Range<u64>, Error> {
         let per_blob = cfg.items_per_section.get();
         let offsets_context = context.child("offsets");
@@ -1260,7 +1256,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// page-validated prefix of a data or offsets blob, which covers every acknowledged item
     /// under the interrupted-write model, and derived offsets that a reopen rebuilds from the
     /// data, so the reopen recovers every retained item.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn unbounded(self) -> Result<Self, Error> {
         let Self {
             context,
@@ -1283,7 +1278,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     ///
     /// The caller removes the data partition under the staged offsets reset, before it
     /// completes, so stale data never outlives the reset.
-    #[commonware_macros::stability(ALPHA)]
     fn cleared(
         context: E,
         cfg: Config<V::Cfg>,
@@ -1602,7 +1596,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::init_at_size].
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_at_size(
         context: E,
         cfg: Config<V::Cfg>,
@@ -1979,7 +1972,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// The offsets reset intent is staged before the data blobs are cleared so recovery can
     /// complete the requested reset if a crash interrupts the operation.
     /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(
         mut self: Box<Self>,
         new_size: u64,
@@ -2399,7 +2391,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// # Errors
     ///
     /// Returns [Error::SizeOverflow] if `size` is `u64::MAX`.
-    #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         Ok(Self(Box::new(
             Inner::init_at_size(context, cfg, size).await?,
@@ -2407,7 +2398,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Discard all items and reposition the journal at or beyond its current end.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
         Ok(self)
@@ -2610,7 +2600,6 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, V> {
     type Journal = Journal<E, V>;
 
@@ -2663,7 +2652,6 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
     type Recovery = Recovery<E, V>;
 

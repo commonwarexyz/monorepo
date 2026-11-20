@@ -198,6 +198,8 @@ mod limits;
 pub use limits::max_payload_size;
 
 pub mod ancestry;
+pub(crate) mod application;
+pub mod coding;
 pub mod core;
 pub mod resolver;
 pub mod standard;
@@ -205,11 +207,6 @@ pub mod store;
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
-
-commonware_macros::stability_scope!(ALPHA {
-    pub(crate) mod application;
-    pub mod coding;
-});
 
 #[cfg(test)]
 pub mod mocks;

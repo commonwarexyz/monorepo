@@ -9,7 +9,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-commonware_macros::stability_scope!(ALPHA {
+commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
     use commonware_codec::Codec;
     use commonware_cryptography::{Committable, PublicKey};
