@@ -1,11 +1,15 @@
-use super::{Header, Layout};
+use super::{Header, Layout, physical_end, physical_range};
 use crate::{
     BlobVersion, Buf, DEFAULT_BLOB_LAYOUT, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions,
     WriteOptions, deterministic::AuditHasher,
 };
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
-use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    ops::{Range, RangeInclusive},
+    sync::Arc,
+};
 
 pub mod open;
 
@@ -25,6 +29,20 @@ fn resolve_header(
         partition,
         name,
     )
+}
+
+/// Convert an extent to a length representable by a `Vec<u8>` allocation.
+fn memory_len(end: u64) -> Result<usize, crate::Error> {
+    let end = isize::try_from(end).map_err(|_| crate::Error::OffsetOverflow)?;
+    Ok(end as usize)
+}
+
+/// Resize a byte vector to a validated length, avoiding unrepresentable doubling.
+fn resize_vec(content: &mut Vec<u8>, len: usize) {
+    if len > content.capacity() && content.capacity() > isize::MAX as usize / 2 {
+        content.reserve_exact(len - content.len());
+    }
+    content.resize(len, 0);
 }
 
 type BlobKey = (String, Vec<u8>);
@@ -123,7 +141,7 @@ impl Storage {
         layout: Layout,
         versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Blob, u64, BlobVersion), crate::Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, Some(name), true)?;
 
         let key = (partition.to_string(), name.to_vec());
         let mut generations = self.generations.lock();
@@ -207,7 +225,7 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), crate::Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, name, true)?;
 
         let mut generations = self.generations.lock();
         let mut partitions = self.partitions.lock();
@@ -215,9 +233,8 @@ impl crate::Storage for Storage {
             Some(name) => {
                 partitions
                     .get_mut(partition)
-                    .ok_or(crate::Error::PartitionMissing(partition.into()))?
-                    .remove(name)
-                    .ok_or(crate::Error::BlobMissing(partition.into(), hex(name)))?;
+                    .and_then(|blobs| blobs.remove(name))
+                    .ok_or_else(|| crate::Error::BlobMissing(partition.into(), hex(name)))?;
                 generations
                     .current
                     .remove(&(partition.to_string(), name.to_vec()));
@@ -233,7 +250,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, crate::Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, None, true)?;
 
         let partitions = self.partitions.lock();
         let partition = partitions
@@ -280,6 +297,31 @@ impl Blob {
         }
     }
 
+    pub(super) fn read_offset(&self, offset: u64, len: usize) -> Result<u64, crate::Error> {
+        super::read_offset(self.data_offset, offset, len).ok_or(crate::Error::OffsetOverflow)
+    }
+
+    /// Resolve a write range in the backing vector. An empty write only checks its start.
+    pub(super) fn write_range(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<Option<Range<usize>>, crate::Error> {
+        let range =
+            physical_range(self.data_offset, offset, len).ok_or(crate::Error::OffsetOverflow)?;
+        if range.is_empty() {
+            return Ok(None);
+        }
+        let end = memory_len(range.end)?;
+        Ok(Some(range.start as usize..end))
+    }
+
+    /// Resolve a resize length in the backing vector.
+    pub(super) fn resize_len(&self, len: u64) -> Result<usize, crate::Error> {
+        let len = physical_end(self.data_offset, len).ok_or(crate::Error::OffsetOverflow)?;
+        memory_len(len)
+    }
+
     fn ensure_current(&self, generations: &Generations) -> Result<(), crate::Error> {
         let key = (self.partition.clone(), self.name.clone());
         if generations.current.get(&key) == Some(&self.generation) {
@@ -321,10 +363,36 @@ impl Blob {
         Ok(())
     }
 
-    fn sync_range_inner(&self, offset: usize, buf: &[u8]) -> Result<(), crate::Error> {
-        let end = offset
-            .checked_add(buf.len())
-            .ok_or(crate::Error::OffsetOverflow)?;
+    fn write_inner(
+        &self,
+        offset: u64,
+        bufs: IoBufs,
+        options: WriteOptions,
+        #[cfg(test)] before_publication: impl FnOnce(),
+    ) -> Result<(), crate::Error> {
+        let Some(range) = self.write_range(offset, bufs.len() as u64)? else {
+            return Ok(());
+        };
+        let buf = bufs.coalesce();
+
+        // Hold the live contents through publication so overlapping durable writes publish in
+        // the order they updated the live contents.
+        let mut content = self.content.write();
+        if range.end > content.len() {
+            resize_vec(&mut content, range.end);
+        }
+        content[range.clone()].copy_from_slice(buf.as_ref());
+        if options.contains(WriteOptions::SYNC) {
+            #[cfg(test)]
+            before_publication();
+
+            self.sync_range_inner(range, buf.as_ref())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn sync_range_inner(&self, range: Range<usize>, buf: &[u8]) -> Result<(), crate::Error> {
         let generations = self.generations.lock();
         self.ensure_current(&generations)?;
         let mut partitions = self.partitions.lock();
@@ -332,11 +400,34 @@ impl Blob {
             .get_mut(&self.partition)
             .and_then(|partition| partition.get_mut(&self.name))
             .expect("a current blob generation has durable content");
-        if end > content.len() {
-            content.resize(end, 0);
+        if range.end > content.len() {
+            resize_vec(content, range.end);
         }
-        content[offset..end].copy_from_slice(buf);
+        content[range].copy_from_slice(buf);
         Ok(())
+    }
+
+    /// Read a validated range without allocating a destination for missing bytes.
+    fn read_range<T>(
+        &self,
+        offset: u64,
+        len: usize,
+        copy: impl FnOnce(&[u8]) -> T,
+    ) -> Result<T, crate::Error> {
+        let start = self.read_offset(offset, len)?;
+        if len == 0 {
+            return Ok(copy(&[]));
+        }
+        // A valid file range can exceed the address space of an in-memory blob.
+        let start = usize::try_from(start).map_err(|_| crate::Error::BlobInsufficientLength)?;
+        let end = start
+            .checked_add(len)
+            .ok_or(crate::Error::BlobInsufficientLength)?;
+        let content = self.content.read();
+        let bytes = content
+            .get(start..end)
+            .ok_or(crate::Error::BlobInsufficientLength)?;
+        Ok(copy(bytes))
     }
 
     /// Merge selected bytes into durable storage without changing this handle's live contents.
@@ -346,15 +437,10 @@ impl Blob {
         mut bufs: IoBufs,
         mut keep: impl FnMut() -> bool,
     ) -> Result<(), crate::Error> {
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(crate::Error::OffsetOverflow)?;
-        let offset: usize = offset
-            .try_into()
-            .map_err(|_| crate::Error::OffsetOverflow)?;
-        offset
-            .checked_add(bufs.remaining())
-            .ok_or(crate::Error::OffsetOverflow)?;
+        let Some(range) = self.write_range(offset, bufs.remaining() as u64)? else {
+            return Ok(());
+        };
+        let offset = range.start;
 
         let generations = self.generations.lock();
         if self.ensure_current(&generations).is_err() {
@@ -376,7 +462,7 @@ impl Blob {
                 let physical_start = offset + position + run_start;
                 let physical_end = offset + position + run_end;
                 if physical_end > content.len() {
-                    content.resize(physical_end, 0);
+                    resize_vec(content, physical_end);
                 }
                 content[physical_start..physical_end].copy_from_slice(&chunk[run_start..run_end]);
             };
@@ -402,10 +488,7 @@ impl Blob {
 
     /// Apply a retained resize to durable storage without changing this handle's live contents.
     pub(crate) fn retain_crash_resize(&self, len: u64) -> Result<(), crate::Error> {
-        let len = len
-            .checked_add(self.data_offset)
-            .ok_or(crate::Error::OffsetOverflow)?;
-        let len: usize = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
+        let len = self.resize_len(len)?;
 
         let generations = self.generations.lock();
         if self.ensure_current(&generations).is_err() {
@@ -416,7 +499,7 @@ impl Blob {
             .get_mut(&self.partition)
             .and_then(|partition| partition.get_mut(&self.name))
             .expect("a current blob generation has durable content");
-        content.resize(len, 0);
+        resize_vec(content, len);
         Ok(())
     }
 }
@@ -426,10 +509,9 @@ impl crate::Blob for Blob {
         &self,
         offset: u64,
         len: usize,
-        options: ReadOptions,
+        _options: ReadOptions,
     ) -> Result<IoBufsMut, crate::Error> {
-        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
-            .await
+        self.read_range(offset, len, |bytes| IoBufMut::from(bytes).into())
     }
 
     async fn read_at_buf(
@@ -442,21 +524,10 @@ impl crate::Blob for Blob {
         let mut bufs = bufs.into();
         // SAFETY: `len` bytes are filled via copy_from_slice below.
         unsafe { bufs.set_len(len) };
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(crate::Error::OffsetOverflow)?;
-        let offset: usize = offset
-            .try_into()
-            .map_err(|_| crate::Error::OffsetOverflow)?;
-        let end = offset
-            .checked_add(len)
-            .ok_or(crate::Error::OffsetOverflow)?;
-        let content = self.content.read();
-        if end > content.len() {
-            return Err(crate::Error::BlobInsufficientLength);
-        }
-        bufs.copy_from_slice(&content[offset..end]);
-        Ok(bufs)
+        self.read_range(offset, len, |bytes| {
+            bufs.copy_from_slice(bytes);
+            bufs
+        })
     }
 
     async fn write_at(
@@ -465,42 +536,18 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), crate::Error> {
-        let bufs = bufs.into();
-        let sync = options.contains(WriteOptions::SYNC);
-        if sync && !bufs.has_remaining() {
-            return Ok(());
-        }
-        let buf = bufs.coalesce();
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(crate::Error::OffsetOverflow)?;
-        let offset: usize = offset
-            .try_into()
-            .map_err(|_| crate::Error::OffsetOverflow)?;
-        let required = offset
-            .checked_add(buf.len())
-            .ok_or(crate::Error::OffsetOverflow)?;
-        {
-            let mut content = self.content.write();
-            if required > content.len() {
-                content.resize(required, 0);
-            }
-            content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
-        }
-        if sync {
-            self.sync_range_inner(offset, buf.as_ref())
-        } else {
-            Ok(())
-        }
+        self.write_inner(
+            offset,
+            bufs.into(),
+            options,
+            #[cfg(test)]
+            || {},
+        )
     }
 
     async fn resize(&self, len: u64) -> Result<(), crate::Error> {
-        let len = len
-            .checked_add(self.data_offset)
-            .ok_or(crate::Error::OffsetOverflow)?;
-        let len: usize = len.try_into().map_err(|_| crate::Error::OffsetOverflow)?;
-        let mut content = self.content.write();
-        content.resize(len, 0);
+        let len = self.resize_len(len)?;
+        resize_vec(&mut self.content.write(), len);
         Ok(())
     }
 
@@ -528,69 +575,105 @@ mod tests {
             faulty::{
                 Config as FaultConfig, PartialWriteMode, Storage as FaultyStorage, WriteConfig,
             },
-            tests::run_storage_tests,
+            tests::{is_invalid_name, run_storage_tests},
         },
     };
     use commonware_utils::{ScriptedRng, probability};
     use futures::executor::block_on;
     use rstest::rstest;
-    use std::{sync::mpsc, time::Duration};
+    use std::sync::Barrier;
 
     #[rstest]
-    #[case::range(true)]
-    #[case::full(false)]
-    fn test_concurrent_sync_preserves_durable_append(#[case] range: bool) {
+    #[case::range_then_range(true, true)]
+    #[case::range_then_full(true, false)]
+    #[case::full_then_range(false, true)]
+    #[case::full_then_full(false, false)]
+    fn test_sync_publications_follow_live_write_order(
+        #[case] first_range: bool,
+        #[case] second_range: bool,
+    ) {
         let storage = Storage::new();
         let (blob, _) = block_on(storage.open("partition", b"blob")).unwrap();
-        let blob = Arc::new(blob);
-        block_on(blob.write_at(0, b"old", WriteOptions::SYNC)).unwrap();
-        let snapshot = Arc::clone(&blob);
-        let (entered, entering) = mpsc::channel();
-        let (release, released) = mpsc::channel();
-        let sync = std::thread::spawn(move || {
-            snapshot.sync_inner(|| {
-                entered.send(()).unwrap();
-                released.recv_timeout(Duration::from_secs(10)).unwrap();
-            })
-        });
-        entering.recv_timeout(Duration::from_secs(10)).unwrap();
-
-        // If publication releases the content guard, complete the newer durable write
-        // before letting the older publication proceed.
-        let protected = blob.content.try_write().is_none();
-        let mut release = Some(release);
-        if protected {
-            release.take().unwrap().send(()).unwrap();
-        }
-        let options = if range {
-            WriteOptions::SYNC
-        } else {
-            WriteOptions::default()
+        let publish_new = || {
+            let options = if second_range {
+                WriteOptions::SYNC
+            } else {
+                WriteOptions::default()
+            };
+            block_on(blob.write_at(0, b"new!", options)).unwrap();
+            if !second_range {
+                block_on(blob.sync()).unwrap();
+            }
         };
-        block_on(blob.write_at(3, b"new", options)).unwrap();
-        if !range {
-            block_on(blob.sync()).unwrap();
+
+        let mut published_new = false;
+        let before_publication = || {
+            // If the content guard was released early, publish the newer write in that gap.
+            // The probe guard drops before the nested write takes the lock again.
+            if blob.content.try_write().is_some() {
+                publish_new();
+                published_new = true;
+            }
+        };
+        if first_range {
+            blob.write_inner(0, b"old".into(), WriteOptions::SYNC, before_publication)
+                .unwrap();
+        } else {
+            block_on(blob.write_at(0, b"old", WriteOptions::default())).unwrap();
+            blob.sync_inner(before_publication).unwrap();
         }
-        if let Some(release) = release {
-            release.send(()).unwrap();
+        if !published_new {
+            publish_new();
         }
-        sync.join().unwrap().unwrap();
 
         assert_eq!(
-            block_on(blob.read_at(0, 6, ReadOptions::default()))
+            block_on(blob.read_at(0, 4, ReadOptions::default()))
                 .unwrap()
                 .coalesce(),
-            b"oldnew"
+            b"new!"
         );
         drop(blob);
         let (reopened, size) = block_on(storage.open("partition", b"blob")).unwrap();
-        assert_eq!(size, 6);
+        assert_eq!(size, 4);
         assert_eq!(
-            block_on(reopened.read_at(0, 6, ReadOptions::default()))
+            block_on(reopened.read_at(0, 4, ReadOptions::default()))
                 .unwrap()
                 .coalesce(),
-            b"oldnew"
+            b"new!"
         );
+    }
+
+    #[test]
+    fn test_overlapping_sync_writes_agree_after_reopen() {
+        const WRITERS: u8 = 4;
+        const LEN: usize = 64;
+        let storage = Storage::new();
+        for round in 0..8u32 {
+            let name = round.to_be_bytes();
+            let (blob, _) = block_on(storage.open("partition", &name)).unwrap();
+            let barrier = Barrier::new(WRITERS as usize);
+            std::thread::scope(|scope| {
+                for fill in 1..=WRITERS {
+                    let (blob, barrier) = (&blob, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        block_on(blob.write_at(0, vec![fill; LEN], WriteOptions::SYNC)).unwrap();
+                    });
+                }
+            });
+
+            // Once every write has returned, a reopen observes the bytes the live handle reads.
+            let live = block_on(blob.read_at(0, LEN, ReadOptions::default()))
+                .unwrap()
+                .coalesce();
+            drop(blob);
+            let (reopened, size) = block_on(storage.open("partition", &name)).unwrap();
+            assert_eq!(size, LEN as u64);
+            let durable = block_on(reopened.read_at(0, LEN, ReadOptions::default()))
+                .unwrap()
+                .coalesce();
+            assert_eq!(live.as_ref(), durable.as_ref(), "round {round}");
+        }
     }
 
     async fn assert_logical_open_contract<S: crate::Storage>(storage: S, shared: S) {
@@ -687,27 +770,94 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_vec_extent_boundaries() {
+        let limit = isize::MAX as u64;
+        assert_eq!(memory_len(limit).unwrap(), isize::MAX as usize);
+        assert!(matches!(
+            memory_len(limit + 1),
+            Err(crate::Error::OffsetOverflow)
+        ));
+    }
+
+    #[rstest]
+    #[case::v0(Layout::V0)]
+    #[case::v1(Layout::V1)]
+    fn test_mutation_extent_overflow(#[case] layout: Layout) {
+        crate::deterministic::Runner::default().start(|_| async move {
+            let storage = Storage::new();
+            let version = BlobVersion::new(0);
+            let (blob, _, _) = storage
+                .open_inner("partition", b"blob", layout, version..=version)
+                .unwrap();
+
+            let last = i64::MAX as u64 - layout.data_offset();
+            for options in [WriteOptions::default(), WriteOptions::SYNC] {
+                assert!(matches!(
+                    blob.write_at(last, b"x", options).await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+                blob.write_at(u64::MAX - layout.data_offset(), b"", options)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    blob.write_at(u64::MAX, b"", options).await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+            }
+            assert!(matches!(
+                blob.resize(last + 1).await,
+                Err(crate::Error::OffsetOverflow)
+            ));
+            #[cfg(target_pointer_width = "32")]
+            {
+                // These extents fit a signed file offset but cannot fit the backing vector.
+                let last = isize::MAX as u64 - layout.data_offset();
+                assert!(matches!(
+                    blob.write_at(last, b"x", WriteOptions::default()).await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+                assert!(matches!(
+                    blob.resize(last + 1).await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+            }
+            blob.sync().await.unwrap();
+            drop(blob);
+            let (_, size) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(size, 0);
+        });
+    }
+
     #[tokio::test]
-    async fn test_empty_write_semantics() {
+    async fn test_portable_name_limits() {
         let storage = Storage::new();
+        let partition = "p".repeat(256);
+        let name = [0xab; 128];
 
-        let (plain, _) = storage.open("partition", b"plain").await.unwrap();
-        plain
-            .write_at(8, Vec::<u8>::new(), WriteOptions::default())
-            .await
-            .unwrap();
-        plain.sync().await.unwrap();
-        drop(plain);
-        let (_, plain_len) = storage.open("partition", b"plain").await.unwrap();
-        assert_eq!(plain_len, 8);
+        // Names beyond the portable limits are rejected by every namespace operation.
+        assert!(is_invalid_name(&storage.open(&partition, b"blob").await));
+        assert!(is_invalid_name(&storage.remove(&partition, None).await));
+        assert!(is_invalid_name(
+            &storage.remove(&partition, Some(b"blob")).await
+        ));
+        assert!(is_invalid_name(&storage.scan(&partition).await));
+        assert!(is_invalid_name(&storage.open("partition", &name).await));
+        assert!(is_invalid_name(
+            &storage.remove("partition", Some(&name)).await
+        ));
 
-        let (sync, _) = storage.open("partition", b"sync").await.unwrap();
-        sync.write_at(8, Vec::<u8>::new(), WriteOptions::SYNC)
-            .await
-            .unwrap();
-        drop(sync);
-        let (_, sync_len) = storage.open("partition", b"sync").await.unwrap();
-        assert_eq!(sync_len, 0);
+        // Rejected operations leave no partition behind.
+        assert!(storage.partitions.lock().is_empty());
+        assert!(storage.generations.lock().current.is_empty());
+
+        // Names at the portable limits are accepted.
+        let (partition, name) = (&partition[..255], &name[..127]);
+        let (blob, _) = storage.open(partition, name).await.unwrap();
+        drop(blob);
+        assert_eq!(storage.scan(partition).await.unwrap(), [name]);
+        storage.remove(partition, Some(name)).await.unwrap();
+        storage.remove(partition, None).await.unwrap();
     }
 
     #[tokio::test]

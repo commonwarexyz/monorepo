@@ -23,7 +23,7 @@ use std::{
 
 cfg_if::cfg_if! {
     if #[cfg(any(test, feature = "test-utils"))] {
-        use crate::{IoBufMut, utils::reschedule};
+        use crate::utils::reschedule;
         use futures::poll;
         use std::sync::atomic::{AtomicUsize, Ordering};
     }
@@ -803,29 +803,10 @@ impl<B> MigratingReadBlob<B> {
     pub fn reads(&self) -> usize {
         self.reads.load(Ordering::Relaxed)
     }
-}
 
-#[cfg(any(test, feature = "test-utils"))]
-impl<B: Blob> Blob for MigratingReadBlob<B> {
-    async fn read_at(
-        &self,
-        offset: u64,
-        len: usize,
-        options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
-            .await
-    }
-
-    async fn read_at_buf(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufsMut> + Send,
-        options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
+    async fn handoff<T>(&self, read: impl Future<Output = T>) -> T {
         self.reads.fetch_add(1, Ordering::Relaxed);
-        let mut read = Box::pin(self.inner.read_at_buf(offset, len, bufs, options));
+        let mut read = Box::pin(read);
 
         // Capture exactly one backend poll, then yield before exposing its result. Requiring a
         // pending result lets a test establish that a task handoff carries unresolved backend I/O.
@@ -842,6 +823,29 @@ impl<B: Blob> Blob for MigratingReadBlob<B> {
             Poll::Ready(result) => result,
             Poll::Pending => read.await,
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<B: Blob> Blob for MigratingReadBlob<B> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.handoff(self.inner.read_at(offset, len, options)).await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.handoff(self.inner.read_at_buf(offset, len, bufs, options))
+            .await
     }
 
     async fn write_at(
@@ -983,7 +987,8 @@ impl<B: Blob> Blob for DelayedSyncBlob<B> {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        if !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
+        let bufs = bufs.into();
+        if bufs.is_empty() || !options.contains(WriteOptions::SYNC) || !self.pending.tracking() {
             return self.inner.write_at(offset, bufs, options).await;
         }
         self.inner
@@ -1420,7 +1425,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 /// Controls a [MutationFaultContext]: after a set number of mutating operations succeed, every
 /// later one fails with an injected error or never completes.
 ///
-/// A mutating operation is a blob creation, write, resize, sync, started sync, or removal.
+/// A mutating operation is a blob creation, nonempty write, resize, sync, started sync, or removal.
 #[derive(Clone, Default)]
 pub struct MutationFaults {
     state: Arc<Mutex<MutationFaultState>>,
@@ -1608,7 +1613,10 @@ impl<B: Blob> Blob for MutationFaultBlob<B> {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.faults.check().await?;
+        let bufs = bufs.into();
+        if !bufs.is_empty() {
+            self.faults.check().await?;
+        }
         self.inner.write_at(offset, bufs, options).await
     }
 
@@ -1638,6 +1646,18 @@ mod tests {
     use std::{thread::sleep, time::Duration};
 
     #[test]
+    fn migrating_read_preserves_range_errors() {
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            let blob = MigratingReadBlob::new(blob, false);
+            assert!(matches!(
+                blob.read_at(0, usize::MAX, ReadOptions::default()).await,
+                Err(Error::OffsetOverflow)
+            ));
+        });
+    }
+
+    #[test]
     fn mutation_faults_fail_after_allowed_operations() {
         deterministic::Runner::default().start(|context| async move {
             let faults = MutationFaults::default();
@@ -1649,10 +1669,17 @@ mod tests {
 
             // Two mutations succeed, then every later one fails, whatever its kind.
             faults.allow(2);
+            blob.write_at(8, b"", WriteOptions::default())
+                .await
+                .unwrap();
             blob.write_at(0, b"data", WriteOptions::default())
                 .await
                 .unwrap();
             blob.sync().await.unwrap();
+            assert!(matches!(
+                blob.write_at(u64::MAX, b"", WriteOptions::SYNC).await,
+                Err(Error::OffsetOverflow)
+            ));
             assert!(!faults.failed());
             assert!(blob.resize(2).await.is_err());
             assert!(faults.failed());
@@ -1696,6 +1723,8 @@ mod tests {
             blob.write_at(0, b"data", WriteOptions::default())
                 .await
                 .unwrap();
+            let mut empty = Box::pin(blob.write_at(8, b"", WriteOptions::SYNC));
+            assert!(matches!(poll!(empty.as_mut()), Poll::Ready(Ok(()))));
             assert!(!faults.parked());
             let mut resize = Box::pin(blob.resize(2));
             assert!(poll!(resize.as_mut()).is_pending());
@@ -1772,6 +1801,31 @@ mod tests {
                 writes: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn delayed_sync_blob_empty_sync_write_preserves_gate() {
+        deterministic::Runner::default().start(|context| async move {
+            let (inner, _) = context.open("delayed_sync", b"blob").await.unwrap();
+            let (blob, pending) = DelayedSyncBlob::new(inner);
+            pending.arm();
+
+            assert!(matches!(
+                blob.write_at(u64::MAX, b"", WriteOptions::SYNC).await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(matches!(
+                poll!(std::pin::pin!(blob.write_at(1, b"", WriteOptions::SYNC))),
+                Poll::Ready(Ok(()))
+            ));
+            assert_eq!(pending.calls(), 0);
+
+            let mut sync = std::pin::pin!(blob.sync());
+            assert!(poll!(sync.as_mut()).is_pending());
+            assert_eq!(pending.calls(), 1);
+            next_pending_sync(&pending).release.send(Ok(())).unwrap();
+            sync.await.unwrap();
+        });
     }
 
     #[test]

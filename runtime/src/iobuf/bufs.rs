@@ -1028,7 +1028,8 @@ impl IoBufsMut {
     ///
     /// # Safety
     ///
-    /// Caller must initialize all `len` bytes before the buffer is read.
+    /// Caller must initialize all `len` bytes before reading them or borrowing
+    /// them as byte slices. [Self::copy_from_slice] can initialize them in place.
     ///
     /// # Panics
     ///
@@ -1064,7 +1065,9 @@ impl IoBufsMut {
         let mut offset = 0;
         self.for_each_chunk_mut(|buf| {
             let len = buf.len();
-            buf.as_mut().copy_from_slice(&src[offset..offset + len]);
+            // A chunk sized with `set_len` may still need initialization.
+            buf.clear();
+            buf.put_slice(&src[offset..offset + len]);
             offset += len;
         });
     }
@@ -4116,7 +4119,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_set_len() {
-        // SAFETY: we don't read the uninitialized bytes.
+        // SAFETY: Length queries do not read bytes. Initialize each nonempty chunk before borrowing it.
         unsafe {
             // Single buffer
             let mut bufs = IoBufsMut::from(IoBufMut::with_capacity(16));
@@ -4129,6 +4132,7 @@ mod tests {
                 IoBufMut::with_capacity(10),
             ]);
             bufs.set_len(12);
+            bufs.copy_from_slice(&[0; 12]);
             assert_eq!(bufs.len(), 12);
             assert_eq!(bufs.chunk().len(), 5);
             bufs.advance(5);
@@ -4143,6 +4147,7 @@ mod tests {
                 IoBufMut::with_capacity(2),
             ]);
             bufs.set_len(18);
+            bufs.copy_from_slice(&[0; 18]);
             assert_eq!(bufs.chunk().len(), 3);
             bufs.advance(3);
             assert_eq!(bufs.chunk().len(), 15);
@@ -4153,6 +4158,7 @@ mod tests {
             let mut bufs =
                 IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
             bufs.set_len(8);
+            bufs.copy_from_slice(&[0; 8]);
             assert_eq!(bufs.chunk().len(), 4);
             bufs.advance(4);
             assert_eq!(bufs.chunk().len(), 4);

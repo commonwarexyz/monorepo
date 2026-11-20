@@ -4,6 +4,17 @@
 //!
 //! Unless configured otherwise, any task panic will lead to a runtime panic.
 //!
+//! # Storage
+//!
+//! Storage enforces the [portable name limits](crate::Storage#partition-and-blob-names).
+//! An otherwise valid name beyond these limits fails validation with
+//! [std::io::ErrorKind::InvalidInput]. An injected namespace fault can fail the operation
+//! before name validation.
+//!
+//! Each blob is held in one contiguous in-memory allocation. A write or resize that would
+//! require a length beyond the addressable allocation size returns [crate::Error::OffsetOverflow],
+//! even when its physical extent is otherwise valid.
+//!
 //! # External Processes
 //!
 //! When testing an application that interacts with some external process, it can appear to
@@ -2808,6 +2819,122 @@ mod tests {
                 context.name().attributes,
                 vec![("epoch".to_string(), "new".to_string())]
             );
+        });
+    }
+
+    #[allow(deprecated)]
+    async fn open_fault_extent_blob(context: &Context, layout: crate::BlobLayout) -> super::Blob {
+        if layout == crate::BlobLayout::V0 {
+            context.storage.inner().inner().inner().set_raw_blob(
+                "fault_extent",
+                b"blob",
+                crate::storage::tests::v0_blob_bytes(crate::DEFAULT_BLOB_VERSION.get(), b""),
+            );
+        }
+        let (blob, size) = context.open("fault_extent", b"blob").await.unwrap();
+        assert_eq!(size, 0);
+        blob
+    }
+
+    #[rstest::rstest]
+    #[case::v0(crate::BlobLayout::V0)]
+    #[case::v1(crate::BlobLayout::V1)]
+    #[allow(deprecated)]
+    fn test_storage_fault_extent_write(#[case] layout: crate::BlobLayout) {
+        // Omitting both bytes keeps the simulated fault from allocating a large buffer.
+        let cfg = Config::default()
+            .with_rng(ScriptedRng::new([u64::MAX; 2]))
+            .with_storage_fault_config(FaultConfig::default().write(WriteConfig {
+                failure_rate: probability!(1.0),
+                retention_rate: probability!(0.5),
+                mode: PartialWriteMode::Subset,
+            }));
+        Runner::new(cfg).start(|context| async move {
+            let blob = open_fault_extent_blob(&context, layout).await;
+            let last = isize::MAX as u64 - layout.data_offset();
+            assert!(matches!(
+                blob.write_at(last - 1, b"xy", WriteOptions::SYNC).await,
+                Err(Error::OffsetOverflow)
+            ));
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::v0(crate::BlobLayout::V0)]
+    #[case::v1(crate::BlobLayout::V1)]
+    #[allow(deprecated)]
+    fn test_storage_fault_extent_resize(#[case] layout: crate::BlobLayout) {
+        // If sampled, pick the smallest partial size (1 byte).
+        let cfg = Config::default()
+            .with_rng(ScriptedRng::new([0]))
+            .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
+                failure_rate: probability!(1.0),
+                partial_rate: probability!(1.0),
+            }));
+        let (result, checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
+            let blob = open_fault_extent_blob(&context, layout).await;
+            blob.resize(isize::MAX as u64 - layout.data_offset() + 1)
+                .await
+        });
+        Runner::from(checkpoint).start(|context| async move {
+            let (_, size) = context.open("fault_extent", b"blob").await.unwrap();
+            assert_eq!(size, 0, "an invalid resize must leave no crash outcome");
+        });
+        assert!(matches!(result, Err(Error::OffsetOverflow)));
+    }
+
+    #[rstest::rstest]
+    #[case::v0(crate::BlobLayout::V0)]
+    #[case::v1(crate::BlobLayout::V1)]
+    #[allow(deprecated)]
+    fn test_storage_fault_extent_read(
+        #[case] layout: crate::BlobLayout,
+        #[values(false, true)] buffered: bool,
+    ) {
+        let cfg = Config::default()
+            .with_storage_fault_config(FaultConfig::default().read(probability!(1.0)));
+        Runner::new(cfg).start(|context| async move {
+            let blob = open_fault_extent_blob(&context, layout).await;
+            let last = i64::MAX as u64 - layout.data_offset();
+            let read = async |offset| {
+                if buffered {
+                    blob.read_at_buf(
+                        offset,
+                        1,
+                        crate::IoBufMut::with_capacity(1),
+                        ReadOptions::default(),
+                    )
+                    .await
+                } else {
+                    blob.read_at(offset, 1, ReadOptions::default()).await
+                }
+            };
+            assert!(matches!(read(last - 1).await, Err(Error::Io(_))));
+            assert!(matches!(read(last).await, Err(Error::OffsetOverflow)));
+            if !buffered {
+                assert!(matches!(
+                    blob.read_at(0, usize::MAX, ReadOptions::default()).await,
+                    Err(Error::OffsetOverflow)
+                ));
+            }
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "read length exceeds buffer capacity")]
+    fn test_storage_fault_extent_read_buf_capacity() {
+        let cfg = Config::default()
+            .with_storage_fault_config(FaultConfig::default().read(probability!(1.0)));
+        Runner::new(cfg).start(|context| async move {
+            let (blob, _) = context.open("fault_extent", b"blob").await.unwrap();
+            let _ = blob
+                .read_at_buf(
+                    0,
+                    2,
+                    crate::IoBufMut::with_capacity(1),
+                    ReadOptions::default(),
+                )
+                .await;
         });
     }
 

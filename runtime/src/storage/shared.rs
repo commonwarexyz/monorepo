@@ -256,6 +256,129 @@ pub(crate) async fn check_sync_writes<S: crate::Storage>(storage: &S, pending: &
     }
 }
 
+/// Reads, writes, and resizes keep the kernel's error code, and a read past the end reports
+/// insufficient length.
+///
+/// A durable write larger than one `batch` of buffers writes them all before a trailing sync.
+/// A failed data phase keeps its error code and leaves the open dirty without a retained
+/// failure, so a later sync succeeds. A failed fused write or trailing sync is retained for
+/// later durability operations, and a failed trailing sync is named like `sync`.
+///
+/// `open` wraps a descriptor as a blob named after its second argument, and `durability`
+/// reports whether a blob is dirty and its retained failure. Linux devices supply the
+/// failures: `/dev/full` rejects writes, and `/dev/null` accepts writes but not syncs.
+#[cfg(target_os = "linux")]
+pub(crate) async fn check_kernel_errors<B: crate::Blob>(
+    path: &std::path::Path,
+    batch: usize,
+    open: impl Fn(std::fs::File, &[u8]) -> B,
+    durability: impl Fn(&B) -> (bool, Option<Error>),
+) {
+    let options = std::fs::File::options;
+    std::fs::write(path, b"abc").unwrap();
+    let write_only = open(options().write(true).open(path).unwrap(), b"write");
+    let read_only = open(options().read(true).open(path).unwrap(), b"read");
+    let full = open(options().write(true).open("/dev/full").unwrap(), b"full");
+    let null = open(
+        options().read(true).write(true).open("/dev/null").unwrap(),
+        b"null",
+    );
+    let batches = || {
+        (0..=batch)
+            .map(|_| crate::IoBuf::from(b"x"))
+            .collect::<crate::IoBufs>()
+    };
+    let io = |result: Result<(), Error>, code| {
+        assert!(
+            matches!(&result, Err(Error::Io(error)) if error.raw_os_error() == Some(code)),
+            "expected I/O error {code}: {result:?}"
+        );
+    };
+    let sync_failed = |result: Result<(), Error>, code| {
+        assert!(
+            matches!(&result, Err(Error::BlobSyncFailed(_, _, error))
+                if error.raw_os_error() == Some(code)),
+            "expected sync failure {code}: {result:?}"
+        );
+    };
+
+    // Reads keep the kernel's error code, and an empty read reaches the end of the file.
+    let result = write_only.read_at(0, 1, ReadOptions::default()).await;
+    assert!(
+        matches!(&result, Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EBADF)),
+        "{result:?}"
+    );
+    let bytes = read_only
+        .read_at(1, 2, ReadOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(bytes.coalesce().as_ref(), b"bc");
+    for (blob, offset) in [(&read_only, 2), (&null, 0)] {
+        assert!(matches!(
+            blob.read_at(offset, 2, ReadOptions::default()).await,
+            Err(Error::BlobInsufficientLength)
+        ));
+    }
+
+    // A failed data phase keeps its error code. The open becomes dirty without a retained
+    // failure, so a later sync succeeds.
+    assert!(matches!(durability(&full), (false, None)));
+    assert!(matches!(durability(&read_only), (false, None)));
+    io(
+        full.write_at(0, batches(), WriteOptions::SYNC).await,
+        libc::ENOSPC,
+    );
+    assert!(matches!(durability(&full), (true, None)));
+    io(
+        read_only.write_at(0, batches(), WriteOptions::SYNC).await,
+        libc::EBADF,
+    );
+    assert!(matches!(durability(&read_only), (true, None)));
+    read_only.sync().await.unwrap();
+    assert!(durability(&read_only).1.is_none());
+
+    // A resize keeps the kernel's error code.
+    let result = read_only.resize(1).await;
+    assert!(
+        matches!(&result, Err(Error::BlobResizeFailed(_, _, error))
+            if error.raw_os_error() == Some(libc::EINVAL)),
+        "{result:?}"
+    );
+
+    // Plain writes keep the kernel's error code.
+    io(
+        read_only.write_at(0, b"x", WriteOptions::default()).await,
+        libc::EBADF,
+    );
+    io(
+        full.write_at(0, b"x", WriteOptions::default()).await,
+        libc::ENOSPC,
+    );
+
+    // A failed fused write keeps its error code and retains it for later syncs.
+    io(
+        read_only.write_at(0, b"x", WriteOptions::SYNC).await,
+        libc::EBADF,
+    );
+    assert!(matches!(durability(&read_only), (true, Some(_))));
+    sync_failed(read_only.sync().await, libc::EBADF);
+
+    // Every batch reaches the device before the trailing sync fails. The failure is named like
+    // `sync` and retained for later durability operations.
+    sync_failed(
+        null.write_at(0, batches(), WriteOptions::SYNC).await,
+        libc::EINVAL,
+    );
+    let (dirty, failure) = durability(&null);
+    assert!(dirty);
+    sync_failed(failure.map_or(Ok(()), Err), libc::EINVAL);
+    sync_failed(null.sync().await, libc::EINVAL);
+    sync_failed(
+        null.write_at(0, b"x", WriteOptions::SYNC).await,
+        libc::EINVAL,
+    );
+}
+
 /// Reopening a replacement flushes its debt while another partition remains usable.
 ///
 /// Covers name and partition removal while the old handle remains readable. The

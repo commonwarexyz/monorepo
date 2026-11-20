@@ -84,6 +84,14 @@ stability_scope!(BETA {
     ///
     /// Restricting the layouts a runtime accepts can be used to orchestrate rollback-safe
     /// upgrades.
+    ///
+    /// # Physical extent
+    ///
+    /// The built-in runtimes add the layout's data offset to a blob offset before validating a
+    /// range. They reject, with [`Error::OffsetOverflow`], a physical start that overflows `u64`
+    /// or a nonempty range whose exclusive physical end exceeds `i64::MAX`. Reads also require
+    /// each requested length to fit in one buffer. Passing these checks does not guarantee that a
+    /// backend can store a blob of that size.
     #[repr(u16)]
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum BlobLayout {
@@ -728,13 +736,23 @@ stability_scope!(BETA {
     /// Runtimes must ensure that no operation issued by a previous run against
     /// the same storage is still in flight when a new run begins.
     ///
-    /// # Partition Names
+    /// # Partition and blob names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
     /// characters, dashes (`-`), or underscores (`_`). Names containing other
     /// characters (e.g., `/`, `.`, spaces) will return an error. On case-insensitive
     /// filesystems, partition names that differ only by letter case must not both
     /// be used.
+    ///
+    /// Blob names are non-empty byte strings. Opening or removing a blob with an empty name
+    /// fails before changing the namespace. Passing `None` to [Storage::remove] removes the
+    /// entire partition.
+    ///
+    /// If an open fails during creation, it can leave an empty partition or a blob name
+    /// visible to [Storage::scan]. A listed name does not guarantee the blob can be opened.
+    ///
+    /// For portability, use at most 255 bytes per partition name and 127 bytes per blob
+    /// name. Support for longer names varies, and the host filesystem can impose lower limits.
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
@@ -777,6 +795,8 @@ stability_scope!(BETA {
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
         /// [Error::BlobVersionMismatch]. `versions` must be non-empty.
         ///
+        /// Creation uses the highest version in `versions`. Reopening a blob preserves its version.
+        ///
         /// # Layout
         ///
         /// New blobs are created with the latest layout allowed by the runtime. Reopening an
@@ -796,7 +816,9 @@ stability_scope!(BETA {
 
         /// Remove a blob from a given partition.
         ///
-        /// If no `name` is provided, the entire partition is removed.
+        /// Removing an absent named blob returns [Error::BlobMissing], including when its
+        /// partition is absent. If no `name` is provided, the entire partition is removed
+        /// and an absent partition returns [Error::PartitionMissing].
         ///
         /// An Ok result indicates the blob is durably removed.
         ///
@@ -805,7 +827,7 @@ stability_scope!(BETA {
         /// Removal unlinks the blob's name but does not invalidate previously opened handles:
         /// they remain fully readable until dropped, whether the blob was removed by name or by
         /// removing its entire partition. This includes bytes written but never synced. Physical
-        /// resources are reclaimed once the last handle is dropped.
+        /// storage may remain in use until outstanding operations also finish.
         ///
         /// Re-opening a removed blob's name creates a new, independent blob; handles opened
         /// before the removal continue to observe the removed blob's contents.
@@ -818,7 +840,10 @@ stability_scope!(BETA {
             name: Option<&[u8]>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Return all blobs in a given partition.
+        /// Return all blob names in a given partition, in unspecified order.
+        ///
+        /// An empty partition returns an empty list. A missing partition returns
+        /// [Error::PartitionMissing]. Other errors do not establish absence.
         fn scan(&self, partition: &str)
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
@@ -875,7 +900,7 @@ stability_scope!(BETA {
     pub struct WriteOptions(u8);
 
     impl WriteOptions {
-        /// Durably persist the submitted bytes before returning.
+        /// Make this write durable before returning, subject to the concurrency rules on [`Blob`].
         ///
         /// This is not a durability barrier for earlier writes without
         /// [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
@@ -927,9 +952,41 @@ stability_scope!(BETA {
     ///
     /// # Durability
     ///
-    /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
-    /// subset of its bytes may be durable. Bytes outside the written range remain
-    /// unchanged.
+    /// A successful write with [`WriteOptions::SYNC`] makes its submitted bytes durable.
+    /// A successful [`Blob::sync`] or a successfully completed [`Blob::start_sync`] handle
+    /// makes all writes and resizes completed before the sync request durable. Concurrent or
+    /// later mutations can overwrite or truncate those bytes. Overlapping mutations may
+    /// interleave, so serialize them when recovery must see a particular result.
+    ///
+    /// After a crash, a write without either guarantee may be torn: any subset of its bytes
+    /// may be durable.
+    ///
+    /// # Failures
+    ///
+    /// A write or resize that returns an I/O error can have changed the blob, but a write never
+    /// changes bytes outside its range, other than zero-filling a gap it creates. A failed
+    /// durability operation can also cause later writes with [`WriteOptions::SYNC`], syncs,
+    /// or opens of the blob to fail.
+    ///
+    /// # Read ranges
+    ///
+    /// Reads are exact. If the end of the blob is reached before a range is filled, the
+    /// read fails with [Error::BlobInsufficientLength]. A zero-length range reads no bytes
+    /// and is valid even past the end of the blob.
+    ///
+    /// A range that cannot be addressed returns [Error::OffsetOverflow]. This differs from
+    /// [Error::BlobInsufficientLength], which reports a representable range that extends past
+    /// the end of the blob. See [`BlobLayout`] for the built-in limits. A batched read can also
+    /// return [Error::OffsetOverflow] if its temporary buffer cannot fit in one allocation, even
+    /// when every range fits individually.
+    ///
+    /// A read may allocate its full requested length before discovering EOF. Bound lengths
+    /// derived from untrusted input before issuing a read.
+    ///
+    /// # Mutation limits
+    ///
+    /// A write or resize that cannot be addressed returns [Error::OffsetOverflow] before changing
+    /// the blob. Being addressable does not guarantee that a backend can store a blob of that size.
     ///
     /// # Concurrency
     ///
@@ -969,7 +1026,8 @@ stability_scope!(BETA {
         ///
         /// Without an error, every range is yielded exactly once. An error need not identify the
         /// ranges it affects, and those ranges may never be yielded, so treat any error as failing
-        /// the call. Reads may begin before the stream is polled and continue after it is dropped.
+        /// the call. If several ranges fail, any of their errors can be reported first.
+        /// Reads may begin before the stream is polled and continue after it is dropped.
         fn read_many(
             &self,
             ranges: &[(u64, usize)],
@@ -996,6 +1054,15 @@ stability_scope!(BETA {
         /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
+        /// Returns [Error::OffsetOverflow] before changing the blob if the range cannot be
+        /// addressed.
+        ///
+        /// If no bytes remain, only the start offset is checked. The write does not change
+        /// the blob's contents or length and is not a durability barrier, regardless of the
+        /// options.
+        ///
+        /// A nonempty write that starts beyond the current end extends the blob, and the gap
+        /// reads as zeros.
         fn write_at(
             &self,
             offset: u64,
@@ -1006,7 +1073,10 @@ stability_scope!(BETA {
         /// Resize the blob to the given length.
         ///
         /// If the length is greater than the current length, the blob is extended with zeros.
-        /// If the length is less than the current length, the blob is resized.
+        /// If the length is less than the current length, the blob is truncated.
+        ///
+        /// Returns [Error::OffsetOverflow] before changing the blob if the length cannot be
+        /// addressed.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Make every write and resize that completed before this call durable.
@@ -1016,7 +1086,7 @@ stability_scope!(BETA {
         ///
         /// Awaiting this future waits until the runtime accepts responsibility for
         /// the sync. It continues even if the returned [`Handle`] is dropped.
-        /// Awaiting that handle waits for the same durability guarantee as [`Blob::sync`].
+        /// Successful completion of that handle gives the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 

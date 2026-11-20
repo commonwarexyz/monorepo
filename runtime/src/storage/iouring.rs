@@ -61,10 +61,10 @@
 use super::{
     Generation, Layout, Pending, Sender, Tracker, create_header,
     hold::{Held, Hold},
-    resolve_header, sync_dir,
+    physical_end, physical_range, resolve_header, sync_dir,
 };
 use crate::{
-    BlobVersion, Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    BlobVersion, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{
         operation::{self, Operation},
         request::{
@@ -84,7 +84,6 @@ use futures::{
 };
 use once_cell::sync::OnceCell;
 use std::{
-    alloc,
     fs::{self, File},
     future::Future,
     io::{Error as IoError, ErrorKind},
@@ -157,7 +156,7 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Blob, u64, BlobVersion), Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, Some(name), false)?;
 
         let (blob, mut logical_len, blob_version, wait, owed) = {
             // Acquire the filesystem lock
@@ -238,16 +237,14 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, name, false)?;
 
         // Acquire the filesystem lock
         let _guard = self.lock.lock();
 
         let path = self.storage_directory.join(partition);
         let sync_path = if let Some(name) = name {
-            let blob_path = path.join(hex(name));
-            fs::remove_file(blob_path)
-                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
+            super::remove_blob(&path, partition, name)?;
 
             &path
         } else {
@@ -266,7 +263,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, None, false)?;
 
         // Acquire the filesystem lock
         let _guard = self.lock.lock();
@@ -276,13 +273,13 @@ impl crate::Storage for Storage {
         // Distinguish missing partitions from other filesystem failures.
         let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
             ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
-            _ => Error::ReadFailed,
+            _ => error.into(),
         })?;
 
         let mut blobs = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|_| Error::ReadFailed)?;
-            let file_type = entry.file_type().map_err(|_| Error::ReadFailed)?;
+            let entry = entry?;
+            let file_type = entry.file_type()?;
 
             if !file_type.is_file() {
                 return Err(Error::PartitionCorrupt(partition.into()));
@@ -408,14 +405,18 @@ impl Shared {
         result
     }
 
+    /// Name a failed barrier's kernel error like `sync`.
+    pub(crate) fn sync_error(&self, error: Error) -> Error {
+        let (partition, name) = &self.key;
+        match error {
+            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error),
+            error => error,
+        }
+    }
+
     /// Retain a failed barrier under the name the caller sees.
     pub(crate) fn sync_failed(&self, error: &Error) {
-        let (partition, name) = &self.key;
-        let error = match error {
-            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error.clone()),
-            error => error.clone(),
-        };
-        self.tracker.poison(&error);
+        self.tracker.poison(&self.sync_error(error.clone()));
     }
 
     /// Establish a settled predecessor's debt through this open's file.
@@ -551,19 +552,8 @@ impl Blob {
     }
 
     /// Map the logical range of `len` bytes at `offset` to its physical offset.
-    ///
-    /// Fails with [Error::OffsetOverflow] when the range's physical offset or end overflows, or
-    /// when `len` exceeds `isize::MAX` so that no buffer can hold it. A representable end keeps
-    /// every partial read below `u64::MAX`, so no read reaches the current-position sentinel.
     fn physical_offset(&self, offset: u64, len: usize) -> Result<u64, Error> {
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
-        offset
-            .checked_add(Widen::widen(len))
-            .ok_or(Error::OffsetOverflow)?;
-        alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
-        Ok(offset)
+        super::read_offset(self.data_offset, offset, len).ok_or(Error::OffsetOverflow)
     }
 
     /// Map the logical `ranges` of a batch to physical ranges.
@@ -779,20 +769,12 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let offset = offset
-            .checked_add(self.data_offset)
+        let range = physical_range(self.data_offset, offset, Widen::widen(bufs.len()))
             .ok_or(Error::OffsetOverflow)?;
-
-        if !bufs.has_remaining() {
+        if range.is_empty() {
             return Ok(());
         }
-
-        // Validate the signed file extent before mutation accounting or ring registration.
-        // Each submission after partial progress then avoids the current-position sentinel.
-        offset
-            .checked_add(Widen::widen(bufs.len()))
-            .filter(|end| *end <= i64::MAX as u64)
-            .ok_or(Error::OffsetOverflow)?;
+        let offset = range.start;
 
         let cache = if options.contains(WriteOptions::DONT_CACHE) {
             Cache::Disabled
@@ -820,8 +802,7 @@ impl crate::Blob for Blob {
         if !sync {
             self.shared.tracker.write();
         }
-        let trailing = state == WriteAtState::WritingBeforeSync;
-        let result = match Operation::register(Request::WriteAt(WriteAtRequest::new(
+        match Operation::register(Request::WriteAt(WriteAtRequest::new(
             self.shared.clone(),
             offset,
             bufs.into(),
@@ -833,27 +814,16 @@ impl crate::Blob for Blob {
             Ok(RequestOutput::WriteAt(result)) => result,
             Ok(_) => unreachable!("write request returned another output kind"),
             Err(_) => Err(Error::WriteFailed),
-        };
-
-        // In a multi-batch write, only the trailing sync reports `Error::Io`. Name it like `sync`.
-        match result {
-            Err(Error::Io(error)) if trailing => {
-                let (partition, name) = &self.shared.key;
-                Err(Error::BlobSyncFailed(partition.clone(), hex(name), error))
-            }
-            result => result,
         }
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let len = len
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
+        let len = physical_end(self.data_offset, len).ok_or(Error::OffsetOverflow)?;
         self.shared.tracker.write();
         self.shared.file.set_len(len).map_err(|e| {
             let (partition, name) = &self.shared.key;
-            Error::BlobResizeFailed(partition.clone(), hex(name), IoError::other(e).into())
+            Error::BlobResizeFailed(partition.clone(), hex(name), e.into())
         })?;
         self.shared.tracker.complete();
         Ok(())
@@ -872,10 +842,7 @@ impl crate::Blob for Blob {
         let RequestOutput::Sync(result) = output else {
             unreachable!("sync request returned another output kind");
         };
-        result.map_err(|error| match error {
-            Error::Io(error) => Error::BlobSyncFailed(partition.clone(), hex(name), error),
-            error => error,
-        })
+        result.map_err(|error| self.shared.sync_error(error))
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -902,11 +869,14 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        BLOB_PAGE_SIZE, Blob as _, Clock as _, IoBuf, IoBufMut, Runner as _, Spawner as _,
+        BLOB_PAGE_SIZE, Blob as _, Buf, Clock as _, IoBuf, IoBufMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
         buffer::paged::{CHECKSUM_SIZE, CacheRef, Writer},
         iouring::{self, operation::tests::admitted},
-        storage::{Header, Layout, shared, tests::run_storage_tests},
+        storage::{
+            Header, Layout, shared,
+            tests::{run_storage_tests, test_host_name_limits},
+        },
     };
     use commonware_utils::{NZU16, NZUsize, channel::oneshot};
     use futures::TryStreamExt as _;
@@ -1170,8 +1140,34 @@ mod tests {
         iouring::Runner::default().start(|_| async move {
             assert!(matches!(
                 blob.write_at(0, buf, WriteOptions::default()).await,
-                Err(Error::WriteFailed)
+                Err(Error::Io(error)) if error.raw_os_error() == Some(libc::ENOSPC)
             ));
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_kernel_errors_keep_their_cause() {
+        let directory = create_test_directory();
+        let hold = Hold::acquire(&directory).unwrap();
+        let pending = Arc::new(Pending::default());
+        let open = |file, name: &[u8]| {
+            Blob::new(
+                file,
+                hold.clone(),
+                0,
+                pending.admit("partition", name, false).unwrap().0,
+            )
+        };
+        let path = directory.join("file");
+        iouring::Runner::default().start(|_| async {
+            shared::check_kernel_errors(&path, IOVEC_BATCH_SIZE, open, |blob| {
+                (
+                    blob.shared.tracker.is_dirty(),
+                    blob.shared.tracker.failure(),
+                )
+            })
+            .await;
         });
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -1436,6 +1432,15 @@ mod tests {
             // Verify the io_uring storage backend satisfies the shared storage trait suite.
             let (storage, storage_directory) = create_test_storage();
             run_storage_tests(context, storage).await;
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    #[test]
+    fn test_iouring_host_name_limits() {
+        iouring::Runner::default().start(|_| async move {
+            let (storage, storage_directory) = create_test_storage();
+            test_host_name_limits(&storage, &storage_directory).await;
             let _ = std::fs::remove_dir_all(storage_directory);
         });
     }
@@ -1901,6 +1906,34 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_resize_extent_leaves_open_clean() {
+        iouring::Runner::default().start(|_| async {
+            for layout in [Layout::V0, Layout::V1] {
+                let directory = create_test_directory();
+                let storage = Storage::new(Config {
+                    storage_directory: directory.clone(),
+                    blob_layouts: layout..=layout,
+                });
+                let (blob, _) = storage.open("partition", b"overflow").await.unwrap();
+                let completed = storage.pending.completions();
+                assert!(matches!(
+                    blob.resize(i64::MAX as u64 - layout.data_offset() + 1)
+                        .await,
+                    Err(Error::OffsetOverflow)
+                ));
+                assert!(!blob.shared.tracker.is_dirty());
+                assert!(blob.shared.tracker.failure().is_none());
+                drop(blob);
+                let (_, size) = storage.open("partition", b"overflow").await.unwrap();
+                assert_eq!(size, 0);
+                assert_eq!(storage.pending.completions(), completed);
+                drop(storage);
+                std::fs::remove_dir_all(directory).unwrap();
+            }
+        });
+    }
+
+    #[test]
     fn test_write_range_overflow_before_registration() {
         for options in [WriteOptions::default(), WriteOptions::SYNC] {
             for chunks in [IOVEC_BATCH_SIZE + 1, 1, 2] {
@@ -2022,7 +2055,7 @@ mod tests {
                     .await
                     .unwrap_err()
                     .to_string(),
-                "read failed"
+                "offset overflow"
             );
             assert_eq!(
                 blob.write_at(u64::MAX, b"x".to_vec(), WriteOptions::default())
@@ -2316,13 +2349,17 @@ mod tests {
 
             assert!(matches!(
                 storage.scan("partition").await,
-                Err(Error::ReadFailed)
+                Err(Error::Io(e)) if e.kind() == ErrorKind::NotADirectory
             ));
             assert!(matches!(
                 storage.scan("missing").await,
                 Err(Error::PartitionMissing(_))
             ));
 
+            assert!(matches!(
+                storage.remove("partition", Some(b"blob")).await,
+                Err(Error::Io(e)) if e.kind() == ErrorKind::NotADirectory
+            ));
             assert!(matches!(
                 storage.remove("partition", None).await,
                 Err(Error::Io(_))
@@ -3327,18 +3364,23 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Every range up to the largest representable end is valid, empty or not.
+            // A nonempty range can end at the signed limit. An empty one can start at u64::MAX.
             let data_offset = blob.data_offset;
             assert!(data_offset > 0);
+            let last = i64::MAX as u64;
             assert_eq!(
-                blob.physical_ranges(&[(0, 4096), (7, 0), (u64::MAX - data_offset - 1, 1)])
-                    .unwrap(),
-                [(data_offset, 4096), (data_offset + 7, 0), (u64::MAX - 1, 1)]
+                blob.physical_ranges(&[
+                    (0, 4096),
+                    (u64::MAX - data_offset, 0),
+                    (last - data_offset - 1, 1)
+                ])
+                .unwrap(),
+                [(data_offset, 4096), (u64::MAX, 0), (last - 1, 1)]
             );
 
-            // A physical offset or end past u64::MAX, or a length no buffer can hold, fails the
-            // mapping.
+            // An unrepresentable range or a length no buffer can hold fails the mapping.
             for ranges in [
+                vec![(0, 1), (last - data_offset, 1)],
                 vec![(0, 1), (u64::MAX, 1)],
                 vec![(0, 1), (u64::MAX - data_offset - 100, 101)],
                 vec![(0, isize::MAX as usize + 1)],

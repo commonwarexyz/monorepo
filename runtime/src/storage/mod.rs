@@ -94,6 +94,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         })
     }
 
+    /// Unlink a named blob. Only an absent path means the blob is missing.
+    fn remove_blob(dir: &Path, partition: &str, name: &[u8]) -> Result<(), Error> {
+        let name = hex(name);
+        std::fs::remove_file(dir.join(&name)).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => Error::BlobMissing(partition.into(), name),
+            _ => e.into(),
+        })
+    }
+
     /// Reads a blob's leading bytes and resolves its header (see [header::resolve]).
     pub(crate) fn resolve_header(
         file: &mut File,
@@ -168,19 +177,51 @@ stability_scope!(BETA {
     pub(crate) use crate::BlobLayout as Layout;
     pub(crate) use header::Header;
 
-    /// Validate that a partition name contains only allowed characters.
+    /// Resolve an exclusive physical end within the signed file extent.
+    fn physical_end(start: u64, len: u64) -> Option<u64> {
+        start.checked_add(len).filter(|&end| end <= i64::MAX as u64)
+    }
+
+    /// Resolve the physical range for a read or write, including the blob header offset.
     ///
-    /// Partition names must only contain alphanumeric characters, dashes ('-'),
-    /// or underscores ('_').
-    pub fn validate_partition_name(partition: &str) -> Result<(), crate::Error> {
+    /// Empty ranges issue no I/O and only need their physical start to fit in `u64`.
+    fn physical_range(data_offset: u64, offset: u64, len: u64) -> Option<std::ops::Range<u64>> {
+        let start = data_offset.checked_add(offset)?;
+        let end = if len == 0 {
+            start
+        } else {
+            physical_end(start, len)?
+        };
+        Some(start..end)
+    }
+
+    /// Resolve a read's physical start, checking that the requested bytes fit in a buffer.
+    fn read_offset(data_offset: u64, offset: u64, len: usize) -> Option<u64> {
+        std::alloc::Layout::array::<u8>(len).ok()?;
+        Some(physical_range(data_offset, offset, len as u64)?.start)
+    }
+
+    /// Validate the names of a namespace operation before it changes the namespace.
+    ///
+    /// Rejects an empty blob name and, when `portable`, names beyond the portable limits
+    /// of [crate::Storage]. `None` names the whole partition.
+    fn validate_names(
+        partition: &str,
+        name: Option<&[u8]>,
+        portable: bool,
+    ) -> Result<(), crate::Error> {
         if partition.is_empty()
-            || partition
-                .chars()
-                .any(|c| !(c.is_ascii_alphanumeric() || ['_', '-'].contains(&c)))
+            || !partition.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
         {
             return Err(crate::Error::PartitionNameInvalid(partition.into()));
         }
-        Ok(())
+        let reason = match name {
+            _ if portable && partition.len() > 255 => "partition name exceeds 255 bytes",
+            Some([]) => "blob name is empty",
+            Some(name) if portable && name.len() > 127 => "blob name exceeds 127 bytes",
+            _ => return Ok(()),
+        };
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, reason).into())
     }
 });
 
@@ -190,12 +231,40 @@ pub(crate) mod shared;
 #[cfg(test)]
 pub(crate) mod tests {
     pub(crate) use super::header::tests::v0_blob_bytes;
+    use super::{Layout, physical_end, physical_range, read_offset};
     use crate::{
-        Blob, BlobVersion, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Spawner, Storage,
-        WriteOptions,
+        Blob, BlobVersion, Buf, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Spawner,
+        Storage, WriteOptions,
     };
-    use futures::FutureExt;
-    use std::sync::Arc;
+    use futures::{FutureExt, TryStreamExt as _};
+    use std::{fs, path::Path, sync::Arc};
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_physical_extent_boundaries() {
+        let limit = i64::MAX as u64;
+        for layout in [Layout::V0, Layout::V1] {
+            let header = layout.data_offset();
+            let last = limit - header;
+            assert_eq!(physical_range(header, last - 2, 2), Some(limit - 2..limit));
+            assert_eq!(read_offset(header, last - 2, 2), Some(limit - 2));
+            assert_eq!(physical_range(header, last - 1, 2), None);
+            assert_eq!(read_offset(header, last - 1, 2), None);
+            assert_eq!(physical_end(header, last), Some(limit));
+            assert_eq!(physical_end(header, last + 1), None);
+            assert_eq!(physical_end(header, u64::MAX), None);
+
+            let highest_start = u64::MAX - header;
+            for len in [0, 1] {
+                assert_eq!(physical_range(header, highest_start + 1, len), None);
+            }
+            assert_eq!(
+                physical_range(header, highest_start, 0),
+                Some(u64::MAX..u64::MAX)
+            );
+            assert_eq!(physical_range(header, highest_start, 1), None);
+        }
+    }
 
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(context: impl Spawner, storage: S)
@@ -228,9 +297,11 @@ pub(crate) mod tests {
         test_overlapping_writes(&storage).await;
         test_resize_then_open(&storage).await;
         test_partition_name_validation(&storage).await;
+        test_blob_name_validation(&storage).await;
         test_blob_version_mismatch(&storage).await;
         test_aligned_layout(&storage).await;
         test_read_zero_length(&storage).await;
+        test_read_offset_overflow(&storage).await;
         test_read_at_buf_returns_same_buffer(&storage).await;
         test_read_at_buf_insufficient_capacity(&storage).await;
         test_read_at_buf_larger_capacity(&storage).await;
@@ -270,6 +341,18 @@ pub(crate) mod tests {
 
         let blobs = storage.scan("partition").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
+
+        let name = b"test_blob";
+        for partition in ["partition", "absent"] {
+            assert!(matches!(
+                storage.remove(partition, Some(name)).await,
+                Err(Error::BlobMissing(p, n)) if p == partition && n == commonware_formatting::hex(name)
+            ));
+        }
+        assert!(matches!(
+            storage.remove("absent", None).await,
+            Err(Error::PartitionMissing(p)) if p == "absent"
+        ));
     }
 
     /// An already-open handle remains fully readable after the blob is removed by name.
@@ -685,7 +768,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Test reading from an offset beyond the written data.
+    /// Exact reads classify ranges that straddle EOF or start past it as short.
     async fn test_read_beyond_bound<S>(storage: &S)
     where
         S: Storage,
@@ -700,20 +783,31 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Attempt to read beyond the written data
-        let result = blob.read_at(6, 10, ReadOptions::default()).await;
-        assert!(
-            result.is_err(),
-            "Reading beyond written data should return an error"
-        );
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            // A valid range ending at the signed limit is still an EOF on this small blob.
+            let last = i64::MAX as u64 - crate::DEFAULT_BLOB_LAYOUT.data_offset();
+            for (offset, len) in [(0, 10), (6, 10), (last - 2, 2)] {
+                let result = blob.read_at(offset, len, options).await;
+                assert!(matches!(result, Err(Error::BlobInsufficientLength)));
 
-        // Same check via read_at_buf
-        let buf = IoBufMut::with_capacity(10);
-        let result = blob.read_at_buf(6, 10, buf, ReadOptions::default()).await;
-        assert!(
-            result.is_err(),
-            "read_at_buf beyond written data should return an error"
-        );
+                let single = IoBufMut::with_capacity(len);
+                let result = blob.read_at_buf(offset, len, single, options).await;
+                assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+
+                let chunks = vec![IoBufMut::with_capacity(2), IoBufMut::with_capacity(len - 2)];
+                let result = blob.read_at_buf(offset, len, chunks, options).await;
+                assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+
+                let ranges = [(0, 1), (offset, len)];
+                let result = blob
+                    .read_many(&ranges, options)
+                    .try_collect::<Vec<_>>()
+                    .await;
+                assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+                let result = blob.start_read_many(&ranges, options).await.await;
+                assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+            }
+        }
     }
 
     /// Test writing data at a large offset.
@@ -750,10 +844,22 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Empty writes should be accepted without extending the blob.
-        blob.write_at(1024, Vec::<u8>::new(), WriteOptions::SYNC)
-            .await
-            .unwrap();
+        // Even after a sync, empty writes must not extend the blob.
+        for options in [
+            WriteOptions::default(),
+            WriteOptions::SYNC,
+            WriteOptions::DONT_CACHE,
+            WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+        ] {
+            blob.write_at(1024, Vec::<u8>::new(), options)
+                .await
+                .unwrap();
+            assert!(matches!(
+                blob.write_at(u64::MAX, Vec::<u8>::new(), options).await,
+                Err(crate::Error::OffsetOverflow)
+            ));
+        }
+        blob.sync().await.unwrap();
         drop(blob);
 
         let (blob, len) = storage
@@ -1038,16 +1144,16 @@ pub(crate) mod tests {
 
         let result = blob.read_at(0, 1, ReadOptions::default()).await;
         assert!(
-            result.is_err(),
-            "Reading from an empty blob should return an error"
+            matches!(result, Err(Error::BlobInsufficientLength)),
+            "Reading from an empty blob should report insufficient length"
         );
 
         // Same check via read_at_buf
         let buf = IoBufMut::with_capacity(1);
         let result = blob.read_at_buf(0, 1, buf, ReadOptions::default()).await;
         assert!(
-            result.is_err(),
-            "read_at_buf from an empty blob should return an error"
+            matches!(result, Err(Error::BlobInsufficientLength)),
+            "read_at_buf from an empty blob should report insufficient length"
         );
     }
 
@@ -1158,6 +1264,7 @@ pub(crate) mod tests {
             "my.partition",
             "my partition",
             "../escape",
+            &format!("{}/", "a".repeat(255)),
             "",
         ] {
             assert!(
@@ -1181,6 +1288,102 @@ pub(crate) mod tests {
                 ),
                 "Invalid partition name '{invalid}' should be rejected by scan"
             );
+        }
+    }
+
+    /// Return whether `result` failed name validation.
+    pub(crate) fn is_invalid_name<T>(result: &Result<T, crate::Error>) -> bool {
+        matches!(
+            result,
+            Err(crate::Error::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+        )
+    }
+
+    /// Test that an empty blob name is rejected without changing the namespace, and that
+    /// binary names are accepted.
+    async fn test_blob_name_validation<S>(storage: &S)
+    where
+        S: Storage,
+    {
+        const PARTITION: &str = "blob_name_validation";
+        let default = crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION;
+
+        // A rejected empty name creates no partition.
+        assert!(is_invalid_name(&storage.open(PARTITION, b"").await));
+        assert!(is_invalid_name(
+            &storage
+                .open_versioned(PARTITION, b"", default.clone())
+                .await
+        ));
+        assert!(is_invalid_name(&storage.remove(PARTITION, Some(b"")).await));
+        assert!(matches!(
+            storage.scan(PARTITION).await,
+            Err(crate::Error::PartitionMissing(_))
+        ));
+
+        // An empty name resolves to neither the partition nor a blob in it.
+        let (blob, _) = storage.open(PARTITION, b"blob").await.unwrap();
+        drop(blob);
+        assert!(is_invalid_name(
+            &storage.open_versioned(PARTITION, b"", default).await
+        ));
+        assert!(is_invalid_name(&storage.remove(PARTITION, Some(b"")).await));
+        assert_eq!(
+            storage.scan(PARTITION).await.unwrap(),
+            vec![b"blob".to_vec()]
+        );
+
+        // Arbitrary bytes, including path separators, are accepted.
+        let name = vec![0, b'/', b'.', 0xff];
+        let (blob, _) = storage.open(PARTITION, &name).await.unwrap();
+        drop(blob);
+        assert!(storage.scan(PARTITION).await.unwrap().contains(&name));
+        storage.remove(PARTITION, Some(&name)).await.unwrap();
+        assert!(!storage.scan(PARTITION).await.unwrap().contains(&name));
+        storage.remove(PARTITION, None).await.unwrap();
+    }
+
+    /// Test that filesystem storage rooted at `root` leaves names at and beyond the portable
+    /// limits to the host: each succeeds exactly when the host accepts the same path
+    /// components on the same mount.
+    pub(crate) async fn test_host_name_limits(storage: &impl Storage, root: &Path) {
+        for (partition_len, name_len) in [(255, 1), (256, 1), (1, 127), (1, 128)] {
+            let partition = "p".repeat(partition_len);
+            let name = vec![0xab; name_len];
+            let dir = root.join(&partition);
+            let expected = fs::create_dir(&dir).is_ok_and(|()| {
+                let supported =
+                    fs::File::create(dir.join(commonware_formatting::hex(&name))).is_ok();
+                fs::remove_dir_all(&dir).unwrap();
+                supported
+            });
+            let opened = storage.open(&partition, &name).await;
+            assert!(!is_invalid_name(&opened));
+            assert_eq!(
+                opened.is_ok(),
+                expected,
+                "lengths {partition_len}, {name_len}"
+            );
+            let scanned = storage.scan(&partition).await;
+            assert!(!is_invalid_name(&scanned));
+            if let Ok((blob, _)) = opened {
+                drop(blob);
+                assert_eq!(scanned.unwrap(), [name.as_slice()]);
+                storage.remove(&partition, Some(&name)).await.unwrap();
+            }
+
+            // The same missing leaf can fail lookup if a component is too long.
+            let path = dir.join(commonware_formatting::hex(&name));
+            let expected = fs::remove_file(path).unwrap_err();
+            let actual = storage.remove(&partition, Some(&name)).await.unwrap_err();
+            if expected.kind() == std::io::ErrorKind::NotFound {
+                assert!(matches!(actual, Error::BlobMissing(..)));
+            } else {
+                assert!(
+                    matches!(actual, Error::Io(e) if e.raw_os_error() == expected.raw_os_error())
+                );
+            }
+            assert!(!is_invalid_name(&storage.remove(&partition, None).await));
         }
     }
 
@@ -1311,17 +1514,59 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // read_at with len=0 should succeed and return empty
-        let output = blob.read_at(0, 0, ReadOptions::default()).await.unwrap();
-        assert_eq!(output.len(), 0);
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            for offset in [0, 5, 6, i64::MAX as u64] {
+                assert!(blob.read_at(offset, 0, options).await.unwrap().is_empty());
+                let bufs = [IoBufMut::zeroed(2), IoBufMut::zeroed(3)];
+                let output = blob.read_at_buf(offset, 0, bufs, options).await.unwrap();
+                assert!(output.is_empty());
+                assert!(!output.is_single());
+                assert_eq!(output.capacity(), 5);
+            }
 
-        // read_at_buf with len=0 should also succeed
-        let buf = IoBufMut::with_capacity(16);
-        let output = blob
-            .read_at_buf(0, 0, buf, ReadOptions::default())
+            let ranges = [(6, 0), (1, 2)];
+            let streamed = crate::collect_reads(blob.read_many(&ranges, options), ranges.len())
+                .await
+                .unwrap();
+            let started = blob.start_read_many(&ranges, options).await.await.unwrap();
+            for buffers in [streamed, started] {
+                let [empty, data]: [_; 2] = buffers.try_into().unwrap();
+                assert!(empty.is_empty());
+                assert_eq!(data.coalesce(), b"el");
+            }
+        }
+    }
+
+    /// The start must fit even for an empty read. A positive read must also end within
+    /// the signed file extent, whether it starts outside it or only crosses the limit.
+    async fn test_read_offset_overflow(storage: &impl Storage) {
+        let (blob, _) = storage
+            .open("test_read_offset_overflow", b"blob")
             .await
             .unwrap();
-        assert_eq!(output.len(), 0);
+        let last = i64::MAX as u64;
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            for (offset, len) in [(u64::MAX, 0), (last, 1), (last - 8192, 8193), (last - 1, 1)] {
+                assert!(matches!(
+                    blob.read_at(offset, len, options).await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+                assert!(matches!(
+                    blob.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
+                        .await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+                let ranges = [(offset, len)];
+                assert!(matches!(
+                    crate::collect_reads(blob.read_many(&ranges, options), ranges.len()).await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+                assert!(matches!(
+                    blob.start_read_many(&ranges, options).await.await,
+                    Err(crate::Error::OffsetOverflow)
+                ));
+            }
+        }
     }
 
     /// Test that read_at_buf returns the same buffer that was passed in (contract verification).

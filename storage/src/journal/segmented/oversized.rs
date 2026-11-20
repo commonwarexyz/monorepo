@@ -965,7 +965,7 @@ mod tests {
     use commonware_runtime::{
         Blob as _, BufMut, Clock as _, Error as RError, Runner, Storage as _, Supervisor as _,
         WriteOptions,
-        buffer::paged::{CacheRef, corrupt_page},
+        buffer::paged::{CHECKSUM_SIZE, CacheRef, corrupt_page},
         deterministic,
         mocks::{
             DeferredSync, DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
@@ -5571,6 +5571,57 @@ mod tests {
             .await;
             assert!(matches!(result, Err(Error::Corruption(_))));
             assert_eq!(context.scan(&cfg.value_partition).await.unwrap().len(), 3);
+        });
+    }
+
+    /// A short physical page in the checkpoint section is corruption and is left untouched.
+    #[test_traced]
+    fn test_init_with_checkpoint_rejects_short_index_page() {
+        check_short_index_page(deterministic::Runner::default());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test_traced]
+    fn test_init_with_checkpoint_rejects_short_index_page_tokio() {
+        let cfg = commonware_runtime::tokio::Config::default();
+        let directory = cfg.storage_directory().clone();
+        check_short_index_page(commonware_runtime::tokio::Runner::new(cfg));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn check_short_index_page<R: Runner>(runner: R)
+    where
+        R::Context: Context,
+    {
+        runner.start(|context| async move {
+            let cfg = entry_cfg();
+            let section = 1u64;
+            let checkpoint = (section, ENTRY_SIZE);
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("seed"), cfg.clone(), (0, 0))
+                    .await
+                    .unwrap();
+            let (journal, _, _, _) = journal
+                .append(section, TestEntry::new(section, 0, 0), &[42; 16])
+                .await
+                .unwrap();
+            drop(journal.sync_all().await.unwrap());
+
+            tear_index_tail(&context, &cfg, section).await;
+
+            let err = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                context.child("restore"),
+                cfg.clone(),
+                checkpoint,
+            )
+            .await
+            .expect_err("restore accepted a short index page");
+            let (_, len) = context
+                .open(&cfg.index_partition, &section.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(len, ENTRY_SIZE + CHECKSUM_SIZE - 1);
+            assert!(matches!(err, Error::Corruption(_)), "{err:?}");
         });
     }
 

@@ -7,7 +7,7 @@
 //! exactly one place.
 
 use super::{CacheRef, tip::Buffer};
-use crate::{Blob, Error, IoBufMut, IoBufs};
+use crate::{Blob, BufMut as _, Error, IoBufMut, IoBufs};
 use commonware_utils::Widen;
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -126,6 +126,16 @@ impl<B: Blob> Clone for View<'_, B> {
 impl<B: Blob> Copy for View<'_, B> {}
 
 impl<B: Blob> View<'_, B> {
+    fn checked_end(&self, offset: u64, len: usize) -> Result<u64, Error> {
+        let end = offset
+            .checked_add(Widen::widen(len))
+            .ok_or(Error::OffsetOverflow)?;
+        if end > self.size {
+            return Err(Error::BlobInsufficientLength);
+        }
+        Ok(end)
+    }
+
     /// Copy any in-memory tail overlap into `buf`, returning the remaining prefix length.
     fn copy_tail_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
         let tail_start = self.tail_offset.max(offset);
@@ -140,12 +150,9 @@ impl<B: Blob> View<'_, B> {
     /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
     /// is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
-        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
+        let Ok(end_offset) = self.checked_end(offset, buf.len()) else {
             return false;
         };
-        if end_offset > self.size {
-            return false;
-        }
         if buf.is_empty() {
             return true;
         }
@@ -169,12 +176,7 @@ impl<B: Blob> View<'_, B> {
 
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        let end_offset = offset
-            .checked_add(buf.len() as u64)
-            .ok_or(Error::OffsetOverflow)?;
-        if end_offset > self.size {
-            return Err(Error::BlobInsufficientLength);
-        }
+        let end_offset = self.checked_end(offset, buf.len())?;
 
         // Copy any suffix from the in-memory tail, leaving the prefix below `tail_offset` to be
         // served from the page cache or blob.
@@ -209,9 +211,8 @@ impl<B: Blob> View<'_, B> {
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        let mut buf = IoBufMut::with_capacity(len);
-        // SAFETY: read_into below initializes all `len` bytes.
-        unsafe { buf.set_len(len) };
+        self.checked_end(offset, len)?;
+        let mut buf = IoBufMut::zeroed(len);
         self.read_into(buf.as_mut(), offset).await?;
         Ok(buf.into())
     }
@@ -235,8 +236,8 @@ impl<B: Blob> View<'_, B> {
         if available == 0 {
             return Err(Error::BlobInsufficientLength);
         }
-        // SAFETY: read_into below fills all `available` bytes.
-        unsafe { bufs.set_len(available) };
+        bufs.truncate(available);
+        bufs.put_bytes(0, available - bufs.len());
         self.read_into(bufs.as_mut(), offset).await?;
         Ok((bufs, available))
     }
@@ -432,6 +433,26 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[test]
+    fn test_read_at_checks_range_before_allocating() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
+            let (blob, size) = context
+                .open("test_partition", b"read_bounds")
+                .await
+                .unwrap();
+            let writer = Writer::new(blob, size, BUFFER_SIZE, cache).await.unwrap();
+            assert!(matches!(
+                writer.read_at(0, usize::MAX).await,
+                Err(super::Error::BlobInsufficientLength)
+            ));
+            assert!(matches!(
+                writer.read_at(u64::MAX, 1).await,
+                Err(super::Error::OffsetOverflow)
+            ));
+        });
+    }
 
     #[test]
     fn test_reads_cross_buffer_chunks_and_cache() {

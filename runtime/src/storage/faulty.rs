@@ -1,5 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
+use super::memory;
 use crate::{
     BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     deterministic::BoxDynRng,
@@ -12,6 +13,7 @@ use commonware_utils::{
 use futures::{FutureExt as _, future::Shared};
 use rand::RngExt as _;
 use std::{
+    any::Any,
     collections::{BTreeMap, HashSet},
     io::Error as IoError,
     sync::{
@@ -115,7 +117,9 @@ pub struct Config {
     /// Failure rate for `open_versioned` operations.
     pub open_rate: Option<Probability>,
 
-    /// Failure rate for `read_at` operations.
+    /// Failure rate for nonempty reads. In the deterministic runner, invalid ranges still
+    /// return [Error::OffsetOverflow]. A valid range may return an injected error instead of
+    /// [Error::BlobInsufficientLength].
     pub read_rate: Option<Probability>,
 
     /// Failure and byte-retention configuration for `write_at` operations.
@@ -264,7 +268,7 @@ impl<B> PendingMutation<B> {
 /// Unresolved entries in issue order within each file generation.
 type PendingMutations<B> = Arc<Mutex<Vec<PendingMutation<B>>>>;
 
-/// Evidence detached from the fault model. Callers release namespace locks before dropping it.
+/// Evidence detached by namespace operations or full syncs for disposal after unlocking.
 pub(crate) struct Retired<B> {
     _mutations: Vec<PendingMutation<B>>,
 }
@@ -414,7 +418,8 @@ impl Oracle {
 
 /// A storage wrapper that injects deterministic faults based on configuration.
 ///
-/// Uses a shared RNG for determinism.
+/// Uses a shared RNG for determinism. With arbitrary backends, an injected fault can
+/// take precedence over backend-specific range validation.
 #[derive(Clone)]
 pub struct Storage<S: crate::Storage> {
     inner: S,
@@ -500,7 +505,7 @@ impl<S: crate::Storage> Storage<S> {
     }
 }
 
-impl Storage<crate::storage::memory::Storage> {
+impl Storage<memory::Storage> {
     /// Retire crash evidence excluded from the durable snapshot admitted by a successful open.
     /// The caller holds the logical namespace guard through admission and retirement.
     pub(crate) fn admit(
@@ -633,6 +638,23 @@ impl<B: crate::Blob> Blob<B> {
             generation,
             size: AtomicU64::new(size),
         }
+    }
+
+    fn memory_blob(&self) -> Option<&memory::Blob> {
+        (self.inner.as_ref() as &dyn Any).downcast_ref()
+    }
+
+    fn preflight_read(&self, offset: u64, len: usize) -> Result<(), Error> {
+        if len == 0 {
+            return Ok(());
+        }
+        if let Some(blob) = self.memory_blob() {
+            blob.read_offset(offset, len)?;
+        }
+        if self.ctx.should_fail(Op::Read) {
+            return Err(injected_io_error().into());
+        }
+        Ok(())
     }
 
     fn record_pending(
@@ -778,9 +800,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        if self.ctx.should_fail(Op::Read) {
-            return Err(injected_io_error().into());
-        }
+        self.preflight_read(offset, len)?;
         self.inner.read_at(offset, len, options).await
     }
 
@@ -791,12 +811,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        if self.ctx.should_fail(Op::Read) {
-            return Err(injected_io_error().into());
-        }
-        self.inner
-            .read_at_buf(offset, len, bufs.into(), options)
-            .await
+        let bufs = bufs.into();
+        assert!(
+            len == 0 || len <= bufs.capacity(),
+            "read length exceeds buffer capacity"
+        );
+        self.preflight_read(offset, len)?;
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
     async fn write_at(
@@ -807,13 +828,17 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
-        let sync = options.contains(WriteOptions::SYNC);
-        if sync && total_bytes == 0 {
-            return Ok(());
+        if total_bytes == 0 {
+            return self.inner.write_at(offset, bufs, options).await;
         }
-        offset
-            .checked_add(total_bytes)
-            .ok_or(Error::OffsetOverflow)?;
+        let sync = options.contains(WriteOptions::SYNC);
+        if let Some(blob) = self.memory_blob() {
+            blob.write_range(offset, total_bytes)?;
+        } else {
+            offset
+                .checked_add(total_bytes)
+                .ok_or(Error::OffsetOverflow)?;
+        }
         let (should_fail, write_retention) = self.ctx.check_write_fault();
         let _mutation = self.generation.mutation.lock().await;
         if should_fail {
@@ -881,6 +906,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        if let Some(blob) = self.memory_blob() {
+            blob.resize_len(len)?;
+        }
         let (should_fail, partial_rate, retain) = self.ctx.check_resize_fault();
         let _mutation = self.generation.mutation.lock().await;
         if should_fail {
@@ -905,9 +933,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if self.ctx.should_fail(Op::Sync) {
             return Err(injected_io_error().into());
         }
-        let _mutation = self.generation.mutation.lock().await;
+        let mutation = self.generation.mutation.lock().await;
         self.inner.sync().await?;
-        clear_pending(&self.pending, std::slice::from_ref(&self.generation));
+        let retired = clear_pending(&self.pending, std::slice::from_ref(&self.generation));
+        drop(mutation);
+        drop(retired);
         Ok(())
     }
 
@@ -915,7 +945,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if self.ctx.should_fail(Op::Sync) {
             return Handle::ready(Err(injected_io_error().into()));
         }
-        let _mutation = self.generation.mutation.lock().await;
+        let mutation = self.generation.mutation.lock().await;
+        // Record the cut in mutation order. Later writes must remain pending even if
+        // they arrive before we observe this sync's result.
         let sync = Arc::new(PendingSync {
             generation: self.generation.clone(),
             completion: self.inner.start_sync().await.shared(),
@@ -923,14 +955,18 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.pending
             .lock()
             .push(PendingMutation::Sync { sync: sync.clone() });
+        drop(mutation);
 
         let pending = self.pending.clone();
-        let completion = sync.completion.clone();
-        Handle::from_future(async move {
-            let result = completion.await;
+        let mut completion = sync.completion.clone().map(move |result| {
             resolve_pending_sync(&pending, &sync, result.is_ok());
             result
-        })
+        });
+        // Retire an already completed sync even if the caller discards its handle.
+        // Polling and dropping a backing completion may run backend code.
+        (&mut completion)
+            .now_or_never()
+            .map_or_else(|| Handle::from_future(completion), Handle::ready)
     }
 }
 
@@ -1478,6 +1514,165 @@ mod tests {
                 .as_ref(),
             b"freshlater"
         );
+    }
+
+    #[tokio::test]
+    async fn test_full_sync_releases_mutation_guard_before_retiring_buffers() {
+        struct Owner(Arc<FileGeneration>, Arc<AtomicBool>);
+
+        impl AsRef<[u8]> for Owner {
+            fn as_ref(&self) -> &[u8] {
+                b"x"
+            }
+        }
+
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.1
+                    .store(self.0.mutation.try_lock().is_ok(), Ordering::Relaxed);
+            }
+        }
+
+        let h = Harness::new(Config::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        }));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        for start in [true, false] {
+            let unlocked = Arc::new(AtomicBool::new(false));
+            let buf = bytes::Bytes::from_owner(Owner(blob.generation.clone(), unlocked.clone()));
+            blob.write_at(0, buf, WriteOptions::default())
+                .await
+                .unwrap();
+            if start {
+                drop(blob.start_sync().await);
+            } else {
+                blob.sync().await.unwrap();
+            }
+            assert!(unlocked.load(Ordering::Relaxed), "start_sync = {start}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_sync_observes_the_backing_completion_without_the_mutation_lock() {
+        let h = Harness::new(Config::default());
+        let (inner, _) = h.storage.open("partition", b"test").await.unwrap();
+        let generation = inner.generation.clone();
+        let (delayed, gate) = crate::mocks::DelayedSyncBlob::new(inner);
+        gate.unblock();
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let blob = Blob::new(
+            h.storage.ctx.clone(),
+            pending.clone(),
+            generation,
+            delayed,
+            0,
+        );
+
+        // This backing completion takes the same mutation lock when polled. It can finish
+        // during admission only after the wrapper releases that lock.
+        drop(blob.start_sync().await);
+        assert!(pending.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dropped_ready_start_sync_resolves_at_admission() {
+        let h = Harness::new(Config::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        }));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        let (other, _) = h.storage.open("partition", b"other").await.unwrap();
+        other
+            .write_at(0, b"x", WriteOptions::default())
+            .await
+            .unwrap();
+
+        // A sync that completes during admission releases its cut and the writes it covers
+        // without being observed.
+        for round in 0..8u8 {
+            blob.write_at(0, vec![round; 4], WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob.start_sync().await);
+            assert_eq!(h.storage.pending.lock().len(), 1);
+        }
+
+        // A sync that fails during admission leaves earlier writes pending without retaining
+        // its cut.
+        blob.write_at(0, b"lost", WriteOptions::default())
+            .await
+            .unwrap();
+        h.inner.remove("partition", Some(b"test")).await.unwrap();
+        let completion = blob.start_sync().await;
+        let unresolved = |pending: &[PendingMutation<_>]| {
+            pending
+                .iter()
+                .map(|mutation| matches!(mutation, PendingMutation::Write { .. }))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(unresolved(&h.storage.pending.lock()), [true, true]);
+        assert!(matches!(completion.await, Err(Error::BlobMissing(..))));
+        assert_eq!(unresolved(&h.storage.pending.lock()), [true, true]);
+    }
+
+    #[test]
+    fn test_dropped_pending_start_sync_keeps_its_crash_cut() {
+        crate::tokio::Runner::default().start(|context| async move {
+            let h = Harness::new(Config::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }));
+            let (inner, _) = h.inner.open("partition", b"pending").await.unwrap();
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let completed = Arc::new(tokio::sync::Notify::new());
+            let gated = OperationGate {
+                inner: Arc::new(inner),
+                context: Arc::new(context),
+                pause_after_write: false,
+                armed: Arc::new(AtomicBool::new(true)),
+                started: started.clone(),
+                release: release.clone(),
+                completed: completed.clone(),
+            };
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let blob = Blob::new(
+                h.storage.ctx.clone(),
+                pending.clone(),
+                Arc::new(FileGeneration::new()),
+                gated,
+                0,
+            );
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Crash replay still owes the write while the unobserved sync is incomplete.
+            drop(blob.start_sync().await);
+            started.notified().await;
+            let cut = {
+                let pending = pending.lock();
+                let [
+                    PendingMutation::Write { .. },
+                    PendingMutation::Sync { sync },
+                ] = &pending[..]
+                else {
+                    panic!("an incomplete sync must retain its cut after the write it covers");
+                };
+                sync.clone()
+            };
+            assert!(!cut.completed_successfully());
+
+            // Once the backing sync completes, the retained cut covers the write.
+            release.notify_one();
+            completed.notified().await;
+            assert!(cut.completed_successfully());
+            assert_eq!(pending.lock().len(), 2);
+        });
     }
 
     #[tokio::test]
@@ -2064,16 +2259,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_empty_unsynced_write_does_not_create_crash_debt() {
-        let h = Harness::new(Config::default().write(WriteConfig {
-            failure_rate: probability!(0.0),
-            retention_rate: probability!(1.0),
-            mode: PartialWriteMode::Prefix,
-        }));
+    async fn test_faulty_storage_empty_writes_skip_faults_and_bookkeeping() {
+        let h = Harness::new(
+            Config::default()
+                .write(WriteConfig {
+                    failure_rate: probability!(1.0),
+                    retention_rate: probability!(1.0),
+                    mode: PartialWriteMode::Prefix,
+                })
+                .sync(probability!(1.0)),
+        );
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        blob.write_at(0, Vec::<u8>::new(), WriteOptions::default())
-            .await
-            .unwrap();
+        for options in [WriteOptions::default(), WriteOptions::SYNC] {
+            blob.write_at(8, Vec::<u8>::new(), options).await.unwrap();
+            assert!(matches!(
+                blob.write_at(u64::MAX, Vec::<u8>::new(), options).await,
+                Err(Error::OffsetOverflow)
+            ));
+        }
+        assert_eq!(blob.size.load(Ordering::Relaxed), 0);
         assert!(h.storage.pending.lock().is_empty());
     }
 
@@ -2091,10 +2295,113 @@ mod tests {
         // Enable read faults
         h.config.write().read_rate = Some(probability!(1.0));
 
+        assert!(
+            blob.read_at(5, 0, ReadOptions::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(matches!(
             blob.read_at(0, 4, ReadOptions::default()).await,
             Err(Error::Io(_))
         ));
+        assert!(matches!(
+            blob.read_at(i64::MAX as u64, 4, ReadOptions::default())
+                .await,
+            Err(Error::OffsetOverflow)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_opaque_storage_read_fault_can_precede_backing_range_validation() {
+        let rng: BoxDynRng = Box::new(StdRng::seed_from_u64(42));
+        let config = Arc::new(RwLock::new(Config::default().read(probability!(1.0))));
+        let storage = Storage::new(
+            crate::mocks::Storage::new(),
+            Arc::new(Mutex::new(rng)),
+            config.clone(),
+        );
+        let (blob, _) = storage.open("partition", b"test").await.unwrap();
+        let offset = i64::MAX as u64;
+        let options = ReadOptions::default();
+
+        // Only directly wrapped memory blobs can preflight the backend's range.
+        assert!(matches!(
+            blob.read_at(offset, 4, options).await,
+            Err(Error::Io(_))
+        ));
+        assert!(matches!(
+            blob.read_at_buf(offset, 4, IoBufMut::with_capacity(4), options)
+                .await,
+            Err(Error::Io(_))
+        ));
+        config.write().read_rate = None;
+        assert!(matches!(
+            blob.read_at(offset, 4, options).await,
+            Err(Error::OffsetOverflow)
+        ));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "read length exceeds buffer capacity")]
+    async fn test_read_fault_cannot_mask_insufficient_capacity() {
+        let h = Harness::new(Config::default().read(probability!(1.0)));
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        let _ = blob
+            .read_at_buf(u64::MAX, 1, IoBufMut::default(), ReadOptions::default())
+            .await;
+    }
+
+    #[test]
+    fn test_invalid_memory_reads_do_not_sample_faults() {
+        crate::deterministic::Runner::default().start(|_| async {
+            // The first sample lets a read through and the second injects a fault.
+            let rng: BoxDynRng = ScriptedRng::new([u64::MAX, 0, 0]).into();
+            let storage = Storage::new(
+                MemStorage::new(),
+                Arc::new(Mutex::new(rng)),
+                Arc::new(RwLock::new(Config::default().read(probability!(0.5)))),
+            );
+            let (blob, _) = storage.open("partition", b"test").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+
+            let options = ReadOptions::default();
+            // Empty reads still validate their start, but never consume a fault sample.
+            assert!(blob.read_at(5, 0, options).await.unwrap().is_empty());
+            assert!(matches!(
+                blob.read_at(u64::MAX, 0, options).await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(
+                blob.read_at_buf(5, 0, IoBufMut::with_capacity(4), options)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                blob.read_at_buf(u64::MAX, 0, IoBufMut::default(), options)
+                    .await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(matches!(
+                blob.read_at(u64::MAX, 4, options).await,
+                Err(Error::OffsetOverflow)
+            ));
+            assert!(matches!(
+                blob.read_at_buf(u64::MAX, 4, IoBufMut::with_capacity(4), options)
+                    .await,
+                Err(Error::OffsetOverflow)
+            ));
+            let read = blob.read_at(0, 4, options).await.unwrap();
+            assert_eq!(read.coalesce(), b"data");
+            assert!(matches!(
+                blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), options)
+                    .await,
+                Err(Error::Io(_))
+            ));
+        });
     }
 
     #[tokio::test]

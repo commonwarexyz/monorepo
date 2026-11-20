@@ -188,7 +188,7 @@ impl crate::Storage for Storage {
         name: &[u8],
         versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, Some(name), false)?;
 
         // Construct the full path
         let path = self.cfg.storage_directory.join(partition).join(hex(name));
@@ -282,7 +282,7 @@ impl crate::Storage for Storage {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, name, false)?;
 
         let path = self.cfg.storage_directory.join(partition);
         let storage_directory = self.cfg.storage_directory.clone();
@@ -301,9 +301,7 @@ impl crate::Storage for Storage {
             // Make the removal durable in its containing directory. Only a
             // surviving partition regains its cache entry after a successful sync.
             if let Some(name) = &name {
-                let blob_path = path.join(hex(name));
-                fs::remove_file(blob_path)
-                    .map_err(|_| Error::BlobMissing(partition.clone(), hex(name)))?;
+                super::remove_blob(&path, &partition, name)?;
 
                 pending.forget(&partition, Some(name));
 
@@ -326,7 +324,7 @@ impl crate::Storage for Storage {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        super::validate_partition_name(partition)?;
+        super::validate_names(partition, None, false)?;
 
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
@@ -334,15 +332,15 @@ impl crate::Storage for Storage {
             // Distinguish missing partitions from other filesystem failures.
             let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
                 ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
-                _ => Error::ReadFailed,
+                _ => error.into(),
             })?;
 
             // Make inherited directory entries durable before exposing their blob names.
             partitions.sync_once(&path)?;
             let mut blobs = Vec::new();
             for entry in entries {
-                let entry = entry.map_err(|_| Error::ReadFailed)?;
-                let file_type = entry.file_type().map_err(|_| Error::ReadFailed)?;
+                let entry = entry?;
+                let file_type = entry.file_type()?;
                 if !file_type.is_file() {
                     return Err(Error::PartitionCorrupt(partition));
                 }
@@ -371,7 +369,10 @@ mod tests {
     use super::*;
     use crate::{
         BLOB_PAGE_SIZE, Blob, ReadOptions, Runner as _, Storage as _, WriteOptions,
-        storage::{Header, Layout, shared, tests::run_storage_tests},
+        storage::{
+            Header, Layout, shared,
+            tests::{run_storage_tests, test_host_name_limits},
+        },
         tokio::Runner,
     };
     use commonware_utils::{Widen, sys_rng};
@@ -521,6 +522,18 @@ mod tests {
             let config = Config::new(storage_directory, Layout::ALL);
             let storage = Storage::new(config);
             run_storage_tests(context, storage).await;
+        });
+    }
+
+    #[test]
+    fn test_tokio_host_name_limits() {
+        Runner::default().start(|_| async move {
+            let mut rng = sys_rng();
+            let storage_directory =
+                env::temp_dir().join(format!("storage_tokio_{}", rng.random::<u64>()));
+            let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
+            test_host_name_limits(&storage, &storage_directory).await;
+            let _ = std::fs::remove_dir_all(&storage_directory);
         });
     }
 
@@ -1073,13 +1086,17 @@ mod tests {
 
         assert!(matches!(
             storage.scan("partition").await,
-            Err(Error::ReadFailed)
+            Err(Error::Io(e)) if e.kind() == ErrorKind::NotADirectory
         ));
         assert!(matches!(
             storage.scan("missing").await,
             Err(Error::PartitionMissing(_))
         ));
 
+        assert!(matches!(
+            storage.remove("partition", Some(b"blob")).await,
+            Err(Error::Io(e)) if e.kind() == ErrorKind::NotADirectory
+        ));
         assert!(matches!(
             storage.remove("partition", None).await,
             Err(Error::Io(_))
