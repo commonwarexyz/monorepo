@@ -205,7 +205,7 @@ impl<C: Clock> RateLimiter<C> {
 
 /// A rate limiter that tracks each key independently.
 ///
-/// Keys are stored with a randomized hasher, so attacker-chosen keys cannot force collisions.
+/// Keys are stored with a randomized hasher, to resist collisions from attacker-chosen keys.
 /// Call [KeyedRateLimiter::retain_recent] periodically to drop keys with a full burst available.
 pub struct KeyedRateLimiter<K, C: Clock> {
     gcra: Gcra<C>,
@@ -273,10 +273,10 @@ mod tests {
     use super::*;
     use crate::{Runner as _, Supervisor as _, deterministic};
     use commonware_macros::select;
-    use commonware_utils::NZU32;
+    use commonware_utils::{NZU32, sync::Mutex};
     use std::{
         future::{Future, ready},
-        sync::{Arc, Mutex},
+        sync::Arc,
     };
 
     /// A clock that only moves when set.
@@ -289,23 +289,23 @@ mod tests {
         }
 
         fn set(&self, time: SystemTime) {
-            *self.0.lock().unwrap() = time;
+            *self.0.lock() = time;
         }
 
         fn advance(&self, step: Duration) {
-            let mut time = self.0.lock().unwrap();
+            let mut time = self.0.lock();
             *time += step;
         }
 
         fn rewind(&self, step: Duration) {
-            let mut time = self.0.lock().unwrap();
+            let mut time = self.0.lock();
             *time -= step;
         }
     }
 
     impl Clock for ManualClock {
         fn current(&self) -> SystemTime {
-            *self.0.lock().unwrap()
+            *self.0.lock()
         }
 
         fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn test_keyed_independent_keys() {
         let clock = ManualClock::new(START);
-        let mut limiter = KeyedRateLimiter::new(Quota::per_second(NZU32!(2)), clock.clone());
+        let mut limiter = KeyedRateLimiter::new(Quota::per_second(NZU32!(2)), clock);
         assert!(limiter.is_empty());
         limiter.check_key(&1u32).unwrap();
         limiter.check_key(&1).unwrap();
