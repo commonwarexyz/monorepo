@@ -2,23 +2,6 @@
 
 ## v2026.11.0
 
-<details>
-<summary>Rollback Support</summary>
-
-_These instructions do not cover primitives that were ALPHA in v2026.10.1._
-
-Nothing needs to be deferred, and v2026.10.1 opens data written by this release
-without conversion.
-
-**To roll back:**
-
-- **Oversized markers:** If a store moved from `Oversized::init` to
-  `init_with_markers`, open it on v2026.10.1 through `init_with_metadata` with
-  the same marker partition. A store opened with `Oversized::init` there leaves
-  stale markers behind when it prunes the sections they protect ([#5663]).
-
-</details>
-
 ### Stability
 
 QMDB is now BETA, along with the structures it builds on: `storage::merkle` with
