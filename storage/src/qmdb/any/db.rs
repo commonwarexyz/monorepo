@@ -413,14 +413,17 @@ where
     /// the inactivity floor.
     ///
     /// The future does not borrow the database, so it can run alongside any database operation,
-    /// and it can be dropped at any point. Prefetching is best effort. Failures are logged, and
-    /// warmed pages are not pinned: they stay cached until read only while the page cache's Main
-    /// section has room for them. One prefetch warms at most half as many pages as Main holds,
-    /// skipping the rest with a warning, but warms in flight that together cover more pages than
-    /// Main holds evict each other's pages before they are read, which can cost more reads than
-    /// not prefetching. Warmed pages also displace Main residents not read since the eviction sweep
-    /// last passed them, so prefetching many cold keys evicts the existing working set faster
-    /// than reading them on demand would.
+    /// and it can be dropped at any point. Prefetching is best effort. Failures are logged.
+    ///
+    /// With the built-in [fixed](crate::journal::contiguous::fixed) and
+    /// [variable](crate::journal::contiguous::variable) journals, each call to `prefetch`,
+    /// `prefetch_floor`, or `prefetch_neighbors` gets its own page budget, even for the same
+    /// block. Warmed pages are not pinned. Together the calls can warm more pages than Main
+    /// holds, evicting each other's pages before they are read and potentially costing more
+    /// reads than skipping prefetch.
+    /// Warmed pages can also displace Main residents not read since the eviction sweep last
+    /// passed them, so prefetching many cold keys evicts the existing working set faster than
+    /// reading them on demand would.
     pub fn prefetch<Q: Borrow<U::Key>>(
         &self,
         keys: &[Q],
