@@ -125,6 +125,27 @@ impl<D: Copy> Resident<D> {
         Ok(())
     }
 
+    /// Make room for the nodes born by size `end`, so adding them regrows no level. Regrowing
+    /// copies every digest a level holds.
+    ///
+    /// A level gets the room that doubling to its new length would have left it. An exact
+    /// reservation would leave every level full, to regrow on the next append. A level whose room
+    /// cannot be reserved is left to grow as its nodes arrive.
+    fn reserve<F: Family>(&mut self, end: Position<F>) {
+        let born = born(end);
+        for (level, &to) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
+            let len = level.nodes.len();
+            let total = usize::try_from(to.saturating_sub(level.end()))
+                .ok()
+                .and_then(|additional| len.checked_add(additional));
+            let Some(total) = total.filter(|&total| total > len) else {
+                continue;
+            };
+            let capacity = total.checked_next_power_of_two().unwrap_or(total);
+            let _ = level.nodes.try_reserve_exact(capacity - len);
+        }
+    }
+
     /// Drop nodes before `boundary`.
     fn trim<F: Family>(&mut self, boundary: Position<F>) {
         let born = born(boundary);
@@ -513,6 +534,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(())
     }
 
+    /// Make room for the resident nodes that appending the operations up to `end` adds. A replay
+    /// to `end` reserves first, so that it never stops to regrow a level.
+    pub(crate) fn reserve(&mut self, end: Location<F>) {
+        self.resident.reserve(F::location_to_position(end));
+        self.update_metrics();
+    }
+
     /// Append the digests of the operations from the current size to `end`.
     pub(crate) async fn replay<C, H>(
         mut self,
@@ -526,6 +554,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         self.check_replay_end(journal, end)?;
+        self.reserve(end);
 
         // Each operation is read once, so its pages are not kept in the OS page cache.
         let stream = journal
@@ -673,6 +702,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         self.check_replay_end(journal.as_ref(), end)?;
+        self.reserve(end);
 
         // Spawn a task that reads and hashes the next chunk, or return false if none is left.
         let plan = self.chunk_plan(end, height);
@@ -1437,6 +1467,79 @@ mod tests {
     #[test]
     fn subtrees_match_batches_mmb() {
         deterministic::Runner::default().start(subtrees_match_batches::<mmb::Family>);
+    }
+
+    /// Reserving for a replay leaves every level room for the nodes the replay adds, so the
+    /// replay regrows none, in trees opened at boundaries on and off level edges. A level's room
+    /// stays under twice its nodes.
+    async fn replay_regrows_no_level<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let total = 513;
+        let expected = oracle::<F>(&Operations::new(total), &hasher);
+        let capacities = |tree: &Tree<F, D, Sequential>| -> Vec<usize> {
+            let levels = tree.resident.levels.iter();
+            levels.map(|level| level.nodes.capacity()).collect()
+        };
+        for height in [0, 2, 5] {
+            for boundary in [0, 1, 31, 32, 33, 257, total] {
+                let case = format!("resident {height}, boundary {boundary}");
+                let pins: Vec<_> = F::nodes_to_pin(Location::new(boundary))
+                    .map(|p| expected.get_node(p).unwrap())
+                    .collect();
+                let ops = Operations::range(boundary..total);
+                let mut tree =
+                    Tree::<F, D, _>::new(Location::new(boundary), pins, &config(height), &context)
+                        .unwrap();
+                tree.reserve(Location::new(total));
+                let reserved = capacities(&tree);
+                let tree = tree
+                    .replay(&ops, &hasher, Location::new(total), NZU64!(7))
+                    .await
+                    .unwrap();
+                assert_eq!(capacities(&tree), reserved, "{case}");
+                for level in &tree.resident.levels {
+                    let (len, capacity) = (level.nodes.len(), level.nodes.capacity());
+                    assert!(len <= capacity && capacity < 2 * len.max(1), "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replay_regrows_no_level_mmr() {
+        deterministic::Runner::default().start(replay_regrows_no_level::<mmr::Family>);
+    }
+    #[test]
+    fn replay_regrows_no_level_mmb() {
+        deterministic::Runner::default().start(replay_regrows_no_level::<mmb::Family>);
+    }
+
+    /// Reserving for more nodes than memory can hold skips the levels that do not fit, and the
+    /// tree still appends.
+    async fn reserve_skips_levels_too_large<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let ops = Operations::new(100);
+        let mut tree =
+            Tree::<F, D, _>::new(Location::new(0), Vec::new(), &config(5), &context).unwrap();
+        tree.reserve(F::MAX_LEAVES);
+        assert_eq!(tree.resident.levels[0].nodes.capacity(), 0);
+        let tree = tree
+            .replay(&ops, &hasher, Location::new(100), NZU64!(7))
+            .await
+            .unwrap();
+        assert_eq!(
+            tree.root(&hasher, 0).unwrap(),
+            oracle::<F>(&ops, &hasher).root(&hasher, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn reserve_skips_levels_too_large_mmr() {
+        deterministic::Runner::default().start(reserve_skips_levels_too_large::<mmr::Family>);
+    }
+    #[test]
+    fn reserve_skips_levels_too_large_mmb() {
+        deterministic::Runner::default().start(reserve_skips_levels_too_large::<mmb::Family>);
     }
 
     /// A chunk, whole or partial, that does not start at the tree's end is rejected.
