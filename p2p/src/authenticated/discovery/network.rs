@@ -380,7 +380,7 @@ mod tests {
             network.tracker.start();
             oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
             let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();
-            let (mailbox, _receiver) = peer::Mailbox::new(context.child("peer"), NZUsize!(1));
+            let (mailbox, _receiver, _) = peer::Mailbox::new(context.child("peer"), NZUsize!(1));
             let greeting = network
                 .tracker_mailbox
                 .connect(peer, mailbox, false)

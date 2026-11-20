@@ -248,7 +248,7 @@ mod tests {
     };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
-        channel::mpsc,
+        channel::{mpsc, watch},
         hostname,
         ordered::{Map, Set},
         sync::Mutex,
@@ -2275,29 +2275,47 @@ mod tests {
         fail: AtomicBool,
         stall_next: AtomicBool,
         failures: AtomicUsize,
+        stall_writes: watch::Sender<Option<ed25519::PublicKey>>,
+        stalled_writes: AtomicUsize,
+    }
+
+    impl Observations {
+        /// Parks while writes to `peer` are stalled, as when the peer stops reading and the
+        /// transport never accepts more bytes.
+        async fn writable(&self, peer: &ed25519::PublicKey) {
+            let mut stall = self.stall_writes.subscribe();
+            if stall.borrow().as_ref() != Some(peer) {
+                return;
+            }
+            self.stalled_writes.fetch_add(1, Ordering::Relaxed);
+            let _ = stall
+                .wait_for(|stalled| stalled.as_ref() != Some(peer))
+                .await;
+        }
     }
 
     struct TestSender<T> {
         inner: T,
+        peer: ed25519::PublicKey,
+        observations: Arc<Observations>,
     }
 
     impl<T: StreamSender> StreamSender for TestSender<T> {
         type Error = T::Error;
 
-        fn send(
-            &mut self,
-            bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
-            self.inner.send(bufs)
+        async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Self::Error> {
+            self.observations.writable(&self.peer).await;
+            self.inner.send(bufs).await
         }
 
-        fn send_many<I>(&mut self, bufs: I) -> impl Future<Output = Result<(), Self::Error>> + Send
+        async fn send_many<I>(&mut self, bufs: I) -> Result<(), Self::Error>
         where
             I: IntoIterator + Send,
             I::Item: Into<IoBufs> + Send,
             I::IntoIter: Send,
         {
-            self.inner.send_many(bufs)
+            self.observations.writable(&self.peer).await;
+            self.inner.send_many(bufs).await
         }
     }
 
@@ -2388,6 +2406,7 @@ mod tests {
                 .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
+            let observations = self.observations.clone();
             let (sender, receiver) = Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
                     signer: self.transport_signer,
@@ -2408,7 +2427,11 @@ mod tests {
             .await?;
 
             Ok((
-                TestSender { inner: sender },
+                TestSender {
+                    inner: sender,
+                    peer: expected_peer,
+                    observations,
+                },
                 TestReceiver { inner: receiver },
             ))
         }
@@ -2482,8 +2505,12 @@ mod tests {
                 .push(application_peer.clone());
 
             Ok((
-                application_peer,
-                TestSender { inner: sender },
+                application_peer.clone(),
+                TestSender {
+                    inner: sender,
+                    peer: application_peer,
+                    observations: self.observations,
+                },
                 TestReceiver { inner: receiver },
             ))
         }
@@ -2954,5 +2981,405 @@ mod tests {
                 context.current().duration_since(stalled_at).unwrap() >= Duration::from_millis(50)
             );
         });
+    }
+
+    /// How the victim ends its connection to the attacker.
+    #[derive(Clone, Copy, Debug)]
+    enum Removal {
+        /// Track a new peer set without the attacker.
+        Untrack,
+        /// Block the attacker.
+        Block,
+        /// Move the attacker to a new address, where another instance with its identity listens.
+        Overwrite,
+    }
+
+    /// Interval between a peer's messages and between victim broadcasts.
+    const TICK: Duration = Duration::from_millis(10);
+
+    /// Number of messages each [send_tagged] task sends.
+    const MAX_TICKS: usize = 10_000;
+
+    /// Time allowed for a removal to take effect before traffic is checked.
+    const GRACE: Duration = Duration::from_secs(1);
+
+    /// Interval over which traffic is checked after [GRACE].
+    const WINDOW: Duration = Duration::from_secs(30);
+
+    /// Tag of messages sent by the attacker's relocated instance.
+    const RELOCATED: u8 = 1;
+
+    /// Sends a one-byte message carrying `tag` to `recipient` every tick.
+    fn send_tagged(
+        context: &deterministic::Context,
+        mut sender: super::Sender<ed25519::PublicKey, deterministic::Context>,
+        recipient: ed25519::PublicKey,
+        tag: u8,
+    ) {
+        context.child("tagged").spawn(move |context| async move {
+            for _ in 0..MAX_TICKS {
+                sender.send(
+                    Recipients::One(recipient.clone()),
+                    IoBuf::from(vec![tag]),
+                    false,
+                );
+                context.sleep(TICK).await;
+            }
+        });
+    }
+
+    /// Traffic seen by the victim's application during one interval.
+    #[derive(Debug, Default)]
+    struct Traffic {
+        /// Messages from the attacker's original instance.
+        attacker: usize,
+        /// Messages from the attacker's relocated instance.
+        relocated: usize,
+        /// Messages from the honest peer.
+        honest: usize,
+        /// Broadcasts the victim sent.
+        broadcasts: usize,
+        /// Broadcasts that included the attacker as a recipient.
+        broadcasts_to_attacker: usize,
+        /// Broadcasts that included the honest peer as a recipient.
+        broadcasts_to_honest: usize,
+    }
+
+    /// The victim's tracker state, read from its metrics.
+    #[derive(Debug, PartialEq, Eq)]
+    struct TrackerState {
+        tracked: i64,
+        reserved: i64,
+        attacker_connected: bool,
+        attacker_dials: i64,
+    }
+
+    /// The victim's application handles and the peers whose traffic it classifies.
+    struct Victim {
+        context: deterministic::Context,
+        sender: super::Sender<ed25519::PublicKey, deterministic::Context>,
+        receiver: super::Receiver<ed25519::PublicKey>,
+        observations: Arc<Observations>,
+        attacker: ed25519::PublicKey,
+        honest: ed25519::PublicKey,
+    }
+
+    impl Victim {
+        /// Broadcasts every tick and records deliveries for `duration`.
+        async fn observe(&mut self, duration: Duration) -> Traffic {
+            let end = self.context.current() + duration;
+            let mut tick = self.context.current();
+            let mut traffic = Traffic::default();
+            while self.context.current() < end {
+                select! {
+                    _ = self.context.sleep_until(tick) => {
+                        let recipients =
+                            self.sender
+                                .send(Recipients::All, IoBuf::from(vec![0]), false);
+                        traffic.broadcasts += 1;
+                        if recipients.contains(&self.attacker) {
+                            traffic.broadcasts_to_attacker += 1;
+                        }
+                        if recipients.contains(&self.honest) {
+                            traffic.broadcasts_to_honest += 1;
+                        }
+                        tick += TICK;
+                    },
+                    message = self.receiver.recv() => {
+                        let (peer, message) = message.expect("victim network must stay open");
+                        if peer == self.honest {
+                            traffic.honest += 1;
+                        } else if message.as_ref() == [RELOCATED] {
+                            traffic.relocated += 1;
+                        } else {
+                            traffic.attacker += 1;
+                        }
+                    },
+                }
+            }
+            traffic
+        }
+
+        /// Observes until `done` holds for one interval, panicking after `attempts` intervals.
+        async fn observe_until(&mut self, attempts: usize, done: impl Fn(&Self, &Traffic) -> bool) {
+            for _ in 0..attempts {
+                let traffic = self.observe(Duration::from_millis(100)).await;
+                if done(self, &traffic) {
+                    return;
+                }
+            }
+            panic!("condition must hold within {attempts} intervals");
+        }
+
+        /// Returns the victim's current tracker state.
+        fn tracker(&self) -> TrackerState {
+            let metrics = self.context.encode();
+            let gauge = |name| {
+                metric_samples(&metrics, name)
+                    .map(|(_, value)| value.parse::<i64>().unwrap())
+                    .next()
+                    .unwrap()
+            };
+            let attacker = format!("peer=\"{}\"", self.attacker);
+            let attacker_samples = |name| {
+                metric_samples(&metrics, name).filter(|(labels, _)| labels.contains(&attacker))
+            };
+            TrackerState {
+                tracked: gauge("victim_tracker_directory_tracked"),
+                reserved: gauge("victim_tracker_directory_reserved"),
+                attacker_connected: attacker_samples("victim_tracker_directory_connected")
+                    .next()
+                    .is_some(),
+                attacker_dials: attacker_samples("victim_dialer_attempts_total")
+                    .map(|(_, value)| value.parse::<i64>().unwrap())
+                    .sum(),
+            }
+        }
+    }
+
+    /// What the victim observed after ending its connection to the attacker while its write to
+    /// the attacker was stalled.
+    #[derive(Debug)]
+    struct StalledRemoval {
+        /// Writes to the attacker that stalled.
+        stalled_writes: usize,
+        /// Traffic during the [WINDOW] that starts [GRACE] after the removal.
+        window: Traffic,
+        /// Tracker state at the end of [WINDOW].
+        tracker: TrackerState,
+        /// Tracker state [GRACE] after writes to the attacker resume.
+        released_tracker: TrackerState,
+    }
+
+    /// Returns a config that tracks one peer set of at most three peers.
+    fn stall_config(handshake: TestHandshake, listen: SocketAddr) -> Config<TestHandshake> {
+        let mut config = custom_config(handshake, listen, CUSTOM_MAX_MESSAGE_SIZE);
+        config.tracked_peer_sets = NZUsize!(1);
+        config.max_peers_per_set = NZUsize!(3);
+        config
+    }
+
+    /// Starts a node on `address` that tracks `peers` and registers one channel.
+    fn start_node(
+        context: &deterministic::Context,
+        label: &'static str,
+        handshake: TestHandshake,
+        address: SocketAddr,
+        peers: AddressableTrackedPeers<ed25519::PublicKey>,
+    ) -> (
+        super::Sender<ed25519::PublicKey, deterministic::Context>,
+        super::Receiver<ed25519::PublicKey>,
+        Oracle<ed25519::PublicKey>,
+    ) {
+        let (mut network, mut oracle) =
+            Network::new(context.child(label), stall_config(handshake, address));
+        let (sender, receiver) = network.register(0, Quota::per_second(NZU32!(1_000)));
+        oracle.track(0, peers);
+        network.start();
+        (sender, receiver, oracle)
+    }
+
+    /// Connects a victim to an attacker and an honest peer, stalls the victim's writes to the
+    /// attacker, applies `removal`, and records what the victim still observes.
+    ///
+    /// The attacker tracks the victim as a secondary peer, so only the victim dials it.
+    async fn stalled_removal(
+        context: deterministic::Context,
+        base_port: u16,
+        removal: Removal,
+    ) -> StalledRemoval {
+        // Derive keys and addresses for the victim, the attacker, and an honest peer.
+        let mut handshakes =
+            make_handshakes::<CUSTOM_MAX_FRAME_SIZE>(&[(20, 120), (21, 121), (22, 122)])
+                .into_iter();
+        let (victim_handshake, victim_observations) = handshakes.next().unwrap();
+        let (attacker_handshake, _) = handshakes.next().unwrap();
+        let (honest_handshake, _) = handshakes.next().unwrap();
+        let victim_key = victim_handshake.public_key();
+        let attacker_key = attacker_handshake.public_key();
+        let honest_key = honest_handshake.public_key();
+        let address = |offset| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + offset);
+        let (victim_address, attacker_address, honest_address) =
+            (address(0), address(1), address(2));
+
+        // Start the three nodes, with both peers sending the victim a message every tick.
+        let (victim_sender, victim_receiver, mut victim_oracle) = start_node(
+            &context,
+            "victim",
+            victim_handshake,
+            victim_address,
+            tracked_peers(
+                (victim_key.clone(), victim_address),
+                [
+                    (attacker_key.clone(), attacker_address),
+                    (honest_key.clone(), honest_address),
+                ],
+                true,
+            ),
+        );
+        let (attacker_sender, _attacker_receiver, _attacker_oracle) = start_node(
+            &context,
+            "attacker",
+            attacker_handshake.clone(),
+            attacker_address,
+            tracked_peers(
+                (attacker_key.clone(), attacker_address),
+                [(victim_key.clone(), victim_address)],
+                false,
+            ),
+        );
+        let (honest_sender, _honest_receiver, _honest_oracle) = start_node(
+            &context,
+            "honest",
+            honest_handshake,
+            honest_address,
+            tracked_peers(
+                (honest_key.clone(), honest_address),
+                [(victim_key.clone(), victim_address)],
+                true,
+            ),
+        );
+        send_tagged(&context, attacker_sender, victim_key.clone(), 0);
+        send_tagged(&context, honest_sender, victim_key.clone(), 0);
+
+        // Wait until messages flow in both directions with both peers.
+        let mut victim = Victim {
+            context: context.child("victim_app"),
+            sender: victim_sender,
+            receiver: victim_receiver,
+            observations: victim_observations,
+            attacker: attacker_key.clone(),
+            honest: honest_key.clone(),
+        };
+        victim
+            .observe_until(100, |_, traffic| {
+                traffic.attacker > 0
+                    && traffic.honest > 0
+                    && traffic.broadcasts_to_attacker > 0
+                    && traffic.broadcasts_to_honest > 0
+            })
+            .await;
+
+        // Stall the victim's writes to the attacker and wait until one write blocks.
+        victim
+            .observations
+            .stall_writes
+            .send_replace(Some(attacker_key.clone()));
+        victim
+            .observe_until(100, |victim, _| {
+                victim.observations.stalled_writes.load(Ordering::Relaxed) > 0
+            })
+            .await;
+
+        // End the connection to the attacker while its write is stalled.
+        match removal {
+            Removal::Untrack => {
+                victim_oracle.track(
+                    1,
+                    tracked_peers(
+                        (victim_key, victim_address),
+                        [(honest_key, honest_address)],
+                        true,
+                    ),
+                );
+            }
+            Removal::Block => {
+                crate::block_peer(&mut victim_oracle, attacker_key);
+            }
+            Removal::Overwrite => {
+                // Start a second attacker instance at a new address and point the victim at it.
+                let relocated_address = address(3);
+                let (relocated_sender, _relocated_receiver, _relocated_oracle) = start_node(
+                    &context,
+                    "relocated",
+                    attacker_handshake,
+                    relocated_address,
+                    tracked_peers(
+                        (attacker_key.clone(), relocated_address),
+                        [(victim_key.clone(), victim_address)],
+                        false,
+                    ),
+                );
+                send_tagged(&context, relocated_sender, victim_key, RELOCATED);
+                victim_oracle.overwrite(
+                    Map::try_from([(attacker_key, Address::from(relocated_address))]).unwrap(),
+                );
+            }
+        }
+
+        // Allow GRACE for the removal to take effect, then record traffic and tracker state over
+        // WINDOW.
+        victim.observe(GRACE).await;
+        let window = victim.observe(WINDOW).await;
+        let tracker = victim.tracker();
+
+        // Resume writes to the attacker and record the tracker state once GRACE has passed.
+        victim.observations.stall_writes.send_replace(None);
+        victim.observe(GRACE).await;
+        let released_tracker = victim.tracker();
+
+        StalledRemoval {
+            stalled_writes: victim.observations.stalled_writes.load(Ordering::Relaxed),
+            window,
+            tracker,
+            released_tracker,
+        }
+    }
+
+    /// Asserts that ending a connection takes effect while a write to the peer is stalled.
+    fn assert_stalled_removal(removal: Removal, base_port: u16) {
+        deterministic::Runner::timed(Duration::from_secs(120)).start(|context| async move {
+            let result = stalled_removal(context, base_port, removal).await;
+            let StalledRemoval {
+                stalled_writes,
+                window,
+                tracker,
+                released_tracker,
+            } = &result;
+
+            // Nothing from the attacker reaches the application once GRACE has passed.
+            assert_eq!(window.attacker, 0, "{result:#?}");
+
+            // The honest peer is unaffected.
+            assert!(window.honest > 0, "{result:#?}");
+            assert_eq!(
+                window.broadcasts_to_honest, window.broadcasts,
+                "{result:#?}"
+            );
+
+            match removal {
+                Removal::Untrack | Removal::Block => {
+                    assert_eq!(*stalled_writes, 1, "{result:#?}");
+                    assert_eq!(window.broadcasts_to_attacker, 0, "{result:#?}");
+                    assert_eq!(tracker.reserved, 1, "{result:#?}");
+                    assert!(!tracker.attacker_connected, "{result:#?}");
+                    assert_eq!(released_tracker, tracker, "{result:#?}");
+                }
+                Removal::Overwrite => {
+                    // The relocated instance can connect while the stale write is stalled.
+                    assert!(window.relocated > 0, "{result:#?}");
+                    assert!(tracker.attacker_connected, "{result:#?}");
+                }
+            }
+        });
+    }
+
+    /// Untracking a peer ends its connection while a write to it is stalled.
+    #[test_traced]
+    fn test_untrack_ends_connection_with_stalled_write() {
+        assert_stalled_removal(Removal::Untrack, 5_400);
+    }
+
+    /// Blocking a peer ends its connection while a write to it is stalled.
+    #[test_traced]
+    fn test_block_ends_connection_with_stalled_write() {
+        assert_stalled_removal(Removal::Block, 5_410);
+    }
+
+    /// Moving a peer to a new address ends its old connection while a write to it is stalled, so
+    /// its relocated instance can connect.
+    #[test_traced]
+    fn test_overwrite_ends_connection_with_stalled_write() {
+        assert_stalled_removal(Removal::Overwrite, 5_420);
     }
 }

@@ -14,15 +14,22 @@ use commonware_runtime::{
     Clock, Error as RuntimeError, Handle, IoBufs, RateLimiter, Spawner, Supervisor,
     telemetry::metrics::{CounterFamily, raw::Counter},
 };
-use std::{collections::BTreeMap, future::Future, hash::Hash, vec::Drain};
+use commonware_utils::channel::ring;
+use std::{
+    collections::BTreeMap,
+    convert::Infallible,
+    future::{self, Future},
+    hash::Hash,
+    vec::Drain,
+};
 use thiserror::Error;
 use tracing::debug;
 
 /// Errors that end a connection in shared peer code.
 #[derive(Error, Debug)]
 pub(crate) enum Error {
-    #[error("peer killed: {0}")]
-    Killed(String),
+    #[error("peer killed")]
+    Killed,
     #[error("peer disconnected")]
     Disconnected,
     #[error("invalid channel")]
@@ -49,14 +56,29 @@ pub(crate) trait Control {
     /// Returns the next already-queued control message, if any.
     fn try_recv(&mut self) -> Option<Self::Message>;
 
-    /// Records `msg` as sent and returns its payload, or `None` if `msg` kills the connection.
-    fn encode(&self, msg: Self::Message) -> Option<IoBufs>;
+    /// Records `msg` as sent and returns its payload.
+    fn encode(&self, msg: Self::Message) -> IoBufs;
+}
+
+/// Control channel of a connection that has no control messages.
+impl Control for () {
+    type Message = Infallible;
+
+    fn recv(&mut self) -> impl Future<Output = Option<Infallible>> + Send {
+        future::pending()
+    }
+
+    fn try_recv(&mut self) -> Option<Infallible> {
+        None
+    }
+
+    fn encode(&self, msg: Infallible) -> IoBufs {
+        match msg {}
+    }
 }
 
 /// Outbound queues, data send counters and the pending batch for one connection.
-pub(crate) struct Outbox<P: PublicKey, T: Control> {
-    peer: P,
-
+pub(crate) struct Outbox<T: Control> {
     control: T,
     high: mailbox::UnreliableReceiver<relay::Message<EncodedData>>,
     low: mailbox::UnreliableReceiver<relay::Message<EncodedData>>,
@@ -66,11 +88,11 @@ pub(crate) struct Outbox<P: PublicKey, T: Control> {
     size: usize,
 }
 
-impl<P: PublicKey, T: Control> Outbox<P, T> {
+impl<T: Control> Outbox<T> {
     /// Creates an outbox that batches at most `size` payloads, with a send counter for each of
     /// `channels`.
-    pub(crate) fn new<L: Label<P>>(
-        peer: P,
+    pub(crate) fn new<P: PublicKey, L: Label<P>>(
+        peer: &P,
         control: T,
         receivers: Receivers<EncodedData>,
         channels: impl Iterator<Item = Channel>,
@@ -78,10 +100,9 @@ impl<P: PublicKey, T: Control> Outbox<P, T> {
         size: usize,
     ) -> Self {
         let sent = channels
-            .map(|channel| (channel, sent.get_or_create_owned(&L::data(&peer, channel))))
+            .map(|channel| (channel, sent.get_or_create_owned(&L::data(peer, channel))))
             .collect();
         Self {
-            peer,
             control,
             high: receivers.high,
             low: receivers.low,
@@ -122,14 +143,11 @@ impl<P: PublicKey, T: Control> Outbox<P, T> {
 
     /// Records a message as sent and appends its payload to the batch.
     ///
-    /// Returns `Err` if `msg` terminates the connection (`Closed` or a kill).
+    /// Returns [Error::Disconnected] if `msg` reports that an outbound channel closed.
     pub(crate) fn push(&mut self, msg: Prioritized<T::Message, EncodedData>) -> Result<(), Error> {
         let payload = match msg {
             Prioritized::Closed => return Err(Error::Disconnected),
-            Prioritized::Control(msg) => self
-                .control
-                .encode(msg)
-                .ok_or_else(|| Error::Killed(self.peer.to_string()))?,
+            Prioritized::Control(msg) => self.control.encode(msg),
             Prioritized::Data(msg) => {
                 self.sent
                     .get(&msg.channel)
@@ -235,12 +253,22 @@ impl<E: Clock + Supervisor, P: PublicKey> Inbox<E, P> {
     }
 }
 
-/// Waits for `context` to stop or for either handler to finish.
+/// Waits for `context` to stop, for `kill` to end the connection, or for either handler to finish.
 ///
-/// Returns `Ok(Ok(()))` if `context` stops first, otherwise the result of the first handler to
-/// finish.
-pub(crate) async fn wait<E: Send + 'static>(
+/// `kill` is the receiver paired with the peer's mailbox. It ends the connection with
+/// [Error::Killed] once any clone of the mailbox kills the peer, or with [Error::Disconnected] once
+/// every clone is dropped. Neither outcome waits for the handlers, so a write blocked on a peer
+/// that stopped reading cannot delay the end of the connection.
+///
+/// Returns `Ok(Ok(()))` if `context` stops first, otherwise the kill outcome or the result of the
+/// first handler to finish. When several are ready, shutdown wins over a kill and a kill over
+/// either handler.
+///
+/// Run `wait` in the task that spawned the handlers. `wait` does not abort them. When that task
+/// exits, runtime supervision signals both handlers to stop.
+pub(crate) async fn wait<E: From<Error> + Send + 'static>(
     context: &impl Spawner,
+    mut kill: ring::Receiver<()>,
     mut send: Handle<Result<(), E>>,
     mut receive: Handle<Result<(), E>>,
 ) -> Result<Result<(), E>, RuntimeError> {
@@ -250,7 +278,169 @@ pub(crate) async fn wait<E: Send + 'static>(
             debug!("context shutdown, stopping peer");
             Ok(Ok(()))
         },
+        killed = kill.recv() => {
+            let err = killed.map_or(Error::Disconnected, |()| Error::Killed);
+            Ok(Err(err.into()))
+        },
         send_result = &mut send => send_result,
         receive_result = &mut receive => receive_result,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use commonware_cryptography::{ChaCha20Poly1305, Signer as _, ed25519::PrivateKey};
+    use commonware_runtime::{Runner as _, Sink, deterministic, mocks};
+    use commonware_stream::{
+        Receiver, Sender, Upgrader as _,
+        cups::{self, Cups},
+        sake::{self, Sake},
+    };
+    use commonware_utils::NZUsize;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    const NAMESPACE: &[u8] = b"test_connection";
+    const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
+
+    /// Sink whose writes never complete once `stalled` is set, like a peer that stopped reading.
+    struct StalledSink<S> {
+        inner: S,
+        stalled: Arc<AtomicBool>,
+        blocked: Arc<AtomicUsize>,
+    }
+
+    impl<S: Sink> Sink for StalledSink<S> {
+        async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
+            if !self.stalled.load(Ordering::Relaxed) {
+                return self.inner.send(bufs).await;
+            }
+            self.blocked.fetch_add(1, Ordering::Relaxed);
+            future::pending().await
+        }
+    }
+
+    /// Authenticates a mock connection from `dialer` to `listener` in which every write the
+    /// listener makes after the handshake blocks forever.
+    ///
+    /// Returns the dialer's sender and receiver, the listener's sender and receiver, and the
+    /// number of listener writes blocked so far.
+    pub(crate) async fn stalled_connection(
+        context: &deterministic::Context,
+        dialer: PrivateKey,
+        listener: PrivateKey,
+    ) -> (
+        impl Sender,
+        impl Receiver,
+        impl Sender,
+        impl Receiver,
+        Arc<AtomicUsize>,
+    ) {
+        let upgrader = |signer| {
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer,
+                    synchrony_bound: Duration::from_secs(10),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            )
+        };
+        let (dialer_sink, listener_stream) = mocks::Channel::init();
+        let (listener_sink, dialer_stream) = mocks::Channel::init();
+        let stalled = Arc::new(AtomicBool::new(false));
+        let blocked = Arc::new(AtomicUsize::new(0));
+        let listener_sink = StalledSink {
+            inner: listener_sink,
+            stalled: stalled.clone(),
+            blocked: blocked.clone(),
+        };
+        let listener_key = listener.public_key();
+        let listen = context.child("listener").spawn(move |context| {
+            upgrader(listener).listen(
+                context,
+                NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                |_| async { true },
+                listener_stream,
+                listener_sink,
+            )
+        });
+        let (dialer_sender, dialer_receiver) = upgrader(dialer)
+            .dial(
+                context.child("dialer"),
+                NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                listener_key,
+                dialer_stream,
+                dialer_sink,
+            )
+            .await
+            .expect("dial must succeed");
+        let (_, listener_sender, listener_receiver) = listen
+            .await
+            .expect("listener task must not fail")
+            .expect("listen must succeed");
+        stalled.store(true, Ordering::Relaxed);
+        (
+            dialer_sender,
+            dialer_receiver,
+            listener_sender,
+            listener_receiver,
+            blocked,
+        )
+    }
+
+    /// `wait` ends the connection on a kill sent before it starts and on a dropped mailbox,
+    /// without waiting for either handler.
+    #[test]
+    fn test_wait_ends_on_kill_or_dropped_mailbox() {
+        for kill in [true, false] {
+            deterministic::Runner::default().start(|context| async move {
+                let (mailbox, receiver) = ring::channel(NZUsize!(1));
+                if kill {
+                    mailbox.send_lossy(());
+                }
+                drop(mailbox);
+
+                let handler = |label| {
+                    context
+                        .child(label)
+                        .spawn(|_| future::pending::<Result<(), Error>>())
+                };
+                let result = wait(&context, receiver, handler("sender"), handler("receiver"))
+                    .await
+                    .expect("handler tasks must not fail");
+                if kill {
+                    assert!(matches!(result, Err(Error::Killed)), "{result:?}");
+                } else {
+                    assert!(matches!(result, Err(Error::Disconnected)), "{result:?}");
+                }
+            });
+        }
+    }
+
+    /// A kill decides the outcome when a handler has already finished.
+    #[test]
+    fn test_wait_prefers_kill_over_finished_handler() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mailbox, receiver) = ring::channel(NZUsize!(1));
+            mailbox.send_lossy(());
+
+            let pending = context
+                .child("receiver")
+                .spawn(|_| future::pending::<Result<(), Error>>());
+            let result = wait(&context, receiver, Handle::ready(Ok(Ok(()))), pending)
+                .await
+                .expect("handler tasks must not fail");
+            assert!(matches!(result, Err(Error::Killed)), "{result:?}");
+        });
     }
 }
