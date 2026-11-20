@@ -36,7 +36,7 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_p2p::{
-    CheckedSender, LimitedSender, Receiver, Recipients, Sender,
+    CheckedSender, LimitedSender, Receiver, Recipients, SendReceipt, Sender,
     simulated::{Config as NetworkConfig, Link, Network},
 };
 use commonware_runtime::{
@@ -228,12 +228,16 @@ impl<C: CheckedSender> CheckedSender for CheckedMuted<C> {
         self.0.recipients()
     }
 
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
+    fn send_with_receipt(
+        self,
+        message: impl Into<IoBufs> + Send,
+        priority: bool,
+    ) -> SendReceipt<Self::PublicKey> {
         let message = message.into();
         if message.chunk_at(0).and_then(<[u8]>::first) == Some(&RESPONSE) {
-            return Unreliable::new(Feedback::Closed);
+            return SendReceipt::new(Unreliable::new(Feedback::Closed), Vec::new());
         }
-        self.0.send(message, priority)
+        self.0.send_with_receipt(message, priority)
     }
 }
 

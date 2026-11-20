@@ -130,6 +130,10 @@ stability_scope!(BETA {
         /// Recipients that exceed their rate limit will be filtered out. The
         /// returned [`CheckedSender`] will only send to non-limited recipients.
         ///
+        /// Checking does not consume a recipient's rate limit. It is consumed when
+        /// [`CheckedSender::send`] submits a message to that recipient and the
+        /// submission is accepted.
+        ///
         /// # Returns
         ///
         /// A [`CheckedSender`] containing only the recipients that are not
@@ -141,15 +145,66 @@ stability_scope!(BETA {
         ) -> Result<Self::Checked<'_>, SystemTime>;
     }
 
+    /// Outcome of a message submitted through a [`CheckedSender`].
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SendReceipt<P> {
+        feedback: Unreliable<Feedback>,
+        recipients: Vec<P>,
+    }
+
+    impl<P> SendReceipt<P> {
+        /// Creates a receipt for a submission to `recipients` that produced `feedback`.
+        ///
+        /// `recipients` is discarded unless `feedback` is accepted, so a rejected or closed
+        /// submission never reports recipients.
+        pub fn new(feedback: Unreliable<Feedback>, mut recipients: Vec<P>) -> Self {
+            if !feedback.accepted() {
+                recipients.clear();
+            }
+            Self {
+                feedback,
+                recipients,
+            }
+        }
+
+        /// Returns the feedback from submitting the message.
+        pub const fn feedback(&self) -> Unreliable<Feedback> {
+            self.feedback
+        }
+
+        /// Returns the recipients of the accepted submission.
+        ///
+        /// Empty if the submission was not accepted.
+        pub fn recipients(&self) -> &[P] {
+            &self.recipients
+        }
+
+        /// Consumes the receipt and returns the recipients of the accepted submission.
+        ///
+        /// Empty if the submission was not accepted.
+        pub fn into_recipients(self) -> Vec<P> {
+            self.recipients
+        }
+    }
+
     /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.
     pub trait CheckedSender: Send {
         /// Public key type used to identify [`Recipients`].
         type PublicKey: PublicKey;
 
         /// Returns the recipients retained by the check.
+        ///
+        /// A send may reach fewer or different recipients. Use
+        /// [`CheckedSender::send_with_receipt`] to learn the recipients of the submission.
         fn recipients(&self) -> Vec<Self::PublicKey>;
 
-        /// Sends a message to the pre-checked recipients.
+        /// Sends a message to the pre-checked recipients and reports to whom it was submitted.
+        ///
+        /// # Rate Limiting
+        ///
+        /// The rate limit is shared with every clone of the originating [`LimitedSender`].
+        /// A pre-checked recipient whose rate limit was consumed through a clone since the
+        /// check is skipped. If every pre-checked recipient is skipped, the send is rejected.
         ///
         /// # Offline Recipients
         ///
@@ -163,10 +218,25 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// Feedback from submitting the message for delivery.
+        /// A [`SendReceipt`] with the feedback from submitting the message for delivery and,
+        /// if the submission was accepted, the recipients it was submitted to.
         /// [`Unreliable`] indicates that local submission may be rejected under backpressure.
         /// [`Feedback::accepted`] does not guarantee that the recipient will receive the message.
-        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback>;
+        fn send_with_receipt(
+            self,
+            message: impl Into<IoBufs> + Send,
+            priority: bool,
+        ) -> SendReceipt<Self::PublicKey>;
+
+        /// Sends a message to the pre-checked recipients.
+        ///
+        /// Behaves like [`CheckedSender::send_with_receipt`], returning only its feedback.
+        fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback>
+        where
+            Self: Sized,
+        {
+            self.send_with_receipt(message, priority).feedback()
+        }
     }
 
     /// Interface for sending messages to a set of recipients.
@@ -190,9 +260,9 @@ stability_scope!(BETA {
         ///
         /// # Returns
         ///
-        /// The recipients we will attempt to send to. Returns an
-        /// empty list if all recipients are rate-limited, the sender has closed, or the send is
-        /// not accepted.
+        /// The recipients of the accepted submission, which may differ from those that passed
+        /// the rate-limit check. Returns an empty list if all recipients are rate-limited, the
+        /// sender has closed, or the send is not accepted.
         fn send(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
@@ -201,15 +271,7 @@ stability_scope!(BETA {
         ) -> Vec<Self::PublicKey> {
             self.check(recipients).map_or_else(
                 |_| Vec::new(),
-                |checked_sender| {
-                    let recipients = checked_sender.recipients();
-                    let feedback = checked_sender.send(message, priority);
-                    if feedback.accepted() {
-                        recipients
-                    } else {
-                        Vec::new()
-                    }
-                },
+                |checked| checked.send_with_receipt(message, priority).into_recipients(),
             )
         }
     }
