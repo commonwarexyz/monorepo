@@ -10,4 +10,5 @@ benchmark-tracking-results
 */fuzz/target
 **/quint/_apalache-out/
 **/quint/out*/
+mutants.out*
 CLAUDE.md

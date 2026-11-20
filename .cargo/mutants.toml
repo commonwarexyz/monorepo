@@ -1,0 +1,20 @@
+# Configuration for cargo-mutants (https://mutants.rs), used by `just mutants`.
+
+# The default nextest profile skips `_slow_` and `_conformance_` tests, which keeps the test run
+# for each mutant short.
+test_tool = "nextest"
+timeout_multiplier = 3.0
+
+# Test support, fuzz plans and benchmarks. Code under `cfg(any(test, feature = ...))` can be built
+# outside tests, so cargo-mutants still mutates it, and conformance helpers are only compiled with
+# the `arbitrary` feature. Mutants there would report as missed without being test gaps.
+exclude_globs = [
+    "**/benches/**",
+    "**/conformance.rs",
+    "**/fuzz.rs",
+    "**/mocks.rs",
+    "**/mocks/**",
+]
+
+# Implementations compiled only with the `arbitrary` feature, and formatting implementations.
+exclude_re = ["impl Debug", "impl Display", "Arbitrary"]

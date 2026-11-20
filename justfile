@@ -169,6 +169,13 @@ test-loom *args='':
     packages=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.features | has("loom")) | "-p " + .name')
     cargo nextest run --release --features loom --lib $packages {{ args }} loom_tests
 
+# Run mutation tests with cargo-mutants, configured in .cargo/mutants.toml (for example
+# `just mutants -p commonware-codec`, or `just mutants --in-diff <diff>` for a change).
+# Most modules are declared inside `stability_scope!`, so this needs a cargo-mutants build that
+# follows `mod` statements inside macros; older releases only see each crate root.
+mutants *args='':
+    cargo mutants {{ args }}
+
 # Run tests without std, one package at a time so other packages cannot re-enable it
 test-no-std *args:
     #!/usr/bin/env bash
