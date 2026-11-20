@@ -185,10 +185,7 @@ fn take_context() -> Option<Context> {
 /// Serve `read` with a buffered positioned read, as [`crate::Blob::read_at`] does for
 /// [`ReadOptions::DONT_CACHE`] when it cannot read directly.
 fn read_positioned(file: &Shared, read: &Read) -> Completion {
-    let mut buf = IoBufMut::with_capacity(read.len);
-    // SAFETY: read_exact_at fills all `len` bytes before the buffer is yielded.
-    unsafe { buf.set_len(read.len) };
-    Blob::read_exact_at(Cache::Disabled, file, buf.as_mut(), read.offset)?;
+    let buf = Blob::read_owned_at(Cache::Disabled, file, read.offset, read.len)?;
     Ok((read.index, buf.into()))
 }
 

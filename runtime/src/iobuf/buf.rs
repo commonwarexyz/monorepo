@@ -791,8 +791,8 @@ impl IoBufMut {
     ///
     /// # Safety
     ///
-    /// Caller must ensure all bytes in `0..len` are initialized before any
-    /// read operations.
+    /// Caller must initialize the bytes in `0..len` before reading them or
+    /// borrowing them as a byte slice, including a mutable slice.
     ///
     /// # Panics
     ///

@@ -28,6 +28,19 @@ use std::{
 };
 use tokio::task;
 
+cfg_if! {
+    if #[cfg(any(
+        all(target_os = "linux", not(target_env = "musl")),
+        target_os = "android",
+        target_os = "hurd",
+    ))] {
+        // The ordinary pread can have a 32-bit offset on these targets.
+        use libc::pread64 as pread;
+    } else {
+        use libc::pread;
+    }
+}
+
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
 const IOVEC_BATCH_SIZE: usize = 1024;
@@ -298,68 +311,84 @@ impl Blob {
         self.shared.tracker.skipped()
     }
 
-    fn read_buffered_exact_at(file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        file.read_exact_at(buf, offset).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::UnexpectedEof {
-                Error::BlobInsufficientLength
-            } else {
-                err.into()
-            }
-        })
+    fn read_owned_at(
+        cache: Cache,
+        file: &Shared,
+        offset: u64,
+        len: usize,
+    ) -> Result<IoBufMut, Error> {
+        let mut buf = IoBufMut::with_capacity(len);
+        Self::read_exact_at(cache, file, &mut buf, offset, len)?;
+        Ok(buf)
     }
 
-    #[cfg(target_os = "linux")]
     fn read_exact_at(
         mut cache: Cache,
         file: &Shared,
-        mut buf: &mut [u8],
+        buf: &mut IoBufMut,
         mut offset: u64,
+        len: usize,
     ) -> Result<(), Error> {
-        if !cache.is_disabled(&file.dont_cache_supported) {
-            return Self::read_buffered_exact_at(file, buf, offset);
-        }
+        assert!(len <= buf.capacity());
+        let fd = file.as_raw_fd();
+        let mut filled = 0;
+        while filled < len {
+            // Apple rejects reads larger than INT_MAX, even on 64-bit targets.
+            let count = (len - filled).min(libc::c_int::MAX as usize);
+            // SAFETY: `filled < len <= buf.capacity()`, and `count` is at most the remaining
+            // bytes in this exclusive view. The destination can include uninitialized bytes.
+            let dst = unsafe { buf.as_mut_ptr().add(filled) }.cast();
 
-        while !buf.is_empty() {
-            // Some 32-bit targets expose a narrower offset for the cache hint than for FileExt.
-            let Ok(position) = libc::off_t::try_from(offset) else {
-                return Self::read_buffered_exact_at(file, buf, offset);
+            // On Linux with a narrow off_t, use the ordinary large-file call when the
+            // hint cannot address this position.
+            #[cfg(target_os = "linux")]
+            let hinted = if cache.is_disabled(&file.dont_cache_supported)
+                && let Ok(position) = libc::off_t::try_from(offset)
+            {
+                let iovec = libc::iovec {
+                    iov_base: dst,
+                    iov_len: count,
+                };
+                // SAFETY: `fd` is held open by `file` and the iovec describes the valid
+                // exclusive destination for this synchronous call.
+                Some(unsafe { libc::preadv2(fd, &iovec, 1, position, libc::RWF_DONTCACHE) })
+            } else {
+                None
             };
-            let iovec = libc::iovec {
-                iov_base: buf.as_mut_ptr().cast(),
-                iov_len: buf.len(),
-            };
-            // SAFETY: `file` owns a valid fd for this call. `iovec` describes the exclusive
-            // writable slice borrowed for the duration of the syscall.
-            let ret = unsafe {
-                libc::preadv2(file.as_raw_fd(), &iovec, 1, position, libc::RWF_DONTCACHE)
+            #[cfg(not(target_os = "linux"))]
+            let hinted = None;
+
+            let ret = match hinted {
+                Some(ret) => ret,
+                None => {
+                    let position = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+                    // SAFETY: `fd` is held open by `file` and `dst` is valid for `count`
+                    // writable bytes until this synchronous call returns.
+                    unsafe { pread(fd, dst, count, position) }
+                }
             };
             if ret < 0 {
                 let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
+                if err.kind() == std::io::ErrorKind::Interrupted
+                    || cache.retry_cached(&file.dont_cache_supported, &err, hinted.is_some())
+                {
                     continue;
-                }
-                if cache.retry_cached(&file.dont_cache_supported, &err, true) {
-                    return Self::read_buffered_exact_at(file, buf, offset);
                 }
                 return Err(err.into());
             }
-
-            let bytes_read = ret as usize;
-            if bytes_read == 0 {
+            if ret == 0 {
                 return Err(Error::BlobInsufficientLength);
             }
-            let (_, unread) = buf.split_at_mut(bytes_read);
-            buf = unread;
+            let bytes_read = ret as usize;
+            filled += bytes_read;
             offset = offset
-                .checked_add(bytes_read as u64)
+                .checked_add(Widen::widen(bytes_read))
                 .ok_or(Error::OffsetOverflow)?;
         }
-        Ok(())
-    }
 
-    #[cfg(not(target_os = "linux"))]
-    fn read_exact_at(_: Cache, file: &Shared, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        Self::read_buffered_exact_at(file, buf, offset)
+        // SAFETY: successful reads have initialized the entire requested prefix.
+        unsafe { buf.set_len(len) };
+        Ok(())
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -479,11 +508,7 @@ impl crate::Blob for Blob {
             {
                 return Ok(buf.into());
             }
-            let mut buf = IoBufMut::with_capacity(len);
-            // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
-            unsafe { buf.set_len(len) };
-            Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
-            Ok(buf.into())
+            Self::read_owned_at(cache, &file, offset, len).map(Into::into)
         })
         .await
         .map_err(|_| Error::ReadFailed)?
@@ -497,7 +522,8 @@ impl crate::Blob for Blob {
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
-        // SAFETY: `len` bytes are filled below before the buffers are returned.
+        // SAFETY: only metadata is accessed before the destination is filled with raw writes.
+        // Empty reads expose no bytes and errors drop the buffers.
         unsafe { bufs.set_len(len) };
         let offset = read_offset(self.data_offset, offset, len).ok_or(Error::OffsetOverflow)?;
         if len == 0 {
@@ -523,13 +549,10 @@ impl crate::Blob for Blob {
             // Otherwise read the range through the page cache.
             if let Some(buf) = bufs.as_single_mut() {
                 // Read directly into the single buffer (zero-copy).
-                Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
+                Self::read_exact_at(cache, &file, buf, offset, len)?;
             } else {
                 // Read into a temporary contiguous buffer and copy back to preserve structure.
-                let mut temp = IoBufMut::with_capacity(len);
-                // SAFETY: `len` bytes are filled via read_exact_at below.
-                unsafe { temp.set_len(len) };
-                Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
+                let temp = Self::read_owned_at(cache, &file, offset, len)?;
                 bufs.copy_from_slice(temp.as_ref());
             }
             Ok(bufs)
@@ -586,11 +609,8 @@ impl crate::Blob for Blob {
         let reads = offsets
             .into_iter()
             .map(|(offset, len)| {
-                let mut bufs: IoBufsMut = IoBufMut::with_capacity(len).into();
-                // SAFETY: `len` bytes are filled via read_exact_at before the buffers are exposed.
-                unsafe { bufs.set_len(len) };
                 if len == 0 {
-                    return Handle::ready(Ok(bufs));
+                    return Handle::ready(Ok(IoBufsMut::default()));
                 }
                 let cache = if options.contains(ReadOptions::DONT_CACHE) {
                     Cache::Disabled
@@ -600,11 +620,8 @@ impl crate::Blob for Blob {
                 let (tx, rx) = oneshot::channel();
                 let file = self.shared.clone();
                 task::spawn_blocking(move || {
-                    let buf = bufs
-                        .as_single_mut()
-                        .expect("the read destination must hold exactly one buffer");
-                    let result = Self::read_exact_at(cache, &file, buf.as_mut(), offset);
-                    let _ = tx.send(result.map(|()| bufs));
+                    let result = Self::read_owned_at(cache, &file, offset, len);
+                    let _ = tx.send(result.map(Into::into));
                 });
                 Handle::from_receiver(rx)
             })
@@ -782,7 +799,7 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BlobVersion, Storage as _,
+        Blob as _, BlobVersion, BufMut as _, Storage as _,
         storage::{
             Layout,
             tokio::{Config, Storage},
@@ -799,6 +816,49 @@ mod tests {
             Storage::new(Config::new(directory.clone(), layouts)),
             directory,
         )
+    }
+
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_positioned_read_into_spare_capacity() {
+        let (storage, directory) = storage_for_reopen_test("positioned_read", Layout::ALL);
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(directory.join("file"))
+            .unwrap();
+        let generation = storage
+            .pending
+            .admit("partition", b"file", false)
+            .unwrap()
+            .0;
+
+        // Exercise the ordinary large-file call with a sparse file.
+        let offset = 1u64 << 32;
+        file.write_all_at(b"data", offset).unwrap();
+        let blob = Blob::new(file, 0, storage.hold.clone(), generation);
+
+        let mut buf = IoBufMut::with_capacity(8);
+        buf.put_slice(b"xx");
+        buf.advance(2);
+        let dst = buf.as_mut_ptr();
+        Blob::read_exact_at(Cache::Enabled, &blob.shared, &mut buf, offset, 4).unwrap();
+        assert_eq!(buf.as_mut_ptr(), dst);
+        assert_eq!(buf.capacity(), 6);
+        assert_eq!(buf.as_ref(), b"data");
+
+        // The positive partial read followed by EOF never makes the prefix readable.
+        let mut buf = IoBufMut::with_capacity(5);
+        assert!(matches!(
+            Blob::read_exact_at(Cache::Enabled, &blob.shared, &mut buf, offset, 5),
+            Err(Error::BlobInsufficientLength)
+        ));
+        assert!(buf.is_empty());
+
+        drop(blob);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// Open `path` read only with `O_DIRECT`.
