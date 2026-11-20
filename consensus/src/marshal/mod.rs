@@ -39,8 +39,8 @@
 //! ## Backfill
 //!
 //! The actor provides a backfill mechanism for missing blocks. If the actor notices a gap in its
-//! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
-//! that the actor can catch up to the rest of the network if it falls behind.
+//! knowledge of finalized blocks, it will request the missing blocks from its peers. This lets
+//! the actor catch up to the rest of the network if it falls behind.
 //!
 //! ## Message Sizes
 //!
@@ -161,10 +161,11 @@
 //!
 //! ## Storage
 //!
-//! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
-//! to store blocks and finalizations. Internal storage (in-memory caches) is used for data that is only
-//! needed for a short period of time, such as unverified blocks or notarizations. External storage
-//! (archive backends) is used to persist finalized blocks and certificates.
+//! The actor uses a combination of internal and external ([`store::Certificates`],
+//! [`store::Blocks`]) storage to store blocks and finalizations. Internal storage (prunable
+//! on-disk caches) is used for data that is only needed for a short period of time, such as
+//! unverified blocks or notarizations. External storage (archive backends) is used to persist
+//! finalized blocks and certificates.
 //!
 //! Marshal stores finalized blocks from a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. The floor
@@ -197,20 +198,21 @@
 //! above that block's height and stay there until a finalization at or above the processed height
 //! is stored.
 //!
-//! ```text
-//! Stores after a restart that follows an interrupted sync (x stored, . missing):
+//! After a restart that follows an interrupted sync:
 //!
-//! height                  H-2   H-1    H
-//! store::Blocks            x     x     x
-//! store::Certificates      x     x     .
+//! | Height | [`store::Blocks`] | [`store::Certificates`] |
+//! |--------|-------------------|-------------------------|
+//! | H-2    | stored            | stored                  |
+//! | H-1    | stored            | stored                  |
+//! | H      | stored            | missing                 |
 //!
-//! Identifier::Latest is the block at H-1, and the processed height becomes H after the
-//! application acknowledges H
-//! ```
+//! [`Identifier::Latest`] is the block at H-1. Once the application acknowledges H, the processed
+//! height becomes H.
 //!
 //! A block can also be stored without a finalization while marshal fills a gap. Marshal can reach
 //! an ancestor of a finalized block by following parent links, and a block stored this way may
-//! never receive a finalization of its own.
+//! never receive a finalization of its own. [`core::Mailbox::get_finalization`] can return `None`
+//! for such a block even after marshal delivers it.
 //!
 //! ## Limitations and Future Work
 //!
@@ -294,7 +296,7 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     ///
     /// This update can be reported before the finalized block and finalization archives complete
     /// a durable sync. Applications must not use this update as a storage durability signal.
-    /// [`Update::Block`] provides that guarantee.
+    /// [`Update::Block`] signals that its block is durable.
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
