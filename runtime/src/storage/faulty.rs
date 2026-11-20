@@ -10,16 +10,21 @@ use commonware_utils::{
     Probability, probability,
     sync::{AsyncMutex, Mutex, RwLock},
 };
-use futures::{FutureExt as _, future::Shared};
+use futures::{
+    FutureExt as _,
+    future::{BoxFuture, Shared},
+};
 use rand::RngExt as _;
 use std::{
     any::Any,
     collections::{BTreeMap, HashSet},
+    future::poll_fn,
     io::Error as IoError,
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::{Context, Poll, Waker},
 };
 
 /// Operation types for fault injection.
@@ -136,6 +141,23 @@ pub struct Config {
 
     /// Failure rate for `scan` operations.
     pub scan_rate: Option<Probability>,
+
+    /// Probability that a pending `write_at` or `resize` is passed over each time it could
+    /// take effect.
+    ///
+    /// When set, a mutation is accepted on its first poll and then takes effect at a later
+    /// point chosen from the shared RNG: a poll of its own future, or a later storage call that
+    /// drives pending mutations. Mutations pending at the same time therefore take effect in any
+    /// order, and dropping a mutation's future does not cancel it, so it may take effect after
+    /// later operations complete, as on the io_uring and Tokio backends. A mutation's future
+    /// completes only once it has taken effect, opening a blob first applies every mutation still
+    /// pending on it, and a simulated crash discards mutations that have not taken effect. Unset
+    /// or zero, mutations take effect when they are first polled, in call order.
+    ///
+    /// Must be less than one, or a pending mutation never takes effect. Opening a blob requires
+    /// each of its pending mutations to finish in one poll, as the in-memory storage of the
+    /// deterministic runtime does.
+    pub reorder_rate: Option<Probability>,
 }
 
 impl Config {
@@ -193,6 +215,20 @@ impl Config {
     pub const fn scan(mut self, rate: Probability) -> Self {
         self.scan_rate = Some(rate);
         self
+    }
+
+    /// Set the rate at which pending mutations are passed over. See [`Self::reorder_rate`].
+    pub const fn reorder(mut self, rate: Probability) -> Self {
+        self.reorder_rate = Some(rate);
+        self
+    }
+
+    /// The reorder rate, if mutations are deferred at all. Panics on a rate of one, which would
+    /// leave every mutation pending forever.
+    fn deferral(&self) -> Option<Probability> {
+        let rate = self.reorder_rate.filter(|rate| !rate.is_zero())?;
+        assert!(!rate.is_one(), "storage reorder rate must be less than one");
+        Some(rate)
     }
 }
 
@@ -291,6 +327,84 @@ impl FileGeneration {
 
 /// Tracks the generation shared by existing handles and unresolved mutations for each file.
 type FileGenerations = Arc<Mutex<BTreeMap<FileKey, Weak<FileGeneration>>>>;
+
+/// A `write_at` or `resize` accepted on its first poll that may not have taken effect yet
+/// (see [`Config::reorder_rate`]). It stays accepted when its future is dropped.
+struct Accepted {
+    /// File the mutation targets, so that opening it can apply the mutation first.
+    key: FileKey,
+    /// The mutation, absent once it has taken effect or while a driver polls it.
+    work: Mutex<Option<BoxFuture<'static, Result<(), Error>>>>,
+    /// The mutation's result, until its future takes it.
+    result: Mutex<Option<Result<(), Error>>>,
+    /// Whether the mutation has taken effect.
+    done: AtomicBool,
+}
+
+impl Accepted {
+    fn new(key: FileKey, work: BoxFuture<'static, Result<(), Error>>) -> Self {
+        Self {
+            key,
+            work: Mutex::new(Some(work)),
+            result: Mutex::new(None),
+            done: AtomicBool::new(false),
+        }
+    }
+
+    /// Poll the mutation once, returning whether it has taken effect.
+    fn drive(&self) -> bool {
+        // A missing mutation has taken effect, or another driver is polling it.
+        let Some(mut work) = self.work.lock().take() else {
+            return self.is_done();
+        };
+        match work.poll_unpin(&mut Context::from_waker(Waker::noop())) {
+            Poll::Ready(result) => {
+                *self.result.lock() = Some(result);
+                self.done.store(true, Ordering::Release);
+                true
+            }
+            Poll::Pending => {
+                *self.work.lock() = Some(work);
+                false
+            }
+        }
+    }
+
+    /// Whether the mutation has taken effect.
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+}
+
+/// Mutations accepted but not yet applied, shared by every blob of one storage.
+type AcceptedMutations = Arc<Mutex<Vec<Arc<Accepted>>>>;
+
+/// Drive pending mutations: every one on `only`'s file when given, otherwise each with
+/// probability one minus the reorder rate. Draws nothing from the RNG while none is pending.
+fn settle(accepted: &AcceptedMutations, ctx: &Oracle, only: Option<&FileKey>) {
+    // Drive a snapshot without holding the list, since a mutation may record crash evidence.
+    let pending = accepted.lock().clone();
+    if pending.is_empty() {
+        return;
+    }
+
+    // Mutations left pending after reordering is disabled take effect at once.
+    let rate = ctx.config.read().deferral();
+    for mutation in &pending {
+        let due = only.map_or_else(
+            || rate.is_none_or(|rate| !ctx.roll(rate)),
+            |key| mutation.key == *key,
+        );
+        if due {
+            let applied = mutation.drive();
+            assert!(
+                applied || only.is_none(),
+                "a pending mutation must apply before its blob opens again"
+            );
+        }
+    }
+    accepted.lock().retain(|mutation| !mutation.is_done());
+}
 
 fn clear_pending<B>(
     pending: &PendingMutations<B>,
@@ -426,6 +540,7 @@ pub struct Storage<S: crate::Storage> {
     ctx: Oracle,
     pending: PendingMutations<S::Blob>,
     generations: FileGenerations,
+    accepted: AcceptedMutations,
 }
 
 impl<S: crate::Storage> Storage<S> {
@@ -436,6 +551,7 @@ impl<S: crate::Storage> Storage<S> {
             ctx: Oracle { rng, config },
             pending: Arc::new(Mutex::new(Vec::new())),
             generations: Arc::new(Mutex::new(BTreeMap::new())),
+            accepted: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -463,13 +579,16 @@ impl<S: crate::Storage> Storage<S> {
                     generation
                 })
         };
-        Blob::new(
+        let mut blob = Blob::new(
             self.ctx.clone(),
             self.pending.clone(),
             generation,
             inner,
             size,
-        )
+        );
+        blob.accepted = self.accepted.clone();
+        blob.key = key;
+        blob
     }
 
     /// Retires generations and pending mutations for one file or an entire partition.
@@ -497,6 +616,7 @@ impl<S: crate::Storage> Storage<S> {
         partition: &str,
         name: Option<&[u8]>,
     ) -> Result<Retired<S::Blob>, Error> {
+        settle(&self.accepted, &self.ctx, None);
         if self.ctx.should_fail(Op::Remove) {
             return Err(injected_io_error().into());
         }
@@ -522,8 +642,10 @@ impl Storage<memory::Storage> {
         clear_pending(&self.pending, std::slice::from_ref(&generation))
     }
 
-    /// Replay selected crash outcomes in issue order.
+    /// Replay selected crash outcomes in issue order. Mutations that have not taken effect are
+    /// discarded, as if the crash came first.
     pub(crate) fn crash(&self) -> Result<(), Error> {
+        drop(std::mem::take(&mut *self.accepted.lock()));
         let pending = std::mem::take(&mut *self.pending.lock());
         let mut synced = HashSet::new();
         let mut replay = Vec::with_capacity(pending.len());
@@ -588,6 +710,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         name: &[u8],
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        // An earlier open's pending mutations take effect before the blob opens again.
+        settle(
+            &self.accepted,
+            &self.ctx,
+            Some(&(partition.to_string(), name.to_vec())),
+        );
         if self.ctx.should_fail(Op::Open) {
             return Err(injected_io_error().into());
         }
@@ -606,6 +734,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        settle(&self.accepted, &self.ctx, None);
         if self.ctx.should_fail(Op::Scan) {
             return Err(injected_io_error().into());
         }
@@ -620,7 +749,11 @@ pub struct Blob<B: crate::Blob> {
     pending: PendingMutations<B>,
     generation: Arc<FileGeneration>,
     /// Tracked size for partial resize support.
-    size: AtomicU64,
+    size: Arc<AtomicU64>,
+    /// Mutations accepted but not yet applied, shared with the blob's storage.
+    accepted: AcceptedMutations,
+    /// File the blob opens.
+    key: FileKey,
 }
 
 impl<B: crate::Blob> Blob<B> {
@@ -636,12 +769,76 @@ impl<B: crate::Blob> Blob<B> {
             ctx,
             pending,
             generation,
-            size: AtomicU64::new(size),
+            size: Arc::new(AtomicU64::new(size)),
+            accepted: Arc::new(Mutex::new(Vec::new())),
+            key: (String::new(), Vec::new()),
         }
+    }
+
+    /// Another handle on this blob's state, for a mutation that can outlive its call. It leaves
+    /// out the shared list of accepted mutations, which would otherwise keep the mutation that
+    /// holds this handle alive through the list.
+    fn handle(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            ctx: self.ctx.clone(),
+            pending: self.pending.clone(),
+            generation: self.generation.clone(),
+            size: self.size.clone(),
+            accepted: Arc::new(Mutex::new(Vec::new())),
+            key: self.key.clone(),
+        }
+    }
+
+    /// Drive mutations accepted earlier (see [`Config::reorder_rate`]).
+    fn drive_pending(&self) {
+        settle(&self.accepted, &self.ctx, None);
+    }
+
+    /// Apply `mutation` now, or accept it to take effect later when mutations are reordered
+    /// (see [`Config::reorder_rate`]).
+    async fn mutate(&self, mutation: BoxFuture<'static, Result<(), Error>>) -> Result<(), Error> {
+        if self.ctx.config.read().deferral().is_none() {
+            self.drive_pending();
+            return mutation.await;
+        }
+
+        // From here on the mutation takes effect whether or not this future is polled again.
+        let accepted = Arc::new(Accepted::new(self.key.clone(), mutation));
+        self.accepted.lock().push(accepted.clone());
+        poll_fn(|cx| {
+            // Each poll drives the pending mutations, this one included, passing over each at
+            // the reorder rate.
+            self.drive_pending();
+            if accepted.is_done() {
+                return Poll::Ready(
+                    accepted
+                        .result
+                        .lock()
+                        .take()
+                        .expect("an applied mutation keeps its result for its future"),
+                );
+            }
+
+            // Only polls and later storage calls drive the mutation, so ask to be polled again.
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await
     }
 
     fn memory_blob(&self) -> Option<&memory::Blob> {
         (self.inner.as_ref() as &dyn Any).downcast_ref()
+    }
+
+    /// Validate a nonempty write's range as the wrapped storage would, without sampling faults.
+    fn write_range(&self, offset: u64, len: u64) -> Result<(), Error> {
+        if let Some(blob) = self.memory_blob() {
+            blob.write_range(offset, len)?;
+        } else {
+            offset.checked_add(len).ok_or(Error::OffsetOverflow)?;
+        }
+        Ok(())
     }
 
     fn preflight_read(&self, offset: u64, len: usize) -> Result<(), Error> {
@@ -791,54 +988,20 @@ impl<B: crate::Blob> Blob<B> {
         drop(pending);
         drop(retired);
     }
-}
 
-impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(
+    /// Apply a `write_at`, injecting its faults and recording its crash evidence.
+    async fn write_now(
         &self,
         offset: u64,
-        len: usize,
-        options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
-        self.preflight_read(offset, len)?;
-        self.inner.read_at(offset, len, options).await
-    }
-
-    async fn read_at_buf(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufsMut> + Send,
-        options: ReadOptions,
-    ) -> Result<IoBufsMut, Error> {
-        let bufs = bufs.into();
-        assert!(
-            len == 0 || len <= bufs.capacity(),
-            "read length exceeds buffer capacity"
-        );
-        self.preflight_read(offset, len)?;
-        self.inner.read_at_buf(offset, len, bufs, options).await
-    }
-
-    async fn write_at(
-        &self,
-        offset: u64,
-        bufs: impl Into<IoBufs> + Send,
+        bufs: IoBufs,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        let bufs = bufs.into();
         let total_bytes = bufs.remaining() as u64;
         if total_bytes == 0 {
             return self.inner.write_at(offset, bufs, options).await;
         }
         let sync = options.contains(WriteOptions::SYNC);
-        if let Some(blob) = self.memory_blob() {
-            blob.write_range(offset, total_bytes)?;
-        } else {
-            offset
-                .checked_add(total_bytes)
-                .ok_or(Error::OffsetOverflow)?;
-        }
+        self.write_range(offset, total_bytes)?;
         let (should_fail, write_retention) = self.ctx.check_write_fault();
         let _mutation = self.generation.mutation.lock().await;
         if should_fail {
@@ -905,10 +1068,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         Ok(())
     }
 
-    async fn resize(&self, len: u64) -> Result<(), Error> {
-        if let Some(blob) = self.memory_blob() {
-            blob.resize_len(len)?;
-        }
+    /// Apply a `resize`, injecting its faults and recording its crash evidence.
+    async fn resize_now(&self, len: u64) -> Result<(), Error> {
         let (should_fail, partial_rate, retain) = self.ctx.check_resize_fault();
         let _mutation = self.generation.mutation.lock().await;
         if should_fail {
@@ -928,8 +1089,67 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.size.store(len, Ordering::Relaxed);
         Ok(())
     }
+}
+
+impl<B: crate::Blob> crate::Blob for Blob<B> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.drive_pending();
+        self.preflight_read(offset, len)?;
+        self.inner.read_at(offset, len, options).await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        let bufs = bufs.into();
+        assert!(
+            len == 0 || len <= bufs.capacity(),
+            "read length exceeds buffer capacity"
+        );
+        self.drive_pending();
+        self.preflight_read(offset, len)?;
+        self.inner.read_at_buf(offset, len, bufs, options).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        // Empty and invalid writes are settled at the call, so only real mutations are accepted.
+        let bufs = bufs.into();
+        let total_bytes = bufs.remaining() as u64;
+        if total_bytes == 0 {
+            return self.write_now(offset, bufs, options).await;
+        }
+        self.write_range(offset, total_bytes)?;
+        let blob = self.handle();
+        self.mutate(async move { blob.write_now(offset, bufs, options).await }.boxed())
+            .await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        // An invalid length is settled at the call, so only real mutations are accepted.
+        if let Some(blob) = self.memory_blob() {
+            blob.resize_len(len)?;
+        }
+        let blob = self.handle();
+        self.mutate(async move { blob.resize_now(len).await }.boxed())
+            .await
+    }
 
     async fn sync(&self) -> Result<(), Error> {
+        self.drive_pending();
         if self.ctx.should_fail(Op::Sync) {
             return Err(injected_io_error().into());
         }
@@ -942,6 +1162,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn start_sync(&self) -> Handle<()> {
+        self.drive_pending();
         if self.ctx.should_fail(Op::Sync) {
             return Handle::ready(Err(injected_io_error().into()));
         }
@@ -3066,5 +3287,140 @@ mod tests {
 
         let (_, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0);
+    }
+
+    /// Run `f` on the deterministic runtime with seed `seed` and mutations reordered at `rate`.
+    fn run_reordered<F, Fut, T>(seed: u64, rate: Probability, f: F) -> T
+    where
+        F: FnOnce(crate::deterministic::Context) -> Fut,
+        Fut: Future<Output = T>,
+    {
+        let cfg = crate::deterministic::Config::default()
+            .with_seed(seed)
+            .with_storage_fault_config(Config::default().reorder(rate));
+        crate::deterministic::Runner::new(cfg).start(f)
+    }
+
+    #[test]
+    fn test_reorder_lands_concurrent_writes_in_any_order() {
+        // Two writes to one range pending at once. Without reordering the later call always
+        // wins, and with it either may land last.
+        let last_writer = |rate| {
+            (0..32)
+                .map(|seed| {
+                    run_reordered(seed, rate, |context| async move {
+                        let (blob, _) = context.open("partition", b"blob").await.unwrap();
+                        let (first, second) = futures::join!(
+                            blob.write_at(0, vec![1u8; 4], WriteOptions::default()),
+                            blob.write_at(0, vec![2u8; 4], WriteOptions::default()),
+                        );
+                        first.unwrap();
+                        second.unwrap();
+                        let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+                        read.coalesce().as_ref()[0]
+                    })
+                })
+                .collect::<HashSet<_>>()
+        };
+        assert_eq!(last_writer(probability!(0.0)), HashSet::from([2]));
+        assert_eq!(last_writer(probability!(0.5)), HashSet::from([1, 2]));
+    }
+
+    #[test]
+    fn test_reorder_lands_dropped_resize_after_later_sync() {
+        // A resize polled once and dropped stays accepted. It may take effect before a later
+        // write, or after that write and its sync have returned, truncating the synced bytes.
+        let outcomes: HashSet<_> = (0..32)
+            .map(|seed| {
+                run_reordered(seed, probability!(0.5), |context| async move {
+                    let (blob, _) = context.open("partition", b"blob").await.unwrap();
+                    let mut resize = Box::pin(blob.resize(0));
+                    let _ = futures::poll!(resize.as_mut());
+                    drop(resize);
+
+                    blob.write_at(0, vec![7u8; 4], WriteOptions::default())
+                        .await
+                        .unwrap();
+                    blob.sync().await.unwrap();
+
+                    // Later calls drive the resize until it has landed.
+                    let mut truncated = false;
+                    for _ in 0..64 {
+                        if blob.read_at(0, 4, ReadOptions::default()).await.is_err() {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                    truncated
+                })
+            })
+            .collect();
+        assert_eq!(outcomes, HashSet::from([false, true]));
+    }
+
+    #[tokio::test]
+    async fn test_reorder_open_applies_pending_mutations_first() {
+        let h = Harness::new(Config::default().reorder(probability!(0.999)));
+        let (blob, _) = h.storage.open("partition", b"blob").await.unwrap();
+        let mut write = Box::pin(blob.write_at(0, b"lost", WriteOptions::default()));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        drop(write);
+        drop(blob);
+        assert_eq!(h.storage.accepted.lock().len(), 1);
+
+        // The reopen applies the dropped write to its open first. That open was never synced,
+        // so its write is discarded and no crash can replay it into the new open.
+        let (blob, len) = h.storage.open("partition", b"blob").await.unwrap();
+        assert!(h.storage.accepted.lock().is_empty());
+        assert_eq!(len, 0);
+        drop(blob);
+    }
+
+    #[tokio::test]
+    async fn test_reorder_crash_discards_pending_mutations() {
+        let h = Harness::new(
+            Config::default()
+                .reorder(probability!(0.999))
+                .write(WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: PartialWriteMode::Prefix,
+                }),
+        );
+        let (blob, _) = h.storage.open("partition", b"blob").await.unwrap();
+        let mut write = Box::pin(blob.write_at(0, b"lost", WriteOptions::default()));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        drop(write);
+        assert_eq!(h.storage.accepted.lock().len(), 1);
+
+        // The write never took effect, so the crash has nothing of it to retain.
+        h.storage.crash().unwrap();
+        assert!(h.storage.accepted.lock().is_empty());
+        let (_, len) = h.inner.open("partition", b"blob").await.unwrap();
+        assert_eq!(len, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reorder_pending_mutation_is_freed_with_its_storage() {
+        let h = Harness::new(Config::default().reorder(probability!(0.999)));
+        let (blob, _) = h.storage.open("partition", b"blob").await.unwrap();
+        let mut write = Box::pin(blob.write_at(0, b"data", WriteOptions::default()));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        drop(write);
+        drop(blob);
+
+        // Without a crash or reopen the mutation stays pending, but nothing it holds keeps the
+        // list of accepted mutations, and so the mutation itself, alive.
+        let pending = Arc::downgrade(&h.storage.accepted.lock()[0]);
+        drop(h);
+        assert!(pending.upgrade().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "storage reorder rate must be less than one")]
+    fn test_reorder_rate_of_one_is_rejected() {
+        let h = Harness::new(Config::default().reorder(probability!(1.0)));
+        let (blob, _) = futures::executor::block_on(h.storage.open("partition", b"blob")).unwrap();
+        let _ = futures::executor::block_on(blob.resize(1));
     }
 }
