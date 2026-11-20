@@ -310,8 +310,8 @@ fn bench_store_init(c: &mut Criterion) {
     for &(elements, operations) in cases() {
         // Populated lazily on the first matched sample, then reused by every variant and cache
         // size. All read the same on-disk database, which does not depend on the index it is
-        // reopened with.
-        let mut initialized = false;
+        // reopened with. Holds the populated database's size once it exists.
+        let mut populated = None;
         for (partitioned, &cache_size) in [false, true]
             .into_iter()
             .flat_map(|partitioned| CACHE_SIZES.iter().map(move |cache| (partitioned, cache)))
@@ -326,7 +326,7 @@ fn bench_store_init(c: &mut Criterion) {
                 ),
                 |b| {
                     // Populate the database once, on the first matched sample.
-                    if !initialized {
+                    let size = *populated.get_or_insert_with(|| {
                         commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                             |ctx| async move {
                                 let db = open_store_db(ctx.child("storage")).await;
@@ -340,11 +340,12 @@ fn bench_store_init(c: &mut Criterion) {
                                 .await;
                                 let floor = db.inactivity_floor();
                                 let db = db.prune(floor).await.unwrap();
+                                let size = db.bounds().end;
                                 db.sync().await.unwrap();
+                                size
                             },
-                        );
-                        initialized = true;
-                    }
+                        )
+                    });
 
                     // Measure init time at this cache size.
                     b.to_async(&runner).iter_custom(move |iters| async move {
@@ -366,7 +367,9 @@ fn bench_store_init(c: &mut Criterion) {
                             } else {
                                 StoreDb::init(ctx, cfg, None).await.unwrap().bounds().end
                             };
-                            assert_ne!(end, 0);
+
+                            // Every reopen must find the populated database, not start a new one.
+                            assert_eq!(end, size);
                         }
                         start.elapsed()
                     });
@@ -375,7 +378,7 @@ fn bench_store_init(c: &mut Criterion) {
         }
 
         // Destroy the populated database.
-        if initialized {
+        if populated.is_some() {
             commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
                 open_store_db(ctx.child("storage"))
                     .await
