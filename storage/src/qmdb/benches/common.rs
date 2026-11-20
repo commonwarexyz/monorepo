@@ -410,7 +410,7 @@ macro_rules! define_db_variants {
 
         #[allow(unused_macros)]
         macro_rules! $timed_dispatch_name {
-            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, $cache_size:expr, |$db_name:ident| $body:expr) => {
+            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, $cache_size:expr) => {
                 match $variant_expr {
                     $(
                         $enum_name::$entry => {
@@ -419,10 +419,7 @@ macro_rules! define_db_variants {
                             cfg.init_cache = $cache_size;
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
-                                #[allow(unused_mut)]
-                                let mut $db_name =
-                                    <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
-                                $body
+                                <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
                             }
                             start.elapsed()
                         }

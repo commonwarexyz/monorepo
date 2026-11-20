@@ -81,18 +81,22 @@
 use crate::{index::unordered::Index, merkle::mmr::Location};
 
 mod db;
-pub use db::{Changeset, Config};
+pub use db::{Batch as IndexedBatch, Changeset, Config, Db as IndexedDb};
 
-/// An unauthenticated key-value database based off of an append-only journal of operations.
-pub type Db<E, K, V, T, S> = db::Db<E, K, V, Index<T, Location>, S>;
+/// An unauthenticated key-value database backed by an append-only journal and an unpartitioned
+/// snapshot index. See [`IndexedDb`] for its methods.
+pub type Db<E, K, V, T, S> = IndexedDb<E, K, V, Index<T, Location>, S>;
 
-/// A batch of writes and deletes staged against a [Db].
-pub type Batch<'a, E, K, V, T, S> = db::Batch<'a, E, K, V, Index<T, Location>, S>;
+/// A batch of writes and deletes staged against a [Db]. See [`IndexedBatch`] for its methods.
+pub type Batch<'a, E, K, V, T, S> = IndexedBatch<'a, E, K, V, Index<T, Location>, S>;
 
-/// Partitioned index variants that divide the key space into `2^(P*8)` partitions and build the
-/// snapshot in parallel at startup.
+/// Partitioned index variants that divide the key space into `2^(P*8)` partitions and can build
+/// the snapshot in parallel at startup. With `init_concurrency = 1`, the calling task rebuilds it.
+///
+/// Partition metrics use the `index` attribute for the partition number. Use a separate attribute,
+/// such as `store`, to distinguish stores that share a metrics prefix.
 pub mod partitioned {
-    use super::db;
+    use super::{IndexedBatch, IndexedDb};
     use crate::{index::partitioned::unordered::Index, merkle::mmr::Location};
 
     /// An unauthenticated key-value database with a partitioned snapshot index.
@@ -103,13 +107,16 @@ pub mod partitioned {
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
     ///
-    /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
-    /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, T, const P: usize, S> = db::Db<E, K, V, Index<T, Location, P>, S>;
+    /// Choose a prefix over which keys are uniformly distributed. Amortizing each partition's
+    /// fixed memory cost requires many more keys than partitions, and alignment can eliminate
+    /// the per-key savings from removing the prefix.
+    /// See [`IndexedDb`] for the database methods.
+    pub type Db<E, K, V, T, const P: usize, S> = IndexedDb<E, K, V, Index<T, Location, P>, S>;
 
     /// A batch of writes and deletes staged against a partitioned [Db].
+    /// See [`IndexedBatch`] for its methods.
     pub type Batch<'a, E, K, V, T, const P: usize, S> =
-        db::Batch<'a, E, K, V, Index<T, Location, P>, S>;
+        IndexedBatch<'a, E, K, V, Index<T, Location, P>, S>;
 }
 
 #[cfg(test)]

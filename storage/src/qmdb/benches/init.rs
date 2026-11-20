@@ -156,7 +156,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time at this cache size.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
-                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_size, |_db| {})
+                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_size)
                         });
                     },
                 );
@@ -224,7 +224,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                         // Benchmark: measure init time at this cache size.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
-                            dispatch_var_timed_init!(ctx, variant, iters, cache_size, |_db| {})
+                            dispatch_var_timed_init!(ctx, variant, iters, cache_size)
                         });
                     },
                 );
@@ -299,7 +299,7 @@ fn bench_keyless_init(c: &mut Criterion) {
 }
 
 /// Benchmark reopening a populated unauthenticated store at each init cache size, over the plain
-/// index and over a partitioned index that builds its snapshot on [THREADS] tasks.
+/// index on one task and a partitioned index on one or [THREADS] tasks.
 fn bench_store_init(c: &mut Criterion) {
     let cfg = Config::default();
     for &(elements, operations) in cases() {
@@ -307,15 +307,16 @@ fn bench_store_init(c: &mut Criterion) {
         // size. All read the same on-disk database, which does not depend on the index it is
         // reopened with. Holds the populated database's size once it exists.
         let mut populated = None;
-        for (partitioned, &cache_size) in [false, true]
-            .into_iter()
-            .flat_map(|partitioned| CACHE_SIZES.iter().map(move |cache| (partitioned, cache)))
+        for ((partitioned, tasks), &cache_size) in
+            [(false, NZUsize!(1)), (true, NZUsize!(1)), (true, THREADS)]
+                .into_iter()
+                .flat_map(|variant| CACHE_SIZES.iter().map(move |cache| (variant, cache)))
         {
             let cache = cache_size.map_or(0, NonZeroUsize::get);
             let runner = tokio::Runner::new(cfg.clone());
             c.bench_function(
                 &format!(
-                    "{}/variant=store::variable{} cache={cache} elements={elements}",
+                    "{}/variant=store::variable{} tasks={tasks} cache={cache} elements={elements}",
                     module_path!(),
                     if partitioned { "::partitioned" } else { "" },
                 ),
@@ -347,9 +348,7 @@ fn bench_store_init(c: &mut Criterion) {
                         let ctx = context::get::<Context>();
                         let mut cfg = store_cfg(&ctx);
                         cfg.init_cache = cache_size;
-                        if partitioned {
-                            cfg.init_concurrency = THREADS;
-                        }
+                        cfg.init_concurrency = tasks;
                         let start = std::time::Instant::now();
                         for _ in 0..iters {
                             let (ctx, cfg) = (ctx.child("storage"), cfg.clone());

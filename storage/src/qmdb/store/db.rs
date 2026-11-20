@@ -374,6 +374,9 @@ where
     /// Initializes a new [Db] with the given configuration.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
+    ///
+    /// All index variants take a [Spawner] context. The unpartitioned index rebuilds on the
+    /// calling task.
     #[boxed]
     pub async fn init(
         context: E,
@@ -814,6 +817,7 @@ mod test {
             store::{self, Db, partitioned},
         },
         translator::{OneCap, TwoCap},
+        utils::task_metrics::{SPAWNED, tasks},
     };
     use commonware_cryptography::{
         Hasher as _, Sha256,
@@ -1786,10 +1790,13 @@ mod test {
 
             for concurrency in [1, 2, 3, 4, 8] {
                 let cfg = test_config_with_tasks(concurrency);
-                let context = context
+                let before = tasks(&context.encode(), SPAWNED, "snapshot_worker");
+                let reopen = context
                     .child("partitioned")
                     .with_attribute("index", concurrency);
-                let db = PartitionedStore::init(context, cfg, None).await.unwrap();
+                let db = PartitionedStore::init(reopen, cfg, None).await.unwrap();
+                let after = tasks(&context.encode(), SPAWNED, "snapshot_worker");
+                assert_eq!(after > before, concurrency > 1, "concurrency={concurrency}");
                 assert_eq!(db.active_keys, active_keys);
                 assert_eq!(db.inactivity_floor(), floor);
                 assert_eq!(db.bounds(), bounds);
