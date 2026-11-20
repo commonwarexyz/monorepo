@@ -66,7 +66,34 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
                 Ok(())
             }
+
+            /// Drop the pages holding `file`'s leading `len` bytes from the OS page cache.
+            ///
+            /// An open reads or writes a blob's header once and keeps what it needs in memory, so
+            /// the header's pages would only displace other data there. The advice is best effort.
+            fn drop_header_pages(file: &File, len: usize) {
+                // SAFETY: `sysconf` reads a system constant and performs no memory access.
+                let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+                let Some(page) = usize::try_from(page).ok().filter(|page| *page > 0) else {
+                    return;
+                };
+
+                // The advice applies only to whole pages, so cover every page the header touches.
+                let Ok(len) = libc::off_t::try_from(len.next_multiple_of(page)) else {
+                    return;
+                };
+
+                // SAFETY: `file` owns a valid fd that lives across the call. `posix_fadvise` takes
+                // only that fd and a range, performs no memory access, and returns an error code,
+                // which is ignored since the advice is best effort.
+                let _ = unsafe {
+                    libc::posix_fadvise(file.as_raw_fd(), 0, len, libc::POSIX_FADV_DONTNEED)
+                };
+            }
         } else {
+            /// Keep the header's pages in the OS page cache, which only Linux can advise against.
+            const fn drop_header_pages(_: &File, _: usize) {}
+
             /// Make inherited partition entries durable before user code starts. Partition
             /// directories and existing blob contents are synchronized on their first access.
             pub(crate) fn sync(dir: &Path) -> io::Result<()> {
@@ -110,6 +137,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         file.take(Widen::widen(requested))
             .read_to_end(&mut raw)
             .map_err(|_| Error::ReadFailed)?;
+        drop_header_pages(file, requested);
 
         // V0's prefix includes mutable payload that may shrink after metadata was read.
         // A complete prefix must retain the original length, which yields the logical size.
@@ -144,6 +172,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         file.write_all(&region).map_err(|_| Error::WriteFailed)?;
         file.sync_all()
             .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
+        drop_header_pages(file, region.len());
         Ok((0, blob_version, data_offset))
     }
 
