@@ -67,6 +67,7 @@ pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     max_peers: usize,
 
     control: mailbox::UnreliableReceiver<Message<C>>,
+    killed: connection::Killed,
     receivers: Receivers<EncodedData>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
@@ -89,6 +90,7 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
                 control: control_receiver,
+                killed: control_sender.killed(),
                 receivers,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
@@ -147,6 +149,8 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             RateLimiter::direct_with_clock(rate, self.context.child("peers_rate_limiter"));
         let label = metrics::Message::new_peers(&peer);
         let peers_throttle = Throttle::new(limiter, received, rate_limited, &label);
+
+        let peer_key = peer.clone();
 
         // Send/Receive messages from the peer
         let send_handler = self.context.child("sender").spawn({
@@ -272,7 +276,13 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
             });
 
         // Wait for one of the handlers to finish or shutdown
-        connection::wait(&self.context, send_handler, receive_handler)
+        connection::wait(
+            &self.context,
+            &peer_key,
+            self.killed,
+            send_handler,
+            receive_handler,
+        )
             .await
             .map_err(Error::UnexpectedFailure)?
     }
@@ -286,6 +296,7 @@ mod tests {
         authenticated::{data::Data, discovery::actors::tracker, router},
     };
     use commonware_codec::Encode;
+    use commonware_macros::select;
     use commonware_cryptography::{
         ChaCha20Poly1305, Signer,
         ed25519::{PrivateKey, PublicKey},
@@ -303,6 +314,10 @@ mod tests {
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         time::Duration,
     };
 
@@ -1062,6 +1077,120 @@ mod tests {
                 matches!(result, Err(Error::DecodeFailed(_))),
                 "Expected DecodeFailed error, got: {result:?}"
             );
+        });
+    }
+    /// Sink that never completes a write once blocked, like a peer that stops reading.
+    struct BlockingSink<S> {
+        inner: S,
+        blocked: Arc<AtomicBool>,
+    }
+
+    impl<S: commonware_runtime::Sink> commonware_runtime::Sink for BlockingSink<S> {
+        async fn send(
+            &mut self,
+            bufs: impl Into<commonware_runtime::IoBufs> + Send,
+        ) -> Result<(), commonware_runtime::Error> {
+            if self.blocked.load(Ordering::Relaxed) {
+                return futures::future::pending().await;
+            }
+            self.inner.send(bufs).await
+        }
+    }
+
+    #[test]
+    fn test_kill_interrupts_blocked_send() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
+
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+            let blocked = Arc::new(AtomicBool::new(false));
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
+            let listener_handle = context.child("listener").spawn({
+                let blocked = blocked.clone();
+                move |ctx| async move {
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            BlockingSink {
+                                inner: remote_sink,
+                                blocked,
+                            },
+                        )
+                        .await
+                        .map(|(_, sender, receiver)| (sender, receiver))
+                }
+            });
+            let (_local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let cfg = default_peer_config(context.child("config"), remote_pk, 10);
+            let (peer_actor, peer_mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
+            let greeting = types::Info::sign(
+                signer.public_key(),
+                IP_NAMESPACE,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch_millis(),
+                |namespace, message| signer.sign(namespace, message),
+            );
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let channels = create_channels(context.child("channels"));
+
+            // The remote stops reading, so the greeting write never completes
+            blocked.store(true, Ordering::Relaxed);
+            let peer_handle = context.child("task").spawn(move |_| async move {
+                peer_actor
+                    .run(
+                        local_pk,
+                        greeting,
+                        (remote_sender, remote_receiver),
+                        tracker::Mailbox::new(tracker_mailbox),
+                        channels,
+                    )
+                    .await
+            });
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Killing the peer ends the connection without waiting for the write
+            peer_mailbox.kill();
+            select! {
+                result = peer_handle => {
+                    let result = result.expect("peer task failed");
+                    assert!(
+                        matches!(result, Err(Error::Connection(connection::Error::Killed(_)))),
+                        "unexpected result: {result:?}"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("kill did not interrupt the blocked send");
+                },
+            }
         });
     }
 }

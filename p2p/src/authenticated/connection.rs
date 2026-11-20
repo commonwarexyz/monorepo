@@ -14,6 +14,7 @@ use commonware_runtime::{
     Clock, Error as RuntimeError, Handle, IoBufs, RateLimiter, Spawner, Supervisor,
     telemetry::metrics::{CounterFamily, raw::Counter},
 };
+use commonware_utils::channel::watch;
 use std::{collections::BTreeMap, future::Future, hash::Hash, vec::Drain};
 use thiserror::Error;
 use tracing::debug;
@@ -235,20 +236,70 @@ impl<E: Clock + Supervisor, P: PublicKey> Inbox<E, P> {
     }
 }
 
-/// Waits for `context` to stop or for either handler to finish.
+/// Kill signal of one connection, held by every clone of its mailbox.
 ///
-/// Returns `Ok(Ok(()))` if `context` stops first, otherwise the result of the first handler to
-/// finish.
-pub(crate) async fn wait<E: Send + 'static>(
+/// Unlike a kill queued behind outbound messages, firing it ends [wait] even while a write is
+/// blocked on a peer that stopped reading.
+#[derive(Clone, Debug)]
+pub(crate) struct Kill(watch::Sender<bool>);
+
+impl Kill {
+    /// Creates an unfired signal.
+    pub(crate) fn new() -> Self {
+        Self(watch::channel(false).0)
+    }
+
+    /// Fires the signal. Firing it again has no effect.
+    pub(crate) fn fire(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// Returns a receiver that resolves once the signal fires.
+    pub(crate) fn subscribe(&self) -> Killed {
+        Killed(self.0.subscribe())
+    }
+}
+
+/// Receiver of a [Kill] signal.
+#[derive(Debug)]
+pub(crate) struct Killed(watch::Receiver<bool>);
+
+impl Killed {
+    /// Resolves once the signal fires.
+    ///
+    /// Never resolves if every [Kill] is dropped unfired: the connection then ends when its
+    /// control channel closes.
+    pub(crate) async fn wait(mut self) {
+        if self.0.wait_for(|killed| *killed).await.is_err() {
+            futures::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Waits for `context` to stop, for `killed` to fire, or for either handler to finish.
+///
+/// Returns `Ok(Ok(()))` if `context` stops first and `Ok(Err(Killed))` if `killed` fires first,
+/// aborting both handlers so a write blocked on the peer cannot delay teardown. Otherwise returns
+/// the result of the first handler to finish.
+pub(crate) async fn wait<E: From<Error> + Send + 'static>(
     context: &impl Spawner,
+    peer: &impl PublicKey,
+    killed: Killed,
     mut send: Handle<Result<(), E>>,
     mut receive: Handle<Result<(), E>>,
 ) -> Result<Result<(), E>, RuntimeError> {
     let mut shutdown = context.stopped();
+    let mut killed = Box::pin(killed.wait());
     select! {
         _ = &mut shutdown => {
             debug!("context shutdown, stopping peer");
             Ok(Ok(()))
+        },
+        _ = &mut killed => {
+            debug!(?peer, "peer killed, stopping peer");
+            send.abort();
+            receive.abort();
+            Ok(Err(Error::Killed(peer.to_string()).into()))
         },
         send_result = &mut send => send_result,
         receive_result = &mut receive => receive_result,
