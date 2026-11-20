@@ -6,10 +6,10 @@ use commonware_macros::{test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_utils::probability;
 use harness::{
-    DkgEngine, good_link, run_activation_failure_completes_empty, run_closed_network_receiver,
-    run_plan, run_restart_after_completion, run_restart_after_failure,
+    DkgEngine, Stop, good_link, run_activation_failure_completes_empty,
+    run_closed_network_receiver, run_plan, run_restart_after_completion, run_restart_after_failure,
     run_restart_completion_state_is_fresh, run_restart_without_share, run_schedule,
-    run_share_without_final_block,
+    run_share_without_final_block, run_stop_with_held_sync,
 };
 use properties::ExpectedOutcome;
 use std::time::Duration;
@@ -69,6 +69,21 @@ fn dkg_e2e_deaf_participant_completes() {
 #[test]
 fn dkg_e2e_closed_network_receiver_stops_engine() {
     run_closed_network_receiver();
+}
+
+#[test]
+fn dkg_e2e_graceful_stop_waits_for_held_sync() {
+    run_stop_with_held_sync(Stop::Graceful);
+}
+
+#[test]
+fn dkg_e2e_child_exit_stops_engine_with_held_sync() {
+    run_stop_with_held_sync(Stop::ChildExit);
+}
+
+#[test]
+fn dkg_e2e_abort_stops_engine_with_held_sync() {
+    run_stop_with_held_sync(Stop::Abort);
 }
 
 #[test]

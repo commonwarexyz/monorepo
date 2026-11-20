@@ -84,6 +84,7 @@ use commonware_cryptography::{
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
+use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -98,6 +99,7 @@ use commonware_utils::{
     sequence::Unit,
     vec::NonEmptyVec,
 };
+use futures::FutureExt as _;
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -697,22 +699,30 @@ where
             },
         );
 
+        let mut shutdown = context.stopped();
         let reshare_handle = reshare_actor.start(dkg);
         let marshal_handle = marshal_actor.start(
             reshare_mailbox,
             buffer_mailbox,
             (backfill_handler, backfill_resolver),
         );
-        let simplex_handle = simplex.start(votes, certificates, resolver_network);
+        let mut simplex_handle = simplex.start(votes, certificates, resolver_network);
 
-        Handle::select([
-            buffer_handle,
-            reshare_handle,
-            marshal_handle,
-            simplex_handle,
-        ])
-        .await
-        .expect("failed dkg");
+        let sibling = select! {
+            result = buffer_handle => result,
+            result = reshare_handle => result,
+            result = marshal_handle => result,
+            result = &mut simplex_handle => {
+                result.expect("failed dkg");
+                return;
+            },
+        };
+        sibling.expect("failed dkg");
+
+        // A sibling may observe the runtime stop first. Let Simplex finish its journal sync.
+        if (&mut shutdown).now_or_never().is_some() {
+            simplex_handle.await.expect("failed dkg");
+        }
     }
 }
 

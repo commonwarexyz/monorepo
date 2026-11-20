@@ -32,7 +32,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -40,6 +40,7 @@ use commonware_runtime::{
 use commonware_utils::{
     Acknowledgement, NonZeroDuration, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec,
 };
+use futures::FutureExt as _;
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -191,7 +192,7 @@ where
 /// [module docs](crate::dkg::orchestrator)).
 pub struct Actor<E, B, M, P, MV, A, L, T, ACK = Exact>
 where
-    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -231,7 +232,7 @@ where
 
 impl<E, B, M, P, MV, A, L, T, ACK> Actor<E, B, M, P, MV, A, L, T, ACK>
 where
-    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -354,6 +355,9 @@ where
             }
         };
 
+        // Held until the active engine exits, so a stop waits for the engine's own
+        // shutdown even after the loop below exits and drops its stop signal.
+        let mut stopped = self.context.stopped();
         select_loop! {
             self.context,
             on_stopped => {
@@ -374,7 +378,7 @@ where
             result = &mut active.handle => match result {
                 Ok(()) => {
                     debug!(epoch = active.epoch.get(), "simplex engine stopped, shutting down orchestrator");
-                    break;
+                    return;
                 }
                 Err(error) => {
                     panic!("simplex engine for epoch {} stopped unexpectedly: {error}", active.epoch);
@@ -402,6 +406,17 @@ where
                     }
                 }
             },
+        }
+
+        // On a stop, wait for the engine to finish stopping; otherwise dropping
+        // `active` aborts it.
+        if (&mut stopped).now_or_never().is_some()
+            && let Err(error) = (&mut active.handle).await
+        {
+            panic!(
+                "simplex engine for epoch {} failed while stopping: {error}",
+                active.epoch
+            );
         }
     }
 
