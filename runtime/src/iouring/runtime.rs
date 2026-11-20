@@ -108,6 +108,30 @@
 //! pass tries to steal before parking, or relies on workers already holding
 //! search counts when the search cap refuses it.
 //!
+//! ## Cooperative budget
+//!
+//! Every task poll and root poll runs with a fresh cooperative budget of
+//! [`commonware_utils::coop::BUDGET`] operations, which budgeted receives,
+//! accepted connections and completed sleeps spend (see
+//! [`commonware_utils::coop`]). A task that spends it returns
+//! pending with a self-wake and is queued at the tail of the local run queue,
+//! behind the other runnables of the batch. The root, service and timers run
+//! when the batch ends, so a task fed faster than it drains and alone on its
+//! worker can take up to `BATCH_SIZE` budgets before them.
+//!
+//! The worker takes the thread's budget with a [`coop::Ownership`] when it
+//! is constructed and gives it back when it is dropped, after cleanup and
+//! after any disposal of the root's output. A batch of task polls runs in
+//! one [`coop::Scope`] and refills the budget before each poll, and each root
+//! poll runs in a scope of its own. The destruction of a task future that
+//! finishes or is cancelled in a poll is part of that poll and shares its
+//! budget, and the scheduler's own bookkeeping between the polls of a batch
+//! runs under the budget the latest poll left. Every other point of the
+//! worker's life, including root construction and destruction, callbacks,
+//! service, teardown, and the disposal of a root output after a failed
+//! shutdown, runs unconstrained, also on unwinding, so code outside a poll
+//! never finds a budget some poll, or the caller, left spent.
+//!
 //! Before parking, the worker checks readiness again because polls and
 //! callbacks can produce more work. Pool workers coordinate through
 //! [`Searcher`], and all workers wait through their mailbox's
@@ -202,6 +226,7 @@ use commonware_macros::select;
 use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
 use commonware_utils::{
     channel::oneshot,
+    coop,
     sync::{Condvar, Mutex},
     sys_rng,
 };
@@ -1510,6 +1535,10 @@ pub struct Worker {
     global_queue_interval: u32,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
+    /// The thread's cooperative budget as the worker found it. The last field,
+    /// so it is restored only once the worker and everything it disposes of,
+    /// a root output included, are gone.
+    _coop: coop::Ownership,
 }
 
 impl Worker {
@@ -1532,6 +1561,7 @@ impl Worker {
             until_global: global_queue_interval,
             global_queue_interval,
             finished: false,
+            _coop: coop::Ownership::take(),
         };
         worker.scope = Some(Scope::install(local));
         worker
@@ -2036,6 +2066,10 @@ impl Worker {
             // mailbox, or io_uring service. A dedicated worker polls only its
             // root.
             if let (Some(pool), Some(searcher)) = (pool, &mut searcher) {
+                // Each task poll starts with a full cooperative budget, and
+                // ending the batch, unwinding included, leaves the thread
+                // unconstrained again for everything but polls.
+                let _coop = coop::Scope::enter();
                 for _ in 0..BATCH_SIZE {
                     let Some(runnable) = self.next_runnable(pool) else {
                         break;
@@ -2044,6 +2078,9 @@ impl Worker {
                     // User code can wake a backlog and wait for a peer to run it.
                     // Return the count so those wakes can kick a parked peer.
                     searcher.leave_search();
+
+                    // Every poll starts with a full budget.
+                    coop::refill();
 
                     // The inner wrapper handles user polling policy. The poll also
                     // contains the destruction of a finished or cancelled future.
@@ -2078,7 +2115,11 @@ impl Worker {
                 // A local wake during this poll sets root_ready again, and a
                 // foreign wake queues a message that sets it when applied.
                 // Pending must not clear a wake caused by the root itself.
-                if let Poll::Ready(output) = root.as_mut().poll(&mut cx) {
+                let polled = {
+                    let _coop = coop::Scope::enter();
+                    root.as_mut().poll(&mut cx)
+                };
+                if let Poll::Ready(output) = polled {
                     return Some(output);
                 }
             }

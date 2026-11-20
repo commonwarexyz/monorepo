@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, channel::mpsc};
 use futures::stream::{self, BoxStream};
 
 /// The `nr_events` each AIO context is created with (`io_setup`): the requests it processes
@@ -201,7 +201,7 @@ fn submit(
     direct: &File,
     ctx: Context,
     reads: Vec<Read>,
-    tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
+    tx: &mpsc::UnboundedSender<Completion>,
 ) -> Result<Context, Error> {
     let fd = u32::try_from(direct.as_raw_fd()).expect("an open descriptor is non-negative");
     let n = reads.len();
@@ -359,7 +359,7 @@ fn reap(ctx: &Context, events: &mut [IoEvent], wait: bool) -> Result<usize, Erro
 fn read_positioned_each(
     file: &Arc<Shared>,
     reads: Vec<Read>,
-    tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
+    tx: &mpsc::UnboundedSender<Completion>,
 ) {
     for read in reads {
         let (file, tx) = (file.clone(), tx.clone());
@@ -370,7 +370,7 @@ fn read_positioned_each(
 }
 
 /// Run one submission on the calling (blocking) thread.
-fn run(file: &Arc<Shared>, reads: Vec<Read>, tx: &tokio::sync::mpsc::UnboundedSender<Completion>) {
+fn run(file: &Arc<Shared>, reads: Vec<Read>, tx: &mpsc::UnboundedSender<Completion>) {
     // Without a direct descriptor (the filesystem rejects direct I/O, or a transient open
     // failure) or a context (for example, the kernel's request limit is exhausted), the
     // submission is served by one buffered positioned read per range, each on its own
@@ -417,7 +417,7 @@ pub(super) fn read_many(
 
     // Run every [NR_EVENTS] reads as one submission on its own blocking task. The tasks share
     // the channel the stream drains, so completions arrive in whatever order they land.
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
     let mut reads = reads.into_iter().peekable();
     while reads.peek().is_some() {
         let chunk: Vec<_> = reads.by_ref().take(NR_EVENTS).collect();
@@ -482,7 +482,7 @@ mod tests {
         const LEN: usize = 64 << 10;
         let block: usize = Widen::widen(BLOB_PAGE_SIZE);
         let (storage, blob, directory) = direct_blob("failed_submission", vec![0xAB; LEN]).await;
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::unbounded_channel();
 
         // The kernel accepts the first read and rejects the second (its offset exceeds the
         // largest signed file offset), whose positioned read then fails, so the submission
@@ -517,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn test_submission_beyond_one_slab_fails() {
         let (storage, blob, directory) = direct_blob("slab_overflow", vec![0; 4096]).await;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
         // Each range passes read_many's length check, but together their supersets exceed the
         // largest allocation layout.
@@ -572,7 +572,7 @@ mod tests {
             std::thread::spawn(move || {
                 // SAFETY: pthread_self has no preconditions.
                 thread_tx.send(unsafe { libc::pthread_self() }).unwrap();
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let (tx, mut rx) = mpsc::unbounded_channel();
                 let ctx = take_context().unwrap();
                 let direct = direct(&shared).unwrap();
                 let result = submit(&shared, direct, ctx, reads, &tx);
@@ -691,7 +691,7 @@ mod tests {
                 len,
             })
             .collect();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         read_positioned_each(&blob.shared, reads, &tx);
         drop(tx);
         let mut served = Vec::new();

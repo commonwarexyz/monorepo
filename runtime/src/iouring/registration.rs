@@ -147,7 +147,10 @@ impl<K: Key> Future for Registration<K> {
                 receiver
             });
 
-            let result = std::task::ready!(Pin::new(receiver).poll(cx));
+            // Forwarding only carries the operation's result, so it spends no
+            // budget: the resource that awaits the operation decides the cost,
+            // as it does when the operation completes on its own worker.
+            let result = std::task::ready!(receiver.poll_unbudgeted(cx));
             this.state = State::Done;
             return Poll::Ready(result.unwrap_or(Err(Error::Closed)));
         };

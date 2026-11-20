@@ -104,6 +104,8 @@ where
         recipients: Recipients<S::PublicKey>,
     ) -> Result<CheckedSender<'_, S>, SystemTime> {
         let mut state = self.state.lock();
+        // The receiver's try_recv ignores the cooperative budget, so a
+        // published update is seen even when the calling poll has spent it.
         if matches!(&recipients, Recipients::All)
             && let Some(peers) = state.peer_subscription.try_recv().ok()
         {
@@ -502,6 +504,45 @@ mod tests {
 
             // Check All should fail since all known peers are rate limited
             assert!(limited.check(Recipients::All).is_err());
+        });
+    }
+
+    /// A membership update already published must reach a broadcast even
+    /// when the calling poll has spent its cooperative budget.
+    #[test]
+    fn test_spent_budget_does_not_hide_published_membership() {
+        use commonware_utils::coop;
+        Runner::default().start(|context| async move {
+            // A sender whose peer set has a pending update.
+            let sender = MockSender::new();
+            let initial = key(1);
+            let updated = key(2);
+            let (updates, receiver) = ring::channel(NZUsize!(1));
+            let peers = UpdatingPeers {
+                peers: vec![initial],
+                receiver: Arc::new(Mutex::new(Some(receiver))),
+            };
+            let mut limited = LimitedSender::new(sender, quota_per_second(10), context, peers);
+
+            // The update is published before the check.
+            assert!(updates.send_lossy(vec![updated.clone()]));
+
+            // A poll that has spent its budget, as after a receive loop.
+            let scope = coop::Scope::enter();
+            for _ in 0..coop::BUDGET {
+                coop::charge();
+            }
+            assert!(coop::exhausted());
+            let checked = limited.check(Recipients::All).unwrap();
+            let recipients = checked.recipients();
+            drop(scope);
+
+            // The broadcast used the updated peer set.
+            assert_eq!(
+                recipients,
+                vec![updated],
+                "broadcast used the stale peer set"
+            );
         });
     }
 

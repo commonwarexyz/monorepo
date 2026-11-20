@@ -1193,7 +1193,7 @@ where
             }
         }
         assert!(
-            reached_receiver.recv().now_or_never().is_none(),
+            matches!(reached_receiver.try_recv(), Err(ring::TryRecvError::Empty)),
             "engine should not report reached-target while boundary state is missing"
         );
 

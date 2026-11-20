@@ -63,7 +63,6 @@ mod tests {
         utils::Timeout,
     };
     use commonware_utils::NZUsize;
-    use futures::FutureExt as _;
     use std::time::Duration;
 
     const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
@@ -185,7 +184,7 @@ mod tests {
                 .await
                 .expect("ready spawn should be retained");
             assert_eq!(peer, peer_1);
-            assert!(receiver.recv().now_or_never().is_none());
+            assert!(matches!(receiver.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
         });
     }
 }

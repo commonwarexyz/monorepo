@@ -1,0 +1,303 @@
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:103:13
+   |
+LL |     let _ = receiver.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+   = note: `#[deny(receive_probe)]` on by default
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:121:13
+   |
+LL |     let _ = mpsc.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:122:13
+   |
+LL |     let _ = unbounded.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:123:13
+   |
+LL |     let _ = ring.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:124:13
+   |
+LL |     let _ = mailbox.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:125:13
+   |
+LL |     let _ = unreliable.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:126:13
+   |
+LL |     let _ = tokio_mpsc.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:127:13
+   |
+LL |     let _ = tokio_unbounded.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:128:13
+   |
+LL |     let _ = simulated.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:129:13
+   |
+LL |     let _ = authenticated.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:133:13
+   |
+LL |     let _ = mpsc.next().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:134:13
+   |
+LL |     let _ = ring.next().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:135:13
+   |
+LL |     let _ = FutureExt::now_or_never(mpsc.recv());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:136:13
+   |
+LL |     let _ = futures_util::future::FutureExt::now_or_never(ring.recv());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:137:13
+   |
+LL |     let _ = commonware_utils::channel::mpsc::Receiver::recv(&mut mpsc).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:138:13
+   |
+LL |     let _ = holder.receiver.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:140:13
+   |
+LL |     let _ = reference.recv().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:141:13
+   |
+LL |     assert!(tokio_mpsc.recv().now_or_never().is_none());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a receive future can miss a queued value once the cooperative budget is spent
+  --> $DIR/main.rs:97:9
+   |
+LL |         $receiver.recv().now_or_never()
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+LL |     let _ = probe!(unbounded);
+   |             ----------------- in this macro invocation
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+   = note: this error originates in the macro `probe` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:174:13
+   |
+LL |     let _ = commonware_utils::channel::oneshot::Receiver::<u8>::new().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:175:13
+   |
+LL |     let _ = tokio::sync::oneshot::Receiver::<u8>::new().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:176:13
+   |
+LL |     let _ = (&mut oneshot).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:177:13
+   |
+LL |     let _ = (&mut tokio_oneshot).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:178:13
+   |
+LL |     let _ = (&mut &mut oneshot).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:179:13
+   |
+LL |     let _ = Box::new(tokio::sync::oneshot::Receiver::<u8>::new()).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:180:13
+   |
+LL |     let _ = Pin::new(&mut oneshot).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:181:13
+   |
+LL |     let _ = Box::pin(tokio::sync::oneshot::Receiver::<u8>::new()).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:182:13
+   |
+LL |     let _ = FutureExt::now_or_never(&mut tokio_oneshot);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a oneshot receiver can miss a sent value once the cooperative budget is spent
+  --> $DIR/main.rs:183:13
+   |
+LL |     assert!((&mut oneshot).now_or_never().is_none());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `try_recv`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:202:13
+   |
+LL |     let _ = watch.changed().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `has_changed`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:203:13
+   |
+LL |     let _ = tokio_watch.changed().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `has_changed`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:204:13
+   |
+LL |     let _ = FutureExt::now_or_never(watch.changed());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `has_changed`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:205:13
+   |
+LL |     let _ = tokio::sync::watch::Receiver::changed(&mut tokio_watch).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `has_changed`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:206:13
+   |
+LL |     let _ = boxed.changed().now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `has_changed`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:207:13
+   |
+LL |     assert!(watch.changed().now_or_never().is_none());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use the receiver's `has_changed`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:210:13
+   |
+LL |     let _ = watch.wait_for(|value| *value > 0).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: check the value from the receiver's `borrow`, which a spent cooperative budget never refuses
+
+error: `now_or_never` probe of a watch change can miss a new value once the cooperative budget is spent
+  --> $DIR/main.rs:211:13
+   |
+LL |     let _ = tokio_watch.wait_for(|value| *value > 0).now_or_never();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: check the value from the receiver's `borrow`, which a spent cooperative budget never refuses
+
+error: aborting due to 37 previous errors
+

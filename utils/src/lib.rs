@@ -292,6 +292,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 
     pub mod channel;
     pub mod concurrency;
+    pub mod coop;
     pub mod futures;
     pub mod sync;
 

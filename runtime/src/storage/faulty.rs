@@ -1061,7 +1061,7 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             let gate = self.clone();
-            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let (sender, receiver) = commonware_utils::channel::oneshot::channel();
             drop(self.context.child("sync").spawn(move |_| async move {
                 let _ = sender.send(gate.sync().await);
                 gate.completed.notify_one();

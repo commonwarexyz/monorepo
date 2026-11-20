@@ -16,7 +16,7 @@ use commonware_runtime::{
 };
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::{Widen, channel::ring, time::SYSTEM_TIME_PRECISION};
-use futures::{FutureExt as _, StreamExt as _};
+use futures::StreamExt as _;
 use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
 use tracing::debug;
@@ -29,7 +29,9 @@ impl connection::Control for ring::Receiver<Message> {
     }
 
     fn try_recv(&mut self) -> Option<Message> {
-        self.next().now_or_never().flatten()
+        // The receiver's own try_recv ignores the cooperative budget, so a
+        // queued message is seen even when the calling poll has spent it.
+        Self::try_recv(self).ok()
     }
 
     fn encode(&self, msg: Message) -> Option<IoBufs> {
@@ -213,6 +215,70 @@ mod tests {
 
     const STREAM_NAMESPACE: &[u8] = b"test_lookup_peer_actor";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
+
+    /// A queued Kill must be visible to the non-blocking control probe even
+    /// when the poll has spent its cooperative budget.
+    #[test]
+    fn test_spent_budget_does_not_hide_queued_kill() {
+        use crate::authenticated::connection::Control;
+        use commonware_utils::coop;
+
+        // Queue a Kill and spend the poll's budget.
+        let (mailbox, mut control) = Mailbox::new(NZUsize!(4));
+        mailbox.kill();
+        let _scope = coop::Scope::enter();
+        for _ in 0..coop::BUDGET {
+            coop::charge();
+        }
+        assert!(coop::exhausted());
+
+        // The probe still sees the Kill.
+        assert!(
+            matches!(Control::try_recv(&mut control), Some(Message::Kill)),
+            "try_recv hid a queued Kill"
+        );
+    }
+
+    /// Outbox::fill must stop at a queued Kill rather than batch data for a
+    /// killed peer when the poll has spent its cooperative budget.
+    #[test]
+    fn test_spent_budget_fill_stops_at_queued_kill() {
+        use crate::authenticated::connection::Error as ConnectionError;
+        use commonware_utils::coop;
+
+        deterministic::Runner::default().start(|context| async move {
+            // Queue data for a peer's outbox.
+            let peer = PrivateKey::from_seed(7).public_key();
+            let (mailbox, control) = Mailbox::new(NZUsize!(4));
+            let (relay, receivers) = Relay::new(context.child("relay"), NZUsize!(8));
+            let sent: CounterFamily<metrics::Message<PublicKey>> =
+                context.family("coop_sent", "test sent messages");
+            let mut outbox = Outbox::new(peer, control, receivers, [0u64].into_iter(), &sent, 8);
+            for payload in [&b"a"[..], b"b", b"c"] {
+                let data = EncodedData::new(0, IoBufs::from(IoBuf::copy_from_slice(payload)));
+                assert!(relay.send(data, false).accepted());
+            }
+
+            // The Kill is queued behind the data, before the batch is filled.
+            mailbox.kill();
+
+            // A poll that has spent its budget, as after a receive loop.
+            let scope = coop::Scope::enter();
+            for _ in 0..coop::BUDGET {
+                coop::charge();
+            }
+            assert!(coop::exhausted());
+            let filled = outbox.fill();
+            let batched = outbox.drain().count();
+            drop(scope);
+
+            // The fill stopped at the Kill.
+            assert!(
+                matches!(filled, Err(ConnectionError::Killed(_))),
+                "fill batched {batched} data payloads past a queued Kill"
+            );
+        });
+    }
 
     struct CountingSink<S> {
         inner: S,

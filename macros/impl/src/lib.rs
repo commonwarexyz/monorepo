@@ -542,9 +542,11 @@ pub fn select(input: TokenStream) -> TokenStream {
         body,
     } in branches.into_iter()
     {
-        // Generate branch for `select!` macro
+        // Generate branch for `select!` macro. Each future defers while the
+        // cooperative budget is spent, so a spent budget defers the whole
+        // select instead of letting a later branch overtake an earlier one.
         let branch_code = quote! {
-            #pattern = #future => #body,
+            #pattern = ::commonware_macros::__coop::Guard { future: #future } => #body,
         };
         select_branches.push(branch_code);
     }

@@ -1,0 +1,18 @@
+[package]
+name = "block_on_in_async"
+version = "0.0.1"
+description = "Reject futures::executor::block_on inside async bodies and poll methods."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "6.3.0"
+
+[dev-dependencies]
+dylint_testing = "6.3.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

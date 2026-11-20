@@ -27,7 +27,7 @@
 //! });
 //! ```
 
-use crate::sync::Mutex;
+use crate::{coop, sync::Mutex};
 use core::num::NonZeroUsize;
 use futures::{Sink, Stream, stream::FusedStream};
 use std::{
@@ -188,6 +188,14 @@ impl<T> Sink<T> for Sender<T> {
 ///
 /// The stream terminates (returns `None`) when all senders have been dropped
 /// and all buffered items have been consumed.
+///
+/// Each ready result of [`Stream::poll_next`], an item or the end of the
+/// stream, spends one unit of the cooperative budget that bounds the current
+/// task poll (see [`crate::coop`]): the commonware budget on the io_uring and
+/// deterministic runtimes, tokio's own budget on tokio. Once that budget is
+/// spent the receiver returns pending without removing an item and the task
+/// is woken again, so the item stays buffered for the next poll. An empty
+/// receiver costs nothing, and [`Receiver::try_recv`] is never budgeted.
 #[derive(Debug)]
 pub struct Receiver<T> {
     shared: Arc<Mutex<Shared<T>>>,
@@ -195,11 +203,13 @@ pub struct Receiver<T> {
 
 impl<T> Receiver<T> {
     /// Receives the next item from the channel.
+    #[inline]
     pub async fn recv(&mut self) -> Option<T> {
         futures::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
     }
 
-    /// Attempts to receive an item without waiting.
+    /// Attempts to receive an item without waiting, whatever the cooperative
+    /// budget.
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mut shared = self.shared.lock();
         if let Some(item) = shared.buffer.pop_front() {
@@ -210,12 +220,13 @@ impl<T> Receiver<T> {
         }
         Err(TryRecvError::Empty)
     }
-}
 
-impl<T> Stream for Receiver<T> {
-    type Item = T;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    /// Polls for the next item without consulting the cooperative budget.
+    ///
+    /// Returns `None` once every sender is gone and the buffer is empty.
+    /// Otherwise registers the waker of `cx` when the buffer is empty.
+    #[inline(always)]
+    fn poll_next_inner(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         // Cloning a waker runs its callback, so clone before taking the lock.
         let waker = cx.waker().clone();
 
@@ -234,6 +245,19 @@ impl<T> Stream for Receiver<T> {
         drop(shared);
         drop(replaced);
         Poll::Pending
+    }
+}
+
+impl<T> Stream for Receiver<T> {
+    type Item = T;
+
+    #[inline(always)]
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // The budget is checked before the buffer is touched, so a spent
+        // budget never removes an item. Nothing was registered or removed, so
+        // the wake a spent budget issues is all the next poll needs. An item
+        // or the end of the stream spends one unit, an empty receiver nothing.
+        coop::poll_budgeted(cx, |cx| self.poll_next_inner(cx))
     }
 }
 
@@ -564,5 +588,369 @@ mod tests {
             receiver.try_recv().is_ok(),
             "the channel must deliver after its waker is replaced"
         );
+    }
+}
+
+#[cfg(test)]
+mod coop_tests {
+    use super::*;
+    use crate::NZUsize;
+    use futures::task::{ArcWake, waker_ref};
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    /// A waker that counts how often it is woken.
+    #[derive(Default)]
+    struct Wakes(
+        /// Number of wakes so far.
+        AtomicUsize,
+    );
+
+    impl Wakes {
+        /// Returns the number of wakes so far.
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    impl ArcWake for Wakes {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Polls `receiver` once with a waker that counts into `wakes`.
+    fn poll<T>(receiver: &mut Receiver<T>, wakes: &Arc<Wakes>) -> Poll<Option<T>> {
+        let waker = waker_ref(wakes);
+        let mut cx = Context::from_waker(&waker);
+        Pin::new(receiver).poll_next(&mut cx)
+    }
+
+    /// Spend the whole budget of the current scope.
+    fn exhaust() {
+        for _ in 0..coop::BUDGET {
+            coop::charge();
+        }
+        assert!(coop::exhausted());
+    }
+
+    #[test]
+    fn test_unconstrained_outside_a_scope() {
+        // Buffer ten budgets of items without entering a scope.
+        let total = 10 * coop::BUDGET as usize;
+        let (sender, mut receiver) = channel::<usize>(NZUsize!(total));
+        for value in 0..total {
+            assert!(sender.send_lossy(value));
+        }
+        let wakes = Arc::new(Wakes::default());
+
+        // Every item is delivered without a yield.
+        for value in 0..total {
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(value)));
+        }
+        assert_eq!(wakes.count(), 0);
+    }
+
+    #[test]
+    fn test_exhaustion_preserves_buffer_and_order() {
+        // Buffer three items.
+        let (sender, mut receiver) = channel::<u32>(NZUsize!(4));
+        for value in 1..=3 {
+            assert!(sender.send_lossy(value));
+        }
+        let wakes = Arc::new(Wakes::default());
+
+        {
+            let _scope = coop::Scope::enter();
+            exhaust();
+
+            // A spent budget removes nothing, however often it is asked.
+            for _ in 0..3 {
+                assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+            }
+            assert_eq!(receiver.shared.lock().buffer.len(), 3);
+
+            // The non-polling path is not bounded by the budget.
+            assert_eq!(receiver.try_recv(), Ok(1));
+        }
+
+        // A fresh poll delivers what was kept, in order.
+        let _scope = coop::Scope::enter();
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(2)));
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(3)));
+    }
+
+    #[test]
+    fn test_exhaustion_wakes_the_polling_task_each_time() {
+        // Buffer an item and spend the budget.
+        let (sender, mut receiver) = channel::<u32>(NZUsize!(2));
+        assert!(sender.send_lossy(7));
+        let wakes = Arc::new(Wakes::default());
+        let _scope = coop::Scope::enter();
+        exhaust();
+        assert_eq!(wakes.count(), 0);
+
+        // Every exhausted poll wakes the task once.
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+        assert_eq!(wakes.count(), 1);
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+        assert_eq!(wakes.count(), 2);
+
+        // The exhausted path parks nothing: no waker was registered.
+        assert!(receiver.shared.lock().receiver_waker.is_none());
+    }
+
+    #[test]
+    fn test_exhausted_poll_keeps_a_registered_waker_working() {
+        let (sender, mut receiver) = channel::<u32>(NZUsize!(2));
+        let wakes = Arc::new(Wakes::default());
+        {
+            let _scope = coop::Scope::enter();
+            // Park on an empty channel, then run out of budget in a later poll.
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+            assert_eq!(wakes.count(), 0);
+        }
+
+        {
+            let _scope = coop::Scope::enter();
+            exhaust();
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+            assert_eq!(wakes.count(), 1);
+        }
+
+        // A send still wakes the parked waker, so no wake is lost.
+        assert!(sender.send_lossy(1));
+        assert_eq!(wakes.count(), 2);
+
+        // The next poll receives the item.
+        let _scope = coop::Scope::enter();
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(1)));
+    }
+
+    #[test]
+    fn test_refill_makes_progress_without_loss() {
+        // Buffer more than three budgets of items and close the channel.
+        let budget = coop::BUDGET as usize;
+        let total = 3 * budget + 5;
+        let (sender, mut receiver) = channel::<usize>(NZUsize!(total));
+        for value in 0..total {
+            assert!(sender.send_lossy(value));
+        }
+        drop(sender);
+        let wakes = Arc::new(Wakes::default());
+
+        // Poll until the stream ends, as an executor would.
+        let mut received = Vec::new();
+        let mut polls = 0;
+        loop {
+            // One task poll, one fresh budget.
+            let _scope = coop::Scope::enter();
+            polls += 1;
+            let mut delivered = 0;
+            let done = loop {
+                match poll(&mut receiver, &wakes) {
+                    Poll::Ready(Some(value)) => {
+                        received.push(value);
+                        delivered += 1;
+                    }
+                    Poll::Ready(None) => break true,
+                    Poll::Pending => break false,
+                }
+            };
+            assert!(delivered <= budget);
+            if done {
+                break;
+            }
+        }
+
+        // Every item arrived, in order.
+        assert_eq!(received, (0..total).collect::<Vec<_>>());
+
+        // Every full budget ended in one self-wake.
+        assert_eq!(wakes.count(), 3);
+        assert_eq!(polls, 4);
+    }
+
+    #[test]
+    fn test_empty_receiver_does_not_charge() {
+        let budget = coop::BUDGET as usize;
+        let (sender, mut receiver) = channel::<usize>(NZUsize!(budget));
+        let wakes = Arc::new(Wakes::default());
+        let _scope = coop::Scope::enter();
+
+        // Poll the empty receiver well past one budget.
+        for _ in 0..10 * budget {
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+        }
+
+        // Parking is not progress: no budget spent and no self-wake.
+        assert!(!coop::exhausted());
+        assert_eq!(wakes.count(), 0);
+
+        // The whole budget is still there for the receiver that has work.
+        for value in 0..budget {
+            assert!(sender.send_lossy(value));
+        }
+        // The sends woke the parked waker once.
+        assert_eq!(wakes.count(), 1);
+
+        // Exactly one budget of items is delivered.
+        for value in 0..budget {
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(value)));
+        }
+        assert!(coop::exhausted());
+    }
+
+    #[test]
+    fn test_closed_empty_receiver_spends_the_budget() {
+        let (sender, mut receiver) = channel::<u32>(NZUsize!(2));
+        drop(sender);
+        let wakes = Arc::new(Wakes::default());
+        let _scope = coop::Scope::enter();
+
+        // End the stream once per unit of the budget.
+        for _ in 0..coop::BUDGET {
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(None));
+        }
+
+        // The budget is spent, so the next poll defers with a self-wake.
+        assert!(coop::exhausted());
+        assert_eq!(wakes.count(), 0);
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+        assert_eq!(wakes.count(), 1);
+    }
+
+    #[test]
+    fn test_exhaustion_keeps_buffered_items_of_a_closed_channel() {
+        // Buffer two items and close the channel.
+        let (sender, mut receiver) = channel::<u32>(NZUsize!(2));
+        assert!(sender.send_lossy(1));
+        assert!(sender.send_lossy(2));
+        drop(sender);
+        let wakes = Arc::new(Wakes::default());
+
+        {
+            let _scope = coop::Scope::enter();
+            exhaust();
+
+            // Neither an item nor the end of the stream is delivered.
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+            assert_eq!(wakes.count(), 1);
+            assert!(!receiver.is_terminated());
+        }
+
+        // A fresh budget delivers both items, then the end of the stream.
+        let _scope = coop::Scope::enter();
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(1)));
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(2)));
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(None));
+        assert!(receiver.is_terminated());
+    }
+
+    #[test]
+    fn test_overflow_while_exhausted_still_drops_oldest() {
+        // Fill the channel.
+        let (sender, mut receiver) = channel::<u32>(NZUsize!(2));
+        assert!(sender.send_lossy(1));
+        assert!(sender.send_lossy(2));
+        let wakes = Arc::new(Wakes::default());
+
+        {
+            let _scope = coop::Scope::enter();
+            exhaust();
+
+            // Senders are not charged and eviction is unchanged.
+            assert!(sender.send_lossy(3));
+            assert_eq!(poll(&mut receiver, &wakes), Poll::Pending);
+        }
+
+        // The oldest item was evicted and the two newest remain.
+        let _scope = coop::Scope::enter();
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(2)));
+        assert_eq!(poll(&mut receiver, &wakes), Poll::Ready(Some(3)));
+    }
+
+    #[test]
+    fn test_recv_loop_yields_once_per_budget() {
+        // Buffer three budgets of items and close the channel.
+        let budget = coop::BUDGET as usize;
+        let total = 3 * budget;
+        let (sender, mut receiver) = channel::<usize>(NZUsize!(total));
+        for value in 0..total {
+            assert!(sender.send_lossy(value));
+        }
+        drop(sender);
+
+        // Drive an ordinary receive loop to completion.
+        let mut future = std::pin::pin!(async move {
+            let mut received = 0;
+            while let Some(value) = receiver.recv().await {
+                assert_eq!(value, received);
+                received += 1;
+            }
+            received
+        });
+        let wakes = Arc::new(Wakes::default());
+        let waker = waker_ref(&wakes);
+        let mut cx = Context::from_waker(&waker);
+        let mut suspensions = 0;
+        let received = loop {
+            // An executor enters one scope per task poll.
+            let _scope = coop::Scope::enter();
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(received) => break received,
+                Poll::Pending => suspensions += 1,
+            }
+        };
+
+        // The loop yielded once per budget, each time with a self-wake.
+        assert_eq!(received, total);
+        assert_eq!(suspensions, 3);
+        assert_eq!(wakes.count(), 3);
+    }
+
+    /// Outside a commonware scope, receives spend tokio's own budget, so a fed
+    /// receive loop on tokio still yields.
+    #[test]
+    fn test_tokio_budget_bounds_receives_outside_a_commonware_scope() {
+        // Buffer more items than tokio lets one poll take, and close the channel.
+        let total = 1024;
+        let (sender, mut receiver) = channel::<usize>(NZUsize!(total));
+        for value in 0..total {
+            assert!(sender.send_lossy(value));
+        }
+        drop(sender);
+
+        // Drain them from a tokio task, counting the items each poll receives.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let per_poll = runtime.block_on(async move {
+            tokio::spawn(async move {
+                let mut per_poll = Vec::new();
+                futures::future::poll_fn(|cx| {
+                    per_poll.push(0);
+                    loop {
+                        match Pin::new(&mut receiver).poll_next(cx) {
+                            Poll::Ready(Some(_)) => *per_poll.last_mut().unwrap() += 1,
+                            Poll::Ready(None) => return Poll::Ready(()),
+                            Poll::Pending => return Poll::Pending,
+                        }
+                    }
+                })
+                .await;
+                per_poll
+            })
+            .await
+            .unwrap()
+        });
+
+        // Every item arrived, over several polls that each stayed within
+        // tokio's budget of 128.
+        assert_eq!(per_poll.iter().sum::<usize>(), total);
+        assert!(per_poll.len() > 1, "{per_poll:?}");
+        assert!(per_poll.iter().all(|&count| count <= 128), "{per_poll:?}");
     }
 }

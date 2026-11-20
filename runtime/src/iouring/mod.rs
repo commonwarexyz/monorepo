@@ -55,6 +55,11 @@
 //! poll that blocks one worker also delays their results for tasks that have
 //! moved elsewhere.
 //!
+//! Each task and root poll runs with a cooperative budget (see
+//! [`commonware_utils::coop`]), so a task fed faster than it drains its
+//! channels and actor mailboxes still returns its worker. Synchronous probes of
+//! such receivers inside a poll must use their `try_recv`.
+//!
 //! Each worker limits in-flight I/O according to [`RingConfig::size`]. A receive
 //! can occupy the last slot while a send needed to satisfy it waits to be
 //! submitted. Use deadlines or cancellation to break such dependencies.

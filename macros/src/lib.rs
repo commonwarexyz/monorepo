@@ -47,6 +47,15 @@ pub use commonware_macros_impl::boxed;
 /// This macro is powered by [tokio::select!](https://docs.rs/tokio/latest/tokio/macro.select.html)
 /// in biased mode and is not bound to a particular executor or context.
 ///
+/// # Cooperative Budget
+///
+/// Under an executor that installs a cooperative budget (see `commonware_utils::coop`), every
+/// branch defers while the current poll's budget is spent: it wakes the task and returns pending
+/// without polling its future. A spent budget therefore defers the whole select to the next poll,
+/// where the branches are tried in order again, rather than letting a branch that is ready without
+/// the budget overtake a budgeted receive with a value queued. Outside such an executor the check
+/// is one thread-local read per branch poll.
+///
 /// # Example
 ///
 /// ```rust
@@ -107,6 +116,8 @@ pub use commonware_macros_impl::select;
 /// All blocks share the same lexical scope within the loop body. Variables declared in
 /// `on_start` are visible in the select arms, `on_stopped`, and `on_end`. This allows
 /// preparing state in `on_start` and using it throughout the iteration.
+///
+/// The arms keep their order under a cooperative budget as described for [select!].
 ///
 /// The `shutdown` variable (the future from `context.stopped()`) is accessible in the
 /// shutdown block, allowing explicit cleanup such as `drop(shutdown)` before breaking or returning.
@@ -373,4 +384,161 @@ pub use commonware_macros_impl::test_traced;
 #[cfg(feature = "std")]
 pub mod __reexport {
     pub use tokio;
+}
+
+/// The cooperative polling budget's thread-local state and the select branch
+/// guard that reads it.
+///
+/// `commonware_utils::coop` owns the budget and documents it. The state lives
+/// here, below that crate, so that [`select!`] can consult it in every crate
+/// that uses the macro without depending on `commonware_utils`.
+#[doc(hidden)]
+#[cfg(feature = "std")]
+pub mod __coop {
+    use core::{
+        cell::Cell,
+        future::{Future, IntoFuture},
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    /// The budget value outside any scope: nothing is charged.
+    pub const UNCONSTRAINED: u32 = u32::MAX;
+
+    std::thread_local! {
+        /// Operations the current poll may still complete, or
+        /// [`UNCONSTRAINED`] outside any scope. A plain word rather than an
+        /// `Option`, since every budgeted operation reads it.
+        pub static REMAINING: Cell<u32> = const { Cell::new(UNCONSTRAINED) };
+    }
+
+    /// Whether the current poll's budget is spent.
+    #[inline(always)]
+    pub fn exhausted() -> bool {
+        REMAINING.get() == 0
+    }
+
+    /// A [`select!`](crate::select) branch that defers while the current
+    /// poll's budget is spent.
+    ///
+    /// A spent budget makes a budgeted receive return pending even with a value
+    /// queued. If only that branch deferred, a later branch that is ready without
+    /// the budget, such as a completed future, would win in its place and the
+    /// select would run out of order. Guarding every branch makes the whole
+    /// select pending instead, so the next poll, with a fresh budget, tries the
+    /// branches in order again. This also covers a budget spent by earlier
+    /// branches or by other futures polled before the select in the same task
+    /// poll.
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
+    pub struct Branch<F> {
+        /// The branch's own future.
+        future: F,
+    }
+
+    /// A select branch's expression as written, which [`IntoFuture`] turns into
+    /// a [`Branch`].
+    ///
+    /// [`select!`](crate::select) builds it with a struct expression rather
+    /// than a function call, so temporaries in the branch expression keep the
+    /// lifetime extension that `tokio::select!` gives them.
+    pub struct Guard<F> {
+        /// The branch's expression.
+        pub future: F,
+    }
+
+    impl<F: IntoFuture> IntoFuture for Guard<F> {
+        type Output = F::Output;
+        type IntoFuture = Branch<F::IntoFuture>;
+
+        #[inline(always)]
+        fn into_future(self) -> Branch<F::IntoFuture> {
+            Branch {
+                future: self.future.into_future(),
+            }
+        }
+    }
+
+    impl<F: Future> Future for Branch<F> {
+        type Output = F::Output;
+
+        #[inline(always)]
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+            // Nothing is polled, so waking the task is all the next poll needs.
+            if exhausted() {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            // SAFETY: `future` is structurally pinned. `Branch` never moves it out
+            // of a pinned `Branch`, has no `Drop` implementation, and is `Unpin`
+            // only when `F` is.
+            let future = unsafe { self.map_unchecked_mut(|branch| &mut branch.future) };
+            future.poll(cx)
+        }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+#[crate::test_group("miri")]
+mod tests {
+    use super::__coop;
+    use core::{
+        future::{Future, IntoFuture},
+        pin::{Pin, pin},
+        task::{Context, Poll, Waker},
+    };
+
+    /// Pending on its first poll, ready on the second.
+    struct YieldOnce(
+        /// Whether the first poll happened.
+        bool,
+    );
+
+    impl Future for YieldOnce {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn test_branch_polls_a_self_referential_future_in_place() {
+        let mut cx = Context::from_waker(Waker::noop());
+
+        // An async block that holds a reference into its own state across a
+        // suspension, so it must not move once polled.
+        let mut branch = pin!(IntoFuture::into_future(__coop::Guard {
+            future: async {
+                let value = 7u32;
+                let reference = &value;
+                YieldOnce(false).await;
+                *reference
+            }
+        }));
+
+        // The guard forwards both polls to the pinned future.
+        assert!(branch.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(branch.as_mut().poll(&mut cx), Poll::Ready(7));
+    }
+
+    #[test]
+    fn test_branch_defers_without_polling_while_the_budget_is_spent() {
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut branch = pin!(IntoFuture::into_future(__coop::Guard {
+            future: core::future::ready(3u32),
+        }));
+
+        // A spent budget defers even a ready future.
+        __coop::REMAINING.set(0);
+        assert!(branch.as_mut().poll(&mut cx).is_pending());
+
+        // Once the budget allows it, the future completes.
+        __coop::REMAINING.set(__coop::UNCONSTRAINED);
+        assert_eq!(branch.as_mut().poll(&mut cx), Poll::Ready(3));
+    }
 }

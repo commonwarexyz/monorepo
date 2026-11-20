@@ -18,7 +18,7 @@ use super::{
     timeout::TimeoutWheel,
 };
 use crate::Error;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, coop};
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
@@ -52,7 +52,7 @@ pub struct Sleep {
 impl Sleep {
     /// Establish a relative deadline, clamping the duration to [`TimeoutWheel::MAX_TIMEOUT`].
     ///
-    /// Zero sleeps take the ready path without reading a clock or accessing TLS.
+    /// Zero sleeps take the ready path without reading a clock or accessing a worker.
     pub fn new(duration: Duration) -> Self {
         if duration.is_zero() {
             return Self { state: State::Done };
@@ -77,6 +77,17 @@ impl Sleep {
     }
 }
 
+/// Complete a sleep whose deadline has passed as one budgeted operation:
+/// under a spent budget wake the task and defer, otherwise spend one unit.
+fn complete(cx: &mut Context<'_>) -> Poll<()> {
+    if coop::exhausted() {
+        cx.waker().wake_by_ref();
+        return Poll::Pending;
+    }
+    coop::charge();
+    Poll::Ready(())
+}
+
 impl Future for Sleep {
     type Output = ();
 
@@ -84,17 +95,20 @@ impl Future for Sleep {
         let this = self.get_mut();
 
         match &mut this.state {
-            State::Done => Poll::Ready(()),
+            State::Done => complete(cx),
             State::Registered(registration) => {
                 std::task::ready!(Pin::new(registration).poll(cx))
                     .expect("io_uring sleep polled after its worker closed");
+                // The expiry is kept in the state, so a deferred completion
+                // needs no worker when the task returns.
                 this.state = State::Done;
-                Poll::Ready(())
+                complete(cx)
             }
             State::Unregistered { deadline } => {
                 // Synchronous work may have made the worker's cached time stale.
                 // An elapsed first poll needs neither a worker nor a registration.
                 if *deadline <= Instant::now() {
+                    std::task::ready!(complete(cx));
                     this.state = State::Done;
                     return Poll::Ready(());
                 }
@@ -356,6 +370,123 @@ mod tests {
             assert!(sleep.poll_unpin(&mut cx).is_ready());
             assert!(matches!(sleep.state, State::Done));
         }
+    }
+
+    /// A scope of this thread whose budget is spent.
+    fn spent() -> coop::Scope {
+        let scope = coop::Scope::enter();
+        for _ in 0..coop::BUDGET {
+            coop::charge();
+        }
+        scope
+    }
+
+    /// Assert that the current budget has exactly `left` units.
+    fn assert_left(left: u32) {
+        for _ in 0..left {
+            assert!(!coop::exhausted());
+            coop::charge();
+        }
+        assert!(coop::exhausted());
+    }
+
+    #[test]
+    fn test_elapsed_sleeps_defer_under_a_spent_budget() {
+        let counter = Arc::new(Counter::default());
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut zero = Sleep::new(Duration::ZERO);
+        let mut passed = Sleep {
+            state: State::Unregistered {
+                deadline: Instant::now(),
+            },
+        };
+
+        // Poll both elapsed sleeps under a spent budget.
+        let scope = spent();
+        assert!(zero.poll_unpin(&mut cx).is_pending());
+        assert!(passed.poll_unpin(&mut cx).is_pending());
+        drop(scope);
+
+        // Each woke its task and kept its state.
+        assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+        assert!(matches!(zero.state, State::Done));
+        assert!(matches!(passed.state, State::Unregistered { .. }));
+
+        // A fresh budget completes both for one unit each.
+        let _scope = coop::Scope::enter();
+        assert!(zero.poll_unpin(&mut cx).is_ready());
+        assert!(passed.poll_unpin(&mut cx).is_ready());
+        assert!(matches!(passed.state, State::Done));
+        assert_left(coop::BUDGET - 2);
+    }
+
+    #[test]
+    fn test_fired_sleep_defers_under_a_spent_budget() {
+        Runner::default().start(|context| async move {
+            let counter = Arc::new(Counter::default());
+            let waker = Waker::from(counter.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            // Register a sleep, retrying if a stall let the deadline pass
+            // before the first poll.
+            let mut sleep = loop {
+                let mut sleep = Sleep::new(Duration::from_millis(1));
+                if sleep.poll_unpin(&mut cx).is_pending() {
+                    break sleep;
+                }
+            };
+
+            // Wait until the timer has fired and woken the sleep.
+            while counter.0.load(Ordering::Relaxed) == 0 {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // A spent budget defers the completion and wakes the task again.
+            let scope = spent();
+            assert!(sleep.poll_unpin(&mut cx).is_pending());
+            drop(scope);
+            assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+
+            // The expiry is kept, so a fresh budget completes it for one unit.
+            assert!(matches!(sleep.state, State::Done));
+            let scope = coop::Scope::enter();
+            assert!(sleep.poll_unpin(&mut cx).is_ready());
+            assert_left(coop::BUDGET - 1);
+            drop(scope);
+        });
+    }
+
+    #[test]
+    fn test_forwarded_sleep_spends_one_unit() {
+        Runner::default().start(|context| async move {
+            let counter = Arc::new(Counter::default());
+            let waker = Waker::from(counter.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            // Register a sleep, then observe it from another thread, so its
+            // expiry arrives through a forwarded completion.
+            let sleep = loop {
+                let mut sleep = Sleep::new(Duration::from_millis(1));
+                if sleep.poll_unpin(&mut cx).is_pending() {
+                    break sleep;
+                }
+            };
+            let mut sleep = poll_on_foreign_thread(sleep, waker.clone());
+
+            // Poll with a fresh budget until the forwarded expiry completes it.
+            loop {
+                let scope = coop::Scope::enter();
+                if sleep.poll_unpin(&mut cx).is_ready() {
+                    // The forwarding spent nothing, the completion one unit.
+                    assert_left(coop::BUDGET - 1);
+                    drop(scope);
+                    break;
+                }
+                drop(scope);
+                context.sleep(Duration::from_millis(1)).await;
+            }
+        });
     }
 
     #[test]

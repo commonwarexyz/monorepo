@@ -5368,3 +5368,453 @@ fn test_direct_reads_outlive_their_origin_worker() {
     // The runner shut down before the handle was first polled, so it reports closure.
     assert!(matches!(block_on(unobserved), Err(Error::ReadFailed)));
 }
+
+mod coop_tests {
+    use super::*;
+    use commonware_utils::channel::mpsc as chan;
+    use futures::future::Either;
+
+    /// Busy work of about `us` microseconds.
+    fn spin(us: u64) {
+        let until = Instant::now() + Duration::from_micros(us);
+        while Instant::now() < until {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Worker zero runs on the caller's thread. A budget the caller had in
+    /// force, part way through a poll of its own, is back when the runner
+    /// returns, and receives outside any executor are unconstrained.
+    #[test]
+    fn test_runner_restores_the_callers_budget() {
+        // A caller poll that has spent three units of its budget.
+        let outer = coop::Scope::enter();
+        for _ in 0..3 {
+            coop::charge();
+        }
+
+        // Run a root that receives three budgets of values from a producer.
+        let received = Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let (sender, mut receiver) = chan::channel::<u32>(4 * coop::BUDGET as usize);
+            let producer = context.child("producer").spawn(move |_| async move {
+                for value in 0..3 * coop::BUDGET {
+                    sender.send(value).await.unwrap();
+                }
+            });
+            let mut received = 0;
+            while receiver.recv().await.is_some() {
+                received += 1;
+            }
+            producer.await.unwrap();
+            received
+        });
+        assert_eq!(received, 3 * coop::BUDGET);
+
+        // The caller's count resumes where it stopped.
+        for _ in 0..coop::BUDGET - 4 {
+            coop::charge();
+        }
+        assert!(
+            !coop::exhausted(),
+            "the caller's budget is where it left it"
+        );
+        coop::charge();
+        assert!(coop::exhausted());
+        drop(outer);
+        assert!(!coop::active());
+
+        // Outside any executor, a receive loop drains past one budget.
+        let (sender, mut receiver) = chan::channel::<u32>(4 * coop::BUDGET as usize);
+        for value in 0..3 * coop::BUDGET {
+            sender.try_send(value).unwrap();
+        }
+        drop(sender);
+        let received = block_on(async {
+            let mut received = 0;
+            while receiver.recv().await.is_some() {
+                received += 1;
+            }
+            received
+        });
+        assert_eq!(received, 3 * coop::BUDGET);
+    }
+
+    /// A runner whose root unwinds gives the caller's budget back as well.
+    #[test]
+    fn test_unwinding_runner_restores_the_callers_budget() {
+        // A caller poll that has spent five units of its budget.
+        let outer = coop::Scope::enter();
+        for _ in 0..5 {
+            coop::charge();
+        }
+
+        // Run a root that panics.
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config()).start(|_| async move {
+                panic!("root failure");
+            })
+        }));
+        assert!(result.is_err());
+
+        // The caller's count resumes where it stopped.
+        for _ in 0..coop::BUDGET - 6 {
+            coop::charge();
+        }
+        assert!(!coop::exhausted(), "the caller's count is where it left it");
+        coop::charge();
+        assert!(coop::exhausted());
+        drop(outer);
+        assert!(!coop::active());
+    }
+
+    /// The root, an ordinary task, and a dedicated task each poll with a
+    /// budget in force, while the root factory runs without one.
+    #[test]
+    fn test_every_poll_runs_with_a_budget() {
+        // Probe the factory, the root, a pool task, and a dedicated task.
+        let seen = Runner::new(config().with_worker_threads(2)).start(|context| {
+            let factory = coop::active();
+            async move {
+                let root = coop::active();
+                let spawned = context
+                    .child("probe")
+                    .spawn(|_| async move { coop::active() })
+                    .await
+                    .unwrap();
+                let dedicated = context
+                    .child("dedicated")
+                    .dedicated()
+                    .spawn(|_| async move { coop::active() })
+                    .await
+                    .unwrap();
+                (factory, root, spawned, dedicated)
+            }
+        });
+
+        // Only the factory ran without a budget, and none is left afterwards.
+        assert_eq!(seen, (false, true, true, true));
+        assert!(!coop::active());
+    }
+
+    /// Drains `receiver`, counting the values each poll of the returned future
+    /// receives, polls that receive nothing included, with `work_us` of
+    /// handler work per value.
+    fn count_receives_per_poll(
+        mut receiver: chan::UnboundedReceiver<u32>,
+        work_us: u64,
+    ) -> impl Future<Output = Vec<u32>> + Send {
+        let per_poll = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let counted = per_poll.clone();
+        let mut body = Box::pin(async move {
+            while receiver.recv().await.is_some() {
+                spin(work_us);
+                *counted.lock().last_mut().unwrap() += 1;
+            }
+        });
+        poll_fn(move |cx| {
+            // Open the count of this poll before the body runs.
+            per_poll.lock().push(0);
+            body.as_mut().poll(cx).map(|()| per_poll.lock().clone())
+        })
+    }
+
+    /// A channel holding `values` values whose senders are gone.
+    fn filled(values: u32) -> chan::UnboundedReceiver<u32> {
+        let (sender, receiver) = chan::unbounded_channel::<u32>();
+        for value in 0..values {
+            sender.send(value).unwrap();
+        }
+        receiver
+    }
+
+    /// Receives per poll of a task fed by a full channel, with `work_us` of
+    /// handler work per value.
+    fn receives_per_poll(values: u32, work_us: u64) -> Vec<u32> {
+        Runner::new(config()).start(move |context| async move {
+            let receiver = filled(values);
+            let consumer = context
+                .child("consumer")
+                .spawn(move |_| count_receives_per_poll(receiver, work_us));
+            consumer.await.unwrap()
+        })
+    }
+
+    /// A fed receive loop takes the budget in every poll, and the budget is
+    /// fresh for every poll. The last poll finds the channel closed.
+    #[test]
+    fn test_fed_receive_loop_yields_on_the_budget() {
+        // Drain four budgets of values with some work per value.
+        let values = 4 * coop::BUDGET;
+        let per_poll = receives_per_poll(values, 20);
+
+        // Every poll took exactly the budget.
+        assert_eq!(
+            per_poll,
+            [coop::BUDGET, coop::BUDGET, coop::BUDGET, coop::BUDGET, 0]
+        );
+    }
+
+    /// The root follows the same budget in a scope of its own.
+    #[test]
+    fn test_fed_root_receive_loop_yields_on_the_budget() {
+        // Drain four budgets of values from the root itself.
+        let values = 4 * coop::BUDGET;
+        let per_poll =
+            Runner::new(config()).start(move |_| count_receives_per_poll(filled(values), 0));
+
+        // Every root poll took exactly the budget.
+        assert_eq!(
+            per_poll,
+            [coop::BUDGET, coop::BUDGET, coop::BUDGET, coop::BUDGET, 0]
+        );
+    }
+
+    /// Records whether a budget was in force when it woke or was dropped.
+    struct Probe(
+        /// The latest observation, one of the constants below.
+        AtomicUsize,
+    );
+
+    impl Probe {
+        /// Nothing recorded yet.
+        const UNSEEN: usize = 0;
+        /// Recorded with no budget in force.
+        const UNCONSTRAINED: usize = 1;
+        /// Recorded with a budget in force.
+        const BUDGETED: usize = 2;
+
+        /// A shared probe that has recorded nothing.
+        fn new() -> Arc<Self> {
+            Arc::new(Self(AtomicUsize::new(Self::UNSEEN)))
+        }
+
+        /// Record whether a budget is in force now.
+        fn record(&self) {
+            let seen = if coop::active() {
+                Self::BUDGETED
+            } else {
+                Self::UNCONSTRAINED
+            };
+            self.0.store(seen, Ordering::SeqCst);
+        }
+
+        /// The latest observation.
+        fn seen(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for Probe {
+        fn wake(self: Arc<Self>) {
+            self.record();
+        }
+    }
+
+    /// Spend the whole budget of the current poll on budgeted receives.
+    async fn spend_budget() {
+        let (sender, mut receiver) = chan::unbounded_channel::<u32>();
+        for value in 0..coop::BUDGET + 1 {
+            sender.send(value).unwrap();
+        }
+        for _ in 0..coop::BUDGET {
+            receiver.recv().await.unwrap();
+        }
+        assert!(coop::exhausted());
+    }
+
+    /// Callbacks run outside any task poll: a timer waker that runs after a
+    /// poll spent its budget finds no budget in force.
+    #[test]
+    fn test_callbacks_run_outside_the_spent_budget() {
+        let seen = Runner::new(config()).start(|context| async move {
+            // A task spends its budget and leaves a timer that wakes the probe.
+            let probe = Probe::new();
+            let spender = context.child("spender").spawn({
+                let probe = probe.clone();
+                move |_| async move {
+                    // Spend the whole budget in this poll, then register a
+                    // timer whose expiry runs the probe as a callback.
+                    spend_budget().await;
+                    let waker = Waker::from(probe);
+                    let mut sleep = Box::pin(Sleep::new(Duration::from_millis(1)));
+                    assert!(
+                        sleep
+                            .as_mut()
+                            .poll(&mut TaskContext::from_waker(&waker))
+                            .is_pending()
+                    );
+                    pending::<()>().await;
+                    drop(sleep);
+                }
+            });
+
+            // Wait for the timer callback to wake the probe.
+            let start = Instant::now();
+            while probe.seen() == Probe::UNSEEN {
+                assert!(start.elapsed() < TEST_TIMEOUT, "no expiry");
+                reschedule().await;
+            }
+            spender.abort();
+            probe.seen()
+        });
+
+        // The callback found no budget in force.
+        assert_eq!(
+            seen,
+            Probe::UNCONSTRAINED,
+            "the callback ran under a spent budget"
+        );
+    }
+
+    /// Records into its probe whether a budget was in force when it is dropped.
+    struct DropProbe(
+        /// The probe that receives the observation.
+        Arc<Probe>,
+    );
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.record();
+        }
+    }
+
+    /// Teardown destroys a pending task outside any task poll, even when the
+    /// task's last poll spent its budget.
+    #[test]
+    fn test_teardown_runs_outside_the_spent_budget() {
+        // A task holds the probe, spends its budget, and stays pending.
+        let probe = Probe::new();
+        let held = probe.clone();
+        Runner::new(config()).start(|context| async move {
+            let (started, ready) = oneshot::channel();
+            context.child("spender").spawn(move |_| async move {
+                let _guard = DropProbe(held);
+                spend_budget().await;
+                started.send(()).unwrap();
+                pending::<()>().await;
+            });
+            ready.await.unwrap();
+        });
+
+        // Teardown dropped it with no budget in force.
+        assert_eq!(
+            probe.seen(),
+            Probe::UNCONSTRAINED,
+            "teardown ran under a spent budget"
+        );
+    }
+
+    /// A root output that the runner disposes of because shutdown failed is
+    /// dropped while the worker still holds the thread's budget, not under the
+    /// spent budget of the caller's own poll.
+    #[test]
+    fn test_output_disposal_after_a_failed_shutdown_runs_unconstrained() {
+        /// Records the budget its destruction found.
+        struct Output(
+            /// The probe that receives the observation.
+            Arc<Probe>,
+        );
+
+        impl Drop for Output {
+            fn drop(&mut self) {
+                self.0.record();
+            }
+        }
+
+        // A caller poll that has spent its budget.
+        let probe = Probe::new();
+        let held = probe.clone();
+        let outer = coop::Scope::enter();
+        for _ in 0..coop::BUDGET {
+            coop::charge();
+        }
+
+        // Run a root whose output outlives a failed shutdown.
+        let mut escaped = None;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config()).start(|_| async {
+                // A timer whose waker panics when shutdown releases it, so
+                // shutdown fails after the root produced its output.
+                let mut sleep = Sleep::new(Duration::from_secs(60));
+                let waker = waker(Arc::new(PanicOnDrop));
+                assert!(
+                    Pin::new(&mut sleep)
+                        .poll(&mut TaskContext::from_waker(&waker))
+                        .is_pending()
+                );
+                drop(waker);
+                escaped = Some(sleep);
+                Output(held)
+            })
+        }));
+        assert!(result.is_err(), "shutdown must fail");
+
+        // The output was dropped with no budget in force, and the caller's is back.
+        assert_eq!(
+            probe.seen(),
+            Probe::UNCONSTRAINED,
+            "the output was dropped under the caller's spent budget"
+        );
+        assert!(coop::exhausted(), "the caller's budget is back");
+        drop(outer);
+        drop(escaped);
+    }
+
+    /// Awaits `sleeps` sleeps made by `sleep`, counting the sleeps each poll
+    /// of the returned future completes, polls that complete none included.
+    fn count_sleeps_per_poll<S, F>(
+        sleeps: u32,
+        mut sleep: S,
+    ) -> impl Future<Output = Vec<u32>> + Send
+    where
+        S: FnMut() -> F + Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let per_poll = Arc::new(Mutex::new(Vec::<u32>::new()));
+        let counted = per_poll.clone();
+        let mut body = Box::pin(async move {
+            for _ in 0..sleeps {
+                sleep().await;
+                *counted.lock().last_mut().unwrap() += 1;
+            }
+        });
+        poll_fn(move |cx| {
+            // Open the count of this poll before the body runs.
+            per_poll.lock().push(0);
+            body.as_mut().poll(cx).map(|()| per_poll.lock().clone())
+        })
+    }
+
+    /// A loop over deadlines that have already passed yields on the budget,
+    /// as a fed receive loop does, so a loop catching up on missed deadlines
+    /// does not hold its worker. This holds whether a deadline had passed
+    /// when its sleep was made or only by its first poll.
+    #[test]
+    fn test_elapsed_sleep_loop_yields_on_the_budget() {
+        for passed_when_made in [true, false] {
+            // Sleep through three budgets of elapsed deadlines in one task.
+            let per_poll = Runner::new(config()).start(move |context| async move {
+                let sleeper = context.child("sleeper").spawn(move |context| {
+                    count_sleeps_per_poll(3 * coop::BUDGET, move || {
+                        if passed_when_made {
+                            return Either::Left(context.sleep_until(SystemTime::UNIX_EPOCH));
+                        }
+
+                        // Work that outlasts the sleep before its first poll.
+                        let sleep = context.sleep(Duration::from_micros(1));
+                        spin(2);
+                        Either::Right(sleep)
+                    })
+                });
+                sleeper.await.unwrap()
+            });
+
+            // Every poll took exactly the budget.
+            assert_eq!(
+                per_poll,
+                [coop::BUDGET, coop::BUDGET, coop::BUDGET],
+                "passed when made: {passed_when_made}"
+            );
+        }
+    }
+}

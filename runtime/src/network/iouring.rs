@@ -30,6 +30,7 @@ use crate::{
         sockaddr::SockAddr,
     },
 };
+use commonware_utils::coop;
 use std::{
     net::{SocketAddr, TcpListener},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -247,10 +248,20 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (stream, remote_addr) = loop {
+            // A queued connection is accepted without a ring round trip, so a
+            // listener fed connections faster than it handles them would never
+            // return its poll. Each accepted connection spends one unit of the
+            // cooperative budget, and a spent budget waits for the next poll
+            // before taking another.
+            coop::proceed().await;
+
             // Accept only while this future is being polled. A readiness
             // request left behind by cancellation cannot consume a connection.
             match self.inner.accept() {
-                Ok(accepted) => break accepted,
+                Ok(accepted) => {
+                    coop::charge();
+                    break accepted;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(_) => return Err(Error::ConnectionFailed),
@@ -549,8 +560,10 @@ mod tests {
         Sink as _, Spawner as _, Stream as _, Supervisor as _, iouring, network::tests,
     };
     use commonware_macros::{select, test_group};
+    use commonware_utils::{coop, sync::Mutex};
     use futures::FutureExt as _;
     use std::{
+        future::poll_fn,
         io::{Read, Write},
         net::TcpStream,
         os::{
@@ -648,6 +661,46 @@ mod tests {
             sender.send(b"kept").await.unwrap();
             assert_eq!(receiver.recv(4).await.unwrap().coalesce(), b"kept"[..]);
         });
+    }
+
+    /// Connections already queued at a listener are accepted without the
+    /// ring, so each one spends budget and an accept loop fed faster than it
+    /// handles connections still returns its worker once per budget.
+    #[test]
+    fn test_accept_flood_yields_on_the_budget() {
+        let budget = coop::BUDGET as usize;
+        let total = 2 * budget + 6;
+        let per_poll = iouring::Runner::default().start(move |context| async move {
+            // Queue more completed handshakes than one budget covers.
+            let network = Network::new(Config::default());
+            let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let peers: Vec<_> = (0..total)
+                .map(|_| TcpStream::connect(address).unwrap())
+                .collect();
+
+            // Accept them all from one task, counting the accepts of each poll.
+            let counts = Arc::new(Mutex::new(Vec::<usize>::new()));
+            let counted = counts.clone();
+            let mut accepting = Box::pin(async move {
+                for _ in 0..total {
+                    listener.accept().await.unwrap();
+                    *counted.lock().last_mut().unwrap() += 1;
+                }
+            });
+            let consumer = context.child("consumer").spawn(move |_| {
+                poll_fn(move |cx| {
+                    counts.lock().push(0);
+                    accepting.as_mut().poll(cx).map(|()| counts.lock().clone())
+                })
+            });
+            let per_poll = consumer.await.unwrap();
+            drop(peers);
+            per_poll
+        });
+
+        // Every poll but the last took exactly one budget of connections.
+        assert_eq!(per_poll, [budget, budget, 6]);
     }
 
     #[test]

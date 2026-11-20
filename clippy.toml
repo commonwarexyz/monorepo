@@ -1,7 +1,8 @@
 # Keep inherent impls with identical bounds together within each module.
 inherent-impl-lint-scope = "module"
 
-# Disallow futures::channel types. Use commonware_utils::channel instead.
+# Disallow futures::channel types and tokio's receivers. Use commonware_utils::channel instead,
+# whose receivers spend the cooperative budget on every runtime (tokio's spend it only on tokio).
 disallowed-types = [
     { path = "std::sync::Condvar", reason = "prefer commonware_utils::sync", allow-invalid = true },
     { path = "std::sync::Mutex", reason = "prefer commonware_utils::sync", allow-invalid = true },
@@ -24,13 +25,18 @@ disallowed-types = [
     { path = "futures_channel::mpsc::UnboundedReceiver", reason = "prefer commonware_utils::channel", allow-invalid = true },
     { path = "futures_channel::oneshot::Sender", reason = "prefer commonware_utils::channel", allow-invalid = true },
     { path = "futures_channel::oneshot::Receiver", reason = "prefer commonware_utils::channel", allow-invalid = true },
+    { path = "tokio::sync::mpsc::Receiver", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::mpsc::UnboundedReceiver", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::oneshot::Receiver", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::watch::Receiver", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::watch::Sender", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
     { path = "futures::future::TryJoinAll", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures", allow-invalid = true },
     { path = "futures_util::future::TryJoinAll", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures", allow-invalid = true },
 ]
 
 # Disallow direct use of futures select macros. Use commonware_macros::select! instead.
 # tokio::select is not listed here because our select! macro expands to it, and clippy
-# checks after macro expansion.
+# checks after macro expansion. The direct_tokio_select dylint rejects it instead.
 disallowed-macros = [
     { path = "futures::select", reason = "use commonware_macros::select! instead" },
     { path = "futures::select_biased", reason = "use commonware_macros::select! instead" },
@@ -40,4 +46,16 @@ disallowed-methods = [
     { path = "commonware_p2p::Blocker::block", reason = "use commonware_p2p::block! instead" },
     { path = "futures::future::try_join_all", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures" },
     { path = "futures_util::future::try_join_all", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures" },
+    { path = "tokio::sync::mpsc::channel", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::mpsc::unbounded_channel", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::oneshot::channel", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::watch::channel", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+    { path = "tokio::sync::watch::Sender::new", reason = "prefer commonware_utils::channel, whose receives are budgeted on every runtime", allow-invalid = true },
+]
+
+# The cooperative budget's thread guards restore the thread's budget on drop, so holding one
+# across an await would carry it into whatever the executor polls next on that thread.
+await-holding-invalid-types = [
+    { path = "commonware_utils::coop::Ownership", reason = "hold the thread's budget only around synchronous code", allow-invalid = true },
+    { path = "commonware_utils::coop::Scope", reason = "hold the thread's budget only around synchronous code", allow-invalid = true },
 ]

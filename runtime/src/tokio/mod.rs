@@ -33,6 +33,17 @@
 //! retained error. A new runtime instance starts without the error record and
 //! still requires normal storage recovery.
 //!
+//! # Cooperative Budget
+//!
+//! This runtime installs no [`commonware_utils::coop`] budget around task
+//! polls, because tokio budgets its task polls itself. Receives from
+//! [`commonware_utils::channel`] channels (mpsc, oneshot, watch and ring) and
+//! from actor mailboxes all spend tokio's budget, so a task fed faster than it
+//! drains them yields to tokio. [`crate::Runner::start`] holds the calling
+//! thread's commonware budget while it runs, so a runner started from inside
+//! another executor's poll runs its root without that poll's budget and gives
+//! it back when it returns.
+//!
 //! # Example
 //!
 //! ```rust

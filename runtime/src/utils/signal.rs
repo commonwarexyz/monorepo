@@ -104,8 +104,20 @@ impl Future for Signal {
 /// An open [Signal] with completion tracking.
 #[derive(Clone)]
 pub struct Receiver {
-    inner: Shared<oneshot::Receiver<i32>>,
+    inner: Shared<Unbudgeted>,
     _guard: Arc<Guard>,
+}
+
+/// The signal's receive, which spends no cooperative budget: a signal is a
+/// one-time notification, not a stream of work, and many tasks share it.
+struct Unbudgeted(oneshot::Receiver<i32>);
+
+impl Future for Unbudgeted {
+    type Output = Result<i32, RecvError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().0.poll_unbudgeted(cx)
+    }
 }
 
 /// A guard used to coordinate the resolution of a [Signal].
@@ -146,7 +158,7 @@ impl Signaler {
 
         let signaler = Self { tx, completion_rx };
         let signal = Signal::Open(Receiver {
-            inner: rx.shared(),
+            inner: Unbudgeted(rx).shared(),
             _guard: Arc::new(Guard::new(completion_tx)),
         });
 
@@ -229,5 +241,32 @@ impl Stopper {
 impl Default for Stopper {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_utils::coop;
+    use std::task::Waker;
+
+    /// A signal is a notification, so it resolves under a spent budget and
+    /// spends nothing.
+    #[test]
+    fn test_signal_spends_no_budget() {
+        // A signal whose value was sent.
+        let (signaler, mut signal) = Signaler::new();
+        let _completion = signaler.signal(9);
+
+        // Poll it under a spent budget.
+        let mut cx = Context::from_waker(Waker::noop());
+        let _scope = coop::Scope::enter();
+        for _ in 0..coop::BUDGET {
+            coop::charge();
+        }
+        let polled = Pin::new(&mut signal).poll(&mut cx);
+
+        // It resolved at once.
+        assert!(matches!(polled, Poll::Ready(Ok(9))));
     }
 }

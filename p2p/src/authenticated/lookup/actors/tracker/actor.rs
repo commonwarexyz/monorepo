@@ -270,7 +270,7 @@ mod tests {
         NZUsize,
         ordered::{Map, Set},
     };
-    use futures::{FutureExt, StreamExt};
+    use futures::StreamExt;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
@@ -816,10 +816,7 @@ mod tests {
             crate::block_peer(&mut oracle, peer_pk.clone());
             context.sleep(Duration::from_millis(10)).await;
             assert!(
-                !matches!(
-                    peer_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(peer_rx.try_recv(), Ok(peer::Message::Kill)),
                 "no kill after handle has been cleared"
             );
         });
@@ -936,7 +933,7 @@ mod tests {
             assert!(registered_ips.contains(&addr_2.ip()));
 
             assert!(
-                !matches!(peer_rx.next().now_or_never(), Some(Some(peer::Message::Kill))),
+                !matches!(peer_rx.try_recv(), Ok(peer::Message::Kill)),
                 "connected peer present in the new set should not be killed when the old set rolls off"
             );
             assert_eq!(reservation.metadata().public_key(), &pk_1);
@@ -1418,10 +1415,7 @@ mod tests {
 
             // Unchanged peer should NOT receive kill - verify the receiver has no pending messages.
             assert!(
-                !matches!(
-                    unchanged_rx.next().now_or_never(),
-                    Some(Some(peer::Message::Kill))
-                ),
+                !matches!(unchanged_rx.try_recv(), Ok(peer::Message::Kill)),
                 "Unchanged peer should not receive kill"
             );
         });

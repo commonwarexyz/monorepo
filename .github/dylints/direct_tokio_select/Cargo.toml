@@ -1,0 +1,18 @@
+[package]
+name = "direct_tokio_select"
+version = "0.0.1"
+description = "Reject tokio::select! invocations that commonware_macros::select! did not produce."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "6.3.0"
+
+[dev-dependencies]
+dylint_testing = "6.3.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
