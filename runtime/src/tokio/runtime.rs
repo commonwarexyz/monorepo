@@ -24,7 +24,6 @@ use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
 use commonware_utils::{sync::Mutex, sys_rng};
-use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use std::{
     convert::Infallible,
@@ -736,16 +735,6 @@ impl Pacer for Context {
         future
     }
 }
-
-impl GClock for Context {
-    type Instant = SystemTime;
-
-    fn now(&self) -> Self::Instant {
-        self.current()
-    }
-}
-
-impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
     type Listener = <Network as crate::Network>::Listener;

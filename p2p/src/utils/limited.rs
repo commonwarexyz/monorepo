@@ -83,7 +83,7 @@ where
     /// Create a new [`LimitedSender`] with the given sender, [`Quota`], and peer source.
     pub fn new(sender: S, quota: Quota, clock: E, peers: P) -> Self {
         let state = Arc::new(Mutex::new(State {
-            rate_limit: KeyedRateLimiter::hashmap_with_clock(quota, clock),
+            rate_limit: KeyedRateLimiter::new(quota, clock),
             peer_subscription: peers.subscribe(),
             known_peers: peers.peers(),
         }));
@@ -114,10 +114,10 @@ where
         let recipients = match recipients {
             Recipients::One(peer) => match state.rate_limit.check_key(&peer) {
                 Ok(()) => Recipients::One(peer),
-                Err(not_until) => return Err(not_until.earliest_possible()),
+                Err(retry) => return Err(retry),
             },
             Recipients::Some(peers) => {
-                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &state.rate_limit);
+                let (allowed, max_retry) = filter_rate_limited(peers.iter(), &mut state.rate_limit);
                 if allowed.is_empty() {
                     match max_retry {
                         Some(retry) => return Err(retry),
@@ -128,8 +128,12 @@ where
                 }
             }
             Recipients::All => {
-                let (allowed, max_retry) =
-                    filter_rate_limited(state.known_peers.iter(), &state.rate_limit);
+                let State {
+                    known_peers,
+                    rate_limit,
+                    ..
+                } = &mut *state;
+                let (allowed, max_retry) = filter_rate_limited(known_peers.iter(), rate_limit);
                 if allowed.is_empty() {
                     match max_retry {
                         Some(retry) => return Err(retry),
@@ -153,7 +157,7 @@ where
 /// time among those that don't.
 pub(crate) fn filter_rate_limited<'a, K, C>(
     peers: impl Iterator<Item = &'a K>,
-    rate_limit: &KeyedRateLimiter<K, C>,
+    rate_limit: &mut KeyedRateLimiter<K, C>,
 ) -> (Vec<K>, Option<SystemTime>)
 where
     K: PublicKey,
@@ -166,9 +170,8 @@ where
                 allowed.push(p.clone());
                 (allowed, max_retry)
             }
-            Err(not_until) => {
-                let earliest = not_until.earliest_possible();
-                let new_max = max_retry.map_or(earliest, |current| cmp::max(current, earliest));
+            Err(retry) => {
+                let new_max = max_retry.map_or(retry, |current| cmp::max(current, retry));
                 (allowed, Some(new_max))
             }
         },

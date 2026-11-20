@@ -85,7 +85,7 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
         let sent_messages = &self.sent_messages;
         let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
         let ping = sent_messages.get_or_create_owned(&metrics::Message::new_ping(&peer));
-        let inbox = Inbox::new(
+        let mut inbox = Inbox::new(
             &self.context,
             peer.clone(),
             channels,
@@ -97,10 +97,9 @@ impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
         // jitter at message boundaries.
         let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
         let ping_rate = Quota::with_period(half).unwrap();
-        let limiter =
-            RateLimiter::direct_with_clock(ping_rate, self.context.child("ping_rate_limiter"));
+        let limiter = RateLimiter::new(ping_rate, self.context.child("ping_rate_limiter"));
         let label = metrics::Message::new_ping(&peer);
-        let ping_throttle = Throttle::new(limiter, received, rate_limited, &label);
+        let mut ping_throttle = Throttle::new(limiter, received, rate_limited, &label);
         let mut outbox = Outbox::new(
             peer.clone(),
             self.control,

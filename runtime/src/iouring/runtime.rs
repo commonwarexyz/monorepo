@@ -219,7 +219,6 @@ use commonware_utils::{
     sync::{Condvar, Mutex},
     sys_rng,
 };
-use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 use std::{
     any::Any,
@@ -973,16 +972,6 @@ impl Pacer for Context {
         future
     }
 }
-
-impl GClock for Context {
-    type Instant = SystemTime;
-
-    fn now(&self) -> Self::Instant {
-        self.current()
-    }
-}
-
-impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
     type Listener = <MeteredNetwork<Network> as crate::Network>::Listener;
