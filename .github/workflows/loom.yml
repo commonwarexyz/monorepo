@@ -18,6 +18,11 @@ env:
 
 jobs:
   Tests:
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: "Tests (partition: ${{ matrix.partition }})"
     runs-on: ubuntu-latest
     timeout-minutes: 60

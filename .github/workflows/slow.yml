@@ -24,7 +24,11 @@ jobs:
   # Use workflow_dispatch to run it on a draft branch.
   Benchmarks:
     name: "Benchmarks (${{ matrix.package }}${{ matrix.test_flags && format(', {0}', matrix.test_flags) }}) (partition: ${{ matrix.partition || '1/1' }})"
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: >-
+      github.event_name != 'pull_request'
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size))
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -80,7 +84,11 @@ jobs:
 
   Fuzz:
     name: "Fuzz (${{ matrix.fuzz_dir }}${{ matrix.os && format(', os: {0}', matrix.os) }}) (partition: ${{ matrix.partition || '1/1' }})"
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: >-
+      github.event_name != 'pull_request'
+      || (!github.event.pull_request.draft && (github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size))
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 180
     strategy:

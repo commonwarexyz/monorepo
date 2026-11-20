@@ -42,6 +42,18 @@ Without rustup (for example, Nix), set `COMMONWARE_NO_RUSTUP=1` to use tools fro
 
 Use `just test -p <crate>` for routine development and reserve workspace-wide tests for changes that need them. The root [agent guidance](AGENTS.md) records the always-applicable repository constraints.
 
+Intermediate stack PRs skip the optional Benchmarks, Fuzz, Forge, and Loom jobs.
+Standalone PRs, the lowest unmerged PR (its base branch matches the stack base),
+and the top PR retain these jobs. Missing stack metadata runs them normally.
+Required checks, Performance, draft handling, and cancellation of older runs keep
+their existing behavior.
+
+This reduces early feedback on intermediate PRs. Merge queue and main-branch runs
+still execute these optional jobs, but their results are not required for merging.
+A prefix merged outside the queue can therefore land without these results.
+Topology changes alone may leave stale skips until a new PR event reevaluates the
+policy.
+
 When creating a new crate, follow the `lib.rs` header conventions used across the workspace: crates that support `no_std` gate `std` behind a feature flag or `cfg(test)` (e.g. `#![cfg_attr(not(any(feature = "std", test)), no_std)]`), and every crate sets the Commonware logos:
 
 ```rust
