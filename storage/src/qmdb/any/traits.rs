@@ -118,6 +118,7 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     /// Prefetching is best effort and candidate-based. Keys absent from the index are skipped.
     /// An absent key whose translated key collides with an indexed key's may cause reads of
     /// unrelated operations. Failures are logged.
+    #[commonware_macros::stability(ALPHA)]
     fn prefetch<Q: Borrow<Self::Key>>(
         &self,
         keys: &[Q],
@@ -127,6 +128,7 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     /// inactivity floor into the page cache, so a later batch can raise the floor without storage
     /// I/O. The future does not borrow the database, so it can run alongside any database
     /// operation. Failures are logged.
+    #[commonware_macros::stability(ALPHA)]
     fn prefetch_floor(&self, candidates: usize) -> impl Future<Output = ()> + Send + 'static;
 
     /// Returns the root digest of the authenticated store.

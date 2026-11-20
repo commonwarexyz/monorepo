@@ -8,7 +8,7 @@
 //!
 //! # Prefetching
 //!
-//! Each call to [`super::Contiguous::prefetch`] has a page budget of half the page cache's Main
+//! Each call to `Contiguous::prefetch` has a page budget of half the page cache's Main
 //! capacity (rounded down, with a minimum of one page). The journal warms pages in position order,
 //! skips ranges that exceed the budget, and logs a warning if it skips pages.
 //!

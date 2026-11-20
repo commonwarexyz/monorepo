@@ -5,7 +5,7 @@
 //!
 //! # Prefetching
 //!
-//! Each call to [`Contiguous::prefetch`] has a page budget of half the page cache's Main capacity
+//! Each call to `Contiguous::prefetch` has a page budget of half the page cache's Main capacity
 //! (rounded down, with a minimum of one page). Frame and offset pages share that budget. Frames
 //! whose offsets are already available go first. The journal skips ranges that exceed the budget
 //! and logs a warning if it skips pages.
