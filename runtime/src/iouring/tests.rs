@@ -451,6 +451,18 @@ fn on_next_park(pool: &Pool, index: u32, point: ParkPoint, hook: impl FnOnce() +
     PARK_HOOKS_ARMED.store(true, Ordering::Release);
 }
 
+/// Run `hook` when the calling pool worker next reaches
+/// [`ParkPoint::BeforeWait`], so after its latest service pass.
+pub fn when_current_worker_waits(hook: impl FnOnce() + Send + 'static) {
+    let local = Local::current().unwrap();
+    let local = local.borrow();
+    let Role::Pool(index) = local.role() else {
+        panic!("only a pool worker waits idle");
+    };
+
+    on_next_park(&local.shared.pool, index, ParkPoint::BeforeWait, hook);
+}
+
 /// Remove the hook installed for this worker at this point of its park, if
 /// any, and run it once the hook list is unlocked. The caller holds no borrow
 /// of the worker's local state.
@@ -6272,37 +6284,29 @@ fn test_due_sleep_fires_beside_a_full_run_queue() {
             })
             .collect();
 
-        // A watchdog stops the spinners if the sleep starves, so the test
-        // fails rather than hangs.
-        let starved = Arc::new(AtomicBool::new(false));
-        let watchdog = thread::spawn({
-            let stop = stop.clone();
-            let starved = starved.clone();
-            move || {
-                let began = Instant::now();
-
-                while !stop.load(Ordering::Relaxed) {
-                    if began.elapsed() > Duration::from_secs(5) {
-                        starved.store(true, Ordering::Relaxed);
-                        stop.store(true, Ordering::Relaxed);
-                    }
-
-                    thread::sleep(Duration::from_millis(1));
-                }
+        // A watchdog thread raises an alarm if the sleep starves, so the test
+        // fails rather than hangs. It waits on a channel, not on a timer.
+        let (finished, done) = mpsc::channel::<()>();
+        let (alarm, alarmed) = oneshot::channel::<()>();
+        let watchdog = thread::spawn(move || {
+            if done.recv_timeout(Duration::from_secs(5)).is_err() {
+                let _ = alarm.send(());
             }
         });
 
-        sleeper.await.unwrap();
+        select! {
+            result = sleeper => result.unwrap(),
+            _ = alarmed => {
+                stop.store(true, Ordering::Relaxed);
+                panic!("a full run queue starved a due sleep");
+            },
+        }
+
+        finished.send(()).unwrap();
+        watchdog.join().unwrap();
 
         for spinner in spinners {
             spinner.await.unwrap();
         }
-
-        watchdog.join().unwrap();
-
-        assert!(
-            !starved.load(Ordering::Relaxed),
-            "a full run queue starved a due sleep"
-        );
     });
 }

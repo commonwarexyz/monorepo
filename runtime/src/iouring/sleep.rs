@@ -35,12 +35,13 @@
 //! [`UNCHECKED_SLEEP`], on a worker whose current service time is not later
 //! than the sleep's creation, registers unchecked. That worker has taken no
 //! service time since the sleep was created, so the deadline has passed only
-//! if its thread has polled for longer than the sleep without serving its
-//! timers. The registration then fires at the worker's next service pass, or
-//! at a peer's rescue. A first poll without a worker, or on a closing one,
-//! reads the clock and completes only a deadline that has passed. A poll that
-//! observes closure reads the clock as well, to complete a deadline that has
-//! passed.
+//! if the whole sleep elapsed between that service time and this poll, as in
+//! a long task poll, callback or service pass, or while the system did not
+//! run the worker's thread. The registration then fires at the worker's next
+//! service pass, or at a peer's rescue. A first poll without a worker, or on
+//! a closing one, reads the clock and completes only a deadline that has
+//! passed. A poll that observes closure reads the clock as well, to complete
+//! a deadline that has passed.
 //!
 //! Polls can follow an idle wait before the next service pass as well. The
 //! wait marks the service time stale rather than reading the clock. The next
@@ -295,11 +296,12 @@ pub const RESCUE_INTERVAL: Duration = Duration::from_micros(250);
 /// Shortest sleep whose first poll may register without reading the clock.
 /// Such a poll trusts that the deadline is still ahead when its worker has
 /// taken no service time ([`Local::now`]) since the sleep was created. It is
-/// wrong only on a worker that has polled for the whole sleep, so for at least
-/// this long, without serving its timers, whose registered sleeps are as late
-/// until a peer rescues them (see [`RESCUE_THRESHOLD`]). A shorter sleep, one
-/// created before the service time, or one first polled after an idle wait,
-/// reads the clock.
+/// wrong only when the whole sleep elapses between that service time and the
+/// first poll, so for at least this long, as in a long task poll, callback or
+/// service pass, or while the system does not run the worker's thread. The
+/// sleep is then late until its worker's next service pass or a peer's rescue
+/// (see [`RESCUE_THRESHOLD`]). A shorter sleep, one created before the
+/// service time, or one first polled after an idle wait, reads the clock.
 const UNCHECKED_SLEEP: Duration = Duration::from_millis(1);
 
 /// How a registration ended.
@@ -1198,6 +1200,7 @@ pub mod tests {
         iouring::{
             Config, Runner,
             operation::tests::{Reentrant, poll_on_foreign_thread},
+            runtime::tests::when_current_worker_waits,
         },
         utils::{extract_panic_message, reschedule},
     };
@@ -1209,6 +1212,7 @@ pub mod tests {
         sync::{
             OnceLock, Weak,
             atomic::{AtomicBool, AtomicUsize},
+            mpsc,
         },
         task::{RawWaker, RawWakerVTable, Wake},
         thread,
@@ -2284,37 +2288,37 @@ pub mod tests {
 
     #[test]
     fn test_first_poll_after_an_idle_wait_completes_a_passed_deadline() {
-        for workers in [1, 2] {
-            let cfg = Config::default().with_worker_threads(workers);
-            Runner::new(cfg).start(|context| async move {
-                // Another thread creates a sleep once every worker waits idle,
-                // so after their latest service times, and wakes the task
-                // with it once its deadline has passed. A worker polls the
-                // woken task before its next service pass.
-                let task = context.child("sleeper").spawn(|_| async move {
-                    let (sender, receiver) = oneshot::channel();
-                    let creator = thread::spawn(move || {
-                        thread::sleep(2 * UNCHECKED_SLEEP);
-                        let sleep = Sleep::new(UNCHECKED_SLEEP);
-                        thread::sleep(5 * UNCHECKED_SLEEP);
+        let cfg = Config::default().with_worker_threads(1);
+        Runner::new(cfg).start(|context| async move {
+            // Another thread creates a sleep once the worker is about to wait
+            // idle, so after its latest service time, and wakes the task with
+            // it once its deadline has passed. The worker polls the woken task
+            // before its next service pass.
+            let task = context.child("sleeper").spawn(|_| async move {
+                let (sender, receiver) = oneshot::channel();
+                let (waiting, waits) = mpsc::channel();
+                when_current_worker_waits(move || waiting.send(()).unwrap());
 
-                        assert!(sender.send(sleep).is_ok());
-                    });
+                let creator = thread::spawn(move || {
+                    waits.recv_timeout(Duration::from_secs(10)).unwrap();
+                    let sleep = Sleep::new(UNCHECKED_SLEEP);
+                    thread::sleep(UNCHECKED_SLEEP);
 
-                    let mut sleep = receiver.await.unwrap();
-
-                    // The service time is from before the wait, so the first
-                    // poll reads the clock rather than take the deadline to be
-                    // ahead.
-                    let ready = poll!(&mut sleep).is_ready();
-                    creator.join().unwrap();
-
-                    ready
+                    assert!(sender.send(sleep).is_ok());
                 });
 
-                assert!(task.await.unwrap());
+                let mut sleep = receiver.await.unwrap();
+
+                // The service time is from before the wait, so the first poll
+                // reads the clock rather than take the deadline to be ahead.
+                let ready = poll!(&mut sleep).is_ready();
+                creator.join().unwrap();
+
+                ready
             });
-        }
+
+            assert!(task.await.unwrap());
+        });
     }
 
     #[test]
