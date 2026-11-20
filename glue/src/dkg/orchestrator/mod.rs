@@ -186,8 +186,10 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, Handle, Quota, Runner, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
+        Clock as _, Handle, Quota, Runner, Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef,
         deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
     };
     use commonware_storage::{archive::prunable, translator::TwoCap};
     use commonware_utils::{
@@ -199,6 +201,7 @@ mod tests {
         sequence::Unit,
         sync::Mutex,
     };
+    use futures::FutureExt as _;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -230,6 +233,9 @@ mod tests {
         /// Indices of nodes whose marshal backfill receiver drops every message,
         /// so they never serve fetches.
         deaf: HashSet<usize>,
+        /// Durability operations of the first node's orchestrator (and so its
+        /// Simplex engines). `None` lets them complete immediately.
+        syncs: Option<PendingSyncs>,
     }
 
     struct Cluster {
@@ -378,6 +384,11 @@ mod tests {
                         oracle.manager(),
                         dealers,
                         layout.deaf.contains(&index),
+                        if index == 0 {
+                            layout.syncs.clone()
+                        } else {
+                            None
+                        },
                     )
                     .await,
                 );
@@ -424,6 +435,7 @@ mod tests {
                 self.oracle.manager(),
                 &fixture.participants,
                 false,
+                None,
             )
             .await;
         }
@@ -552,6 +564,7 @@ mod tests {
             manager: M,
             dealers: &[mocks::TestPublicKey],
             deaf: bool,
+            syncs: Option<PendingSyncs>,
         ) -> Self
         where
             M: Manager<PublicKey = mocks::TestPublicKey, Directory = Unit>,
@@ -643,7 +656,14 @@ mod tests {
             fence.mark(gate_epoch);
 
             let (actor, mailbox) = Actor::new(
-                context.child("orchestrator"),
+                DelayedSyncContext {
+                    inner: context.child("orchestrator"),
+                    pending: syncs.unwrap_or_else(|| {
+                        let syncs = PendingSyncs::default();
+                        syncs.unblock();
+                        syncs
+                    }),
+                },
                 Config {
                     oracle: control.clone(),
                     manager,
@@ -1028,6 +1048,7 @@ mod tests {
                 mocks::FailingManager(oracle.manager()),
                 &fixture.participants,
                 false,
+                None,
             )
             .await;
 
@@ -1063,6 +1084,70 @@ mod tests {
                 .await
                 .expect("shutdown should interrupt the boundary gate wait");
         });
+    }
+
+    /// Stops the runtime while a node's active Simplex engine holds a journal sync,
+    /// then either completes the sync or aborts the orchestrator.
+    fn stop_with_held_engine_sync(complete: bool) {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 1);
+            let syncs = PendingSyncs::default();
+            syncs.unblock();
+            let layout = Layout {
+                syncs: Some(syncs.clone()),
+                ..Layout::default()
+            };
+            let mut cluster = Cluster::start_with_fixture_state_sync_and_gate_epoch(
+                &mut context,
+                &fixture,
+                true,
+                None,
+                Epoch::zero(),
+                layout,
+            )
+            .await;
+            wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
+
+            syncs.arm();
+            let gate = next_pending_sync(&syncs);
+            gate.blocked.await.expect("engine should sync its journal");
+            let mut stopping = Box::pin(context.child("stop").stop(0, None));
+            assert!(stopping.as_mut().now_or_never().is_none());
+            context.sleep(Duration::from_secs(1)).await;
+            assert!(!gate.release.is_closed(), "stop should not cancel the sync");
+            assert!(stopping.as_mut().now_or_never().is_none());
+            let node = &mut cluster.nodes[0];
+            assert!(
+                (&mut node.marshal_handle).now_or_never().is_some(),
+                "sibling marshal should exit on the stop"
+            );
+            let handle = &mut node.orchestrator_handle;
+            assert!((&mut *handle).now_or_never().is_none());
+
+            if complete {
+                gate.release.send(Ok(())).expect("sync should be pending");
+                stopping.await.expect("stop should complete");
+                handle.await.expect("orchestrator should stop cleanly");
+            } else {
+                handle.abort();
+                assert!(handle.await.is_err());
+                stopping
+                    .await
+                    .expect("stop should not wait for an aborted engine");
+                assert!(gate.release.is_closed(), "abort should cancel the sync");
+            }
+        });
+    }
+
+    #[test]
+    fn stop_waits_for_engine_sync() {
+        stop_with_held_engine_sync(true);
+    }
+
+    #[test]
+    fn abort_during_stop_cancels_engine_sync() {
+        stop_with_held_engine_sync(false);
     }
 
     #[test]
@@ -1532,6 +1617,7 @@ mod tests {
             let layout = Layout {
                 dealers: Some(3),
                 deaf: HashSet::from([1, 2]),
+                syncs: None,
             };
             let cluster = Cluster::start_with_layout(&mut context, &fixture, layout).await;
             let caught_up = wait_for_block(
