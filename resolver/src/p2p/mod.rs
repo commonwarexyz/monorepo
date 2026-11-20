@@ -247,8 +247,9 @@ pub trait Producer: Clone + Send + 'static {
 
     /// Serve a request received from the network.
     ///
-    /// Return promptly. If you defer replies, limit how many requests you keep pending.
-    /// To decline a request, drop the response sender.
+    /// If the data is not ready, return the receiver so the caller can continue. Each sender
+    /// kept for a later reply represents one unanswered request. Send the data to answer the
+    /// request, or drop the sender to decline it.
     fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes>;
 }
 
