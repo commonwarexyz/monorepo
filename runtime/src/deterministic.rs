@@ -93,7 +93,6 @@ use futures::{
     Future,
     task::{ArcWake, AtomicWaker, waker},
 };
-use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
@@ -1481,16 +1480,6 @@ impl Pacer for Context {
         }
     }
 }
-
-impl GClock for Context {
-    type Instant = SystemTime;
-
-    fn now(&self) -> Self::Instant {
-        self.current()
-    }
-}
-
-impl ReasonablyRealtime for Context {}
 
 impl crate::Network for Context {
     type Listener = ListenerOf<Network>;

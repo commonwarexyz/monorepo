@@ -874,9 +874,7 @@ mod tests {
         fn new(inner: S, quota: Quota, clock: E) -> Self {
             Self {
                 inner,
-                rate_limiter: Arc::new(RwLock::new(KeyedRateLimiter::hashmap_with_clock(
-                    quota, clock,
-                ))),
+                rate_limiter: Arc::new(RwLock::new(KeyedRateLimiter::new(quota, clock))),
             }
         }
     }
@@ -896,12 +894,7 @@ mod tests {
                 _ => unimplemented!(),
             };
 
-            {
-                let rate_limiter = self.rate_limiter.write();
-                if let Err(not_until) = rate_limiter.check_key(peer) {
-                    return Err(not_until.earliest_possible());
-                }
-            }
+            self.rate_limiter.write().check_key(peer)?;
 
             Ok(CheckedSender {
                 sender: &mut self.inner,

@@ -185,7 +185,7 @@ impl<E: Clock + Supervisor, P: PublicKey> Inbox<E, P> {
         let mut inbound = BTreeMap::new();
         for (channel, (rate, sender)) in channels.collect() {
             let label = L::data(&peer, channel);
-            let limiter = RateLimiter::direct_with_clock(
+            let limiter = RateLimiter::new(
                 rate,
                 context
                     .child("rate_limiter")
@@ -216,8 +216,8 @@ impl<E: Clock + Supervisor, P: PublicKey> Inbox<E, P> {
     /// closed.
     ///
     /// Returns [Error::InvalidChannel] if `data` names an unregistered channel.
-    pub(crate) async fn deliver(&self, data: Data) -> Result<(), Error> {
-        let Some((throttle, sender)) = self.channels.get(&data.channel) else {
+    pub(crate) async fn deliver(&mut self, data: Data) -> Result<(), Error> {
+        let Some((throttle, sender)) = self.channels.get_mut(&data.channel) else {
             debug!(peer = ?self.peer, channel = data.channel, "invalid channel");
             self.invalid.inc();
             return Err(Error::InvalidChannel);

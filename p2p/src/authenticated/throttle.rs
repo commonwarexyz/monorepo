@@ -29,18 +29,13 @@ impl<E: Clock> Throttle<E> {
 
     /// Records a received message and, if `limit` is set, waits until the rate limiter
     /// admits it.
-    pub(crate) async fn receive(&self, limit: bool) {
+    pub(crate) async fn receive(&mut self, limit: bool) {
         self.received.inc();
         if !limit || self.limiter.check().is_ok() {
             return;
         }
         self.limited.inc();
-
-        // A rejected check does not consume a cell, so wait until one is taken
-        let clock = self.limiter.clock();
-        while let Err(not_until) = self.limiter.check() {
-            clock.sleep_until(not_until.earliest_possible()).await;
-        }
+        self.limiter.until_ready().await;
     }
 }
 
@@ -62,8 +57,8 @@ mod tests {
             let received: CounterFamily<Label> = context.family("received", "received");
             let limited: CounterFamily<Label> = context.family("limited", "limited");
             let quota = Quota::per_second(NZU32!(1));
-            let limiter = RateLimiter::direct_with_clock(quota, context.child("limiter"));
-            let throttle = Throttle::new(limiter, &received, &limited, &LABEL);
+            let limiter = RateLimiter::new(quota, context.child("limiter"));
+            let mut throttle = Throttle::new(limiter, &received, &limited, &LABEL);
             let count = |family: &CounterFamily<Label>| family.get(&LABEL).unwrap().get();
 
             // Both series exist at zero before any message
@@ -94,8 +89,8 @@ mod tests {
             let received: CounterFamily<Label> = context.family("received", "received");
             let limited: CounterFamily<Label> = context.family("limited", "limited");
             let quota = Quota::per_second(NZU32!(1));
-            let limiter = RateLimiter::direct_with_clock(quota, context.child("limiter"));
-            let throttle = Throttle::new(limiter, &received, &limited, &LABEL);
+            let limiter = RateLimiter::new(quota, context.child("limiter"));
+            let mut throttle = Throttle::new(limiter, &received, &limited, &LABEL);
 
             // Each delayed message takes its own cell, so a flood is admitted one per period
             let start = context.current();

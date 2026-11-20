@@ -181,7 +181,6 @@ futures = "0.3.34"
 futures-timer = "3.0.4"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 glob = "0.3.3"
-governor = "0.10.4"
 gungraun = "0.19.4"
 hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
 io-uring = "0.7.13"
