@@ -846,7 +846,7 @@ mod tests {
                 .append(&Op::Commit(None, Location::new(0)))
                 .await
                 .unwrap();
-            let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
+            let (log, boundary) = log.prune(Location::new(28)).await.unwrap();
             assert_eq!(boundary, Location::new(28));
             let root = log.root(0).unwrap();
             let expected = log.pinned_nodes_at(Location::new(30)).await.unwrap();

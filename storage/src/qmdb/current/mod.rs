@@ -3849,31 +3849,32 @@ pub mod tests {
             .unwrap();
 
             // Each round updates one key, moves the previous write and commits, so every commit
-            // keeps a floor two operations below its size.
+            // keeps a floor two operations below its size. The first round also writes a second
+            // key, which places a later commit just past the chunk boundary with its floor before
+            // it.
             let mut history = Vec::new();
             for round in 0..COMMITS {
-                db = commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
-                    .await;
+                let writes =
+                    (0..=u64::from(round == 0)).map(|i| (key(i), Some(val(10_000 + round))));
+                db = commit_writes_with_metadata(db, writes, None).await;
                 history.push((db.bounds().end, db.inactivity_floor()));
             }
 
-            // Prune to the first chunk boundary. The bitmap lands exactly there, while the log
-            // keeps whole sections and retains from below it.
+            // Prune to the first chunk boundary. The bitmap and the log both land exactly there,
+            // though the log's section still holds operations below it.
             let prune_loc = Location::new(CHUNK_BITS);
             assert!(prune_loc <= db.sync_boundary());
             let db = db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert_eq!(pruned_bits, CHUNK_BITS);
             let retained_start = db.bounds().start;
-            assert!(retained_start < prune_loc);
+            assert_eq!(retained_start, prune_loc);
 
-            // Pick a commit the log retains in full whose floor the bitmap has pruned.
+            // Pick a retained commit whose floor has been pruned.
             let (target_size, target_floor) = history
                 .iter()
                 .copied()
-                .find(|(size, floor)| {
-                    **size >= pruned_bits && *floor >= retained_start && **floor < pruned_bits
-                })
+                .find(|(size, floor)| **size > pruned_bits && **floor < pruned_bits)
                 .unwrap_or_else(|| {
                     panic!(
                         "expected initialization target below bitmap boundary. \
@@ -3881,7 +3882,6 @@ pub mod tests {
                          history={history:?}"
                     )
                 });
-            assert!(retained_start <= target_floor);
             assert!(*target_floor < pruned_bits);
             assert!(pruned_bits <= *target_size);
 

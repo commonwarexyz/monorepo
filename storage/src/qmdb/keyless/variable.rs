@@ -199,9 +199,9 @@ mod tests {
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
-            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
-            // commit is at 8.
-            let db = db.prune(Location::new(8)).await.unwrap();
+            // Prune to loc=7, so the append at 7 is the first retained operation and the first
+            // retained commit is at 8.
+            let db = db.prune(Location::new(7)).await.unwrap();
             let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
