@@ -2223,10 +2223,7 @@ mod tests {
             .unwrap();
 
         iouring::Runner::new(
-            iouring::Config::default().with_ring_config(iouring::RingConfig {
-                size: 1,
-                ..Default::default()
-            }),
+            iouring::Config::default().with_ring_config(iouring::RingConfig { size: 1 }),
         )
         .start(|_| async {
             // With a ring of one, each resize waits for the one before it to complete.
