@@ -1,0 +1,226 @@
+//! A runtime for browser pages that connects them to each other over
+//! [WebRTC](https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API) data channels.
+//!
+//! Tasks run on the page's event loop. The runtime implements [crate::Spawner], [crate::Clock],
+//! and [crate::Metrics], draws randomness from the browser, and connects pages to each other
+//! with a [Sink] and [Stream]. It has no storage and cannot open sockets, so it does not
+//! implement [crate::Storage] or [crate::Network].
+//!
+//! # Running
+//!
+//! A page cannot block its event loop, so [Runner::start] is an async function and [Runner]
+//! does not implement [crate::Runner].
+//!
+//! The event loop runs a woken task before it handles its next event. A task that keeps waking
+//! itself without waiting for a timer or a connection stops the page from handling anything
+//! else. A loop over [crate::reschedule] is one such task.
+//!
+//! ```text
+//!  tasks that wait    | event | A  B   | event | C      | event | A      |   time -->
+//!
+//!  a task that keeps  | event | A  A  A  A  A  A  A  A  A  A  A  A  A  A  ...
+//!  waking itself                ^ runs again before the next event, which never gets its turn
+//!
+//!  A, B, C  tasks, each run when something wakes it
+//! ```
+//!
+//! [crate::Spawner::dedicated] and [crate::Spawner::shared] change nothing, because every task
+//! shares the event loop.
+//!
+//! # Threads
+//!
+//! The runtime runs on the thread that started it and does not compile with the `atomics`
+//! target feature. Without that feature a module cannot be shared between threads, and
+//! `wasm-bindgen` treats JavaScript values as [Send] and [Sync]. Tasks may therefore hold
+//! JavaScript values.
+//!
+//! # Panics
+//!
+//! When the module is built to unwind, a panic in any task panics the runtime. This target
+//! aborts on panic by default. An abort stops the task that panicked without releasing what it
+//! held, and events that arrive later can still run other tasks. Treat a panic as fatal to the
+//! page.
+//!
+//! # Time
+//!
+//! [crate::Clock::current] reads the device's wall clock. Sleeps follow the page's monotonic
+//! clock. On most devices that clock stops while the device is suspended.
+//!
+//! A browser may run a timer late. It runs the timers of a hidden page about once per second.
+//!
+//! # Connecting
+//!
+//! A page cannot accept a connection from a page it knows nothing about, so two pages connect
+//! by dialing each other. Each binds an [Endpoint] and gives its [Address] to the other. An
+//! address depends on nothing the other page says. The application carries the two addresses
+//! in either order and however it likes, such as through a server both pages know or in a
+//! string their users pass along.
+//!
+//! ```text
+//!  page A                         application                         page B
+//!    |                                 |                                 |
+//!    |  Context::bind                  |                  Context::bind  |
+//!    |                                 |                                 |
+//!    |---------- address A ----------->|---------- address A ----------->|
+//!    |<--------- address B ------------|<--------- address B ------------|
+//!    |                                 |                                 |
+//!    |  Endpoint::dial(address B)      |      Endpoint::dial(address A)  |
+//!    |                                                                   |
+//!    |<======================= Sink and Stream =========================>|
+//! ```
+//!
+//! An endpoint connects to one other endpoint. A page binds one for every page it connects to.
+//!
+//! Without a STUN server, an address lists only the sockets of the device's own network
+//! interfaces. Unless one of those is public, they reach the page only from the same device or
+//! local network. A page behind a NAT learns its public address from a STUN server named in
+//! its [Config]. A STUN server reports the address a request arrived from and carries none of
+//! the connection's traffic.
+//!
+//! ```text
+//!                             STUN server
+//!                                 ^  |
+//!                  "where am I?"  |  |  "203.0.113.7:5001"
+//!                                 |  v
+//!  page A ====================== NAT A ============== NAT B ====================== page B
+//!  192.168.1.5                203.0.113.7          198.51.100.9                  10.0.0.4
+//!
+//!  ====  the connection, which no server carries
+//! ```
+//!
+//! The runtime contacts no server unless one is configured. It never relays a connection, so
+//! pages whose networks keep them from reaching each other directly cannot connect.
+//!
+//! Either page may dial first, and the first to dial waits for the other. A browser stops
+//! sending to an address that has not answered for some seconds, and a NAT soon forgets the
+//! path a page opened through it. Pages behind NATs should therefore dial at about the same
+//! time. Where nothing stands between the pages, the browser of the second page answers the
+//! first page's checks before its own page dials, and the first page only waits.
+//!
+//! ```text
+//!  B can be reached before it dials
+//!           A dials                                 B dials
+//!            |                                       |
+//!            v                                       v
+//!  page A    oooooooooooooooooooooooooooooooooooooooo===========
+//!  page B                                            ===========
+//!
+//!  B cannot be reached until it dials
+//!           A dials        browser gives up         B dials
+//!            |              |                        |
+//!            v              v                        v
+//!  page A    ###############.........................===========
+//!  page B                                            ===========
+//!
+//!  o  checks answered     #  checks unanswered     .  no checks sent     =  connected
+//! ```
+//!
+//! A dial fails once the endpoint it reached proves another certificate than the address names.
+//!
+//! A STUN server that does not respond can delay [Context::bind] by tens of seconds, and the
+//! other page may never dial. Neither step has a deadline of its own, so callers must put one
+//! on each. Dropping an endpoint or a pending dial closes the endpoint.
+//!
+//! # Connections
+//!
+//! A connection is an ordered, reliable stream of bytes that the browsers encrypt. The browsers
+//! acknowledge, retransmit, and order what they carry, so the runtime adds no acknowledgement
+//! of its own.
+//!
+//! ```text
+//!              page A                                                    page B
+//!
+//!            Sink::send                                               Stream::recv
+//!                |                                                         ^
+//!                | cut into messages                    joined into bytes  |
+//!                v                                                         |
+//!      .- +--------------+                                          +--------------+ -.
+//!      |  | data channel |<== acknowledges, retransmits, orders ==> | data channel |  |
+//!      |  +--------------+                                          +--------------+  |
+//!      |         |                                                         ^          |
+//!      |         v                                                         |          |
+//!      |  +--------------+                                          +--------------+  |
+//!      |  |  encryption  |<============= UDP packets =============> |  encryption  |  |
+//!      '- +--------------+                                          +--------------+ -'
+//!
+//!     its browser                                                            its browser
+//! ```
+//!
+//! Each browser authenticates the other only by the address its page dialed. A page that must
+//! know who it reached has to authenticate it over the connection.
+//!
+//! WebRTC gives a page no way to slow down a peer that sends faster than the page reads. A
+//! connection therefore holds at most the receive buffer size set in its [Config] beyond its
+//! pending read, and closes when its peer sends more. A protocol that moves more than that must
+//! let the reader set the pace, for example by sending only what the reader has requested.
+//!
+//! ```text
+//!  bytes held for the reader
+//!
+//!  |<----- pending read ------>|<----------- receive_buffer_size ----------->|
+//!  ##########################################################################x
+//!                                                                            ^
+//!                                          the byte that closes the connection
+//! ```
+//!
+//! A connection closes when its [Sink] and [Stream] are both dropped. Dropping one of them
+//! tells the peer nothing and leaves the other usable. Reads and sends have no deadline of
+//! their own. When a peer disappears without closing, the browser may take tens of seconds to
+//! notice.
+//!
+//! What ends a connection decides what each half returns from then on.
+//!
+//! ```text
+//!  the peer closes, the transport fails, or the peer sends text or too many bytes
+//!                             |
+//!                             v
+//!  Stream::recv   Ok   Ok     |  buffered     RecvFailed   Closed   Closed
+//!  Sink::send     Ok   Ok     |  SendFailed   Closed       Closed   Closed
+//!
+//!  a pending read is dropped
+//!                             |
+//!                             v
+//!  Stream::recv   Ok   Ok     |  Closed       Closed       Closed   Closed
+//!  Sink::send     Ok   Ok     |  Ok           Ok           Ok       Ok
+//!
+//!  a pending send is dropped
+//!                             |
+//!                             v
+//!  Stream::recv   Ok   Ok     |  Ok           Ok           Ok       Ok
+//!  Sink::send     Ok   Ok     |  Closed       Closed       Closed   Closed
+//!
+//!  each column is one call, in order       buffered  bytes received before the event
+//! ```
+//!
+//! # Example
+//!
+//! ```no_run
+//! use commonware_runtime::{IoBuf, Sink as _, Stream as _, browser};
+//!
+//! # async fn exchange(_address: &browser::Address) -> browser::Address { unimplemented!() }
+//! # async fn example() {
+//! browser::Runner::default()
+//!     .start(|context| async move {
+//!         // Give the other page this page's address and learn its address.
+//!         let endpoint = context.bind().await.unwrap();
+//!         let address = exchange(endpoint.address()).await;
+//!
+//!         // Dial the other page, which dials this one, and greet it.
+//!         let (mut sink, mut stream) = endpoint.dial(address).await.unwrap();
+//!         sink.send(IoBuf::from(b"hello")).await.unwrap();
+//!         let _reply = stream.recv(5).await.unwrap();
+//!     })
+//!     .await;
+//! # }
+//! ```
+
+#[cfg(target_feature = "atomics")]
+compile_error!("the browser runtime runs on one thread and cannot be built with atomics");
+
+mod address;
+pub use address::{Address, InvalidAddress};
+mod runtime;
+pub use runtime::*;
+mod timer;
+mod webrtc;
+pub use webrtc::{Endpoint, Sink, Stream};
