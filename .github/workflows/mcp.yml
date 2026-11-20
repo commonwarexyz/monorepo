@@ -3,7 +3,6 @@ name: MCP
 on:
   push:
     branches: ["main"]
-  pull_request:
   merge_group:
 
 permissions:
