@@ -40,8 +40,11 @@ use commonware_runtime::{
     tokio::{Config as RConfig, Context, Runner},
 };
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{full, mmb},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    merkle::mmb,
     qmdb::{
         any::{
             batch::Slot,
@@ -431,14 +434,11 @@ fn main() {
     Runner::new(RConfig::default()).start(|ctx| async move {
         let pc = CacheRef::new(PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
-        let merkle_config = full::Config {
-            journal_partition: "constantinople-merkle-journal".into(),
-            metadata_partition: "constantinople-merkle-metadata".into(),
-            items_per_blob: ITEMS_PER_BLOB,
-            write_buffer: WRITE_BUFFER,
+        let merkle_config = MerkleConfig {
+            partition: "constantinople-merkle-metadata".into(),
             replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),
-            page_cache: pc.clone(),
+            resident_height: Default::default(),
         };
         let journal_config = FConfig {
             partition: "constantinople-log".into(),
@@ -456,7 +456,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = CurrentDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(
@@ -474,7 +474,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = CurrentOrderedDb::init(ctx.child("db"), cfg, None)
                     .await
@@ -493,7 +493,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg, None)
                     .await
@@ -515,7 +515,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
@@ -527,7 +527,7 @@ fn main() {
                     translator: EightCap,
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
-                    init_concurrency: (),
+                    init_concurrency: threads,
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)

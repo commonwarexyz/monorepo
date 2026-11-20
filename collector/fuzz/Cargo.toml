@@ -32,3 +32,10 @@ path = "fuzz_targets/collector.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "collector_faults"
+path = "fuzz_targets/collector_faults.rs"
+test = false
+doc = false
+bench = false

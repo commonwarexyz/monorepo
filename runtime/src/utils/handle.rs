@@ -17,9 +17,8 @@ use futures::{
 };
 use std::{
     any::Any,
-    cell::UnsafeCell,
     future::Future,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    panic::resume_unwind,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -159,25 +158,51 @@ where
     }
 }
 
-/// Polls a task's future, catching any panic it raises.
-///
-/// The future lives in an [`UnsafeCell`], which has the same layout as `F`, so the shared
-/// reference [`Abortable`] takes to check for cancellation does not invalidate borrows the future
-/// holds into its own state. Catching panics here spares a task separate wrappers for that, each
-/// of which would add a stack slot the size of the future to every poll in unoptimized builds.
-// Miri treats creating a shared reference as a read of everything outside an `UnsafeCell`, which
-// conflicts with a suspended future's borrows of itself (rust-lang/rust#137750) until coroutines
-// are built on `UnsafePinned` (rust-lang/rust#125735).
-struct FutureCell<F>(UnsafeCell<F>);
+mod cell {
+    use std::{
+        cell::UnsafeCell,
+        future::Future,
+        panic::{AssertUnwindSafe, catch_unwind},
+        pin::Pin,
+        task::{Context, Poll},
+    };
 
-impl<F: Future> Future for FutureCell<F> {
-    type Output = std::thread::Result<F::Output>;
+    /// Polls a task's future, catching any panic it raises.
+    ///
+    /// The future lives in an [`UnsafeCell`], which has the same layout as `F`, so the shared
+    /// reference [`Abortable`](crate::utils::abort::Abortable) takes to check for cancellation
+    /// does not invalidate borrows the future holds into its own state. Catching panics here
+    /// spares a task separate wrappers for that, each of which would add a stack slot the size of
+    /// the future to every poll in unoptimized builds.
+    // Miri treats creating a shared reference as a read of everything outside an `UnsafeCell`,
+    // which conflicts with a suspended future's borrows of itself (rust-lang/rust#137750) until
+    // coroutines are built on `UnsafePinned` (rust-lang/rust#125735).
+    pub(super) struct FutureCell<F>(UnsafeCell<F>);
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: The future is structurally pinned: `FutureCell` has no `Drop` impl, is `Unpin`
-        // only when `F` is, and reaches the future only through this pinned projection.
-        let future = unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) };
-        catch_unwind(AssertUnwindSafe(|| future.poll(cx)))?.map(Ok)
+    impl<F: Send> FutureCell<F> {
+        /// Wraps a future already proven [`Send`], which the cell's [`Send`] impl relies on.
+        pub(super) const fn new(future: F) -> Self {
+            Self(UnsafeCell::new(future))
+        }
+    }
+
+    // SAFETY: The field is private to this module and `FutureCell::new` requires `F: Send`, so
+    // every cell holds a `Send` future. Implementing `Send` for any `F` ends a proof that a
+    // spawned task is `Send` at its cell. Otherwise each crate that instantiates a spawn proves it
+    // again over the whole future when it hands the task to an executor, and a deep future
+    // exceeds the recursion limit (rust-lang/rust#159228).
+    unsafe impl<F> Send for FutureCell<F> {}
+
+    impl<F: Future> Future for FutureCell<F> {
+        type Output = std::thread::Result<F::Output>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            // SAFETY: The future is structurally pinned: `FutureCell` has no `Drop` impl, is
+            // `Unpin` only when `F` is, and reaches the future only through this pinned
+            // projection.
+            let future = unsafe { self.map_unchecked_mut(|cell| cell.0.get_mut()) };
+            catch_unwind(AssertUnwindSafe(|| future.poll(cx)))?.map(Ok)
+        }
     }
 }
 
@@ -213,20 +238,24 @@ where
             metric: metric.clone(),
         };
 
-        // Wrap the future with panic catching, abort support, and cleanup.
+        // Build the cell before the task captures it, so the task holds the cell rather than `f`
+        // and a proof that the task is `Send` stops at the cell.
+        let cell = cell::FutureCell::new(f);
+
+        // Add abort support and cleanup around the cell.
         //
-        // Everything is done in a single async block (and the function is marked
-        // #[inline(always)]) so that stack usage is `size_of(F) + constant` rather than
-        // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
+        // Both live in a single async block (and the function is marked #[inline(always)])
+        // rather than a combinator chain, which in debug builds adds a stack slot the size of
+        // the future for every wrapper.
         let task = async move {
             // Cancellation can destroy the user future during this poll. Close
             // its supervision subtree even if that destruction unwinds.
             let _guard = guard;
 
             // Only this task's wakers poll this block, so the wrapper can skip re-registering
-            // an unchanged one. `f` is dropped at the end of this statement, before its result
-            // is sent.
-            let result = Abortable::task(FutureCell(UnsafeCell::new(f)), abort_registration).await;
+            // an unchanged one. The future is dropped at the end of this statement, before its
+            // result is sent.
+            let result = Abortable::task(cell, abort_registration).await;
 
             // Handle result
             match result {

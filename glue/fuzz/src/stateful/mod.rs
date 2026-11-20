@@ -231,6 +231,10 @@ pub(crate) const QMDB_INIT_BUFFER: NonZeroUsize = NZUsize!(1 << 12);
 /// QMDB cache size.
 pub(crate) const QMDB_INIT_CACHE: NonZeroUsize = NZUsize!(64);
 
+/// Tasks a QMDB initialization spawns to scan its log. With 1 it spawns none and builds its
+/// index serially.
+pub(crate) const QMDB_INIT_CONCURRENCY: NonZeroUsize = NZUsize!(1);
+
 /// Actor mailbox capacity.
 pub(crate) const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
 

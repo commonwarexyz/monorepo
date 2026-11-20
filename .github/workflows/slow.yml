@@ -91,13 +91,21 @@ jobs:
           - fuzz_dir: codec/fuzz
           - fuzz_dir: coding/fuzz
           - fuzz_dir: collector/fuzz
-          - fuzz_dir: consensus/fuzz/aggregation
-          - fuzz_dir: consensus/fuzz/marshal
-          - fuzz_dir: consensus/fuzz/simplex
+          - fuzz_dir: consensus/fuzz
+            partition: "1/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "2/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "3/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "4/4"
+          - fuzz_dir: consensus/fuzz/experimental/aggregation
+          - fuzz_dir: consensus/fuzz/experimental/marshal
+          - fuzz_dir: consensus/fuzz/experimental/simplex
             features: twins
-          - fuzz_dir: consensus/fuzz/simplex
+          - fuzz_dir: consensus/fuzz/experimental/simplex
             features: base
-          - fuzz_dir: consensus/fuzz/structures
+          - fuzz_dir: consensus/fuzz/experimental/structures
           - fuzz_dir: cryptography/fuzz
             partition: "1/4"
           - fuzz_dir: cryptography/fuzz
@@ -110,6 +118,7 @@ jobs:
           - fuzz_dir: glue/fuzz
           - fuzz_dir: math/fuzz
           - fuzz_dir: p2p/fuzz
+          - fuzz_dir: parallel/fuzz
           - fuzz_dir: runtime/fuzz
           - fuzz_dir: storage/fuzz
             partition: "1/8"

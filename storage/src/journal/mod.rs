@@ -9,7 +9,7 @@ use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _};
 use commonware_utils::Cached;
 use thiserror::Error;
 
-commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
+pub mod authenticated;
 pub mod contiguous;
 pub(crate) mod durability;
 mod frame;
@@ -21,8 +21,6 @@ mod conformance;
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("merkle error: {0}")]
-    Merkle(anyhow::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]

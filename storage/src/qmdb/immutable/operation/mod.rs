@@ -9,21 +9,17 @@
 pub(crate) mod fixed;
 pub(crate) mod variable;
 
+pub use crate::qmdb::operation::{COMMIT_CONTEXT, SET_CONTEXT};
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        operation::{Committable, Floored, Key},
+        operation::{Committable, Key},
         value::ValueEncoding,
     },
 };
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use core::fmt::Display;
-
-/// Wire tag for [Operation::Set].
-pub const SET_CONTEXT: u8 = 0;
-/// Wire tag for [Operation::Commit].
-pub const COMMIT_CONTEXT: u8 = 1;
 
 /// An operation applied to an immutable authenticated database.
 ///
@@ -62,13 +58,15 @@ impl<F: Family, K: Key, V: ValueEncoding> Operation<F, K, V> {
     }
 }
 
-impl<F: Family, K: Key, V: ValueEncoding> Floored<F> for Operation<F, K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> Committable<F> for Operation<F, K, V> {
     fn inactivity_floor(&self) -> Option<Location<F>> {
         self.inactivity_floor()
     }
-}
 
-impl<F: Family, K: Key, V: ValueEncoding> Committable for Operation<F, K, V> {
+    fn initial_commit() -> Self {
+        Self::Commit(None, Location::new(0))
+    }
+
     fn is_commit(&self) -> bool {
         self.is_commit()
     }
@@ -78,7 +76,12 @@ impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => {
-                write!(f, "[key:{} value:{}]", hex(key), hex(&value.encode()))
+                write!(
+                    f,
+                    "[key:{} value:{}]",
+                    hex(key.as_ref()),
+                    hex(&value.encode())
+                )
             }
             Self::Commit(value, floor) => {
                 if let Some(value) = value {
@@ -162,19 +165,19 @@ mod tests {
 
         let set_op = VarOp::Set(key, value.clone());
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::inactivity_floor(&set_op),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&set_op),
             None
         );
 
         let commit_op = VarOp::Commit(Some(value), Location::new(42));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&commit_op),
             Some(Location::new(42))
         );
 
         let commit_op_none = VarOp::Commit(None, Location::new(0));
         assert_eq!(
-            <VarOp as Floored<mmr::Family>>::inactivity_floor(&commit_op_none),
+            <VarOp as Committable<mmr::Family>>::inactivity_floor(&commit_op_none),
             Some(Location::new(0))
         );
     }

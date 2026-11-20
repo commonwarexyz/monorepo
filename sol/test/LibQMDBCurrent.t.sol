@@ -329,7 +329,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
 
     /// @dev Fixed-schema exclusion remains independent of the authenticated bitmap chunk size.
     function test_VariableChunkFixedSchemaExclusion() public view {
-        bytes memory operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), hex"112233", bytes32(uint256(20)));
+        bytes memory operation = abi.encodePacked(bytes1(0x01), bytes32(uint256(10)), hex"112233", bytes32(uint256(20)));
         LibQMDBCurrent.Schema memory schema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, 3);
         uint256[6] memory sizes = [uint256(1), 2, 16, 32, 64, 128];
         for (uint256 i; i < sizes.length; ++i) {
@@ -479,7 +479,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
             for (uint256 mode; mode < 3; ++mode) {
                 bytes32 left = bytes32(uint256(mode == 1 ? 20 : 10));
                 bytes32 right = bytes32(uint256(mode == 0 ? 20 : 10));
-                QMDBCase memory c = this.build(383, 127, abi.encodePacked(bytes1(0xd2), left, value, right), true, 32);
+                QMDBCase memory c = this.build(383, 127, abi.encodePacked(bytes1(0x01), left, value, right), true, 32);
                 for (uint256 j; j < keys.length; ++j) {
                     bool expected = mode == 0
                         ? keys[j] > left && keys[j] < right
@@ -499,7 +499,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         public
         view
     {
-        QMDBCase memory c = this.build(2, 1, abi.encodePacked(bytes1(0xd2), left, value, right), true, 32);
+        QMDBCase memory c = this.build(2, 1, abi.encodePacked(bytes1(0x01), left, value, right), true, 32);
         bool expected =
             left < right ? left < key && key < right : left > right ? key > left || key < right : key != left;
         LibQMDBCurrent.Schema memory schema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, value.length);
@@ -514,32 +514,32 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
             for (uint256 j; j < metadata.length; ++j) {
                 metadata[j] = bytes1(uint8(j + 1));
             }
-            bytes memory operation = abi.encodePacked(hex"d301", metadata, uint64(256), new bytes(55));
+            bytes memory operation = abi.encodePacked(hex"0001", metadata, uint64(256), new bytes(55));
             QMDBCase memory c = this.build(257, 256, operation, true, 32);
             LibQMDBCurrent.Schema memory schema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, lengths[i]);
             assertTrue(this.checkedExclusion(c, abi.encodePacked(bytes32(0)), schema));
             assertTrue(this.checkedExclusion(c, abi.encodePacked(bytes32(type(uint256).max)), schema));
-            operation = abi.encodePacked(hex"d300", new bytes(lengths[i]), uint64(256), new bytes(55));
+            operation = abi.encodePacked(hex"0000", new bytes(lengths[i]), uint64(256), new bytes(55));
             assertTrue(
                 this.checkedExclusion(this.build(257, 256, operation, true, 32), abi.encodePacked(bytes32(0)), schema)
             );
-            operation = abi.encodePacked(hex"d301", metadata, uint64(255), new bytes(55));
+            operation = abi.encodePacked(hex"0001", metadata, uint64(255), new bytes(55));
             c = this.build(257, 256, operation, true, 32);
             assertTrue(this.checked(c), "wrong-floor operation membership");
             assertFalse(this.checkedExclusion(c, abi.encodePacked(bytes32(0)), schema), "wrong floor");
         }
-        bytes memory absent = abi.encodePacked(hex"d300", uint64(0), new bytes(55));
+        bytes memory absent = abi.encodePacked(hex"0000", uint64(0), new bytes(55));
         LibQMDBCurrent.Schema memory absentSchema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, 0);
         assertTrue(
             this.checkedExclusion(
                 this.build(1, 0, absent, true, 32), abi.encodePacked(bytes32(uint256(7))), absentSchema
             )
         );
-        absent = abi.encodePacked(hex"d300", uint64(382), new bytes(55));
+        absent = abi.encodePacked(hex"0000", uint64(382), new bytes(55));
         assertTrue(
             this.checkedExclusion(this.build(383, 382, absent, true, 32), abi.encodePacked(bytes32(0)), absentSchema)
         );
-        absent = abi.encodePacked(hex"d300", uint64(381), new bytes(55));
+        absent = abi.encodePacked(hex"0000", uint64(381), new bytes(55));
         assertFalse(
             this.checkedExclusion(this.build(383, 382, absent, true, 32), abi.encodePacked(bytes32(0)), absentSchema)
         );
@@ -551,28 +551,28 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         assertFalse(this.checkedExclusion(this.build(1, 0, "", true, 32), abi.encodePacked(bytes32(0)), schema));
         for (uint256 length = 1; length < 65; ++length) {
             bytes memory operation = new bytes(length);
-            operation[0] = 0xd2;
+            operation[0] = 0x01;
             assertFalse(
                 this.checkedExclusion(
                     this.build(1, 0, operation, true, 32), abi.encodePacked(bytes32(uint256(1))), schema
                 )
             );
-            operation[0] = 0xd3;
+            operation[0] = 0x00;
             assertFalse(
                 this.checkedExclusion(
                     this.build(1, 0, operation, true, 32), abi.encodePacked(bytes32(uint256(1))), schema
                 )
             );
         }
-        bytes memory commit = abi.encodePacked(hex"d300", uint64(0), new bytes(55));
+        bytes memory commit = abi.encodePacked(hex"0000", uint64(0), new bytes(55));
         for (uint256 tag; tag < 256; ++tag) {
-            if (tag == 0xd2 || tag == 0xd3) continue;
+            if (tag == 0x00 || tag == 0x01) continue;
             commit[0] = bytes1(uint8(tag));
             assertFalse(
                 this.checkedExclusion(this.build(1, 0, commit, true, 32), abi.encodePacked(bytes32(uint256(1))), schema)
             );
         }
-        commit[0] = 0xd3;
+        commit[0] = 0x00;
         for (uint256 flag = 2; flag < 256; ++flag) {
             commit[1] = bytes1(uint8(flag));
             assertFalse(this.checkedExclusion(this.build(1, 0, commit, true, 32), abi.encodePacked(bytes32(0)), schema));
@@ -586,7 +586,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
             );
             commit[i] = 0;
         }
-        commit = abi.encodePacked(hex"d300", new bytes(33), uint64(0), new bytes(55));
+        commit = abi.encodePacked(hex"0000", new bytes(33), uint64(0), new bytes(55));
         schema.valueSize = 33;
         for (uint256 i = 2; i < 35; ++i) {
             commit[i] = 0x01;
@@ -596,7 +596,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
             );
             commit[i] = 0;
         }
-        commit = abi.encodePacked(hex"d301", bytes32(uint256(42)), uint64(0), new bytes(55));
+        commit = abi.encodePacked(hex"0001", bytes32(uint256(42)), uint64(0), new bytes(55));
         schema.valueSize = 32;
         commit[commit.length - 1] = 0x01;
         assertFalse(
@@ -608,12 +608,12 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Interval and empty witnesses share the complete active-operation authentication contract.
     function test_FixedExclusionProofAuthentication() public view {
         uint256[7] memory sizes = [uint256(1), 256, 257, 383, 512, 513, 639];
-        bytes memory update = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), hex"112233", bytes32(uint256(20)));
+        bytes memory update = abi.encodePacked(bytes1(0x01), bytes32(uint256(10)), hex"112233", bytes32(uint256(20)));
         for (uint256 i; i < sizes.length; ++i) {
             uint256 location = sizes[i] - 1;
             for (uint256 mode; mode < 2; ++mode) {
                 bytes memory operation =
-                    mode == 0 ? update : abi.encodePacked(hex"d300", uint64(location), new bytes(55));
+                    mode == 0 ? update : abi.encodePacked(hex"0000", uint64(location), new bytes(55));
                 QMDBCase memory c = this.build(sizes[i], location, operation, true, 32);
                 LibQMDBCurrent.Schema memory schema =
                     LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, mode == 0 ? 3 : 0);
@@ -637,8 +637,8 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         bytes memory query = abi.encodePacked(bytes32(uint256(1)));
         bytes memory metadata = abi.encodePacked(bytes32(uint256(7)));
         QMDBCase memory fixedCase =
-            this.build(1, 0, bytes.concat(hex"d301", metadata, abi.encodePacked(uint64(0)), new bytes(55)), true, 32);
-        QMDBCase memory variableCase = this.build(1, 0, bytes.concat(hex"d301", metadata, hex"00"), true, 32);
+            this.build(1, 0, bytes.concat(hex"0001", metadata, abi.encodePacked(uint64(0)), new bytes(55)), true, 32);
+        QMDBCase memory variableCase = this.build(1, 0, bytes.concat(hex"0001", metadata, hex"00"), true, 32);
         LibQMDBCurrent.Schema memory fixedSchema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Fixed, 32, 32);
         LibQMDBCurrent.Schema memory variableSchema = LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Variable, 32, 32);
         assertTrue(this.checkedExclusion(fixedCase, query, fixedSchema));
@@ -962,7 +962,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
     /// @dev Prefix keys, empty keys, and full-word boundaries retain Rust's raw byte ordering.
     function testFuzz_VariableExclusionOrdering(bytes memory left, bytes memory right, bytes memory query) public view {
         if (left.length > 160 || right.length > 160 || query.length > 160) return;
-        bytes memory operation = bytes.concat(hex"d2", _vector(left), hex"00", _vector(right));
+        bytes memory operation = bytes.concat(hex"01", _vector(left), hex"00", _vector(right));
         int256 afterLeft = _keyOrder(query, left);
         int256 beforeRight = _keyOrder(query, right);
         bool expected = _keyOrder(left, right) < 0 ? afterLeft > 0 && beforeRight < 0 : afterLeft > 0 || beforeRight < 0;
@@ -971,20 +971,20 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
 
     /// @dev Explicit prefixes and zero suffixes exercise comparisons that padded words cannot distinguish.
     function test_VariableExclusionPrefixes() public view {
-        _variableCase(hex"d201000003000001", hex"0000", true);
-        _variableCase(hex"d201000003000001", hex"00", false);
-        _variableCase(hex"d201000003000001", hex"000001", false);
-        _variableCase(hex"d2010100020001", hex"", true);
-        _variableCase(hex"d2010100020001", hex"0002", false);
-        _variableCase(hex"d20101000101", hex"0100", true);
-        _variableCase(hex"d20101000101", hex"01", false);
-        _variableCase(hex"d200000100", hex"", false);
-        _variableCase(hex"d2000000", hex"00", true);
+        _variableCase(hex"0101000003000001", hex"0000", true);
+        _variableCase(hex"0101000003000001", hex"00", false);
+        _variableCase(hex"0101000003000001", hex"000001", false);
+        _variableCase(hex"01010100020001", hex"", true);
+        _variableCase(hex"01010100020001", hex"0002", false);
+        _variableCase(hex"010101000101", hex"0100", true);
+        _variableCase(hex"010101000101", hex"01", false);
+        _variableCase(hex"0100000100", hex"", false);
+        _variableCase(hex"01000000", hex"00", true);
         uint256[10] memory lengths = [uint256(1), 31, 32, 33, 63, 64, 65, 128, 256, 1024];
         for (uint256 i; i < lengths.length; ++i) {
             bytes memory left = new bytes(lengths[i]);
             bytes memory right = bytes.concat(left, hex"0001");
-            bytes memory operation = bytes.concat(hex"d2", _vector(left), hex"00", _vector(right));
+            bytes memory operation = bytes.concat(hex"01", _vector(left), hex"00", _vector(right));
             _variableCase(operation, bytes.concat(left, hex"00"), true);
             _variableCase(operation, left, false);
             _variableCase(operation, right, false);
@@ -1002,22 +1002,22 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
                 bytes memory left = keySize == 0 ? bytes(hex"0101") : bytes(hex"01");
                 bytes memory right = keySize == 0 ? bytes(hex"0103") : bytes(hex"03");
                 bytes memory value = valueSize == 0 ? bytes(hex"01ff") : bytes(hex"ff");
-                QMDBCase memory c = this.build(1, 0, bytes.concat(hex"d2", left, value, right), true, 32);
+                QMDBCase memory c = this.build(1, 0, bytes.concat(hex"01", left, value, right), true, 32);
                 assertTrue(this.checkedExclusion(c, hex"02", schema));
                 assertFalse(this.checkedExclusion(c, hex"01", schema));
                 assertFalse(this.checkedExclusion(c, hex"03", schema));
                 if (keySize != 0) assertFalse(this.checkedExclusion(c, hex"0002", schema));
-                c = this.build(1, 0, bytes.concat(hex"d301", value, hex"00"), true, 32);
+                c = this.build(1, 0, bytes.concat(hex"0001", value, hex"00"), true, 32);
                 assertTrue(this.checkedExclusion(c, hex"02", schema));
-                c = this.build(1, 0, hex"d30000", true, 32);
+                c = this.build(1, 0, hex"000000", true, 32);
                 assertTrue(this.checkedExclusion(c, hex"02", schema));
             }
         }
         LibQMDBCurrent.Schema memory emptyValueSchema =
             LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Variable, variableSize, 0);
-        QMDBCase memory zero = this.build(1, 0, hex"d201010103", true, 32);
+        QMDBCase memory zero = this.build(1, 0, hex"0101010103", true, 32);
         assertTrue(this.checkedExclusion(zero, hex"02", emptyValueSchema));
-        zero = this.build(1, 0, hex"d30100", true, 32);
+        zero = this.build(1, 0, hex"000100", true, 32);
         assertTrue(this.checkedExclusion(zero, hex"", emptyValueSchema));
         emptyValueSchema.keySize = variableSize - 1;
         assertFalse(this.checkedExclusion(zero, hex"", emptyValueSchema));
@@ -1031,19 +1031,19 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
         uint256[7] memory sizes = [uint256(0), 1, 32, 127, 128, 16383, 16384];
         for (uint256 i; i < sizes.length; ++i) {
             bytes memory value = new bytes(sizes[i]);
-            _variableCase(bytes.concat(hex"d20101", _vector(value), hex"0103"), hex"02", true);
-            _variableCase(bytes.concat(hex"d301", _vector(value), hex"00"), hex"02", true);
+            _variableCase(bytes.concat(hex"010101", _vector(value), hex"0103"), hex"02", true);
+            _variableCase(bytes.concat(hex"0001", _vector(value), hex"00"), hex"02", true);
         }
-        _variableCase(hex"d30000", hex"", true);
-        _variableCase(hex"d3010000", hex"", true);
-        _variableCase(hex"d30001", hex"", false);
+        _variableCase(hex"000000", hex"", true);
+        _variableCase(hex"00010000", hex"", true);
+        _variableCase(hex"000001", hex"", false);
         LibQMDBCurrent.Schema memory schema =
             LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Variable, type(uint256).max, type(uint256).max);
         for (uint256 location = 127; location <= 128; ++location) {
             QMDBCase memory c =
-                this.build(location + 1, location, bytes.concat(hex"d300", _unsigned(location)), true, 32);
+                this.build(location + 1, location, bytes.concat(hex"0000", _unsigned(location)), true, 32);
             assertTrue(this.checkedExclusion(c, hex"", schema));
-            c = this.build(location + 1, location, bytes.concat(hex"d300", _unsigned(location - 1)), true, 32);
+            c = this.build(location + 1, location, bytes.concat(hex"0000", _unsigned(location - 1)), true, 32);
             assertFalse(this.checkedExclusion(c, hex"", schema));
         }
     }
@@ -1052,29 +1052,29 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
     function test_VariableExclusionMalformed() public view {
         bytes[19] memory invalid = [
             bytes(hex""),
-            hex"d1",
-            hex"d2",
-            hex"d3",
-            hex"d30200",
-            hex"d300",
-            hex"d3008000",
-            hex"d30080808080808080808002",
-            hex"d3008080808080808080808000",
-            hex"d3000000",
-            hex"d301800000",
-            hex"d301020000",
-            hex"d2810001000103",
-            hex"d2808080801001000103",
-            hex"d2010180000103",
-            hex"d2010100810003",
-            hex"d2010100010300",
-            hex"d20101000203",
-            hex"d201010001"
+            hex"02",
+            hex"01",
+            hex"00",
+            hex"000200",
+            hex"0000",
+            hex"00008000",
+            hex"000080808080808080808002",
+            hex"00008080808080808080808000",
+            hex"00000000",
+            hex"0001800000",
+            hex"0001020000",
+            hex"01810001000103",
+            hex"01808080801001000103",
+            hex"01010180000103",
+            hex"01010100810003",
+            hex"01010100010300",
+            hex"010101000203",
+            hex"0101010001"
         ];
         for (uint256 i; i < invalid.length; ++i) {
             _variableCase(invalid[i], hex"02", false);
         }
-        bytes memory valid = hex"d20101000103";
+        bytes memory valid = hex"010101000103";
         for (uint256 length; length < valid.length; ++length) {
             bytes memory truncated = new bytes(length);
             for (uint256 i; i < length; ++i) {
@@ -1088,7 +1088,7 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
     function test_VariableExclusionProofBinding() public view {
         LibQMDBCurrent.Schema memory schema =
             LibQMDBCurrent.Schema(LibQMDBCurrent.Encoding.Variable, type(uint256).max, type(uint256).max);
-        bytes memory operation = hex"d20101000103";
+        bytes memory operation = hex"010101000103";
         QMDBCase memory c = this.build(638, 17, operation, true, 32);
         assertTrue(this.checkedExclusion(c, hex"02", schema));
         c.root ^= bytes32(uint256(1));

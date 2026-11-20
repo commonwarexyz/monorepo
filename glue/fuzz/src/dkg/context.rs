@@ -33,7 +33,16 @@ pub(super) struct EngineContext {
     /// The pacing of the blobs opened through this context, or none if the
     /// engine's storage is not paced.
     pacing: Option<EnginePacing>,
+    /// Where the partitions of the blobs opened or removed through this
+    /// context are recorded, if a test asked for them.
+    #[cfg(test)]
+    touched: Option<Touched>,
 }
+
+/// The partitions a test records the blobs of an engine's context were
+/// opened or removed in, in order.
+#[cfg(test)]
+pub(super) type Touched = std::sync::Arc<commonware_utils::sync::Mutex<Vec<String>>>;
 
 impl EngineContext {
     /// Wrap `inner` as the context of the engine at index `engine`. Its
@@ -43,6 +52,25 @@ impl EngineContext {
             inner,
             engine,
             pacing: None,
+            #[cfg(test)]
+            touched: None,
+        }
+    }
+
+    /// This context with the partition of every blob opened or removed
+    /// through it, or through a context derived from it, recorded into
+    /// `touched`.
+    #[cfg(test)]
+    pub(super) fn touching(mut self, touched: Touched) -> Self {
+        self.touched = Some(touched);
+        self
+    }
+
+    /// Record that a blob of `partition` was opened or removed.
+    #[cfg(test)]
+    fn touch(&self, partition: &str) {
+        if let Some(touched) = &self.touched {
+            touched.lock().push(partition.to_string());
         }
     }
 
@@ -65,6 +93,8 @@ impl Supervisor for EngineContext {
             inner: self.inner.child(label),
             engine: self.engine,
             pacing: self.pacing.clone(),
+            #[cfg(test)]
+            touched: self.touched.clone(),
         }
     }
 
@@ -73,6 +103,8 @@ impl Supervisor for EngineContext {
             inner: self.inner.with_attribute(key, value),
             engine: self.engine,
             pacing: self.pacing,
+            #[cfg(test)]
+            touched: self.touched,
         }
     }
 }
@@ -96,12 +128,16 @@ impl Spawner for EngineContext {
     {
         let engine = self.engine;
         let pacing = self.pacing;
+        #[cfg(test)]
+        let touched = self.touched;
         self.inner.spawn(move |inner| {
             attributed(engine, move || {
                 f(Self {
                     inner,
                     engine,
                     pacing,
+                    #[cfg(test)]
+                    touched,
                 })
             })
         })
@@ -185,6 +221,8 @@ impl Storage for EngineContext {
         name: &[u8],
         versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        #[cfg(test)]
+        self.touch(partition);
         let (blob, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             PacedBlob::new(blob, self.pacing.as_ref(), partition),
@@ -194,6 +232,8 @@ impl Storage for EngineContext {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        #[cfg(test)]
+        self.touch(partition);
         self.inner.remove(partition, name).await
     }
 

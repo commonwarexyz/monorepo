@@ -13,28 +13,37 @@
 //! Every check panics with a message naming the invariant of `SPEC.md` it
 //! enforces, the engines involved, and the epoch.
 
+#[cfg(test)]
+use super::app::BLOCK_CFG;
 use super::{
     BootstrapInfo, Digest, Directory, EPOCH_LENGTH, Info, MockGroup, PublicKey,
+    app::Block,
     report::{Invariant, Judged, Target},
     schedule::Schedule,
     scheme::{Registration, Scheme},
 };
-use crate::stateful::runner::Panic;
+use crate::stateful::{PROBE_EPOCH_LENGTH, runner::Panic};
+use commonware_codec::{Copying, DecodeExt as _, ReadExt as _};
 use commonware_consensus::{
-    Epochable as _,
+    Epochable as _, Heightable as _,
     simplex::types::Finalization,
     types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height, Round},
 };
-use commonware_cryptography::bls12381::{
-    dkg::feldman_desmedt::deal,
-    primitives::{
-        group::Share,
-        ops::{self, threshold},
-        sharing::Mode,
+#[cfg(test)]
+use commonware_cryptography::certificate::Verifier as _;
+use commonware_cryptography::{
+    Digestible as _,
+    bls12381::{
+        dkg::feldman_desmedt::deal,
+        primitives::{
+            group::Share,
+            ops::{self, threshold},
+            sharing::Mode,
+        },
     },
 };
 use commonware_glue::dkg::{
-    network,
+    ReshareBlock as _, network,
     probe::Artifact,
     types::{EpochInfo, EpochOutcome, Payload, SchemeInfo},
 };
@@ -1695,6 +1704,58 @@ pub(crate) type ProbeArtifact = Artifact<Scheme, Digest, MockGroup, Directory>;
 /// malformed whatever the probe is doing.
 pub(crate) const PROBE_TAGS: u8 = 6;
 
+/// The tag of a request for the finalization that introduces an epoch.
+const BOUNDARY_REQUEST: u8 = 0;
+
+/// The tag of a response carrying such a finalization.
+#[cfg(test)]
+const BOUNDARY_RESPONSE: u8 = 1;
+
+/// The tag of a request for the block that introduces an epoch.
+const BLOCK_REQUEST: u8 = 2;
+
+/// The tag of a response carrying such a block.
+#[cfg(test)]
+const BLOCK_RESPONSE: u8 = 3;
+
+/// The tag of a request for the receiver's latest finalization.
+const LATEST_REQUEST: u8 = 4;
+
+/// The tag of a response carrying the receiver's latest finalization.
+#[cfg(test)]
+const LATEST_RESPONSE: u8 = 5;
+
+/// The epoch a request for a boundary finalization or block names, read as
+/// the whole rest of the request after its tag.
+fn requested_epoch(bytes: &[u8]) -> Option<Epoch> {
+    Epoch::decode(Copying(bytes.get(1..)?)).ok()
+}
+
+/// The epoch a block response names, read after its tag, whatever follows
+/// it.
+fn responded_epoch(bytes: &[u8]) -> Option<Epoch> {
+    Epoch::read(&mut Copying(bytes.get(1..)?)).ok()
+}
+
+/// The height of the block that introduces `epoch`, which is past zero: the
+/// final block of the epoch before it.
+fn introducing_height(epoch: Epoch) -> Height {
+    epoch
+        .previous()
+        .and_then(|ending| FixedEpocher::new(PROBE_EPOCH_LENGTH).last(ending))
+        .expect("an epoch past zero follows a final block")
+}
+
+/// Whether `block` is the block a probe fetching `epoch` accepts from a peer
+/// it asked with a boundary finalization committing to `commitment`: the
+/// block has that commitment, is at the epoch's boundary height, and carries
+/// the epoch's description.
+fn fits(block: &Block, commitment: Digest, epoch: Epoch) -> bool {
+    block.digest() == commitment
+        && block.height() == introducing_height(epoch)
+        && matches!(block.payload(), Some(Payload::EpochInfo(info)) if info.epoch == epoch)
+}
+
 /// One chain as the probe target fabricated it, recorded before any probe
 /// starts.
 #[derive(Clone, Debug)]
@@ -1720,6 +1781,35 @@ impl ProbeChain {
     }
 }
 
+/// A checkpoint record as the harness wrote it to a source's checkpoint
+/// partition before the source's state-sync plan opened.
+#[derive(Clone)]
+pub(crate) struct ProbeCheckpoint {
+    /// The epoch it is keyed by.
+    pub(crate) epoch: Epoch,
+    /// The block it holds.
+    pub(crate) block: Block,
+    /// The commitment it holds for the block.
+    pub(crate) commitment: Digest,
+    /// The finalization it holds, if any.
+    pub(crate) finalization: Option<ProbeFinalization>,
+}
+
+impl fmt::Debug for ProbeCheckpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProbeCheckpoint")
+            .field("epoch", &self.epoch)
+            .field("height", &self.block.height())
+            .field("block", &self.block.digest())
+            .field("commitment", &self.commitment)
+            .field(
+                "finalization",
+                &self.finalization.as_ref().map(|found| found.round()),
+            )
+            .finish()
+    }
+}
+
 /// What one source of a probe run holds, recorded before any probe starts.
 #[derive(Clone, Debug)]
 pub(crate) struct ProbeSource {
@@ -1734,6 +1824,19 @@ pub(crate) struct ProbeSource {
     /// order. The last is what the source answers a request for its latest
     /// finalization with.
     pub(crate) finalizations: Vec<ProbeFinalization>,
+    /// The checkpoints the source's state-sync plan held when it opened, in
+    /// epoch order. A source answers a request for an epoch's boundary
+    /// finalization or block from that epoch's checkpoint alone.
+    pub(crate) checkpoints: Vec<ProbeCheckpoint>,
+}
+
+impl ProbeSource {
+    /// The checkpoint the source holds for `epoch`, if any.
+    fn checkpoint(&self, epoch: Epoch) -> Option<&ProbeCheckpoint> {
+        self.checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.epoch == epoch)
+    }
 }
 
 /// A response a source built, which the harness withheld.
@@ -1762,6 +1865,11 @@ pub(crate) enum ProbeShape {
     /// The request for latest finalizations the discovering probe sent,
     /// which the harness sends back to it to wake it.
     Request,
+    /// Bytes a regression test built. They are judged by their tag and by
+    /// whether what follows it decodes, so they must not decode as a whole
+    /// finalization response: such a response is sent as a capture.
+    #[cfg(test)]
+    Crafted,
 }
 
 /// A message the program sent to the discovering probe.
@@ -1831,6 +1939,15 @@ impl ProbeLedger {
         self.0.lock().steps.push(step);
     }
 
+    /// Whether an artifact the probe emitted is on record.
+    pub(crate) fn resolved(&self) -> bool {
+        self.0
+            .lock()
+            .steps
+            .iter()
+            .any(|step| matches!(step, ProbeStep::Resolved(_)))
+    }
+
     /// Record that the source at position `source` took `bytes` from its
     /// receiver.
     pub(crate) fn asked(&self, source: usize, bytes: &[u8]) {
@@ -1874,22 +1991,22 @@ impl ProbeLedger {
     /// it, once the probe has sent one.
     pub(crate) fn solicitation(&self) -> Option<Vec<u8>> {
         self.0.lock().steps.iter().find_map(|step| match step {
-            ProbeStep::Requested { bytes, .. } => Some(bytes.clone()),
+            ProbeStep::Requested { bytes, .. } if bytes.first() == Some(&LATEST_REQUEST) => {
+                Some(bytes.clone())
+            }
             _ => None,
         })
     }
 
-    /// Whether the last message the program sent is the whole of a response
-    /// to the discovering probe's most recent request, which the probe
-    /// addressed to the sender alone, and no subscription was opened or
-    /// resolved since.
+    /// Whether the last message the program sent is the whole of a block
+    /// response, for the epoch of a fetch the discovering probe has under
+    /// way, from a peer the probe asked for that epoch's block, and no
+    /// subscription was opened or resolved since.
     ///
-    /// The probe addresses a request to one peer only for its boundary block,
-    /// and sends another as soon as it gives that peer up. A probe that is
-    /// still discovering takes the response as the block it awaits and
-    /// resolves its artifact with it or refuses it and asks someone else, so
-    /// once the probe has taken the response this holds only if it resolved.
-    pub(crate) fn answered_alone(&self) -> bool {
+    /// A fetch is under way from the probe's first request for its epoch's
+    /// boundary finalization until an artifact resolves, and the probe keeps
+    /// the fetches of the two latest epochs it asked for, which only rise.
+    pub(crate) fn delivered_block(&self) -> bool {
         let log = self.0.lock();
         let Some((at, send)) =
             log.steps
@@ -1909,15 +2026,43 @@ impl ProbeLedger {
         {
             return false;
         }
-        let request = log.steps.iter().rev().find_map(|step| match step {
-            ProbeStep::Requested { recipients, bytes } => Some((recipients, bytes)),
-            _ => None,
-        });
-        let Some((Recipients::One(asked), request)) = request else {
+        let ProbeShape::Response(capture) = send.shape else {
             return false;
         };
-        matches!(send.shape, ProbeShape::Response(capture)
-            if *asked == send.origin && log.captures[capture].request == *request)
+        let request = &log.captures[capture].request;
+        if request.first() != Some(&BLOCK_REQUEST) {
+            return false;
+        }
+        let Some(epoch) = requested_epoch(request) else {
+            return false;
+        };
+        let since = log
+            .steps
+            .iter()
+            .rposition(|step| matches!(step, ProbeStep::Resolved(_)))
+            .map_or(0, |resolved| resolved + 1);
+        let mut fetched: Vec<Epoch> = Vec::new();
+        let mut asked = false;
+        for step in &log.steps[since..at] {
+            let ProbeStep::Requested { recipients, bytes } = step else {
+                continue;
+            };
+            match bytes.first() {
+                Some(&BOUNDARY_REQUEST) => {
+                    if let Some(fetch) = requested_epoch(bytes)
+                        && !fetched.contains(&fetch)
+                    {
+                        fetched.push(fetch);
+                    }
+                }
+                Some(&BLOCK_REQUEST) => {
+                    asked |= *bytes == *request
+                        && matches!(recipients, Recipients::One(peer) if *peer == send.origin);
+                }
+                _ => {}
+            }
+        }
+        asked && fetched.iter().rev().take(2).any(|fetch| *fetch == epoch)
     }
 
     /// Everything recorded at the discovering probe's boundaries, in order.
@@ -1956,15 +2101,16 @@ pub(crate) struct ProbeRun {
     pub(crate) blocked: Vec<(PublicKey, PublicKey)>,
 }
 
-/// What a source's response answers, known from the request that drew it.
+/// What a source's response answers, read from the tag and the epoch of the
+/// request that drew it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProbeAnswer {
     /// The source's latest finalization.
     Latest,
-    /// The finalization of a boundary block.
-    Boundary,
-    /// A boundary block.
-    Block,
+    /// The finalization that introduces this epoch.
+    Boundary(Epoch),
+    /// The block that introduces this epoch.
+    Block(Epoch),
 }
 
 impl ProbeRun {
@@ -1983,37 +2129,38 @@ impl ProbeRun {
             .map_or(self.bootstrap, |floor| floor.epoch().max(self.bootstrap))
     }
 
-    /// The request for latest finalizations as the discovering probe encodes
-    /// it: discovery begins with it, so it is the first request the probe
-    /// sent.
-    fn solicitation(&self) -> Option<&[u8]> {
-        self.steps.iter().find_map(|step| match step {
-            ProbeStep::Requested { bytes, .. } => Some(bytes.as_slice()),
-            _ => None,
-        })
+    /// What `capture` answers. A source answers only a request it decoded:
+    /// one for its latest finalization, whatever follows the tag, or one for
+    /// the boundary finalization or block of an epoch.
+    fn answer(&self, capture: &ProbeCapture) -> ProbeAnswer {
+        let engine = self.sources[capture.source].engine;
+        let epoch = || {
+            requested_epoch(&capture.request).unwrap_or_else(|| {
+                panic!("harness defect: engine {engine} answered a request that does not decode")
+            })
+        };
+        match capture.request.first() {
+            Some(&LATEST_REQUEST) => ProbeAnswer::Latest,
+            Some(&BOUNDARY_REQUEST) => ProbeAnswer::Boundary(epoch()),
+            Some(&BLOCK_REQUEST) => ProbeAnswer::Block(epoch()),
+            _ => panic!("harness defect: engine {engine} answered a message that is no request"),
+        }
     }
 
-    /// What `capture` answers. A source answers only the discovering probe,
-    /// which asks its dealers for their latest finalization, every peer for
-    /// a boundary finalization, and one peer for the block.
-    fn answer(&self, capture: &ProbeCapture) -> ProbeAnswer {
-        if self.solicitation() == Some(capture.request.as_slice()) {
-            return ProbeAnswer::Latest;
-        }
-        let mut asked = self.steps.iter().filter_map(|step| match step {
-            ProbeStep::Requested { recipients, bytes } if *bytes == capture.request => {
-                Some(recipients)
-            }
-            _ => None,
-        });
-        match asked.next() {
-            Some(Recipients::One(_)) => ProbeAnswer::Block,
-            Some(_) => ProbeAnswer::Boundary,
-            None => panic!(
-                "harness defect: engine {} answered a request the discovering probe did not send",
-                self.sources[capture.source].engine,
-            ),
-        }
+    /// The checkpoint `capture`, which answers a request for the boundary
+    /// finalization or block of `epoch`, was built from.
+    fn served(&self, capture: &ProbeCapture, epoch: Epoch) -> &ProbeCheckpoint {
+        let source = &self.sources[capture.source];
+        source
+            .checkpoint(epoch)
+            .filter(|checkpoint| checkpoint.finalization.is_some())
+            .unwrap_or_else(|| {
+                panic!(
+                    "harness defect: engine {} answered for epoch {epoch} without a checkpoint \
+                     that holds its finalization",
+                    source.engine
+                )
+            })
     }
 
     /// Whether the source at position `source` answers a request for its
@@ -2026,9 +2173,9 @@ impl ProbeRun {
             .is_some_and(|latest| latest.epoch() < self.minimum())
     }
 
-    /// The source `send` counts for in a sample: `send` is the whole of a
-    /// latest reply, sent by the source that built it, from the fabricated
-    /// chain and not stale.
+    /// The source `send` counts for in a request round: `send` is the whole
+    /// of a latest reply, sent by the source that built it, from the
+    /// fabricated chain and not stale.
     fn counted(&self, send: &ProbeSend) -> Option<usize> {
         let ProbeShape::Response(capture) = send.shape else {
             return None;
@@ -2040,6 +2187,15 @@ impl ProbeRun {
             && !source.foreign
             && !self.stale(capture.source))
         .then_some(capture.source)
+    }
+
+    /// The finalization the source at position `source` answers a request
+    /// for its latest finalization with.
+    fn latest(&self, source: usize) -> &ProbeFinalization {
+        self.sources[source]
+            .finalizations
+            .last()
+            .expect("a source that answered holds a finalization")
     }
 
     /// How failure messages name `peer`.
@@ -2089,7 +2245,7 @@ pub struct ProbeCounts {
     pub blocked_peers: usize,
     /// Subscriptions that resolved with an artifact.
     pub artifacts: usize,
-    /// Floors checked against the delivered samples under I12.
+    /// Floors checked against the request rounds under I12.
     pub floors: usize,
     /// Runs whose first artifact was compared with the fabricated chain
     /// under I13: zero or one.
@@ -2111,75 +2267,168 @@ impl ProbeCounts {
     }
 }
 
-/// I12: the floor of the artifact the discovering probe emitted is the
-/// highest-round finalization among the valid latest replies of the first
-/// `f + 1` distinct dealers to deliver one since the probe last asked for
-/// them, each sent by the source that built it.
+/// One selection of the discovering probe, as I12 lists it.
+#[derive(Clone, Debug)]
+pub(crate) struct ProbeSelection {
+    /// The request round it was made in, counted from the probe's first
+    /// request for latest finalizations.
+    pub(crate) round: usize,
+    /// The sources whose replies it was made from, in the order the probe
+    /// took them.
+    pub(crate) replies: Vec<usize>,
+    /// The highest of their finalizations.
+    pub(crate) floor: ProbeFinalization,
+}
+
+/// The selections the discovering probe made before its first artifact, and
+/// that artifact, if it emitted one.
 ///
-/// The probe selects its floor when the reply of the `f + 1`-th distinct
-/// dealer arrives and judges no latest reply after that, so the floor is the
-/// highest of exactly those replies: one delivered later, however high, does
-/// not change it. Each reply stands for the finalization its source was
-/// recorded to hold as its latest. Returns the number of floors checked.
-pub(crate) fn check_probe_floor(run: &ProbeRun) -> usize {
-    let solicitation = run.solicitation();
-    let mut replies: Vec<(usize, &ProbeFinalization)> = Vec::new();
+/// A request round runs from one request of the probe for latest
+/// finalizations to its next. Its replies are the whole latest replies of the
+/// fabricated chain that are not stale, each delivered by the source that
+/// built it, once per source, while the probe had a subscriber, in the order
+/// the probe took them; each stands for the finalization its source was
+/// recorded to hold as its latest. A round with `f + 1` replies selects the
+/// highest of exactly those, and a reply delivered after them changes
+/// nothing.
+pub(crate) fn probe_selections(run: &ProbeRun) -> (Vec<ProbeSelection>, Option<&ProbeArtifact>) {
+    let (rounds, artifact) = probe_rounds(run);
+    let required = run.required();
+    let selections = rounds
+        .into_iter()
+        .enumerate()
+        .filter(|(_, replies)| replies.len() >= required)
+        .map(|(round, mut replies)| {
+            replies.truncate(required);
+            let floor = replies
+                .iter()
+                .map(|source| run.latest(*source))
+                .max_by_key(|latest| latest.round())
+                .expect("a selection has replies")
+                .clone();
+            ProbeSelection {
+                round,
+                replies,
+                floor,
+            }
+        })
+        .collect();
+    (selections, artifact)
+}
+
+/// The replies of every request round before the discovering probe's first
+/// artifact, as [`probe_selections`] lists them, including those delivered
+/// after the first `f + 1` of their round, and that artifact.
+fn probe_rounds(run: &ProbeRun) -> (Vec<Vec<usize>>, Option<&ProbeArtifact>) {
+    let mut rounds: Vec<Vec<usize>> = Vec::new();
+    let mut open = 0usize;
     let mut sent = None;
-    let mut artifact = None;
     for step in &run.steps {
         match step {
-            ProbeStep::Requested { bytes, .. } if solicitation == Some(bytes.as_slice()) => {
-                replies.clear();
+            ProbeStep::Requested { bytes, .. } if bytes.first() == Some(&LATEST_REQUEST) => {
+                rounds.push(Vec::new());
             }
+            ProbeStep::Subscribed => open += 1,
+            ProbeStep::Unsubscribed | ProbeStep::Closed => open = open.saturating_sub(1),
             ProbeStep::Sent(send) => sent = Some(send),
             ProbeStep::Delivered { .. } => {
-                let Some(source) = sent.take().and_then(|send| run.counted(send)) else {
+                let send = sent.take();
+                let (Some(replies), true) = (rounds.last_mut(), open > 0) else {
                     continue;
                 };
-                if replies.iter().any(|(counted, _)| *counted == source) {
-                    continue;
+                if let Some(source) = send.and_then(|send| run.counted(send))
+                    && !replies.contains(&source)
+                {
+                    replies.push(source);
                 }
-                let latest = run.sources[source]
-                    .finalizations
-                    .last()
-                    .expect("a source that answered holds a finalization");
-                replies.push((source, latest));
             }
-            ProbeStep::Resolved(resolved) => {
-                artifact = Some(resolved);
-                break;
-            }
+            ProbeStep::Resolved(artifact) => return (rounds, Some(artifact)),
             _ => {}
         }
     }
+    (rounds, None)
+}
+
+/// I12: the floor of the artifact the discovering probe emitted is one of its
+/// selections, and of the selections in the artifact's epoch made before the
+/// artifact, the one with the highest round.
+///
+/// A selection in the epoch of a fetch the probe keeps replaces that fetch's
+/// floor if its round is higher, and the artifact carries the floor of the
+/// fetch that completes first, so a lower selection of the artifact's epoch,
+/// or a floor no round selected, is a fault. Returns the number of floors
+/// checked.
+pub(crate) fn check_probe_floor(run: &ProbeRun) -> usize {
+    let (selections, artifact) = probe_selections(run);
     let Some(artifact) = artifact else {
         return 0;
     };
-
-    // The replies the probe selects from, and those delivered after them.
+    let epoch = artifact.floor.epoch();
     let required = run.required();
-    let (sample, later) = replies.split_at(required.min(replies.len()));
-    let highest = sample
-        .iter()
-        .map(|(_, latest)| *latest)
-        .max_by_key(|latest| latest.round());
-    let named = |replies: &[(usize, &ProbeFinalization)]| -> Vec<String> {
+    let replies = |replies: &[usize]| -> Vec<String> {
         replies
             .iter()
-            .map(|(source, latest)| {
+            .map(|source| {
                 let engine = run.sources[*source].engine;
-                format!("engine {engine} at round {}", latest.round())
+                format!("engine {engine} at round {}", run.latest(*source).round())
             })
             .collect()
     };
+    let named = |selections: &[&ProbeSelection]| -> Vec<String> {
+        selections
+            .iter()
+            .map(|selection| {
+                let engines: Vec<usize> = selection
+                    .replies
+                    .iter()
+                    .map(|source| run.sources[*source].engine)
+                    .collect();
+                format!(
+                    "round {} from engines {engines:?} at {}",
+                    selection.round,
+                    selection.floor.round()
+                )
+            })
+            .collect()
+    };
+    if !selections
+        .iter()
+        .any(|selection| selection.floor == artifact.floor)
+    {
+        // The latest request round is named first: a floor that no round
+        // selected is most often raised by a reply after its round's first
+        // `f + 1`.
+        let (rounds, _) = probe_rounds(run);
+        let last = rounds.last().map_or(&[][..], Vec::as_slice);
+        let (sample, later) = last.split_at(required.min(last.len()));
+        let all: Vec<&ProbeSelection> = selections.iter().collect();
+        panic!(
+            "I12 violated: the floor of the artifact, at round {}, is not the highest \
+             finalization of the first {required} valid latest replies from distinct dealers \
+             that were delivered since engine 0 last asked for them, {:?}; {:?} were delivered \
+             after them; the selections of every request round were {:?}",
+            artifact.floor.round(),
+            replies(sample),
+            replies(later),
+            named(&all),
+        );
+    }
+    let same: Vec<&ProbeSelection> = selections
+        .iter()
+        .filter(|selection| selection.floor.epoch() == epoch)
+        .collect();
+    let highest = same
+        .iter()
+        .map(|selection| &selection.floor)
+        .max_by_key(|floor| floor.round())
+        .expect("the floor is a selection in its own epoch");
     assert!(
-        sample.len() == required && highest == Some(&artifact.floor),
-        "I12 violated: the floor of the artifact, at round {}, is not the highest finalization \
-         of the first {required} valid latest replies from distinct dealers that were delivered \
-         since engine 0 last asked for them, {:?}; {:?} were delivered after them",
+        *highest == artifact.floor,
+        "I12 violated: the floor of the artifact, at round {}, is below another selection in \
+         epoch {epoch}, at round {}: the selections in that epoch were {:?}",
         artifact.floor.round(),
-        named(sample),
-        named(later),
+        highest.round(),
+        named(&same),
     );
     1
 }
@@ -2187,9 +2436,9 @@ pub(crate) fn check_probe_floor(run: &ProbeRun) -> usize {
 /// I13: the artifact the discovering probe emitted carries the fabricated
 /// chain's boundary finalization and epoch description for its floor's epoch,
 /// or no finalization and the configured genesis description at epoch zero.
-/// Nothing in it comes from the foreign chain, the boundary is one a source
-/// of the fabricated chain held, and every subscription resolved with the
-/// same artifact.
+/// Nothing in it comes from the foreign chain, the boundary is one that a
+/// source of the fabricated chain held in a checkpoint, and every
+/// subscription resolved with the same artifact.
 ///
 /// Returns the number of artifacts judged: the first against the chain, and
 /// each later one against the first.
@@ -2274,18 +2523,22 @@ pub(crate) fn check_probe_artifact(run: &ProbeRun) -> usize {
         artifact.info,
     );
     assert!(
-        run.sources
-            .iter()
-            .any(|source| !source.foreign && source.finalizations.contains(finalization)),
+        run.sources.iter().any(|source| {
+            !source.foreign
+                && (source.finalizations.contains(finalization)
+                    || source.checkpoint(epoch).is_some_and(|checkpoint| {
+                        checkpoint.finalization.as_ref() == Some(finalization)
+                    }))
+        }),
         "I13 violated: the artifact carries the boundary of epoch {epoch}, which no source of \
-         the fabricated chain holds",
+         the fabricated chain holds, in its marshal or in a checkpoint",
     );
     judged
 }
 
 /// What I14 requires of the discovering probe's blocker for one delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProbeVerdict {
+pub(crate) enum ProbeVerdict {
     /// The sender must be blocked.
     Block,
     /// The sender must not be blocked.
@@ -2297,22 +2550,68 @@ enum ProbeVerdict {
     Open,
 }
 
+/// One boundary fetch of the discovering probe, as its requests show it.
+struct ProbeFetch {
+    /// The epoch whose introducing block it fetches.
+    epoch: Epoch,
+    /// Peers whose valid boundary finalization it accepted in its current
+    /// pass, each with that finalization.
+    accepted: Vec<(PublicKey, ProbeFinalization)>,
+    /// Peers it asked for its block, in any pass, and has not blocked for a
+    /// block since, each with the commitment of the boundary finalization it
+    /// first asked the peer with.
+    requested: Vec<(PublicKey, Digest)>,
+}
+
+impl ProbeFetch {
+    const fn new(epoch: Epoch) -> Self {
+        Self {
+            epoch,
+            accepted: Vec::new(),
+            requested: Vec::new(),
+        }
+    }
+
+    /// The commitment the fetch asked `peer` for its block with, if it did.
+    fn asked(&self, peer: &PublicKey) -> Option<Digest> {
+        self.requested
+            .iter()
+            .find(|(asked, _)| asked == peer)
+            .map(|(_, commitment)| *commitment)
+    }
+}
+
+/// What the probe must show before it takes its next message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeExpected {
+    /// A request to every peer for the boundary finalization of this epoch,
+    /// which a selection in a later epoch than any fetch starts.
+    Fetch(Epoch),
+    /// An artifact, which a valid block from a peer the fetch asked, or a
+    /// selection in epoch zero with no fetch under way, resolves.
+    Resolution,
+}
+
 /// What the harness knows of the discovering probe's state when the probe
 /// takes a message, from the probe's public boundaries alone: what the
 /// program did to its mailbox, what the probe sent, and what was delivered to
 /// it.
 ///
-/// This is a small model of the probe's state, kept to what those boundaries
-/// settle: which loop the probe runs, whether its floor is selected, whether
-/// it awaits its boundary, which peer it last addressed, and which peers it
-/// holds as responders. It reproduces neither the probe's sample nor its
-/// verification. The driver places the boundaries that settle the rest: once
-/// the program drops its last subscription it wakes the probe, which then
-/// looks at its subscriptions before the next event, and once the responder
-/// the block was requested from delivers it with no subscription open it
-/// opens one, which shows the artifact.
+/// It follows which loop the probe runs, whether it has a subscriber, which
+/// dealers it recorded in its current request round and whether that round
+/// selected, and, for each fetch the probe keeps, the peers it accepted in
+/// the current pass and those it asked for the block. Fetches, passes and
+/// requests for a block are read off the requests the probe sends, and the
+/// artifact off its subscriptions; the recorded replies follow from the
+/// rules the probe documents. The driver places the boundaries that settle
+/// the rest: once the program drops its last subscription it wakes the
+/// probe, which then looks at its subscriptions before the next event, and
+/// once a peer the probe asked delivers the whole block of a fetch under way
+/// with no subscription open it opens one, which shows the artifact. A
+/// selection or an artifact the probe must show and does not leaves every
+/// later verdict that depends on its state open.
 #[derive(Default)]
-struct ProbeKnowledge<'a> {
+struct ProbeKnowledge {
     /// The program attached the probe's marshal.
     attached: bool,
     /// Subscriptions the program holds open.
@@ -2328,25 +2627,20 @@ struct ProbeKnowledge<'a> {
     /// closed without an artifact, or its marshal is attached and its
     /// subscriptions resolved.
     serving: bool,
-    /// The probe sent a request other than for latest finalizations, which
-    /// it does only once it has selected its floor.
-    fetching: bool,
-    /// Whom the probe addressed its most recent request to.
-    asked: Option<&'a Recipients<PublicKey>>,
-    /// Sources whose own valid latest reply was delivered since the probe
-    /// last asked for latest finalizations.
-    counted: BTreeSet<usize>,
-    /// Identities that delivered the whole of a boundary finalization of the
-    /// fabricated chain and that the probe still holds as responders: a peer
-    /// it holds is retired when the probe asks another peer, or every peer,
-    /// for what it asked that peer alone.
-    vouched: Vec<&'a PublicKey>,
-    /// The whole of a boundary block of the fabricated chain was delivered
-    /// by the peer the probe's most recent request was addressed to alone.
-    /// The probe takes a block from the responder it requested the block
-    /// from and from nobody else, so only such a delivery resolves the
-    /// artifact through the boundary.
-    fetched: bool,
+    /// Sources whose valid latest reply the probe recorded in its current
+    /// request round.
+    recorded: Vec<usize>,
+    /// The current request round selected.
+    selected: bool,
+    /// The fetch the latest selection in a new epoch started.
+    primary: Option<ProbeFetch>,
+    /// The fetch the primary replaced, kept beside it.
+    fallback: Option<ProbeFetch>,
+    /// What the probe must show before it takes its next message.
+    expected: Option<ProbeExpected>,
+    /// The probe did not show what it had to: what depends on its state is
+    /// no longer known.
+    diverged: bool,
 }
 
 /// Which loop the discovering probe runs.
@@ -2356,9 +2650,9 @@ enum ProbePhase {
     Serving,
 }
 
-impl<'a> ProbeKnowledge<'a> {
+impl ProbeKnowledge {
     /// Take in a step other than a delivery.
-    fn learn(&mut self, solicitation: Option<&[u8]>, step: &'a ProbeStep) {
+    fn learn(&mut self, step: &ProbeStep) {
         match step {
             ProbeStep::Subscribed => self.open += 1,
             ProbeStep::Unsubscribed => {
@@ -2372,61 +2666,84 @@ impl<'a> ProbeKnowledge<'a> {
             ProbeStep::Resolved(_) => {
                 self.open = self.open.saturating_sub(1);
                 self.resolved = true;
+                self.primary = None;
+                self.fallback = None;
+                if self.expected == Some(ProbeExpected::Resolution) {
+                    self.expected = None;
+                }
             }
             ProbeStep::Closed => {
                 self.open = self.open.saturating_sub(1);
                 self.serving |= self.attached;
             }
-            ProbeStep::Requested { recipients, bytes } => {
-                if solicitation == Some(bytes.as_slice()) {
-                    self.counted.clear();
-                } else {
-                    self.fetching = true;
-                    // The probe asks for a boundary finalization or block
-                    // only once it awaits a block from nobody: the peer it
-                    // last asked alone is no longer its responder, and a
-                    // request to every peer shows it holds none at all.
-                    match (self.asked, recipients) {
-                        (Some(Recipients::One(last)), Recipients::One(next)) if last != next => {
-                            self.vouched.retain(|held| *held != last);
-                        }
-                        (_, Recipients::One(_)) => {}
-                        _ => self.vouched.clear(),
-                    }
-                }
-                self.asked = Some(recipients);
-            }
+            ProbeStep::Requested { recipients, bytes } => self.requested(recipients, bytes),
             ProbeStep::Sent(_) | ProbeStep::Delivered { .. } | ProbeStep::Blocked { .. } => {}
         }
         self.serving |= self.attached && self.resolved;
     }
 
-    /// Take in the delivery of `send`.
-    fn deliver(&mut self, run: &ProbeRun, send: &'a ProbeSend) {
-        if self.dropped {
-            assert!(
-                send.shape == ProbeShape::Request,
-                "harness defect: engine 0 was not woken after the program dropped its last \
-                 subscription"
-            );
-            self.dropped = false;
-            self.serving |= self.attached;
+    /// Take in a request the probe sent.
+    fn requested(&mut self, recipients: &Recipients<PublicKey>, bytes: &[u8]) {
+        match bytes.first() {
+            Some(&LATEST_REQUEST) => {
+                self.recorded.clear();
+                self.selected = false;
+            }
+            Some(&BOUNDARY_REQUEST) => {
+                let Some(epoch) = requested_epoch(bytes) else {
+                    self.diverged = true;
+                    return;
+                };
+                if self.expected == Some(ProbeExpected::Fetch(epoch)) {
+                    self.expected = None;
+                }
+                // A request for a fetch's boundary begins a pass of it, and
+                // one for a later epoch than the primary's starts a fetch.
+                if let Some(fetch) = self.fetch(epoch) {
+                    fetch.accepted.clear();
+                } else if self
+                    .primary
+                    .as_ref()
+                    .is_none_or(|primary| epoch > primary.epoch)
+                {
+                    self.fallback = self.primary.replace(ProbeFetch::new(epoch));
+                } else {
+                    self.diverged = true;
+                }
+            }
+            Some(&BLOCK_REQUEST) => {
+                let (Some(epoch), Recipients::One(peer)) = (requested_epoch(bytes), recipients)
+                else {
+                    self.diverged = true;
+                    return;
+                };
+                let Some(fetch) = self.fetch(epoch) else {
+                    self.diverged = true;
+                    return;
+                };
+                let Some(commitment) = fetch
+                    .accepted
+                    .iter()
+                    .find(|(accepted, _)| accepted == peer)
+                    .map(|(_, finalization)| finalization.proposal.payload)
+                else {
+                    self.diverged = true;
+                    return;
+                };
+                if fetch.asked(peer).is_none() {
+                    fetch.requested.push((peer.clone(), commitment));
+                }
+            }
+            _ => self.diverged = true,
         }
-        if let Some(source) = run.counted(send) {
-            self.counted.insert(source);
-        }
-        let ProbeShape::Response(capture) = send.shape else {
-            return;
-        };
-        let capture = &run.captures[capture];
-        if run.sources[capture.source].foreign {
-            return;
-        }
-        match run.answer(capture) {
-            ProbeAnswer::Latest => {}
-            ProbeAnswer::Boundary => self.vouched.push(&send.origin),
-            ProbeAnswer::Block => self.fetched |= self.asked_only(&send.origin),
-        }
+    }
+
+    /// The fetch of `epoch`, if the probe keeps one.
+    fn fetch(&mut self, epoch: Epoch) -> Option<&mut ProbeFetch> {
+        self.primary
+            .iter_mut()
+            .chain(self.fallback.iter_mut())
+            .find(|fetch| fetch.epoch == epoch)
     }
 
     const fn phase(&self) -> ProbePhase {
@@ -2437,201 +2754,258 @@ impl<'a> ProbeKnowledge<'a> {
         }
     }
 
-    /// The probe has certainly selected its floor.
-    const fn selected(&self) -> bool {
-        self.fetching || self.resolved
-    }
-
-    /// The probe has certainly not selected its floor: it selects once
-    /// `required` valid latest replies are recorded, it records none while
-    /// it has no subscriber, and fewer were delivered since it last asked.
-    ///
-    /// A probe with no subscription open has noticed so: the driver wakes it
-    /// once the program drops its last one, and the next subscription makes
-    /// it ask again, so every reply counted since it last asked reached it
-    /// while it had a subscriber.
-    fn sampling(&self, required: usize) -> bool {
-        !self.selected() && (self.open == 0 || self.counted.len() < required)
-    }
-
-    /// The probe certainly waits for its boundary: it asked for one, no
-    /// subscription resolved, and the responder it requested the block from
-    /// did not deliver the whole of it.
-    const fn fetching(&self) -> bool {
-        self.fetching && !self.resolved && !self.fetched
-    }
-
-    /// The probe addressed its most recent request to `peer` alone. Only a
-    /// request for the block is addressed to one peer. The probe sends it
-    /// when it starts to await that peer's block, and sends another request,
-    /// to its next responder or to everyone, when it gives that peer up, so
-    /// while the boundary is awaited `peer` is the responder whose block the
-    /// probe awaits.
-    fn asked_only(&self, peer: &PublicKey) -> bool {
-        matches!(self.asked, Some(Recipients::One(asked)) if asked == peer)
-    }
-}
-
-/// What I14 requires for the delivery of `send`, given what the harness knows
-/// of the discovering probe.
-///
-/// This is the blocking table of the DKG probe, read off its code. While
-/// discovering, the probe decodes every message before anything else and
-/// blocks the sender of one that does not decode: one with no tag or an
-/// unknown tag, or a finalization response cut short. It ignores a request.
-/// A block response is decoded past its epoch only when it comes from the
-/// peer the block was requested from, and is ignored from anyone else. A
-/// latest reply is judged only until the floor is selected: a sender that is
-/// not a dealer is blocked, a stale reply is set aside, and a reply that does
-/// not verify blocks its sender. A boundary finalization is judged only while
-/// the boundary is awaited and from a sender the probe does not hold as a
-/// responder, and one that does not verify blocks its sender. While serving,
-/// the probe reads requests only: it blocks the sender of a message with no
-/// tag or an unknown tag and ignores every response, whole or cut short. It
-/// answers a request from its marshal, which holds nothing in this target.
-///
-/// A verdict stays open only where a correct probe would have moved on and
-/// the run shows no sign that it did, in two cases of a probe that
-/// discovers. A latest reply the probe would refuse, once enough valid
-/// replies for a floor reached it while it had a subscriber and neither a
-/// request for the boundary nor an artifact followed: a probe that selected
-/// its floor ignores the reply. A foreign boundary finalization, or a cut
-/// block from the responder the block was requested from, once that responder
-/// delivered the whole block and no subscription resolved, not even the one
-/// the driver opens to show the artifact: a probe that resolved ignores both.
-fn probe_verdict(run: &ProbeRun, known: &ProbeKnowledge<'_>, send: &ProbeSend) -> ProbeVerdict {
-    let outsider = send.origin == run.outsider;
-    let discovering = match send.shape {
-        ProbeShape::Junk => ProbeVerdict::Block,
-        ProbeShape::Request => ProbeVerdict::Pass,
-        // A prefix this short ends inside the tag or right after it.
-        ProbeShape::Prefix(_) if send.bytes.len() <= 1 => ProbeVerdict::Block,
-        ProbeShape::Prefix(capture) => match run.answer(&run.captures[capture]) {
-            ProbeAnswer::Latest | ProbeAnswer::Boundary => ProbeVerdict::Block,
-            // The body of a block response is decoded only when the response
-            // comes from the responder the block was requested from.
-            ProbeAnswer::Block if !known.asked_only(&send.origin) => ProbeVerdict::Pass,
-            ProbeAnswer::Block if known.fetching() => ProbeVerdict::Block,
-            // The probe holds its artifact and awaits no block.
-            ProbeAnswer::Block if known.resolved => ProbeVerdict::Pass,
-            ProbeAnswer::Block => ProbeVerdict::Open,
-        },
-        ProbeShape::Response(capture) => {
-            let capture = &run.captures[capture];
-            let source = &run.sources[capture.source];
+    /// Take in the delivery of `send`, and say what I14 requires for it.
+    fn deliver(&mut self, run: &ProbeRun, send: &ProbeSend) -> ProbeVerdict {
+        if self.expected.take().is_some() {
+            self.diverged = true;
+        }
+        if self.dropped {
             assert!(
-                outsider || source.identity == send.origin,
-                "harness defect: {} sent a whole response another source built",
-                run.name(&send.origin),
+                send.shape == ProbeShape::Request,
+                "harness defect: engine 0 was not woken after the program dropped its last \
+                 subscription"
             );
-            match run.answer(capture) {
-                // A reply the probe refuses for as long as it samples.
-                ProbeAnswer::Latest
-                    if outsider || (source.foreign && !run.stale(capture.source)) =>
-                {
-                    if known.sampling(run.required()) {
-                        ProbeVerdict::Block
-                    } else if known.selected() {
-                        ProbeVerdict::Pass
-                    } else {
-                        ProbeVerdict::Open
-                    }
-                }
-                ProbeAnswer::Latest => ProbeVerdict::Pass,
-                ProbeAnswer::Boundary if !source.foreign => ProbeVerdict::Pass,
-                // A responder the probe holds is ignored before its boundary
-                // finalization is verified.
-                ProbeAnswer::Boundary if known.fetching() => {
-                    if known.vouched.contains(&&send.origin) {
-                        ProbeVerdict::Pass
-                    } else {
-                        ProbeVerdict::Block
-                    }
-                }
-                ProbeAnswer::Boundary if known.resolved => ProbeVerdict::Pass,
-                ProbeAnswer::Boundary => ProbeVerdict::Open,
-                ProbeAnswer::Block => {
-                    // A source builds a block only when the probe requests
-                    // one from it, which the probe does only of a peer whose
-                    // boundary finalization verified. A source of the foreign
-                    // chain sends no such finalization, so the table has no
-                    // row for a foreign block.
-                    assert!(
-                        !source.foreign,
-                        "harness defect: engine {} holds the foreign chain and built a boundary \
-                         block, which engine 0 can have requested of no such source",
-                        source.engine,
-                    );
-                    ProbeVerdict::Pass
-                }
-            }
+            self.dropped = false;
+            self.serving |= self.attached;
         }
-    };
+        match self.phase() {
+            ProbePhase::Serving => serving_verdict(send),
+            ProbePhase::Discovering => match self.discovering(run, send) {
+                (verdict, false) => verdict,
+                (_, true) if self.diverged => ProbeVerdict::Open,
+                (verdict, true) => verdict,
+            },
+        }
+    }
 
-    match known.phase() {
-        ProbePhase::Discovering => discovering,
-        // While serving, only a message with no tag or an unknown tag blocks.
-        ProbePhase::Serving => match send.shape {
-            ProbeShape::Junk => ProbeVerdict::Block,
-            ProbeShape::Prefix(_) if send.bytes.is_empty() => ProbeVerdict::Block,
-            ProbeShape::Prefix(_) | ProbeShape::Response(_) | ProbeShape::Request => {
-                ProbeVerdict::Pass
+    /// What I14 requires of a probe that discovers for the delivery of
+    /// `send`, and whether that depends on the probe's state rather than on
+    /// how far the message decodes.
+    fn discovering(&mut self, run: &ProbeRun, send: &ProbeSend) -> (ProbeVerdict, bool) {
+        let origin = &send.origin;
+        match send.shape {
+            ProbeShape::Junk => (ProbeVerdict::Block, false),
+            ProbeShape::Request => (ProbeVerdict::Pass, false),
+            ProbeShape::Prefix(_) if send.bytes.is_empty() => (ProbeVerdict::Block, false),
+            ProbeShape::Prefix(capture) => match run.answer(&run.captures[capture]) {
+                // A finalization cut short does not decode.
+                ProbeAnswer::Latest | ProbeAnswer::Boundary(_) => (ProbeVerdict::Block, false),
+                ProbeAnswer::Block(epoch) => match responded_epoch(&send.bytes) {
+                    None => (ProbeVerdict::Block, false),
+                    Some(_) => (self.block(origin, epoch, None), true),
+                },
+            },
+            ProbeShape::Response(capture) => {
+                let capture = &run.captures[capture];
+                let source = &run.sources[capture.source];
+                assert!(
+                    *origin == run.outsider || source.identity == *origin,
+                    "harness defect: {} sent a whole response another source built",
+                    run.name(origin),
+                );
+                let verdict = match run.answer(capture) {
+                    ProbeAnswer::Latest => self.latest(run, origin, capture.source),
+                    ProbeAnswer::Boundary(epoch) => {
+                        let served = run.served(capture, epoch);
+                        let finalization = served.finalization.as_ref().expect("served");
+                        self.boundary(run, origin, finalization)
+                    }
+                    ProbeAnswer::Block(epoch) => {
+                        let served = run.served(capture, epoch);
+                        self.block(origin, epoch, Some(&served.block))
+                    }
+                };
+                (verdict, true)
             }
+            #[cfg(test)]
+            ProbeShape::Crafted => self.crafted(origin, &send.bytes),
+        }
+    }
+
+    /// What I14 requires for a whole latest reply that the source at
+    /// position `source` built, delivered by `origin`.
+    fn latest(&mut self, run: &ProbeRun, origin: &PublicKey, source: usize) -> ProbeVerdict {
+        // Ignored with no subscriber, once the round selected, and from a
+        // dealer recorded in the round, before any check.
+        if self.open == 0 || self.selected {
+            return ProbeVerdict::Pass;
+        }
+        if *origin == run.outsider {
+            return ProbeVerdict::Block;
+        }
+        if self.recorded.contains(&source) {
+            return ProbeVerdict::Pass;
+        }
+        if run.stale(source) {
+            return ProbeVerdict::Pass;
+        }
+        if run.sources[source].foreign {
+            return ProbeVerdict::Block;
+        }
+        self.recorded.push(source);
+        if self.recorded.len() == run.required() {
+            self.selected = true;
+            let target = self
+                .recorded
+                .iter()
+                .map(|source| run.latest(*source))
+                .max_by_key(|latest| latest.round())
+                .expect("a selection has replies")
+                .epoch();
+            self.expected = match &self.primary {
+                None if target.is_zero() => Some(ProbeExpected::Resolution),
+                None => Some(ProbeExpected::Fetch(target)),
+                Some(primary) if target > primary.epoch => Some(ProbeExpected::Fetch(target)),
+                Some(_) => None,
+            };
+        }
+        ProbeVerdict::Pass
+    }
+
+    /// What I14 requires for a whole boundary finalization response carrying
+    /// `finalization`, delivered by `origin`.
+    fn boundary(
+        &mut self,
+        run: &ProbeRun,
+        origin: &PublicKey,
+        finalization: &ProbeFinalization,
+    ) -> ProbeVerdict {
+        let Some(primary) = &self.primary else {
+            return ProbeVerdict::Pass;
+        };
+        let named = finalization.epoch();
+        let primary_boundary = primary
+            .epoch
+            .previous()
+            .expect("a fetch is past epoch zero");
+        let Some(fetch) = self.fetch(named.next()) else {
+            return if named > primary_boundary {
+                ProbeVerdict::Block
+            } else {
+                ProbeVerdict::Pass
+            };
+        };
+        if fetch
+            .accepted
+            .iter()
+            .any(|(accepted, _)| accepted == origin)
+        {
+            return ProbeVerdict::Pass;
+        }
+        if !run.chain.certifies(finalization) {
+            return ProbeVerdict::Block;
+        }
+        fetch.accepted.push((origin.clone(), finalization.clone()));
+        ProbeVerdict::Pass
+    }
+
+    /// What I14 requires for a block response for `epoch` from `origin`,
+    /// whose epoch decodes and whose body is `block`, or does not decode.
+    fn block(&mut self, origin: &PublicKey, epoch: Epoch, block: Option<&Block>) -> ProbeVerdict {
+        let Some(fetch) = self.fetch(epoch) else {
+            return ProbeVerdict::Pass;
+        };
+        let Some(commitment) = fetch.asked(origin) else {
+            return ProbeVerdict::Pass;
+        };
+        if block.is_some_and(|block| fits(block, commitment, epoch)) {
+            self.expected = Some(ProbeExpected::Resolution);
+            return ProbeVerdict::Pass;
+        }
+        fetch.requested.retain(|(asked, _)| asked != origin);
+        ProbeVerdict::Block
+    }
+
+    /// What I14 requires for bytes a regression test built, delivered by
+    /// `origin` to a probe that discovers.
+    #[cfg(test)]
+    fn crafted(&mut self, origin: &PublicKey, bytes: &[u8]) -> (ProbeVerdict, bool) {
+        match bytes.first().copied() {
+            Some(BOUNDARY_REQUEST | BLOCK_REQUEST | LATEST_REQUEST) => (ProbeVerdict::Pass, false),
+            Some(BOUNDARY_RESPONSE | LATEST_RESPONSE) => {
+                assert!(
+                    <ProbeFinalization as commonware_codec::Decode>::decode_cfg(
+                        Copying(&bytes[1..]),
+                        &Scheme::certificate_codec_config_unbounded()
+                    )
+                    .is_err(),
+                    "harness defect: a crafted message decodes as a whole finalization response"
+                );
+                (ProbeVerdict::Block, false)
+            }
+            Some(BLOCK_RESPONSE) => {
+                let mut rest = Copying(&bytes[1..]);
+                let Ok(epoch) = Epoch::read(&mut rest) else {
+                    return (ProbeVerdict::Block, false);
+                };
+                let block = <Block as commonware_codec::Decode>::decode_cfg(rest, &BLOCK_CFG).ok();
+                (self.block(origin, epoch, block.as_ref()), true)
+            }
+            _ => (ProbeVerdict::Block, false),
+        }
+    }
+}
+
+/// What I14 requires of a probe that serves for the delivery of `send`.
+///
+/// It reads requests only. It blocks the sender of a message with no tag or
+/// an unknown tag, and of a request for a boundary finalization or block
+/// whose epoch does not decode as the whole rest of the message; it ignores
+/// a response whatever follows its tag, and takes a request for latest
+/// finalizations whatever follows its tag.
+fn serving_verdict(send: &ProbeSend) -> ProbeVerdict {
+    match send.shape {
+        ProbeShape::Junk => ProbeVerdict::Block,
+        ProbeShape::Prefix(_) if send.bytes.is_empty() => ProbeVerdict::Block,
+        ProbeShape::Prefix(_) | ProbeShape::Response(_) | ProbeShape::Request => ProbeVerdict::Pass,
+        #[cfg(test)]
+        ProbeShape::Crafted => match send.bytes.first().copied() {
+            Some(BOUNDARY_REQUEST | BLOCK_REQUEST) if requested_epoch(&send.bytes).is_none() => {
+                ProbeVerdict::Block
+            }
+            Some(tag) if tag < PROBE_TAGS => ProbeVerdict::Pass,
+            _ => ProbeVerdict::Block,
         },
     }
 }
 
-/// I14: the discovering probe blocks the sender of a damaged response, of a
-/// latest reply replayed by the identity that is not a dealer, and of a
-/// response that does not verify, in the states where it decodes and judges
-/// that message, and blocks nobody else. The blocks the network recorded are
-/// exactly the ones the probe placed.
-///
-/// Every delivery is judged on its own, by [`probe_verdict`], against the
-/// blocks the probe placed while it processed that delivery. Returns the
-/// number of deliveries that had to be blocked, that had to pass, and for
-/// which nothing was required, and the number of blocks the probe placed.
-pub(crate) fn check_probe_blocks(run: &ProbeRun) -> (usize, usize, usize, usize) {
-    // The delivery the probe is processing: its position among the deliveries,
-    // what it is, what I14 requires for it, and whether the probe blocked its
-    // sender.
-    struct Judged<'a> {
-        position: usize,
-        send: &'a ProbeSend,
-        verdict: ProbeVerdict,
-        blocked: bool,
-    }
-    let settle = |judged: Option<Judged<'_>>| {
-        let Some(judged) = judged else {
-            return;
-        };
-        let sender = run.name(&judged.send.origin);
-        match judged.verdict {
-            ProbeVerdict::Block => assert!(
-                judged.blocked,
-                "I14 violated: {sender} was not blocked for delivery {}, {:?} of {} bytes, which \
-                 engine 0 decodes and judges in the state it took it in",
-                judged.position,
-                judged.send.shape,
-                judged.send.bytes.len(),
-            ),
-            ProbeVerdict::Pass => assert!(
-                !judged.blocked,
-                "I14 violated: {sender} was blocked for delivery {}, {:?} of {} bytes, which \
-                 engine 0 must not block in the state it took it in",
-                judged.position,
-                judged.send.shape,
-                judged.send.bytes.len(),
-            ),
-            ProbeVerdict::Open => {}
-        }
-    };
+/// One delivery to the discovering probe as I14 judged it.
+#[derive(Clone, Debug)]
+pub(crate) struct ProbeJudgment {
+    /// Its position among the deliveries.
+    pub(crate) position: usize,
+    /// What was delivered.
+    pub(crate) send: ProbeSend,
+    /// What I14 required for it.
+    pub(crate) verdict: ProbeVerdict,
+    /// Whether the probe blocked its sender while it processed it.
+    pub(crate) blocked: bool,
+}
 
-    let solicitation = run.solicitation();
+/// Every delivery to the discovering probe with what I14 requires for it and
+/// whether the probe blocked its sender, and every block the probe placed.
+///
+/// This is the blocking table of the DKG probe, read off its code (`SPEC.md`,
+/// Choices made, item 36). While discovering, the probe decodes the parts of
+/// every message that tell it what the message is before anything else, and
+/// blocks the sender of a message with no tag or an unknown tag, of a latest
+/// or boundary response whose finalization does not decode as the whole rest,
+/// and of a block response whose epoch does not decode; it ignores a request.
+/// A latest reply is judged only while the probe has a subscriber and its
+/// round awaits the sender: the sender that is not a dealer is blocked, a
+/// stale reply is set aside, and a foreign one blocks its source. A boundary
+/// finalization is judged by the fetch whose boundary epoch it names; one
+/// naming no fetch's blocks its sender if its epoch is later than the
+/// primary's boundary epoch, a sender the fetch accepted in the current pass
+/// is ignored, and any other one that does not verify blocks its sender. A
+/// block response is decoded past its epoch only for a fetch of that epoch
+/// and from a peer the fetch asked for the block and has not blocked for one
+/// since, and blocks that peer unless it is the block the fetch asked for.
+/// While serving, [`serving_verdict`] applies.
+pub(crate) fn probe_judgments(run: &ProbeRun) -> (Vec<ProbeJudgment>, Vec<PublicKey>) {
     let mut known = ProbeKnowledge::default();
     let mut sent: Option<&ProbeSend> = None;
-    let mut judged: Option<Judged<'_>> = None;
-    let (mut refusals, mut admissions, mut unsettled, mut deliveries) = (0, 0, 0, 0);
+    let mut judgments: Vec<ProbeJudgment> = Vec::new();
     let mut placed = Vec::new();
     for step in &run.steps {
         match step {
@@ -2642,7 +3016,6 @@ pub(crate) fn check_probe_blocks(run: &ProbeRun) -> (usize, usize, usize, usize)
                 );
             }
             ProbeStep::Delivered { peer, bytes } => {
-                settle(judged.take());
                 let send = sent
                     .take()
                     .expect("harness defect: engine 0 took a message the program did not send");
@@ -2650,23 +3023,16 @@ pub(crate) fn check_probe_blocks(run: &ProbeRun) -> (usize, usize, usize, usize)
                     send.origin == *peer && send.bytes == *bytes,
                     "harness defect: engine 0 took a message other than the one the program sent"
                 );
-                let verdict = probe_verdict(run, &known, send);
-                match verdict {
-                    ProbeVerdict::Block => refusals += 1,
-                    ProbeVerdict::Pass => admissions += 1,
-                    ProbeVerdict::Open => unsettled += 1,
-                }
-                judged = Some(Judged {
-                    position: deliveries,
-                    send,
+                let verdict = known.deliver(run, send);
+                judgments.push(ProbeJudgment {
+                    position: judgments.len(),
+                    send: send.clone(),
                     verdict,
                     blocked: false,
                 });
-                deliveries += 1;
-                known.deliver(run, send);
             }
             ProbeStep::Blocked { peer } => {
-                let Some(judged) = judged.as_mut() else {
+                let Some(judged) = judgments.last_mut() else {
                     panic!(
                         "I14 violated: engine 0 blocked {} before it took any message",
                         run.name(peer)
@@ -2681,22 +3047,65 @@ pub(crate) fn check_probe_blocks(run: &ProbeRun) -> (usize, usize, usize, usize)
                     run.name(&judged.send.origin),
                 );
                 judged.blocked = true;
-                placed.push(peer);
+                placed.push(peer.clone());
             }
-            step => known.learn(solicitation, step),
+            step => known.learn(step),
         }
     }
-    settle(judged);
     assert!(
         sent.is_none(),
         "harness defect: a message the program sent was never delivered"
     );
+    (judgments, placed)
+}
+
+/// I14: the discovering probe blocks the sender of a damaged response, of a
+/// latest reply replayed by the identity that is not a dealer, and of a
+/// response that does not verify, in the states where it decodes and judges
+/// that message, and blocks nobody else. The blocks the network recorded are
+/// exactly the ones the probe placed.
+///
+/// Every delivery is judged on its own, by [`probe_judgments`], against the
+/// blocks the probe placed while it processed that delivery. Returns the
+/// number of deliveries that had to be blocked, that had to pass, and for
+/// which nothing was required, and the number of blocks the probe placed.
+pub(crate) fn check_probe_blocks(run: &ProbeRun) -> (usize, usize, usize, usize) {
+    let (judgments, placed) = probe_judgments(run);
+    let (mut refusals, mut admissions, mut unsettled) = (0, 0, 0);
+    for judged in &judgments {
+        let sender = run.name(&judged.send.origin);
+        match judged.verdict {
+            ProbeVerdict::Block => {
+                refusals += 1;
+                assert!(
+                    judged.blocked,
+                    "I14 violated: {sender} was not blocked for delivery {}, {:?} of {} bytes, \
+                     which engine 0 decodes and judges in the state it took it in",
+                    judged.position,
+                    judged.send.shape,
+                    judged.send.bytes.len(),
+                );
+            }
+            ProbeVerdict::Pass => {
+                admissions += 1;
+                assert!(
+                    !judged.blocked,
+                    "I14 violated: {sender} was blocked for delivery {}, {:?} of {} bytes, which \
+                     engine 0 must not block in the state it took it in",
+                    judged.position,
+                    judged.send.shape,
+                    judged.send.bytes.len(),
+                );
+            }
+            ProbeVerdict::Open => unsettled += 1,
+        }
+    }
 
     // The network holds the blocks the probe placed and no others: no source
     // blocks anyone, since the discovering probe sends only requests.
     for (blocker, target) in &run.blocked {
         assert!(
-            *blocker == run.discoverer && placed.contains(&target),
+            *blocker == run.discoverer && placed.contains(target),
             "I14 violated: the network recorded that {} blocked {}, a block engine 0 did not \
              place",
             run.name(blocker),
@@ -2707,7 +3116,7 @@ pub(crate) fn check_probe_blocks(run: &ProbeRun) -> (usize, usize, usize, usize)
         assert!(
             run.blocked
                 .iter()
-                .any(|(blocker, target)| *blocker == run.discoverer && target == *peer),
+                .any(|(blocker, target)| *blocker == run.discoverer && target == peer),
             "I14 violated: the block engine 0 placed on {} did not reach the network",
             run.name(peer),
         );
@@ -2717,11 +3126,10 @@ pub(crate) fn check_probe_blocks(run: &ProbeRun) -> (usize, usize, usize, usize)
 
 /// Check a probe run and report how much was compared.
 pub(crate) fn check_probe(run: &ProbeRun) -> ProbeCounts {
-    let solicitation = run.solicitation();
     let (mut solicitations, mut fetches, mut artifacts) = (0, 0, 0);
     for step in &run.steps {
         match step {
-            ProbeStep::Requested { bytes, .. } if solicitation == Some(bytes.as_slice()) => {
+            ProbeStep::Requested { bytes, .. } if bytes.first() == Some(&LATEST_REQUEST) => {
                 solicitations += 1;
             }
             ProbeStep::Requested { .. } => fetches += 1,
@@ -2729,19 +3137,19 @@ pub(crate) fn check_probe(run: &ProbeRun) -> ProbeCounts {
             _ => {}
         }
     }
-    let answers = |answer| {
+    let answers = |kind: fn(ProbeAnswer) -> bool| {
         run.captures
             .iter()
-            .filter(|capture| run.answer(capture) == answer)
+            .filter(|capture| kind(run.answer(capture)))
             .count()
     };
     let (refusals, admissions, unsettled, blocks) = check_probe_blocks(run);
     ProbeCounts {
         solicitations,
         fetches,
-        latest_replies: answers(ProbeAnswer::Latest),
-        boundary_replies: answers(ProbeAnswer::Boundary),
-        block_replies: answers(ProbeAnswer::Block),
+        latest_replies: answers(|answer| answer == ProbeAnswer::Latest),
+        boundary_replies: answers(|answer| matches!(answer, ProbeAnswer::Boundary(_))),
+        block_replies: answers(|answer| matches!(answer, ProbeAnswer::Block(_))),
         deliveries: refusals + admissions + unsettled,
         refusals,
         admissions,

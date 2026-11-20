@@ -7,8 +7,8 @@ use commonware_runtime::{
     Runner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
-    merkle::{Family, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
+    merkle::{Family, Location, mmb, mmr},
     qmdb::{
         Error, ProofExt as _,
         keyless::variable::{Config, Db as Keyless},
@@ -233,13 +233,10 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
-            journal_partition: format!("{test_name}-journal"),
-            metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
-            write_buffer: NZUsize!(1024),
+            partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy,
-            page_cache: page_cache.clone(),
+            resident_height: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("{test_name}-log"),
@@ -250,6 +247,7 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
             items_per_section: NZU64!(7),
             page_cache,
         },
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -797,10 +795,11 @@ fn fuzz_family<F: Family, S: Strategy>(
                             reopened
                         }
                         Err(error @ (Error::InvalidInitializationBound
-                            | Error::Journal(commonware_storage::journal::Error::ItemPruned(_)))) => {
+                            | Error::NoRetainedCommit(_))) => {
                             match error {
                                 Error::InvalidInitializationBound => assert_eq!(cap, 0),
-                                Error::Journal(_) => {
+                                Error::NoRetainedCommit(bound) => {
+                                    assert_eq!(bound, cap);
                                     assert_ne!(cap, 0);
                                     assert!(selected.is_none_or(|(end, _)| end <= before_bounds.start));
                                 }

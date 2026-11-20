@@ -24,6 +24,10 @@ Used throughout this document with exactly these meanings.
 - **EpochInfo**: the value the final block of an epoch carries for the next epoch: outcome,
   epoch, output, players, and next players.
 - **Boundary block**: the final block of an epoch.
+- **Introducing block** of an epoch `e`: the block the epoch starts from, which carries the
+  `EpochInfo` of `e`: the configured genesis block for epoch zero, and the boundary block of epoch
+  `e - 1` for a later epoch. The DKG module's documentation calls it the boundary block that
+  introduces `e`.
 - **Identity**: one ed25519 signing key.
 - **Committee**: the players of the current output. It always has 4 members.
 - **Engine**: one running node stack.
@@ -53,6 +57,15 @@ Used throughout this document with exactly these meanings.
   identity against its retained storage and its retained secret store.
 - **Fabricated chain**: in the probe target, a chain of blocks and finalizations built by the
   harness and injected into real marshal actors, with no consensus running.
+- **State-sync plan**: one node's `commonware_glue::dkg::state_sync::Plan`, opened with
+  `Plan::init` under the node's partition prefix. It keeps the node's state-sync material and its
+  checkpoints in two partitions outside marshal, `<prefix>_dkg_state_sync` and
+  `<prefix>_dkg_checkpoint`.
+- **Checkpoint**: what a state-sync plan keeps, keyed by an epoch `e`, for an epoch the node
+  entered from its introducing block: that block and, when marshal had one, its finalization,
+  which for `e` past zero is a finalization of epoch `e - 1`. A node serves an epoch to a
+  probe only from the epoch's checkpoint, and only if the checkpoint holds the finalization
+  (`glue/src/dkg/mod.rs`, Marshal Retention). Main #5555 (2026-11-19) introduced checkpoints.
 - **Joiner**: in the state-sync target, the identity that starts late and enters through the
   probe and DKG state sync.
 - **Measurement point**: the points at which the invariants in section 8 are checked: each
@@ -66,11 +79,12 @@ to satisfy them.
 
 The DKG module enables threshold key generation without a trusted dealer,
 while resharing allows validator set changes while preserving the threshold public key. It composes the
-Feldman-Desmedt ceremony with p2p dealing, on-chain dealer logs, epoch transitions, crash
-recovery, and state sync for late joiners. A defect in that composition can leave correct nodes
-with different outputs, with shares that do not match the public key, or with a group key that
-changes across a reshare. It can also leave a correct player's share published on chain. No
-invariant checks that last defect since I7 was withdrawn (Choices made, item 4; section 12).
+Feldman-Desmedt ceremony with p2p dealing, on-chain dealer logs, epoch transitions, epoch
+checkpoints, crash recovery, and state sync for late joiners. A defect in that composition can
+leave correct nodes with different outputs, with shares that do not match the public key, or
+with a group key that changes across a reshare. It can also leave a correct player's share
+published on chain. No invariant checks that last defect since I7 was withdrawn (Choices made,
+item 4; section 12).
 
 Existing fuzzing does not cover this. `cryptography/fuzz` drives the ceremony functions directly,
 with no actors, network, storage, or blocks.
@@ -160,7 +174,11 @@ fact about the code under test, and it adds no obligation of its own.
   `reshare::Application` wrapper, the real `orchestrator::Actor` with its per-epoch Simplex
   engines, and the real `probe::Actor`. The block type and the inner application MUST be defined by
   the harness and MUST NOT carry state beyond what the DKG module needs. `StatefulActor` and QMDB
-  MUST NOT be part of the stack.
+  MUST NOT be part of the stack. At every start, every engine MUST open one state-sync plan with
+  `Plan::init` under its own partition prefix, never `Plan::disabled`, and MUST give clones of
+  that one plan to its reshare actor, its orchestrator, and its probe when it attaches marshal
+  (R23), as the DKG module documents for its caller (`glue/src/dkg/mod.rs`, State Sync and Marshal
+  Retention).
 - **R14. Harness-supplied traits.** The harness MUST implement `SecretStore`, `Registrar`,
   `ParticipantsProvider`, and the epoch-keyed scheme provider. These implementations MUST honor the
   contracts documented on the traits, so that a panic the DKG module raises on a contract violation
@@ -177,12 +195,13 @@ fact about the code under test, and it adds no obligation of its own.
   restart any engine.
 - **R16. Restart scope.** The restart targets MUST run correct nodes only and accept a
   fuzz-controlled schedule that crashes and restarts them. A restart MUST be an in-run abort and
-  re-initialisation on the same deterministic runtime. All storage partitions and the node's secret
-  store MUST survive it. A state-loss variant (a wiped secret store or journal, storage rolled back
-  behind the secret store) MUST NOT be produced. A crash MAY fall between any two writes of a node:
-  after it the secret store can be ahead of the node's journals, or behind them, by the writes that
-  were in flight at the crash, and a journal can lack writes that had resolved but whose sync had
-  not completed. That is not state loss: nothing that was durable when its write resolved is lost.
+  re-initialisation on the same deterministic runtime. All storage partitions, the state-sync
+  plan's included, and the node's secret store MUST survive it. A state-loss variant (a wiped
+  secret store or journal, storage rolled back behind the secret store) MUST NOT be produced. A
+  crash MAY fall between any two writes of a node: after it the secret store can be ahead of the
+  node's journals, or behind them, by the writes that were in flight at the crash, and a journal
+  can lack writes that had resolved but whose sync had not completed. That is not state loss:
+  nothing that was durable when its write resolved is lost.
 - **R17. Link conditions.** In the Twins targets every link MUST be fixed and lossless; the twins
   partition and the DKG mask MUST be the only network faults. In the restart targets the input MUST
   control link conditions among correct nodes: latency, jitter, delivery rate, and temporary cuts.
@@ -196,7 +215,15 @@ fact about the code under test, and it adds no obligation of its own.
   control: a fault planted inside the harness at the observation boundary that makes exactly that
   invariant fail. An invariant that another invariant always reports first in a target MAY have its
   control in another target or over built records. I11 constrains the working tree, not a run, and
-  is verified at delivery (section 10, step 1).
+  is verified at delivery (section 10, step 1). In the two restart targets a fixed input
+  MAY place a scheduled crash right after writes the test names, instead of at the time the tape
+  draws (Choices made, item 35). Such a test MAY replace the crash and restart program that the
+  target's run function lays out from the input with one it builds, and MAY enter the driver below
+  that function only at the one point where that program is handed in; the decoded input, the
+  runtime, the engines, the observations, and the invariant checks MUST be the ones the run
+  function uses. A regression test MUST NOT replace that program for any other purpose. The naming
+  of writes MUST be compiled only into the regression suite, and a run that does not use it MUST be
+  unchanged by it.
 - **R20. Reuse of fuzzing primitives.** The implementation MUST reuse existing fuzzing primitives
   wherever one fits and MUST NOT duplicate them in `glue/fuzz`. This covers the primitives the
   published crates provide (`FuzzRng`, the twins scenario generator and elector, the simulated
@@ -215,14 +242,52 @@ fact about the code under test, and it adds no obligation of its own.
   later epoch's MUST be a reshare of the one before through the real dealer and player state
   machines, so every epoch's output carries the group key the chain is verified with. The epoch
   length MUST be 2. A source MAY be seeded from a foreign chain built the same way from a different
-  dealt key.
+  dealt key. Every member MUST open its own state-sync plan with `Plan::init` (R13), and every
+  attachment MUST give the probe that member's marshal and plan. Each source's plan MUST hold, when
+  it is opened, the checkpoints the input selects for that source (R22), and the harness MUST put
+  them there by writing the partition the plan loads its checkpoints from,
+  `<prefix>_dkg_checkpoint`, in the record format the DKG module stores, before `Plan::init` opens
+  it. A checkpoint MUST be keyed by its epoch `e` and MUST hold the introducing block of `e` on the
+  source's own chain (for `e` past zero, the final block of epoch `e - 1`, which carries the
+  `EpochInfo` of `e`), the commitment of that block, and either nothing or that chain's
+  finalization of the block, whose proposal's payload is that commitment and which for `e` past
+  zero is a finalization of epoch `e - 1`; a checkpoint of epoch zero MUST hold no finalization.
+  The module checks none of this when it loads a record: the check that a finalization matches its
+  block runs only where the module itself builds a checkpoint, which a written record bypasses. The
+  regression suite MUST hold a fixed input in which a source holds the checkpoint of an epoch `e`
+  past zero with its finalization and the discovering probe samples a floor in `e`, and MUST check
+  that the source's record keyed `e` holds the block at the height of the final block of `e - 1`,
+  that this block carries the `EpochInfo` of `e`, that the record's commitment equals the
+  commitment of the record's block and the payload of the record's finalization's proposal, that
+  the record's finalization is of epoch `e - 1`, and that the run emits an artifact for `e`. Two
+  more fixed inputs MUST tell serving from a checkpoint apart from serving from marshal. In the
+  first, one source's plan holds the checkpoint of an epoch `e` past zero with its finalization
+  while that source's marshal holds no height at or above the introducing block of `e`, no other
+  source holds a checkpoint of `e`, and the discovering probe samples a floor in `e`: the run MUST
+  emit an artifact for `e`, and the boundary finalization and the block that resolve it MUST be
+  that source's responses. In the second, a source's marshal holds the introducing block of an
+  epoch `e` past zero and its finalization, while its plan holds no checkpoint of `e` in one run
+  and one without the finalization in another, and the discovering probe asks every peer for the
+  boundary of `e`. A source that sends no boundary finalization is never asked for its block by the
+  discovering probe, so in both runs the regression driver MUST also deliver to that source,
+  through the simulated network and from the identity that is not a dealer, one encoded boundary
+  finalization request and one encoded block request for `e`, each whole. In both runs that source
+  MUST send no boundary finalization response and no block response for `e`, to the discovering
+  probe or to the identity that is not a dealer, read from the traffic the harness captures (R22).
+  Only the regression suite MAY seed a checkpoint whose introducing block lies above the heights a
+  source's marshal holds; the fuzz input MUST NOT (R22). The harness MUST write that partition only
+  through the public APIs of `commonware_storage` and `commonware_codec`, and MUST NOT write any
+  other partition of the DKG module. The discovering probe's plan MUST hold nothing. Choices made,
+  item 30 gives the reasons and what this depends on.
 - **R22. Probe adversary program.** The probe target's structured input MUST bound and control
-  what each source holds, the minimum epoch, and a program of events: subscribe, unsubscribe,
-  attach a marshal, release a captured response, duplicate it, replay it from the non-dealer,
-  truncate it, send a fragment of it from another identity, send junk, and advance time. Source
-  responses MUST be captured and handled as opaque bytes, for all three response kinds the DKG
-  probe has. The harness MUST NOT reimplement floor selection, response verification, or probe
-  state transitions.
+  what each source holds: the heights of its chain and, for each epoch whose introducing block
+  lies within those heights, whether the source holds the epoch's checkpoint and whether that
+  checkpoint holds the finalization. It MUST also bound and control the minimum epoch and a
+  program of events: subscribe, unsubscribe, attach a marshal and a plan, release a captured
+  response, duplicate it, replay it from the non-dealer, truncate it, send a fragment of it from
+  another identity, send junk, and advance time. Source responses MUST be captured and handled
+  as opaque bytes, for all three response kinds the DKG probe has. The harness MUST NOT
+  reimplement floor selection, response verification, or probe state transitions.
 - **R23. Late-joiner state sync.** The state-sync target MUST run 5 correct identities. The input
   MUST select one as the joiner; the other four MUST start at genesis. The joiner MUST start once a
   fuzz-selected height has been applied, which MUST be able to fall in any phase of any epoch of
@@ -230,12 +295,15 @@ fact about the code under test, and it adds no obligation of its own.
   the probe's artifact, and start the reshare stack from it. The input MUST also control an
   optional restart of the joiner at a chosen delay after it starts and a schedule of up to three
   restarts across all nodes. Links MUST be fixed. Every node MUST start a real probe at every boot
-  and attach its marshal to it.
+  and attach its marshal and its state-sync plan to it.
 - **R24. Joiner caller contract.** The harness plays the role the DKG module documents for its
   caller. It MUST keep the joiner's floor durable across restarts, MUST pass a persisted floor to
   the probe when it restarts, MUST pair the artifact's `EpochInfo` with the later-by-round of the
   persisted floor and the artifact's floor, and MUST start marshal from that floor. A sync that
-  completed MUST NOT be repeated at a later start.
+  completed MUST NOT be repeated at a later start. It MUST give the state-sync plan material only
+  at a start whose floor block marshal still stores or will fetch, which the DKG module requires
+  of its caller since main #5555 (`glue/src/dkg/mod.rs`, Marshal Retention; Choices made,
+  item 33).
 - **R25. Registration.** Every target MUST be registered as a `[[bin]]` in
   `glue/fuzz/Cargo.toml` with its own feature, and every such feature MUST be included in a
   `dkg-all` feature that is part of the default set, as the stateful targets are.
@@ -342,6 +410,9 @@ The CI fuzz job discovers targets from the manifest, so no other list needs upda
 - The marshal actor and its mocks in `commonware_consensus::marshal`.
 - The simulated network in `commonware_p2p::simulated`.
 - The deterministic runtime and its storage in `commonware_runtime::deterministic`.
+- The metadata store in `commonware_storage::metadata`, through which the probe target writes
+  its sources' checkpoints (R21). The partition name and record format it writes are the DKG
+  module's, and are not part of its public API (Choices made, item 30).
 
 Any change to a consumed interface that alters its contract is a change to this feature's
 dependencies and must be re-audited against this document.
@@ -469,22 +540,24 @@ fuzz process writes.
 ### 7.4 `dkg_probe`
 
 1. **Setup.** Per R21. The harness records, for each source, the exact finalizations and boundary
-   blocks it holds.
+   blocks its marshal holds, and the checkpoints its plan holds, each with or without its
+   finalization.
 2. **Execution.** The bounded event program of R22 drives subscriptions, attachment, retries,
    delivery, and raw malformed traffic through public boundaries. The driver adds two
    observable boundaries, so that the oracle knows the probe's state at every delivery. When
    the program drops its last subscription, the identity that is not a dealer sends the probe
    back the request for latest finalizations the probe sent: the probe ignores it while
    discovering, answers it with nothing while serving, and looks at its subscriptions once it
-   has taken it. When the responder the probe asked delivers the whole boundary block while no
-   subscription is open and the probe's marshal is not attached, the driver opens a
-   subscription, which the probe answers with the artifact it then holds.
+   has taken it. When a peer the probe asked for the introducing block of a fetch under way
+   (Choices made, item 36) delivers that whole block while no subscription is open and the
+   probe's marshal is not attached, the driver opens a subscription, which the probe answers
+   with the artifact it then holds.
 3. **Measurement.** If the discovering probe emits an artifact, I12 and I13 are checked against
    the recorded source state. No artifact is required. A run without one reports I12 and I13 as
    unmeasured (R30). I14 does not depend on an artifact: it is checked at every delivery to the
    discovering probe, and its count (R30) is the number of deliveries for which it required a
    block or required that the sender not be blocked. A delivery for which nothing is required
-   (Choices made, item 11) is not counted. I14 is unmeasured only when that count is zero, with
+   (Choices made, item 36) is not counted. I14 is unmeasured only when that count is zero, with
    the reason that no delivery was judged. I8 applies throughout (section 8.1).
 
 ### 7.5 `dkg_state_sync`
@@ -575,11 +648,15 @@ targets. Section 8.1 gives the same sets as one table.
   check, which names I10 when they differ.
 - **I11. Fuzz-only change scope.** Every change introduced by this feature MUST be confined to
   `glue/fuzz/` (R3), and pre-existing unrelated working-tree changes MUST be preserved.
-- **I12. Probe floor provenance.** If the discovering probe emits an artifact, its floor MUST be
-  the highest-round finalization among the valid latest-replies of exactly the first `f + 1`
-  distinct dealers to deliver one since the probe's last latest-request, each sent by the source
-  that built it. A valid latest-reply delivered after those MUST NOT change the floor. With 4
-  dealers that is 2.
+- **I12. Probe floor provenance.** A selection is the highest-round finalization among the valid
+  latest-replies of exactly the first `f + 1` distinct dealers to deliver one, while the probe had
+  a subscriber, after a latest-request of the probe and before its next one, each sent by the
+  source that built it.
+  With 4 dealers that is 2. If the discovering probe emits an artifact, its floor MUST be a
+  selection, and of the selections in the artifact's epoch made before the artifact was emitted,
+  the one with the highest round. A valid latest-reply delivered after the first `f + 1` of its
+  request MUST NOT change that request's selection. Until main #5555 the probe made one selection
+  and the floor was final (Choices made, item 32).
 - **I13. Probe artifact consistency.** The artifact's finalization and `EpochInfo` MUST equal the
   fabricated chain's boundary finalization and the `EpochInfo` of its boundary block for the
   floor's epoch. At epoch 0 the artifact MUST carry no finalization and the configured genesis
@@ -669,7 +746,7 @@ suite of that target makes at least one replay comparison.
 | I6 | One failed ceremony that a correct engine reported: a failed reshare, whose carried output is compared with the previous one and under which every share a correct engine held for the previous epoch is judged; or a failed bootstrap, after which the holdings of every correct engine are examined | `no failed ceremony was reported` |
 | I8 | One for the run: its whole panic record and its watch over the correct engines, judged at the end of the run. The count is zero only for a run that executed no scenario | `nothing ran` |
 | I9 | One for the run: the network's whole record of blocks, judged at the end of the run. The count is zero only for a run that executed no scenario | `nothing ran` |
-| I12 | One floor: the floor of the artifact the discovering probe emitted, judged against the replies of Choices made, item 12. A probe selects one floor, so the count of a run is 0 or 1 | `no artifact was emitted` |
+| I12 | One floor: the floor of the artifact the discovering probe emitted, judged against the selections of Choices made, item 37. A probe emits one artifact, so the count of a run is 0 or 1, however many selections it made | `no artifact was emitted` |
 | I13 | One artifact the discovering probe emitted, one for each subscription it answered with an artifact: the first judged against the fabricated chain, each later one against the first | `no artifact was emitted` |
 | I14 | One delivery to the discovering probe for which the check required a block or required that the sender not be blocked (7.4, step 3) | `no delivery was judged` |
 | I15 | One step of the joiner's caller record that a clause of I15 judges: a start that follows a selected floor, a start that follows or finds a completion, or a floor selected after an earlier one. The joiner's first start, its first floor, and the completion itself are judged by no clause and add no unit | `no start followed a floor` |
@@ -765,10 +842,16 @@ use the nightly pinned by CI (`nightly` under `[tools]` in `.github/toolchains.t
    ceremony (section 9), so its regression suite MUST instead show, in at least one run, I6
    reported as unmeasured with the reason `no failed ceremony was reported` (section 8.1), and
    it MUST keep the negative control of I6 that R19 requires. `dkg_bootstrap_restarts` is not
-   excepted. The smoke run of step 6 reports, per invariant, how many runs measured it and how
-   many did not. The invariants of a target are the ids of its row in section 8.1. For I10 the count
-   is the replay check's. The smoke run reports in the last aggregate line its process writes
-   (section 5.4), which has no entry for I10.
+   excepted. In `dkg_state_sync` the run that gives I6 a count above zero MUST be found by a
+   search, not pinned: the regression suite MUST run the two-byte inputs `[0x00, 0x00]`,
+   `[0x00, 0x01]`, and so on in that order, each decoded as libFuzzer decodes its input, through
+   the target's run function, MUST stop at the first whose report gives I6 a count above zero,
+   and MUST fail if none of the first 512 does. A change of the code under test that only moves
+   the run's timing then moves which input is found, and does not lose the count (Choices made,
+   item 35). The smoke run of step 6 reports, per
+   invariant, how many runs measured it and how many did not. The invariants of a target are the
+   ids of its row in section 8.1. For I10 the count is the replay check's. The smoke run reports
+   in the last aggregate line its process writes (section 5.4), which has no entry for I10.
 
 Passing steps 1-7 for a target constitutes acceptance of that target.
 
@@ -969,6 +1052,9 @@ sections refer to it as "Choices made" and to its entries by item number.
     places is attributed to the delivery it was processing, the probe may block only that
     delivery's sender, and the pairs the network recorded must be exactly the blocks the probe
     placed, so a block by a source is a violation too.
+
+    Superseded on 2026-11-20 by item 36, for main #5555. Item 31 gives why and what changed.
+    The text above is kept unchanged as the record of the table before that update.
 12. **I12 as checked.** The replies are every whole latest reply of the fabricated chain that is not
     stale, delivered by the source that built it, once per source, since the last request for latest
     finalizations and before the first subscription resolved, in the order the probe took them. Each
@@ -988,6 +1074,9 @@ sections refer to it as "Choices made" and to its entries by item number.
     listed anew. The negative control is a run in which the
     third source's higher reply is delivered after the first two and before the boundary, with that
     reply's finalization planted as the floor.
+
+    Superseded on 2026-11-20 by item 37, for main #5555. Item 32 gives why and what changed.
+    The text above is kept unchanged as the record of the check before that update.
 13. **Writes are held around a scheduled crash (R16, A6, 7.3).** A crash is an abort of the
     engine's tasks, and an abort takes effect only where a task is suspended. The harness secret
     store and the deterministic runtime's storage complete every write in one poll, so a crash
@@ -1247,7 +1336,7 @@ sections refer to it as "Choices made" and to its entries by item number.
     targets. All 60 decoded bootstrap runs completed, at every prefix. No invariant fired.
 23. **Unmeasured runs (R30).** Until this change section 9 excluded the reporting of runs that
     measured nothing: the harness did not label or count them, and the reach of the oracle was
-    read from libFuzzer coverage. Withdrawn after the spec review (CR-001): a run that cannot
+    read from libFuzzer coverage. Withdrawn after the spec review of 2026-11-18: a run that cannot
     measure an invariant is reported as unmeasured, never as passing. Nothing that was detected
     is lost. What is new: a campaign whose runs no longer reach a ceremony, an artifact, or a
     sync is visible.
@@ -1255,7 +1344,7 @@ sections refer to it as "Choices made" and to its entries by item number.
     artifact can still measure it. Its count is the deliveries for which the check required a
     block or required none. A delivery for which nothing is required (item 11) is left out, so
     that a run in which every delivery is of that kind reports I14 as unmeasured and not as
-    passing. From the spec review (CR-007): until then 7.4 said that a run without an artifact
+    passing. From the spec review of 2026-11-18: until then 7.4 said that a run without an artifact
     reports I12-I14 as unmeasured.
 25. **Units of the R30 counts (8.1).** R30 said "how many records the check judged" and fixed
     the unit for I14 only (item 24). The acceptance list for R30 (2026-11-18) could
@@ -1318,7 +1407,7 @@ sections refer to it as "Choices made" and to its entries by item number.
 29. **I6 in `dkg_bootstrap` is excepted from section 10, step 7.** Until this change step 7
     required, for every target, a count above zero in at least one regression run for every
     invariant of its row in 8.1, I6 in `dkg_bootstrap` included. The review of items 25 to 28
-    found (SR-001) that the document did not know whether a bootstrap ceremony can fail under
+    found, on 2026-11-18, that the document did not know whether a bootstrap ceremony can fail under
     that target's adversary (R15, R17, A1, A2). A check then found no failing input, in the
     4,330 runs section 9 gives, and the reason section 9 gives from the code. A failed
     bootstrap under Twins is likely unreachable and not proven so. The decision of
@@ -1334,6 +1423,341 @@ sections refer to it as "Choices made" and to its entries by item number.
     is about what the regression suite must show, not about what a run reports: a run of
     `dkg_bootstrap` in which a correct engine reports a failed ceremony gives I6 a count
     above zero, as R30 and 8.1 require. Future work 12.1, row 28 records the cost.
+
+Items 30 to 37 record the update of 2026-11-20 for main #5555 (`7e8a61c52c`, "Checkpoint DKG
+epoch boundaries for restart and peer sync"), merged into this branch with main `c2627b4132`.
+The merge ported the harness so that it compiles, and no further. On that tree, before any part
+of this update was built, 53 tests of `glue/fuzz` failed: 45 of `dkg_probe`, two that pin the
+partitions an engine opens, three fixed crash scenarios of `dkg_reshare_restarts`, the
+acceptance coverage tests of `dkg_probe` and `dkg_state_sync`, and the production-tree check of
+section 10, step 1, which fails while a merge is staged and not committed.
+
+30. **Checkpoints of the probe's sources (R21, R22, 7.4).** Since main #5555 a serving probe
+    answers a boundary finalization or block request for an epoch only from that epoch's
+    checkpoint in its plan, and only if the checkpoint holds the finalization
+    (`glue/src/dkg/probe/actor/service.rs`). Only a running orchestrator records a checkpoint
+    (`Plan::record` and `Checkpoint::new` are private to the crate), and the probe target runs
+    none (R21). The three sources then answered no boundary request, no artifact past epoch 0
+    was emitted, and 39 tests of `dkg_probe` failed for that reason alone: a throwaway prototype
+    that wrote each source's checkpoints before its plan opened, and changed nothing else, made
+    them pass. R21 now has the harness write that partition, and `Plan::init` loads it as it does
+    for a restarted node.
+    - *What it depends on.* Two details that are not part of the DKG module's public API: the
+      partition's suffix, `_dkg_checkpoint`, and the format of a checkpoint record (the block as
+      marshal stores it, its commitment, and an optional finalization, keyed by the epoch as a
+      `U64`; `glue/src/dkg/state_sync.rs`). The writing itself uses public APIs only (R3). If the
+      format changes so that the module cannot decode a record the harness wrote, the source's
+      `Plan::init` panics when it opens (a metadata entry that does not decode is an error,
+      `storage/src/metadata/storage.rs`, and the plan expects none), in harness code, which I8
+      reports, in every run that seeds at least one checkpoint record. If the suffix changes, the
+      sources' plans open an empty partition and serve nothing: a run whose floor lies past epoch
+      zero then emits no artifact and reports I12 and I13 as unmeasured (R30), while a run whose
+      floor lies in epoch zero resolves from genesis without a fetch and is not affected. The
+      checks that always show either change are the fixed inputs of R21: the one with a checkpoint
+      past epoch zero and the first of the two that tell checkpoint serving from marshal serving
+      both expect an artifact past epoch zero, and fail.
+    - *What the input selects (R22).* For each source and each epoch whose introducing block its
+      chain holds: no checkpoint, a checkpoint without the finalization, or one with it. A node
+      has no checkpoint for an epoch it entered by state sync or that it has dropped, and a
+      checkpoint without the finalization when marshal repaired the introducing block without one
+      (`glue/src/dkg/mod.rs`, Marshal Retention). The choice is free per epoch, so some
+      combinations, such as an old epoch kept beside a newer one missing, are not ones a node's
+      retention produces. That is sound here: the serving probe answers each epoch from that
+      epoch's checkpoint alone, so every answer is one a node with that checkpoint gives, and the
+      discovering probe judges each response by itself. The input value that holds every
+      checkpoint with its finalization keeps the meaning the fixed inputs had before this update,
+      and those inputs use it.
+    - *Telling checkpoint serving from marshal serving (R21).* A source seeded as above holds each
+      introducing block both in its marshal and in its checkpoint, so a fixed input in which it
+      serves cannot show where the answer came from. R21 therefore asks for two more fixed inputs:
+      one in which the only checkpoint of the floor's epoch belongs to a source whose marshal does
+      not hold that epoch's introducing block, so only a probe that serves from the checkpoint can
+      resolve; and one in which the marshal holds the block and the checkpoint is missing or has no
+      finalization, so a probe that serves from marshal shows as a response the capture records.
+      A real node gets the first state by pruning marshal, or by entering a later floor through
+      application state sync, after it recorded the checkpoint (`glue/src/dkg/state_sync.rs`,
+      module documentation). The harness cannot prune a source's marshal that far: a source holds
+      at most five heights, marshal keeps its archive in sections of ten items and may keep older
+      blocks when it prunes (`Mailbox::prune` in `consensus/src/marshal/core/mailbox.rs`). The fixed
+      input shortens the source's chain instead, which only the regression suite may do; the fuzz
+      input keeps every checkpoint within its source's heights (R22).
+    - *What `dkg_probe` does not run.* `Plan::record`, the retention of checkpoints from the
+      recovered epoch, and the orchestrator's recording. The restart and state-sync targets run
+      them, with real probes serving from the checkpoints their orchestrators recorded
+      (item 34).
+    - *Decision, 2026-11-20.* "A: harness seeds the partition", written into R21 as a reading of
+      R3, with this item; R3 itself is not amended. Options not taken: a public way to record a
+      checkpoint, which needs a change under `glue/src` (R3, G7); a real orchestrator per
+      source, which runs consensus (R21); and sources that serve nothing, which leaves I12 and
+      I13 unmeasured in nearly every run.
+    - *What is no longer detected.* Nothing. Before main #5555 a source served boundaries from
+      its marshal, and the target judged that; it now judges serving from checkpoints, which is
+      what the module does.
+31. **The probe blocking table after main #5555 (item 11, I14).** Main #5555 rewrote the probe's
+    discovery (`glue/src/dkg/probe/actor/discovery.rs`), and section 11 requires the table to be
+    read off that code, so the table was read again: item 36 supersedes item 11. I14 itself did not
+    change. What changed in the table, each read off the code at `c2627b4132`:
+    - A latest reply that reaches a probe with no subscriber is ignored before any check
+      (`handle_latest`, line 370). Before, the sender that is not a dealer, and the sender of a
+      reply that did not verify, were blocked, and a valid reply discarded the sample. A probe
+      that does not block them while it has no subscriber is no longer detected, because the
+      module no longer judges those replies. A run showed this rule (a throwaway prototype of
+      the oracle with this one rule changed), and the negative control that planted the missing
+      block of the old rule plants no fault under the new one. It must be replaced by a control
+      that plants a block of a reply the probe ignores.
+    - A selected floor is no longer final: when a pass of the primary fetch ends with no
+      responder left, the probe asks the dealers again and judges their latest replies again
+      (lines 210-228; item 37).
+    - A responder is held for the rest of its fetch's pass, not until the probe asks another
+      peer (`seen`, lines 482-484). A foreign boundary finalization from a held responder is
+      ignored where it was blocked before.
+    - A block response is decoded from every peer the fetch asked for the block, in any pass, not
+      only from the peer asked last (`requested`, lines 505-550). A damaged block from a peer asked
+      earlier blocks it where it was ignored before.
+    - A boundary finalization of another epoch than a fetch's is judged against the primary's
+      boundary epoch, and the fallback's boundary epoch is judged by the fallback (lines 464-481).
+    - While serving, boundary requests are answered from checkpoints only (item 30).
+    - Not a change of main #5555, found when the table was read again: a block response cut short
+      inside its epoch blocks its sender while discovering, and a boundary or block request whose
+      epoch does not decode blocks its sender while serving (`read_response` and `read_request` in
+      `glue/src/dkg/probe/wire.rs`, which main #5555 did not change). Item 11 did not say so, and an
+      oracle built from it would have required no block there. Item 36 states both, with a fixed
+      program for each.
+
+    With item 30 in place, six fixed-input tests of `dkg_probe` and the target's acceptance
+    coverage test still failed. For three of the six and the coverage test a run showed the
+    cause, the first rule above. For the other three the cause is likely the second to fourth
+    rules, and it was not shown. Nothing that the module still judges is lost.
+32. **I12 after main #5555.** Withdrawn: "A valid latest-reply delivered after those MUST NOT
+    change the floor", read over the whole run, and the replies counted "since the probe's last
+    latest-request". The module now documents a second sample after a pass of the primary fetch
+    ends, a floor that a later selection in the same epoch with a higher round replaces, and a
+    fallback fetch (`glue/src/dkg/probe/mod.rs`, lines 90-95), so the old text would fire on a
+    correct probe whose second round selects a higher round in the epoch of its artifact (read off
+    the code; not yet seen in a run). Item 37, which supersedes item 12, gives the check that
+    replaces it. No longer detected: a probe that replaces its floor by a later selection in the
+    same epoch with a higher round, and an artifact from the fallback fetch. Still detected: a
+    floor that is no selection (built from other replies, from a reply after the first `f + 1` of
+    its round, from a reply its source did not build, or from a stale one), and a floor below
+    another selection of its epoch. Before main #5555 the probe made one selection. Now a second
+    round needs a pass of the primary fetch that ends with no responder left, which takes sources
+    that withhold a checkpoint (item 30) or a response, and the probe's timeout passing. Item 37
+    therefore gives the second round a negative control of its own.
+33. **The state-sync caller after main #5555 (R24, items 15 to 17).** The DKG module now records
+    the height of the floor block with the state-sync material once marshal delivers that block,
+    and resumes from marshal's processed position without reading the block when both are known.
+    This supersedes the last sentence of item 17's second paragraph, which said that while it syncs
+    the joiner makes its caller's record, the material of the state-sync plan, and marshal's floor
+    durable one after another, and that its own crash falls between them. Since main #5555 there is
+    a fourth write in that sequence: once marshal delivers the floor block, the plan records the
+    block's height with the material, through the same paced storage (item 13), and the joiner's
+    crash can fall before or after it too. A crash that drops it leaves no height on record, and
+    the next start reads the floor block from marshal again (`resolve_floor` in
+    `glue/src/dkg/reshare/actor/setup.rs`). No check changed and nothing that was detected is lost;
+    the crash points the target reaches grew by one. Material given to `Plan::init` replaces the
+    recorded height, so the next start reads the floor block again, and marshal does not fetch a
+    floor that its persisted round floor already covers. The module therefore asks its caller to
+    give material only when marshal still stores the floor block or will fetch it
+    (`glue/src/dkg/mod.rs`, Marshal Retention), and R24 now states it. The joiner's caller gives
+    material at every syncing start (item 15). The harness never prunes marshal (section 9), so a
+    floor block marshal stored stays stored, and marshal fetches a floor its round floor does not
+    cover. Not checked: whether a crash of the joiner can leave marshal's persisted round floor
+    covering a floor block that marshal had not yet stored. If it can, the joiner's reshare actor
+    waits for that block for the rest of the run, which R18 counts as healthy, and nothing is
+    reported.
+34. **Checkpoints in the restart and state-sync targets (item 13, G4).** Every engine of the
+    reshare stack runs a state-sync plan with checkpoints (R13), so these targets now reach what
+    main #5555 added: an orchestrator that records an epoch's checkpoint before it acknowledges
+    the final block, a restart that reads its epoch from a checkpoint instead of the introducing
+    block in marshal, the record of an epoch's checkpoint from marshal at a start that finds none,
+    and the retention of checkpoints from the recovered epoch. The pacing holds the checkpoint
+    writes as writes of the DKG module's own state (below), and tells the partition by its
+    suffix, `_dkg_checkpoint`. Until this update its classifier did not know the partition, and
+    the two tests that pin the partitions an engine opens failed. No invariant was added: a
+    checkpoint is the module's internal state, and a wrong one shows as a wrong `EpochInfo` (I1,
+    I4, I17), as a panic of a correct engine (I8: the module asserts that a checkpoint's block
+    matches its finalization and carries the epoch's `EpochInfo`), or, in `dkg_state_sync`, as a
+    correct node's probe blocking a correct node for a boundary it served (I9). A checkpoint that
+    restarts an epoch from a wrong Simplex root stalls consensus, which is not reported (R18).
+
+    This item supplements item 13 for main #5555; item 13 is kept as accepted. The pacing tells the
+    DKG module's own state from the rest of an engine's storage, and each crash holds the two kinds
+    of write at rates it draws from the run's tape. The DKG module's own state is the secret store,
+    the reshare journal, both partitions of the state-sync plan (the material with the height of
+    its floor block, and the checkpoints), and the record a joiner's caller keeps (item 15).
+    Consensus and marshal storage are the rest. Since main #5555 the orchestrator records and syncs
+    the next epoch's checkpoint before it acknowledges an epoch's final block, and records the
+    checkpoint of an epoch it starts in from the epoch's introducing block in marshal
+    (`glue/src/dkg/mod.rs`, Marshal Retention). A crash can therefore fall at each of the three
+    points the module documents there, before the record, a held write of the checkpoint partition,
+    has completed or after it, and a restart then reads its epoch from the plan's material, the
+    checkpoint, or the introducing block in marshal, the first of them that applies.
+35. **Crashes placed after named writes (R19; section 10, step 7).** With main #5555 merged, the
+    runs of the reshare stack reach the same points later than before on the same tapes: on
+    fixed inputs of `dkg_reshare_restarts` and `dkg_state_sync`, height 1 of epoch 0 was
+    finalized in view 2, not in view 1 (observed 2026-11-20; why was not established). A crash
+    that the tape places at a fixed time then fell at another point of the epoch. Three fixed
+    inputs of `dkg_reshare_restarts` that pin which write a crash drops held no write, or
+    another one, and the input on which the acceptance coverage test of `dkg_state_sync` relied
+    for I6 no longer failed its ceremony: before the merge it reported one failed ceremony and
+    one paced crash, and after it none.
+    - *The control.* In the regression suite, the pacing can hold exactly the writes a test names
+      and nothing the tape draws (`Pacing::name`, `glue/fuzz/src/dkg/pacing.rs`, compiled for tests
+      only). A named write is the first write of a given kind (items 13 and 34) that a given engine
+      starts once it has started a given number of writes of an anchor kind, counted across its
+      instances, and it is held at a given stage: before it is applied, or after it is applied and
+      before its future resolves. A named write is held only where item 13 lets a write be held, in
+      the window of its engine's scheduled crash. The deterministic runtime makes a run identical
+      up to the crash, so a test places the crash in three runs of its fixed input: one without a
+      crash, to learn how long the run takes; one with the crash due at twice that time, to learn
+      when the named writes are held; and the run the test judges, with the crash 1 ms after the
+      last named write was held. Each of the three runs hands its own crash program to the driver
+      below the run function, at the point R19 names, and keeps everything else the run function
+      uses. The tape still seeds the runtime and the trusted deal. All six state scenarios of
+      `dkg_reshare_restarts` place their crash this way, the three that failed and the three that
+      still passed. They name a new share, a prune into the third epoch, or the private half of a
+      dealing and the journal entry after it. Every assertion they made is kept: the writes dropped
+      and the stage at which each was held, where the run lands, the share flags, the oldest epoch
+      held, a second registration, and the epoch entered.
+    - *For I6 in `dkg_state_sync`.* A first text of this update required the input that measures I6
+      in this target to fail its ceremony through a crash placed after a named write. It was
+      withdrawn the same day, before any build, because a throwaway prototype on the merged tree
+      found no such write. Its fixed input had two epochs, an unchanging committee, identity 0 as
+      the joiner (a committee member), a join height of 36 (early in epoch 1), and no restart
+      schedule of its own. Each run named one write of one of the other three members, one of the
+      four reshare-journal writes that member made after the joiner started (at 4.19 s, then 7.69,
+      7.74, and 7.80 s, when the three dealer logs were included), held it before or after it was
+      applied, and crashed that member 1 ms after the hold began, for 0.5, 2, 5, 10, or 20 s. In
+      all 120 runs the write was held and dropped, and both ceremonies succeeded. The reason is
+      structural: a joiner that entered by state sync has no share of the epoch's output, so it
+      neither deals nor signs, and a crash of any of the other three leaves two of four signers.
+      Consensus then stalls until the member is back, the inclusion window waits for it in blocks,
+      and every dealer log is still included. The tape-placed input the coverage relied on before
+      had failed its ceremony through two crashes in the inclusion window
+      (`glue/fuzz/src/dkg/fixtures.rs`, `FAILED_STATE_SYNC`). Section 10, step 7 now has the suite
+      search for the run. Measured on the merged tree, 2026-11-21: of the first 400 two-byte
+      inputs, 5 fail a ceremony (`[0x00, 0x0d]`, `[0x00, 0x67]`, `[0x00, 0xc4]`, `[0x01, 0x78]`,
+      `[0x01, 0x8b]`), so the search finds `[0x00, 0x0d]`, the fourteenth, after 14 runs. The bound
+      of 512 is a margin, not a probability: the prefix is deterministic, so on one build it either
+      holds a failed ceremony or it does not. It is more than 36 times the position of the current
+      hit, and it caps the test's cost. Executing one run of this target took 0.3 to 0.5 s on the
+      acceptance host (`Mac16,5`, debug build, four searches at once); that is the host's time to
+      compute a run, not the run's simulated time, which comes from the deterministic runtime (R4).
+      512 runs at 0.5 s take about 4 minutes. A change after which none of the first 512 inputs
+      fails a ceremony makes the test fail, which shows that the prefix no longer measures I6 and
+      that the bound or the search must be revisited. The prototype also showed that in this target
+      a crash time given on the schedule's clock counts from the moment the joiner's start begins,
+      about 25 ms before that start completes; a named-write control for this target would have to
+      place its crash on that clock.
+    - *What is no longer detected.* Nothing: the control exists only in the regression suite,
+      and a libFuzzer run never uses it.
+36. **Probe blocking table after main #5555 (section 11, I14).** Supersedes item 11. Read off
+    `glue/src/dkg/probe` at main `c2627b4132` (`actor/discovery.rs`, `actor/service.rs`). Item 31
+    gives what changed with main #5555. While discovering, the probe decodes the parts of every
+    message that tell it what the message is before anything else (`read_response` in
+    `glue/src/dkg/probe/wire.rs`), and blocks the sender, whatever it awaits, of a message with no
+    tag or an unknown tag, of a latest or boundary response whose finalization does not decode as
+    the whole rest of the message, and of a block response whose epoch does not decode, cut short
+    inside it included. It ignores a request, whatever follows its tag.
+
+    A latest reply is judged only while the probe has a subscriber and its sample awaits the
+    sender. The sample awaits each dealer once, from a request for latest finalizations until a
+    selection (I12). The probe sends that request to the dealers when a subscription arrives while
+    it has no subscriber and no fetch is under way; after its retry timeout, while it has a
+    subscriber, no fetch is under way, and nothing is selected; and when a pass of the primary
+    fetch ends (below). When judged, the sender that is not a dealer is blocked, whatever the
+    reply; a stale reply is set aside, from either chain; a foreign reply that is not stale blocks
+    its source. A latest reply that reaches the probe while it has no subscriber is ignored,
+    whoever sent it.
+
+    A fetch is under way from a selection in an epoch past zero until the artifact. The probe keeps
+    at most two: the primary, and the fallback, which is the fetch the primary replaced when a
+    selection named a later epoch than the primary's (item 37). A pass of a fetch begins when the
+    probe asks every peer for the fetch's boundary finalization: when the fetch starts, and again
+    when the fetch's retry timeout finds no responder left that it accepted in the pass and has not
+    yet asked for the block. The probe's retry timers run only while it has a subscriber and no
+    artifact.
+
+    A boundary finalization is judged only while a fetch is under way, and by the fetch whose
+    boundary epoch, the epoch before the fetch's, it names. One that names no such epoch blocks its
+    sender if its epoch is later than the primary's boundary epoch, and is ignored otherwise. A
+    fetch ignores, before verification, a sender whose valid boundary finalization it accepted in
+    the current pass. Any other one that does not verify, a foreign one included, blocks its
+    sender.
+
+    A block response is decoded past its epoch only for a fetch under way whose epoch it names, and
+    only from a peer that fetch asked for the block, in this pass or an earlier one, and has not
+    blocked for a block since. Such a peer is blocked if the block is cut short or does not decode,
+    is not the block that the boundary finalization the fetch first asked it with commits to, is
+    not at the fetch's boundary height, or does not carry the `EpochInfo` of the fetch's epoch.
+    From anyone else, and for any other epoch, a block response whose epoch decodes is ignored,
+    whole or cut past its epoch.
+
+    The identity that is not a dealer is not blocked for a valid boundary finalization or block:
+    the probe asks every peer for those, and takes them from it. While serving, the probe reads
+    requests only (`read_request` in `glue/src/dkg/probe/wire.rs`): it blocks the sender of a
+    message with no tag or an unknown tag, and of a boundary finalization or block request whose
+    epoch does not decode as the whole rest of the message, cut short inside it included, and of
+    nothing else. It ignores a response whatever follows its tag, and takes a latest-finalization
+    request whatever follows its tag. It answers a latest-finalization request from its marshal,
+    and a boundary finalization or block request for an epoch only from that epoch's checkpoint in
+    its plan, and only if the checkpoint holds the finalization. The discovering probe's marshal
+    and plan hold nothing in this target, so it answers nothing. Every other delivery must not be
+    blocked. The regression suite MUST hold a fixed program for each of the two epochs cut short: a
+    block response cut inside its epoch, delivered to the discovering probe while it discovers, and
+    a boundary or block request cut inside its epoch, delivered to it while it serves. In both, I14
+    MUST require the sender's block, and the run MUST show it. With the boundaries the driver adds
+    (7.4), the probe's state is known at every delivery, and nothing is required only where a
+    correct probe would have selected its floor or resolved its artifact and the run shows that it
+    did not, which a stalled run may. Each block the probe places is attributed to the delivery it
+    was processing, the probe may block only that delivery's sender, and the pairs the network
+    recorded must be exactly the blocks the probe placed, so a block by a source is a violation
+    too.
+37. **I12 as checked after main #5555.** Supersedes item 12. A request round runs from one request
+    of the probe for latest finalizations to its next. Its replies are every whole latest reply of
+    the fabricated chain that is not stale, delivered by the source that built it, once per source,
+    while the probe had a subscriber, in the order the probe took them. Each reply stands for the
+    finalization its source was recorded to hold as its latest. A round that has at least `f + 1`
+    replies, 2 with 4 dealers, makes one selection: the highest of exactly its first `f + 1`. A
+    reply delivered after those, however high, must not change it. That is the moment the probe
+    selects, as its documentation states (`glue/src/dkg/probe/mod.rs`, lines 70-75). It records at
+    most one valid reply per dealer in a round, selects after each one it records, and judges no
+    latest reply after it selected until it asks again (`glue/src/dkg/probe/actor/discovery.rs`,
+    `handle_latest` and `select`, lines 362-456). A reply that reaches a probe with no subscriber
+    is ignored: it is not recorded and discards nothing (line 370). The probe drops a closed
+    subscription only when it next wakes, and the driver wakes it as soon as the program drops its
+    last one (7.4), so a reply the program releases after that finds the probe with no subscriber
+    and is not listed.
+
+    Since main #5555 a probe can make more than one selection (`glue/src/dkg/probe/mod.rs`, lines
+    90-95; `discovery.rs`, lines 210-228 and 405-456). When a pass of its primary fetch ends with
+    no responder left, it asks every peer for the boundary again and the dealers for their latest
+    finalizations again, which starts a new round. A selection in the epoch of the primary or of
+    the fallback replaces that fetch's floor if its round is higher. A selection in a later epoch
+    than the primary's starts a new primary, keeps the old primary as the fallback, and drops the
+    fallback before it. Any other selection changes nothing. The artifact carries the floor of the
+    fetch that completes first. Every selection in the artifact's epoch therefore reached that
+    fetch, which keeps the highest round among them: the first selection in an epoch starts its
+    fetch or changes nothing, and an epoch whose fetch was dropped never gets one again, because a
+    new fetch needs an epoch later than the primary's. The check lists the rounds up to the
+    artifact and judges the floor against the selections in the artifact's epoch.
+
+    The negative controls are a run in which the third source's higher reply is delivered after the
+    first two of its round and before the boundary, with that reply's finalization planted as the
+    floor; and a run with two request rounds whose selections are in one epoch at different rounds,
+    with the lower of the two planted as the artifact's floor at the observation boundary, so that
+    I12 alone fails. Built records do not stand in for the second control: a lower selection of the
+    right epoch carries the right boundary finalization and `EpochInfo`, so no other invariant
+    reports it first (R19). The run reaches a second round through the probe's own retry, with a
+    subscription open throughout so that its timers run (item 36): the program holds back every
+    boundary finalization response of the first pass, advances time past the probe's retry timeout
+    so that the pass ends with no responder and the probe asks the dealers again, releases in the
+    second round latest replies whose highest is above the first round's selection and in the same
+    epoch, and only then releases one source's boundary finalization and block responses of the
+    second pass. With an epoch length of 2 and at most five heights, epoch 2 holds heights 4 and 5:
+    two sources whose latest is at height 4 select in the first round, and a source whose latest is
+    at height 5 with one of them in the second; one of them holds the checkpoint of epoch 2 with
+    its finalization.
 
 ## 12. Future work
 
@@ -1374,8 +1798,10 @@ id or the item that states the choice. "How to lift it" is a direction, not a de
 | 24 | Two known blind spots of the state-sync oracle | Choices made, item 19 | An engine that never follows, and a probe that picks the lowest reply of its sample, are caught by no invariant of `dkg_state_sync` | Not designed. For the second, I12 judges the probe's selection in `dkg_probe` |
 | 25 | In `dkg_reshare` a ceremony fails only under a prefix without a bound | Choices made, items 8 and 22; section 9, A failed reshare under Twins | Of 60 decoded inputs of `dkg_reshare`, 6 held a failed ceremony: 6 of the 14 with a prefix without a bound, and none of the 46 with a bounded prefix (item 22). One draw in five sets no bound. A failed reshare is therefore reached far more often here than in the restart targets (row 11), but never next to a bounded prefix. No bootstrap ceremony is known to fail under Twins: none did in 4,330 logged runs of `dkg_bootstrap` (section 9; row 28) | Draw a prefix without a bound, or a sustained scenario, more often (item 22). Under a bounded prefix the compromised dealer cannot fail a ceremony by its messages alone (section 9), so a failure there needs a fault the Twins targets exclude: a restart (R15) or a lossy link (R17) |
 | 26 | Standard marshal variant only | R13; section 9, Other configurations | The DKG module is generic over the marshal variant in the reshare actor and in the probe (`glue/src/dkg/reshare/actor/dealing.rs`, `glue/src/dkg/reshare/actor/follower.rs`, `glue/src/dkg/probe/mod.rs`). The harness builds it over the Standard variant in every target that configures marshal (`Variant` in `glue/fuzz/src/dkg/reshare_stack.rs`), so the module over the coding variant, with coded blocks and their commitments, is never run here. The module's own tests run probe discovery over the coding variant (`glue/src/dkg/probe/actor/discovery.rs`, tests) | A second stack over `marshal::coding`, chosen by the input or as targets of its own. It changes R13 |
-| 27 | Marshal is never pruned | R13; section 9, Other configurations | In a node the stateful layer prunes marshal (`PruneConfig` in `glue/src/stateful/actor/core/mod.rs`), and R13 leaves that layer out. Nothing under `glue/src/dkg` and nothing in the harness calls marshal's `prune`. The DKG module documents what pruning must keep (`glue/src/dkg/mod.rs`, Marshal Retention): a restart loads the epoch's `EpochInfo` from the boundary block, serving the probe needs the boundary finalization and block of every epoch served, and no runtime check enforces the retention rule. A restart, a serving probe, and a joiner beside pruned history are never run | The harness prunes marshal in the caller's role, inside the documented retention rule so that P3 still holds. It is a new requirement beside R24 |
+| 27 | Marshal is never pruned | R13; section 9, Other configurations | In a node the stateful layer prunes marshal (`PruneConfig` in `glue/src/stateful/actor/core/mod.rs`), and R13 leaves that layer out. Nothing under `glue/src/dkg` and nothing in the harness calls marshal's `prune`. Until main #5555 a restart loaded the epoch's `EpochInfo` from its introducing block, and serving the probe needed the boundary finalization and block of every epoch served. Since then a restart reads the epoch from the plan's material or checkpoint first, and the probe serves only from checkpoints, so the module documents that restart and probe serving no longer depend on marshal's retention while the plan's partitions are kept (`glue/src/dkg/mod.rs`, Marshal Retention). Two things still do: a lagging node's catch-up, and the caller rule of R24 that a state sync's floor block be in marshal or fetched (Choices made, item 33). A run with pruned history would check the module's claim; none is run. The cost is lower than before main #5555 | The harness prunes marshal in the caller's role, inside the documented retention rule so that P3 still holds. It is a new requirement beside R24 |
 | 28 | I6 is excepted from the non-vacuity step in `dkg_bootstrap` | Section 10, step 7; section 9, A failed bootstrap under Twins; Choices made, item 29 | In the 4,330 observed runs of `dkg_bootstrap` (section 9), the failed-bootstrap clause of I6 was not judged: those runs leave I6 unmeasured. In the current regression suite the clause rests on its negative control (R19). A run of the target in which a correct engine reports a failed ceremony still gives I6 a count above zero (R30, 8.1). Step 7 still requires a count above zero in `dkg_bootstrap_restarts` | An input of `dkg_bootstrap` that fails a ceremony: if one is found, it joins the regression suite and the exception goes. Making one reachable by a scripted elector needs a change under `glue/src` (rows 16 and 20) |
+| 29 | The probe's sources are given checkpoints, not made to record them | R21, R22; Choices made, item 30 | `dkg_probe` never runs `Plan::record`, the retention of checkpoints, or a checkpoint recorded without its finalization by a real marshal. It depends on the checkpoint partition's name and record format, which are not public: a change of the format shows as a panic at the open of every source plan that has a seeded record, and a change of the name as I12 and I13 unmeasured in every run whose floor lies past epoch zero; the fixed inputs of R21 that expect an artifact past epoch zero fail on either | A public way to record a checkpoint under `glue/src` (row 20). The restart and state-sync targets run the recording path meanwhile (item 34) |
+| 30 | Every plan is enabled | R13, R21 | `Plan::disabled`, the configuration in which every restart reads its epoch's introducing block from marshal and the probe serves nothing, is never run. A probe cannot be attached with it (`glue/src/dkg/probe/mailbox.rs`) | A restart target whose engines use a disabled plan and attach no probe. It changes R13 and R23 |
 
 ### 12.2 Next planned steps
 
@@ -1496,4 +1922,6 @@ rests on and what is still open.
      `glue/fuzz/src/dkg/report.rs`. The acceptance tests written from this document are in
      `glue/fuzz/src/dkg/dkg_acceptance.rs` and `glue/fuzz/tests/dkg_delivery_acceptance.rs`.
      They hold one coverage test of section 10, step 7 for each of the six targets, and all
-     six pass.
+     six passed after the build of 2026-11-18. On 2026-11-20, with main #5555 merged and before
+     the update of Choices made, items 30 to 37 was built, the coverage tests of `dkg_probe`
+     and `dkg_state_sync` failed.

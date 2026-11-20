@@ -403,17 +403,17 @@ where
     /// [`crate::qmdb::ProofExt::verify`]. Together with [`Self::pinned_nodes`] they verify via
     /// [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are flushed (by a commit or sync
-    /// after apply).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (such as a batch from [`Db::to_batch`]).
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned, and
+    /// [`crate::merkle::Error::Empty`] if the batch has no operations (such as a batch from
+    /// [`Db::to_batch`]).
     pub fn proof<E, C, H, T>(
         &self,
         db: &Db<F, E, K, V, C, H, T, S>,
@@ -436,16 +436,15 @@ where
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
     /// nodes verify against [`Self::root`] via [`crate::qmdb::ProofExt::verify_with_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
-    /// which retains them at least until this batch's changes are flushed (by a commit or sync
-    /// after apply).
+    /// Nodes appended by unapplied ancestors come from the records this batch retained when it
+    /// was merkleized. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
+    /// changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor.
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub fn pinned_nodes<E, C, H, T>(
         &self,
         db: &Db<F, E, K, V, C, H, T, S>,
@@ -634,5 +633,28 @@ where
             ancestor_diffs: Vec::new(),
             bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
+    }
+}
+
+impl<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> crate::qmdb::sync::MerkleizedBatch
+    for MerkleizedBatch<F, D, K, V, S>
+where
+    Operation<F, K, V>: EncodeShared,
+{
+    type Family = F;
+    type Digest = D;
+
+    fn root(&self) -> D {
+        self.root()
+    }
+
+    fn target(&self) -> crate::qmdb::sync::Target<F, D> {
+        crate::qmdb::sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(
+                self.bounds.inactivity_floor,
+                self.bounds.tip.size
+            ),
+        }
     }
 }

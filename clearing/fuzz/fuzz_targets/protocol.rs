@@ -87,8 +87,8 @@ use commonware_runtime::{
 use commonware_storage::{
     bmt::Proof,
     index::unordered::Index,
-    journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig},
+    merkle::{Location, mmb, mmr},
     qmdb::{self, current::unordered::fixed, keyless},
     translator::EightCap,
 };
@@ -849,13 +849,10 @@ impl Refused {
 fn journals(name: &str) -> (MerkleConfig<Sequential>, JournalConfig) {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let merkle = MerkleConfig {
-        journal_partition: format!("{name}-merkle-journal"),
-        metadata_partition: format!("{name}-merkle-metadata"),
-        items_per_blob: NZU64!(7),
-        write_buffer: NZUsize!(1024),
+        partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: page_cache.clone(),
+        resident_height: Default::default(),
     };
     let log = JournalConfig {
         partition: format!("{name}-log"),
@@ -892,7 +889,7 @@ impl Store {
             translator: EightCap,
             init_cache: None,
             init_buffer: NZUsize!(1024),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(1),
         };
         TestBalances::init(context.child(name), config, None)
             .await
@@ -907,7 +904,11 @@ impl Store {
         size: Option<Location<mmr::Family>>,
     ) -> TestLog {
         let (merkle, log) = journals(name);
-        let config = keyless::fixed::Config { merkle, log };
+        let config = keyless::fixed::Config {
+            merkle,
+            log,
+            init_concurrency: NZUsize!(1),
+        };
         TestLog::init(context.child(name), config, size)
             .await
             .expect("the payout log must open")

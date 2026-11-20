@@ -40,9 +40,8 @@ pub mod partitioned {
     //! [Any's counterpart]: crate::qmdb::any::unordered::variable::partitioned
 
     use super::*;
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::index::partitioned::unordered::Index;
-    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -62,9 +61,6 @@ pub mod partitioned {
             N,
             S,
         >;
-
-    /// Configuration for a [Db].
-    pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S, NonZeroUsize>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -92,6 +88,7 @@ mod test {
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::NZUsize;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -164,7 +161,7 @@ mod test {
                 translator: TwoCap,
                 init_cache: base.init_cache,
                 init_buffer: base.init_buffer,
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             };
 
             // Commit a value and verify its lookup and proof under a variable-length key.

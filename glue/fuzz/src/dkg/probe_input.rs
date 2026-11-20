@@ -27,6 +27,12 @@
 //!   only an input built by hand holds, are not sent.
 //! - `Advance` lets deterministic time pass, possibly across a retry.
 //!
+//! Each source's state-sync plan opens with the checkpoints the input selects:
+//! for every epoch whose introducing block lies within the source's heights,
+//! none, one without the finalization, or one with it. The genesis
+//! checkpoint of epoch zero never holds a finalization, and an epoch whose
+//! introducing block lies above the source's heights is never drawn.
+//!
 //! The program is not drawn uniformly. A session that discovers a boundary
 //! needs its sources attached, a subscription, and several releases in a row,
 //! so the program opens with the attachments and the subscription unless the
@@ -38,7 +44,8 @@ use super::{input::sharing_mode, invariants::PROBE_TAGS};
 use crate::{
     input::stream,
     stateful::{
-        MAX_ADVANCE_STEPS, MAX_RAW_PAYLOAD, MAX_SOURCE_HEIGHT, NUM_SOURCES, ProbeEvent, input::tape,
+        MAX_ADVANCE_STEPS, MAX_RAW_PAYLOAD, MAX_SOURCE_HEIGHT, NUM_SOURCES, PROBE_EPOCH_LENGTH,
+        ProbeEvent, input::tape,
     },
 };
 use arbitrary::{Arbitrary, Unstructured};
@@ -66,6 +73,40 @@ const MAX_BODY: usize = MAX_EVENTS - SOURCES - 1;
 /// source builds responses of three kinds.
 const MAX_BACK: u8 = 2;
 
+/// Epochs whose introducing block a source may hold: epoch zero, introduced
+/// by genesis, and each epoch introduced by the final block of an epoch at or
+/// below the highest source height.
+pub(super) const CHECKPOINT_EPOCHS: usize =
+    (MAX_SOURCE_HEIGHT as usize + 1) / PROBE_EPOCH_LENGTH.get() as usize + 1;
+
+/// The height of the block that introduces `epoch`: genesis for epoch zero,
+/// and the final block of the epoch before it otherwise.
+pub(super) const fn introducing(epoch: usize) -> u64 {
+    (epoch as u64 * PROBE_EPOCH_LENGTH.get()).saturating_sub(1)
+}
+
+/// What a source's state-sync plan holds for one epoch when it opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceCheckpoint {
+    /// No checkpoint, as for an epoch a node entered by state sync or has
+    /// dropped.
+    Missing,
+    /// The introducing block without its finalization, as for an epoch whose
+    /// introducing block marshal repaired without one, and for genesis.
+    Unfinalized,
+    /// The introducing block with its finalization.
+    Finalized,
+}
+
+/// The checkpoints of a source that holds every introducing block, each with
+/// its finalization where it can have one.
+#[cfg(test)]
+pub(super) const FINALIZED: [SourceCheckpoint; CHECKPOINT_EPOCHS] = {
+    let mut held = [SourceCheckpoint::Finalized; CHECKPOINT_EPOCHS];
+    held[0] = SourceCheckpoint::Unfinalized;
+    held
+};
+
 /// One run of the probe target.
 #[derive(Clone)]
 pub struct DkgProbeFuzzInput {
@@ -87,6 +128,10 @@ pub struct DkgProbeFuzzInput {
     pub sharing_mode: Mode,
     /// The adversarial event program.
     pub events: Vec<ProbeEvent>,
+    /// What each source's state-sync plan holds for each epoch when it
+    /// opens, by epoch from zero. The run seeds only the epochs whose
+    /// introducing block lies within the source's height.
+    pub checkpoints: [[SourceCheckpoint; CHECKPOINT_EPOCHS]; SOURCES],
     /// Byte tape seeding the deterministic runtime and the trusted deals.
     pub raw_bytes: Vec<u8>,
 }
@@ -100,6 +145,7 @@ impl fmt::Debug for DkgProbeFuzzInput {
             .field("floor", &self.floor)
             .field("sharing_mode", &self.sharing_mode)
             .field("events", &self.events)
+            .field("checkpoints", &self.checkpoints)
             .field("raw_bytes_len", &self.raw_bytes.len())
             .finish()
     }
@@ -247,6 +293,28 @@ fn program(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<ProbeEvent>> {
     Ok(events)
 }
 
+/// Draw what a source at `height` holds for each epoch. A checkpoint is
+/// drawn only for an epoch whose introducing block the source holds; it
+/// holds the finalization three times in four, and epoch zero's never does.
+fn checkpoints(
+    u: &mut Unstructured<'_>,
+    height: u8,
+) -> arbitrary::Result<[SourceCheckpoint; CHECKPOINT_EPOCHS]> {
+    let mut held = [SourceCheckpoint::Missing; CHECKPOINT_EPOCHS];
+    for (epoch, held) in held.iter_mut().enumerate() {
+        if introducing(epoch) > u64::from(height) {
+            break;
+        }
+        *held = match u.int_in_range(0..=7u8)? {
+            0 => SourceCheckpoint::Missing,
+            _ if epoch == 0 => SourceCheckpoint::Unfinalized,
+            1 => SourceCheckpoint::Unfinalized,
+            _ => SourceCheckpoint::Finalized,
+        };
+    }
+    Ok(held)
+}
+
 /// Whether [`program`] can draw `events`: the opening, any part of which may
 /// be withheld, and then a body of events that [`event`] draws.
 #[cfg(test)]
@@ -320,13 +388,20 @@ impl Arbitrary<'_> for DkgProbeFuzzInput {
         } else {
             None
         };
+        let sharing_mode = sharing_mode(u)?;
+        let events = program(u)?;
+        let mut held = [[SourceCheckpoint::Missing; CHECKPOINT_EPOCHS]; SOURCES];
+        for (held, height) in held.iter_mut().zip(sources) {
+            *held = checkpoints(u, height)?;
+        }
         Ok(Self {
             sources,
             foreign,
             bootstrap_epoch,
             floor,
-            sharing_mode: sharing_mode(u)?,
-            events: program(u)?,
+            sharing_mode,
+            events,
+            checkpoints: held,
             raw_bytes: tape(u)?,
         })
     }
@@ -508,6 +583,55 @@ mod tests {
             }
         }
         assert!(fragments > 1_000 && junk > 1_000, "{fragments} {junk}");
+    }
+
+    /// Every source draws every checkpoint choice for every epoch its height
+    /// holds, never a finalization for genesis, and nothing above its height.
+    #[test]
+    fn checkpoints_are_drawn_within_each_source_height() {
+        let sessions: Vec<_> = (0..4_096u16)
+            .map(|seed| decode(&seed.to_le_bytes()))
+            .collect();
+        for session in &sessions {
+            for (held, height) in session.checkpoints.iter().zip(session.sources) {
+                for (epoch, held) in held.iter().enumerate() {
+                    if introducing(epoch) > u64::from(height) {
+                        assert_eq!(*held, SourceCheckpoint::Missing, "{session:?}");
+                    }
+                }
+                assert_ne!(held[0], SourceCheckpoint::Finalized, "{session:?}");
+            }
+        }
+        for source in 0..SOURCES {
+            for epoch in 0..CHECKPOINT_EPOCHS {
+                for choice in [
+                    SourceCheckpoint::Missing,
+                    SourceCheckpoint::Unfinalized,
+                    SourceCheckpoint::Finalized,
+                ] {
+                    if epoch == 0 && choice == SourceCheckpoint::Finalized {
+                        continue;
+                    }
+                    assert!(
+                        sessions.iter().any(|session| {
+                            introducing(epoch) <= u64::from(session.sources[source])
+                                && session.checkpoints[source][epoch] == choice
+                        }),
+                        "source {source} never draws {choice:?} for epoch {epoch}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn introducing_heights_follow_the_epoch_length() {
+        assert_eq!(introducing(0), 0);
+        assert_eq!(introducing(1), PROBE_EPOCH_LENGTH.get() - 1);
+        assert_eq!(
+            introducing(CHECKPOINT_EPOCHS - 1),
+            u64::from(MAX_SOURCE_HEIGHT)
+        );
     }
 
     #[test]

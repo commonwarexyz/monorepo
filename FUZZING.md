@@ -27,12 +27,12 @@ subcommand (`run`, `list`, `build`, `coverage`, `cmin`, `tmin`) and is resolved 
 the working directory, so these can be run from the repository root:
 
 ```bash
-# The consensus fuzzers are five packages under `consensus/fuzz/`, which has no manifest
-$ cargo +nightly fuzz list --fuzz-dir consensus/fuzz/simplex
-$ cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock
+# The experimental consensus fuzzers are five packages under `consensus/fuzz/experimental/`, which has no manifest
+$ cargo +nightly fuzz list --fuzz-dir consensus/fuzz/experimental/simplex
+$ cargo +nightly fuzz run --fuzz-dir consensus/fuzz/experimental/simplex exp_simplex_cert_mock
 ```
 
-See [`consensus/fuzz/README.md`](./consensus/fuzz/README.md) for that layout.
+See [`consensus/fuzz/experimental/README.md`](./consensus/fuzz/experimental/README.md) for that layout.
 
 > [!NOTE]
 > If using the [`justfile`](./justfile), all fuzz tests for a given directory can be ran using 

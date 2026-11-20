@@ -111,6 +111,10 @@ pub(super) enum Partition {
     Journal,
     /// The material of a DKG state sync.
     StateSync,
+    /// The boundary block, and its finalization, of each epoch the
+    /// orchestrator entered from its boundary block, which a restart reads
+    /// the epoch from.
+    Checkpoint,
     /// The record the caller of a state-synced engine keeps of its sync: the
     /// floor of a sync in progress, or its completion.
     Ledger,
@@ -143,6 +147,8 @@ impl Partition {
             Self::Journal
         } else if name.ends_with("_dkg_state_sync") {
             Self::StateSync
+        } else if name.ends_with("_dkg_checkpoint") {
+            Self::Checkpoint
         } else if name.ends_with("-joiner") {
             Self::Ledger
         } else if name.ends_with("-simplex") || epoch(name) {
@@ -186,7 +192,8 @@ pub(super) enum Operation {
 
 impl Operation {
     /// Whether the write changes the DKG module's own state: the secret
-    /// store, the reshare actor's journal, or the material of a state sync.
+    /// store, the reshare actor's journal, the material of a state sync, or
+    /// the epoch checkpoints.
     /// The record a caller keeps of a state sync counts with them: the DKG
     /// module leaves that record to its caller.
     pub(super) const fn dkg(self) -> bool {
@@ -194,7 +201,10 @@ impl Operation {
             self,
             Self::Secret(_)
                 | Self::Blob(
-                    Partition::Journal | Partition::StateSync | Partition::Ledger,
+                    Partition::Journal
+                        | Partition::StateSync
+                        | Partition::Checkpoint
+                        | Partition::Ledger,
                     _
                 )
         )
@@ -360,6 +370,10 @@ pub(super) struct Trace {
     /// identity.
     #[cfg(test)]
     opened: BTreeSet<(usize, Partition)>,
+    /// Every crash, write start, and blob open of every engine, in the order
+    /// they happened.
+    #[cfg(test)]
+    log: Vec<tests::Paced>,
 }
 
 impl Trace {
@@ -486,6 +500,13 @@ impl Trace {
             .collect()
     }
 
+    /// Every crash, write start, and blob open of every engine, in the order
+    /// they happened.
+    #[cfg(test)]
+    pub(super) fn log(&self) -> &[tests::Paced] {
+        &self.log
+    }
+
     /// What the partitions the engine of the identity at `engine` opened
     /// hold.
     #[cfg(test)]
@@ -510,6 +531,29 @@ struct Crash {
     /// One in this many of those writes is held, or none if it is zero: for
     /// the writes of the DKG module's own state, and for every other write.
     odds: (u8, u8),
+}
+
+/// Draw from `rng` whether a write `operation` that falls in the window of
+/// `crash` is held, and where.
+fn draw(rng: &mut FuzzRng, crash: &Crash, operation: Operation) -> Option<Stage> {
+    let odds = if operation.dkg() {
+        crash.odds.0
+    } else {
+        crash.odds.1
+    };
+    if odds == 0 {
+        return None;
+    }
+    let mut sample = [0u8; 1];
+    rng.fill(&mut sample[..]);
+    if sample[0] % odds != 0 {
+        return None;
+    }
+    Some(if (sample[0] / odds) % 2 == 0 {
+        Stage::Before
+    } else {
+        Stage::After
+    })
 }
 
 /// One identity's engine as the pacing sees it.
@@ -553,6 +597,9 @@ struct State {
     /// was crashed, and its restart has not completed since.
     impaired: Option<usize>,
     trace: Trace,
+    /// The writes a test names to be held in place of those the tape draws.
+    #[cfg(test)]
+    named: Option<tests::Named>,
 }
 
 impl State {
@@ -606,6 +653,8 @@ impl Pacing {
                 restarted: None,
                 impaired: None,
                 trace: Trace::default(),
+                #[cfg(test)]
+                named: None,
             })),
         }
     }
@@ -714,6 +763,8 @@ impl Pacing {
             state.impaired
         );
         state.impaired = Some(index);
+        #[cfg(test)]
+        state.trace.log.push(tests::Paced::Crashed(index));
         let engine = &mut state.engines[index];
         engine.up = false;
         state.trace.outages.push(Outage {
@@ -760,6 +811,16 @@ impl EnginePacing {
     fn decide(&self, operation: Operation) -> Option<Decision> {
         let mut state = self.state.lock();
         let state = &mut *state;
+        #[cfg(test)]
+        state
+            .trace
+            .log
+            .push(tests::Paced::Started(self.engine, operation));
+        #[cfg(test)]
+        let named = state
+            .named
+            .as_mut()
+            .map(|named| named.start(self.engine, operation));
         let started = state.started.as_ref()?;
 
         // A held write makes its identity the faulty one until its restart
@@ -782,24 +843,16 @@ impl EnginePacing {
             return None;
         }
         let until = crash.at + GRACE;
-        let odds = if operation.dkg() {
-            crash.odds.0
-        } else {
-            crash.odds.1
-        };
-        if odds == 0 || now + crash.reach < crash.at || now >= until {
+        if now + crash.reach < crash.at || now >= until {
             return None;
         }
-        let mut sample = [0u8; 1];
-        state.rng.fill(&mut sample[..]);
-        if sample[0] % odds != 0 {
-            return None;
-        }
-        let stage = if (sample[0] / odds) % 2 == 0 {
-            Stage::Before
-        } else {
-            Stage::After
+        #[cfg(test)]
+        let stage = match named {
+            Some(named) => named?,
+            None => draw(&mut state.rng, crash, operation)?,
         };
+        #[cfg(not(test))]
+        let stage = draw(&mut state.rng, crash, operation)?;
         debug_assert!(
             state
                 .impaired
@@ -863,14 +916,16 @@ impl EnginePacing {
         };
     }
 
-    /// Record that the engine opened a partition that holds `partition`.
+    /// Record that the engine opened a blob of the partition called `name`,
+    /// which holds `partition`.
     #[cfg(test)]
-    fn opened(&self, partition: Partition) {
-        self.state
-            .lock()
+    fn opened(&self, partition: Partition, name: &str) {
+        let mut state = self.state.lock();
+        state.trace.opened.insert((self.engine, partition));
+        state
             .trace
-            .opened
-            .insert((self.engine, partition));
+            .log
+            .push(tests::Paced::Opened(self.engine, name.to_string()));
     }
 
     /// Run `apply`, which makes the one write `operation`, held if the tape
@@ -942,9 +997,10 @@ impl<B: Blob> PacedBlob<B> {
     /// one.
     pub(super) fn new(inner: B, pacing: Option<&EnginePacing>, partition: &str) -> Self {
         let pacing = pacing.map(|pacing| {
-            let partition = Partition::named(partition);
+            let name = partition;
+            let partition = Partition::named(name);
             #[cfg(test)]
-            unattributed(|| pacing.opened(partition));
+            unattributed(|| pacing.opened(partition, name));
             (pacing.clone(), partition)
         });
         Self { inner, pacing }
@@ -1027,14 +1083,96 @@ impl<B: Blob> Blob for PacedBlob<B> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::dkg::context::EngineContext;
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Spawner as _, Storage as _, Supervisor as _};
     use futures::join;
 
+    /// A write a test names to be held at `stage`: the first write of
+    /// `operation` that the engine of the identity at `engine` starts once it
+    /// has started `after.1` writes of `after.0`, across all its instances.
+    #[derive(Clone, Copy, Debug)]
+    pub(in crate::dkg) struct Write {
+        pub(in crate::dkg) engine: usize,
+        pub(in crate::dkg) operation: Operation,
+        pub(in crate::dkg) after: (Operation, usize),
+        pub(in crate::dkg) stage: Stage,
+    }
+
+    /// One thing the pacing saw an engine do.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(in crate::dkg) enum Paced {
+        /// The schedule crashed the engine of the identity at `.0`.
+        Crashed(usize),
+        /// The engine of the identity at `.0` started the write `.1`.
+        Started(usize, Operation),
+        /// The engine of the identity at `.0` opened a blob of the partition
+        /// called `.1`.
+        Opened(usize, String),
+    }
+
+    /// The writes a test names, each with whether it has been started, and
+    /// how many writes of each kind each engine has started so far.
+    #[derive(Debug)]
+    pub(super) struct Named {
+        writes: Vec<(Write, bool)>,
+        started: Vec<((usize, Operation), usize)>,
+    }
+
+    impl Named {
+        /// How many writes of `operation` the engine at `engine` has started.
+        fn count(&self, engine: usize, operation: Operation) -> usize {
+            self.started
+                .iter()
+                .find(|(kind, _)| *kind == (engine, operation))
+                .map_or(0, |(_, count)| *count)
+        }
+
+        /// Count a write `operation` the engine at `engine` starts, and say
+        /// where it is held if it is a named one.
+        pub(super) fn start(&mut self, engine: usize, operation: Operation) -> Option<Stage> {
+            let counts: Vec<usize> = self
+                .writes
+                .iter()
+                .map(|(write, _)| self.count(engine, write.after.0))
+                .collect();
+            let stage = self
+                .writes
+                .iter_mut()
+                .zip(counts)
+                .find(|((write, started), anchors)| {
+                    !*started
+                        && (write.engine, write.operation) == (engine, operation)
+                        && *anchors >= write.after.1
+                })
+                .map(|((write, started), _)| {
+                    *started = true;
+                    write.stage
+                });
+            match self
+                .started
+                .iter_mut()
+                .find(|(kind, _)| *kind == (engine, operation))
+            {
+                Some((_, count)) => *count += 1,
+                None => self.started.push(((engine, operation), 1)),
+            }
+            stage
+        }
+    }
+
     impl Pacing {
+        /// Hold `writes`, wherever a write may be held, and no other write:
+        /// the tape decides nothing.
+        pub(in crate::dkg) fn name(&self, writes: &[Write]) {
+            self.state.lock().named = Some(Named {
+                writes: writes.iter().map(|write| (*write, false)).collect(),
+                started: Vec::new(),
+            });
+        }
+
         /// Like [`Self::new`], with every crash reaching `reach` back and
         /// holding one in `odds` of the writes in its window, or none of them
         /// if `odds` is zero.
@@ -1608,6 +1746,7 @@ mod tests {
                 },
             ],
             opened: BTreeSet::new(),
+            log: Vec::new(),
         };
         assert_eq!(trace.overlaps(), 1);
     }
@@ -1688,6 +1827,7 @@ mod tests {
             ],
             outages: Vec::new(),
             opened: BTreeSet::new(),
+            log: Vec::new(),
         };
         assert_eq!(trace.interrupted(0), 2);
         assert_eq!(trace.interrupted(1), 1);
@@ -1803,6 +1943,7 @@ mod tests {
         for (name, expected) in [
             ("engine-0-reshare_events", Partition::Journal),
             ("engine-3_dkg_state_sync", Partition::StateSync),
+            ("engine-3_dkg_checkpoint", Partition::Checkpoint),
             ("engine-1-simplex", Partition::Consensus),
             ("engine-4-orchestrator_consensus_0", Partition::Consensus),
             ("engine-4-orchestrator_consensus_12", Partition::Consensus),
@@ -1834,6 +1975,7 @@ mod tests {
             for (partition, dkg) in [
                 (Partition::Journal, true),
                 (Partition::StateSync, true),
+                (Partition::Checkpoint, true),
                 (Partition::Ledger, true),
                 (Partition::Consensus, false),
                 (Partition::Chain, false),
@@ -1871,6 +2013,7 @@ mod tests {
             holds,
             outages,
             opened: BTreeSet::new(),
+            log: Vec::new(),
         };
 
         // One identity held, crashed, and restarted, then the next.

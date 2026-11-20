@@ -4,7 +4,6 @@ target
 benchmark-tracking-results
 *.vscode
 .idea
-examples/flood/assets
 */fuzz/artifacts
 */fuzz/corpus
 */fuzz/coverage
@@ -12,6 +11,9 @@ examples/flood/assets
 */fuzz/*/artifacts
 */fuzz/*/corpus
 */fuzz/*/coverage
+*/fuzz/*/*/artifacts
+*/fuzz/*/*/corpus
+*/fuzz/*/*/coverage
 */fuzz_html
 **/quint/_apalache-out/
 **/quint/out*/

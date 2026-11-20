@@ -48,18 +48,31 @@
 //! reads ancestor operations through the weak parent links, so every unapplied ancestor must be
 //! held until its descendant is merkleized. See [`chain`] for the details.
 //!
+//! # Variable-size writes
+//!
+//! Callers must ensure that the journal's [`codec_config`] can decode the keys, values, and commit
+//! metadata they write to the operation log. For example, if byte values are limited to 4096 bytes,
+//! check the length of the final value before adding it to a batch. A commit can succeed with an
+//! out-of-bounds value. Reads, proofs, and recovery can then fail when they decode it.
+//! [Compact databases](compact) apply the same requirement to commit metadata in their witnesses.
+//!
+//! [`codec_config`]: crate::journal::contiguous::variable::Config#structfield.codec_config
+//!
 //! # Durability
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
-//! durable and guarantees no recovery is needed on startup after a crash.
+//! durable and advances the operation journal's recovery watermark. Full databases rebuild their
+//! Merkle digests from retained operations at every startup.
 //!
 //! # Initialization bounds
 //!
 //! With `Some(max_size)`, `init` opens the latest retained commit with at most `max_size`
 //! operations, counting commit records and pruned operations. `None` opens the latest retained
 //! state. Zero is invalid, and a bound above the stored size does not grow the database.
-//! Initialization fails if pruning removed history needed by the selected commit.
+//! If pruning leaves no commit at or below the bound, initialization returns
+//! [`Error::NoRetainedCommit`]. Initialization also fails if pruning removed history needed
+//! to rebuild the selected commit.
 //!
 //! Initialization durably removes later history before returning successfully. The bound does not
 //! limit future appends. To require an exact checkpoint, also check the recovered root and range.
@@ -87,16 +100,22 @@
 //!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
+    Context,
     index::{Cursor, Unordered as Index},
-    journal::{Error as JournalError, contiguous::Contiguous},
+    journal::{
+        Error as JournalError,
+        authenticated::{self, Backing, Config as MerkleConfig, Journal, Recovery},
+        contiguous::Contiguous,
+    },
     merkle::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
-    qmdb::operation::Floored,
+    qmdb::operation::Committable,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Hasher;
+use commonware_parallel::Strategy;
 use thiserror::Error;
 
 pub mod any;
@@ -132,12 +151,20 @@ pub(crate) fn validate_initialization_bound<F: Family>(
     Ok(())
 }
 
+/// Classify pruning while selecting a commit for a bounded open.
+fn selection_error<F: Family>(error: JournalError, max_size: Option<Location<F>>) -> Error<F> {
+    match (error, max_size) {
+        (JournalError::ItemPruned(_), Some(cap)) => Error::NoRetainedCommit(cap),
+        (error, _) => error.into(),
+    }
+}
+
 /// Validate a selected commit against its retained history and return its floor.
 fn validate_initialization_commit<F: Family>(
     start: u64,
     size: u64,
     fresh: bool,
-    commit: Option<&impl Floored<F>>,
+    commit: Option<&impl Committable<F>>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>> {
     if size == 0 {
@@ -148,7 +175,7 @@ fn validate_initialization_commit<F: Family>(
         };
     }
     let floor = commit
-        .and_then(Floored::inactivity_floor)
+        .and_then(Committable::inactivity_floor)
         .ok_or(Error::DataCorrupted(
             "selected operation has no commit floor",
         ))?;
@@ -166,15 +193,15 @@ fn validate_initialization_commit<F: Family>(
 /// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
-    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    pending: &Recovery<F, E, C, H, S>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     let bounds = pending.bounds();
     let commit = if bounds.end == 0 {
@@ -194,19 +221,19 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: MerkleConfig<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
-) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+) -> Result<Recovery<F, E, C, H, S>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     validate_initialization_bound(max_size)?;
-    Ok(crate::journal::authenticated::Journal::prepare(
+    Journal::prepare(
         context,
         merkle,
         journal,
@@ -214,28 +241,12 @@ where
         |op: &C::Item| op.inactivity_floor().is_some(),
         ROOT_BAGGING,
     )
-    .await?)
-}
-
-/// Publish a standard QMDB journal after validating the retained commit.
-#[commonware_macros::boxed]
-pub(crate) async fn init_journal<F, E, C, H, S>(
-    context: E,
-    merkle: crate::merkle::full::Config<S>,
-    journal: C::Config,
-    max_size: Option<Location<F>>,
-    replay_from_floor: bool,
-) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
-where
-    F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
-    H: Hasher,
-    S: commonware_parallel::Strategy,
-{
-    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
-    validate_initialization(&pending, replay_from_floor).await?;
-    Ok(pending.finish().await?)
+    .await
+    // Every pruning error from this step means the selection found no usable commit.
+    .map_err(|err| match err {
+        authenticated::Error::Journal(err) => selection_error(err, max_size),
+        err => err.into(),
+    })
 }
 
 /// Merkle peak bagging policy used by QMDB operation roots.
@@ -261,28 +272,23 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
         .expect("a single-leaf Merkle root is always valid")
 }
 
-/// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
-///
-/// `op_count` must be a non-zero commit-boundary historical size: the operation at `op_count - 1`
-/// must itself be a commit op (one for which `floor_of` returns `Some`).
+/// Look up the inactivity floor declared by the commit at `size - 1`. Returns `None` for
+/// size zero or when the retained operation at `size - 1` is not a commit.
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
-///   `op_count - 1` is retained but is not a commit op (either because the caller passed a
-///   non-commit-boundary size, or because pruning removed the commit that would have governed this
-///   size).
-/// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
-pub(crate) async fn find_inactivity_floor_at<F, R>(
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
+pub(crate) async fn commit_floor_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
-) -> Result<Location<F>, Error<F>>
+    size: Location<F>,
+) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    let Some(last_op) = op_count.checked_sub(1) else {
-        return Err(Error::HistoricalFloorPruned(op_count));
+    let Some(last_op) = size.checked_sub(1) else {
+        return Ok(None);
     };
     let last_op = *last_op;
     let bounds = reader.bounds();
@@ -291,32 +297,51 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = op
-        .inactivity_floor()
-        .ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let Some(floor) = op.inactivity_floor() else {
+        return Ok(None);
+    };
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
         ));
     }
-    Ok(floor)
+    Ok(Some(floor))
 }
 
-/// Compute the inactive peak count for a historical operation count.
+/// Look up the inactivity floor at the commit boundary required by recovery or sync.
+///
+/// # Errors
+///
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero or the retained operation at
+///   `size - 1` has no commit floor.
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
+pub(crate) async fn find_inactivity_floor_at<F, R>(
+    reader: &R,
+    size: Location<F>,
+) -> Result<Location<F>, Error<F>>
+where
+    F: Family,
+    R: Contiguous<Item: Committable<F>>,
+{
+    commit_floor_at(reader, size)
+        .await?
+        .ok_or(Error::HistoricalFloorPruned(size))
+}
+
+/// Compute the inactive peak count for a proof at the requested commit boundary.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
+    size: Location<F>,
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    if op_count == Location::new(0) {
-        return Ok(0);
-    }
-
-    let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
-    Ok(F::inactive_peaks(op_count, floor))
+    let floor = commit_floor_at(reader, size)
+        .await?
+        .ok_or(Error::NotCommitBoundary(size))?;
+    Ok(F::inactive_peaks(size, floor))
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -325,6 +350,10 @@ pub enum Error<F: Family> {
     /// A QMDB initialization bound cannot exclude its initial commit.
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
+
+    /// No retained commit is at or below the requested initialization bound.
+    #[error("no retained commit at or below size: {0}")]
+    NoRetainedCommit(Location<F>),
 
     /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
@@ -340,7 +369,7 @@ pub enum Error<F: Family> {
 
     /// An error from an underlying journal.
     #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
+    Journal(#[from] JournalError),
 
     /// An error from the runtime.
     #[error("runtime error: {0}")]
@@ -400,10 +429,10 @@ pub enum Error<F: Family> {
     #[error("stale read: database is at no state of the batch's chain")]
     StaleRead,
 
-    /// A batch read asked for a location below the batch's inactivity floor (for an unmerkleized
-    /// batch, the floor it builds on).
+    /// A read by location asked for a location below the inactivity floor: the database's, or for
+    /// a batch read the batch's (for an unmerkleized batch, the floor it builds on).
     ///
-    /// Whether the journal still retains such a location depends on local pruning, so batch reads
+    /// Whether the journal still retains such a location depends on local pruning, so reads
     /// reject it on every database at the same commitment.
     #[error("location below inactivity floor: {0}")]
     BelowInactivityFloor(Location<F>),
@@ -421,17 +450,21 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondCommit(Location<F>, Location<F>),
 
+    /// The requested operation count is zero or its final operation is a retained non-commit.
+    #[error("size {0} is not a commit boundary")]
+    NotCommitBoundary(Location<F>),
+
     /// The commit at the given operation count cannot be reconstructed from retained history.
     /// The payload is the requested or selected operation count, not its inactivity floor.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),
 }
 
-impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
-    fn from(e: crate::journal::authenticated::Error<F>) -> Self {
+impl<F: Family> From<authenticated::Error<F>> for Error<F> {
+    fn from(e: authenticated::Error<F>) -> Self {
         match e {
-            crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
-            crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
+            authenticated::Error::Journal(j) => Self::Journal(j),
+            authenticated::Error::Merkle(m) => Self::Merkle(m),
         }
     }
 }
