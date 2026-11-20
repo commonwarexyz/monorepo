@@ -1,3 +1,4 @@
+use ::tokio::task::consume_budget;
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
@@ -173,6 +174,9 @@ fn main() {
                 let mut rng = SmallRng::seed_from_u64(0);
                 let messages = context.counter("messages", "Sent messages");
                 loop {
+                    // Sending is synchronous, so explicitly cooperate with the executor.
+                    consume_budget().await;
+
                     // Pace to the quota, sleeping while every connected peer is rate-limited
                     let checked = match flood_sender.check(Recipients::All) {
                         Ok(checked) => checked,
