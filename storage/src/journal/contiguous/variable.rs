@@ -5,7 +5,7 @@
 //!
 //! # Prefetching
 //!
-//! Each call to `Contiguous::prefetch` has a page budget of half the page cache's Main capacity
+//! Each call to [`Contiguous::prefetch`] has a page budget of half the page cache's Main capacity
 //! (rounded down, with a minimum of one page). Frame and offset pages share that budget. Frames
 //! whose offsets are already available go first. The journal skips ranges that exceed the budget
 //! and logs a warning if it skips pages.
@@ -35,20 +35,19 @@ use crate::{
     },
 };
 use bytes::{Bytes, BytesMut};
-#[commonware_macros::stability(ALPHA)]
-use commonware_codec::DecodeExt;
-use commonware_codec::{Buf, Codec, CodecShared, Copying, Viewing, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{
+    Buf, Codec, CodecShared, Copying, DecodeExt, Viewing, varint::MAX_U32_VARINT_SIZE,
+};
 use commonware_macros::boxed;
-#[commonware_macros::stability(ALPHA)]
-use commonware_runtime::buffer::paged::Sealed;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Handle, IoBuf, ReadOptions,
-    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
+    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay, Sealed},
 };
 use commonware_utils::{MAX_ALLOCATION_BYTES, futures::try_join_all};
-#[commonware_macros::stability(ALPHA)]
-use futures::future::join_all;
-use futures::{FutureExt as _, Stream, future::try_join};
+use futures::{
+    FutureExt as _, Stream,
+    future::{join_all, try_join},
+};
 #[cfg(test)]
 use std::future::pending;
 use std::{
@@ -518,12 +517,10 @@ pub struct Reader<'a, E: Context, V: Codec> {
 
 /// The share of a prefetch's remaining page budget its offset pages may use together, as a
 /// divisor, so the frames they resolve keep the rest.
-#[commonware_macros::stability(ALPHA)]
 const OFFSETS_SHARE: usize = 2;
 
 /// The frames a prefetch warms: every frame position interleaved with its same-blob successor,
 /// and the immutable views of the data blobs holding them.
-#[commonware_macros::stability(ALPHA)]
 struct PrefetchFrames<B: RBlob> {
     /// Frame positions and their same-blob successors, strictly increasing.
     lookups: Vec<u64>,
@@ -538,7 +535,6 @@ struct PrefetchFrames<B: RBlob> {
     metrics: super::metrics::PrefetchMetrics,
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<B: RBlob> PrefetchFrames<B> {
     /// The byte range of the frame at `idx` in `lookups`, in a blob of `blob_size` bytes, once
     /// `offsets` resolves both of its ends.
@@ -600,7 +596,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     /// that still need an offset read. The offset pages may then use half of what remains, and
     /// the frames they resolve the rest. An offset whose page the budget skips is not read, so its
     /// frame is skipped too.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch(
         &self,
         positions: &[u64],
@@ -1208,7 +1203,6 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
 impl<'a, E: Context, V: CodecShared> super::Contiguous for Reader<'a, E, V> {
     type Item = V;
 
-    #[commonware_macros::stability(ALPHA)]
     fn prefetch(
         &self,
         positions: &[u64],
@@ -2769,7 +2763,6 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.0.reader().try_read_many_sync(positions)
     }
 
-    #[commonware_macros::stability(ALPHA)]
     fn prefetch(&self, positions: &[u64]) -> impl Future<Output = ()> + Send + 'static + use<E, V> {
         self.0.reader().prefetch(positions)
     }

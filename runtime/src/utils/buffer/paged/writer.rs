@@ -551,7 +551,6 @@ impl<B: Blob> Writer<B> {
     ///
     /// Written pages never change under that id, so the view stays valid while the writer
     /// appends, and pages it warms into the cache stay correct.
-    #[commonware_macros::stability(ALPHA)]
     pub fn written(&self) -> Sealed<B> {
         Sealed::new(
             self.blob.clone(),

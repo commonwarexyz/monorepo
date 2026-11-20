@@ -1,6 +1,5 @@
 //! Blob management for a contiguous journal.
 
-#[commonware_macros::stability(ALPHA)]
 use super::metrics::PrefetchMetrics;
 use crate::{
     Context, SyncCompletion,
@@ -20,9 +19,7 @@ use commonware_runtime::{
 use commonware_utils::futures::try_join_all;
 use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
-use tracing::debug;
-#[commonware_macros::stability(ALPHA)]
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -491,7 +488,6 @@ impl<E: Context> Writable<E> {
 /// reopened blob gets a fresh id. A view also stays readable after the journal prunes or clears
 /// its blob, since a removed blob's open handles remain readable (see
 /// [commonware_runtime::Storage::remove]).
-#[commonware_macros::stability(ALPHA)]
 pub(super) struct Warm<B: RBlob> {
     /// Each blob with its byte ranges.
     groups: Vec<(Sealed<B>, ByteRanges)>,
@@ -500,10 +496,8 @@ pub(super) struct Warm<B: RBlob> {
 }
 
 /// `(offset, len)` byte ranges of one blob, ascending by offset.
-#[commonware_macros::stability(ALPHA)]
 type ByteRanges = Vec<(u64, u64)>;
 
-#[commonware_macros::stability(ALPHA)]
 impl<B: RBlob> Warm<B> {
     pub(super) const fn new(metrics: PrefetchMetrics) -> Self {
         Self {
@@ -542,7 +536,6 @@ impl<B: RBlob> Warm<B> {
 /// How many of the page cache's Main pages one logical prefetch may warm, as a divisor of Main's
 /// capacity. Warmed pages survive until read only while they fit in Main, so half lets two
 /// prefetches in flight fit together.
-#[commonware_macros::stability(ALPHA)]
 const MAIN_SHARE: usize = 2;
 
 /// The pages one logical prefetch may still warm, shared by every blob it reads.
@@ -553,7 +546,6 @@ const MAIN_SHARE: usize = 2;
 /// resident. A sealed blob's partial last page is held in memory and never warmed, so it is free.
 /// Pages are deduplicated within one call, so a page covered by ranges offered in separate calls
 /// can be charged once per call, which only makes the budget stricter.
-#[commonware_macros::stability(ALPHA)]
 #[derive(Default)]
 pub(super) struct Budget {
     /// The page cache's Main capacity, the budget, and the pages it has left, once the first
@@ -566,7 +558,6 @@ pub(super) struct Budget {
 }
 
 /// See [Budget::state].
-#[commonware_macros::stability(ALPHA)]
 struct BudgetState {
     main: usize,
     limit: usize,
@@ -574,7 +565,6 @@ struct BudgetState {
 }
 
 /// A share of a [Budget] set aside by [Budget::reserve] for ranges admitted across several calls.
-#[commonware_macros::stability(ALPHA)]
 pub(super) struct Share {
     /// Pages left in the share.
     pages: usize,
@@ -582,7 +572,6 @@ pub(super) struct Share {
     skipping: bool,
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl Budget {
     /// The budget's state, read from `blob`'s page cache when first needed.
     fn state<B: RBlob>(&mut self, blob: &Sealed<B>) -> &mut BudgetState {
@@ -1075,7 +1064,6 @@ impl<'a, B: RBlob> Blobs<'a, B> {
 
     /// Return an immutable view of blob `blob`, if retained. The view is a sealed blob, or the
     /// bytes of a writable tail already written to storage.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn immutable(&self, blob: u64) -> Option<Sealed<B>> {
         Some(match self.get(blob)? {
             Blob::Writer(writer) => writer.written(),

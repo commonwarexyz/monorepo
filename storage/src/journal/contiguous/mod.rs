@@ -246,7 +246,6 @@ pub trait Contiguous: Send + Sync {
     /// The future does not borrow the journal, so it can run alongside any journal operation, and
     /// it can be dropped at any point. Prefetching is best effort. Positions outside `bounds()`
     /// are skipped, and failures are logged.
-    #[commonware_macros::stability(ALPHA)]
     fn prefetch(
         &self,
         _positions: &[u64],
