@@ -125,6 +125,25 @@ impl<D: Copy> Resident<D> {
         Ok(())
     }
 
+    /// Make room for the nodes born by size `end`, so adding them regrows no level. Regrowing
+    /// copies every digest a level holds.
+    ///
+    /// A level gets the room that growing to its new length would have left it, so the appends
+    /// after `end` do not regrow it at once.
+    fn reserve<F: Family>(&mut self, end: Position<F>) {
+        let born = born(end);
+        for (level, &to) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
+            let additional = to.saturating_sub(level.end()) as usize;
+            if additional == 0 {
+                continue;
+            }
+            let len = level.nodes.len();
+            let total = len.saturating_add(additional);
+            let capacity = total.checked_next_power_of_two().unwrap_or(total);
+            level.nodes.reserve_exact(capacity - len);
+        }
+    }
+
     /// Drop nodes before `boundary`.
     fn trim<F: Family>(&mut self, boundary: Position<F>) {
         let born = born(boundary);
@@ -513,6 +532,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(())
     }
 
+    /// Make room for the resident nodes that appending the operations up to `end` adds. A replay
+    /// to `end` reserves first, so that it never stops to regrow a level.
+    pub(crate) fn reserve(&mut self, end: Location<F>) {
+        self.resident.reserve(F::location_to_position(end));
+        self.update_metrics();
+    }
+
     /// Append the digests of the operations from the current size to `end`.
     pub(crate) async fn replay<C, H>(
         mut self,
@@ -526,6 +552,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         self.check_replay_end(journal, end)?;
+        self.reserve(end);
 
         // Each operation is read once, so its pages are not kept in the OS page cache.
         let stream = journal
@@ -673,6 +700,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         self.check_replay_end(journal.as_ref(), end)?;
+        self.reserve(end);
 
         // Spawn a task that reads and hashes the next chunk, or return false if none is left.
         let plan = self.chunk_plan(end, height);
@@ -1437,6 +1465,51 @@ mod tests {
     #[test]
     fn subtrees_match_batches_mmb() {
         deterministic::Runner::default().start(subtrees_match_batches::<mmb::Family>);
+    }
+
+    /// Reserving for a replay leaves every level room for the nodes the replay adds, so the
+    /// replay regrows none, in trees opened at boundaries on and off level edges. A level's room
+    /// stays under twice its nodes.
+    async fn replay_regrows_no_level<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let total = 513;
+        let expected = oracle::<F>(&Operations::new(total), &hasher);
+        let capacities = |tree: &Tree<F, D, Sequential>| -> Vec<usize> {
+            let levels = tree.resident.levels.iter();
+            levels.map(|level| level.nodes.capacity()).collect()
+        };
+        for height in [0, 2, 5] {
+            for boundary in [0, 1, 31, 32, 33, 257, total] {
+                let case = format!("resident {height}, boundary {boundary}");
+                let pins: Vec<_> = F::nodes_to_pin(Location::new(boundary))
+                    .map(|p| expected.get_node(p).unwrap())
+                    .collect();
+                let ops = Operations::range(boundary..total);
+                let mut tree =
+                    Tree::<F, D, _>::new(Location::new(boundary), pins, &config(height), &context)
+                        .unwrap();
+                tree.reserve(Location::new(total));
+                let reserved = capacities(&tree);
+                let tree = tree
+                    .replay(&ops, &hasher, Location::new(total), NZU64!(7))
+                    .await
+                    .unwrap();
+                assert_eq!(capacities(&tree), reserved, "{case}");
+                for level in &tree.resident.levels {
+                    let (len, capacity) = (level.nodes.len(), level.nodes.capacity());
+                    assert!(len <= capacity && capacity < 2 * len.max(1), "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replay_regrows_no_level_mmr() {
+        deterministic::Runner::default().start(replay_regrows_no_level::<mmr::Family>);
+    }
+    #[test]
+    fn replay_regrows_no_level_mmb() {
+        deterministic::Runner::default().start(replay_regrows_no_level::<mmb::Family>);
     }
 
     /// A chunk, whole or partial, that does not start at the tree's end is rejected.
