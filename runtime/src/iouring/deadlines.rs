@@ -126,7 +126,7 @@ impl Deadlines {
     /// that no deadline is due. A pass that runs out of budget leaves the
     /// bound at or before `now`, so this is `Some` while due deadlines
     /// remain.
-    pub fn due_cutoff(&self, now: Instant) -> Option<Instant> {
+    pub fn latest_due(&self, now: Instant) -> Option<Instant> {
         self.next.filter(|next| *next <= now).map(|_| {
             let ticks = now.nanos_since(self.origin) / RESOLUTION;
             self.origin + Duration::from_nanos(ticks * RESOLUTION)
