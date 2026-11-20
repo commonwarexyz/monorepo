@@ -226,7 +226,7 @@ impl<S: UnlimitedSender, E: Clock> CheckedSender<'_, S, E> {
     ///
     /// The rate limit is applied to `recipients` exactly as it is to the checked recipients in
     /// [`CheckedSender::send`](crate::CheckedSender::send).
-    #[commonware_macros::stability(ALPHA)]
+    #[commonware_macros::stability(BETA)]
     pub(crate) fn send_to(
         self,
         recipients: Recipients<S::PublicKey>,
