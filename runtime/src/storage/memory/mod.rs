@@ -1016,11 +1016,16 @@ mod tests {
         let faulty = FaultyStorage::new(
             inner.clone(),
             Arc::new(Mutex::new(rng)),
-            Arc::new(RwLock::new(FaultConfig::default().write(WriteConfig {
-                failure_rate,
-                retention_rate: probability!(0.5),
-                mode: PartialWriteMode::Subset,
-            }))),
+            // The script covers fault draws only, so mutations apply in call order.
+            Arc::new(RwLock::new(
+                FaultConfig::default()
+                    .reorder(probability!(0.0))
+                    .write(WriteConfig {
+                        failure_rate,
+                        retention_rate: probability!(0.5),
+                        mode: PartialWriteMode::Subset,
+                    }),
+            )),
         );
 
         // Apply the overwrite through the faulty wrapper and assert the selected write boundary.

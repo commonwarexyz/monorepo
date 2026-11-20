@@ -1409,7 +1409,11 @@ mod tests {
             merkle_syncs.arm();
             let finish = pending.finish();
             futures::pin_mut!(finish);
-            assert!(futures::poll!(&mut finish).is_pending());
+            while operation_syncs.calls() == 0 {
+                assert!(futures::poll!(&mut finish).is_pending());
+                assert_eq!(merkle_syncs.calls(), 0);
+                commonware_runtime::reschedule().await;
+            }
             assert_eq!(operation_syncs.calls(), 1);
             assert_eq!(merkle_syncs.calls(), 0);
 
@@ -4484,8 +4488,11 @@ mod tests {
         loop {
             let journal_cfg = journal_cfg.clone();
             let outcome = deterministic::Runner::default().start(|context| async move {
-                context.storage_fault_config().write().reorder_rate =
-                    reorder.then_some(commonware_utils::probability!(0.75));
+                context.storage_fault_config().write().reorder_rate = if reorder {
+                    commonware_utils::probability!(0.75)
+                } else {
+                    commonware_utils::probability!(0.0)
+                };
 
                 // Record the digest of empty storage. A completed destroy must restore it.
                 let empty = context.storage_audit();

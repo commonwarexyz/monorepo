@@ -121,9 +121,8 @@ fn recovery_fault_config(rng: &mut impl Rng) -> deterministic::FaultConfig {
 
     // Drawn last so the earlier knobs keep their draws. Zero keeps call order, and the cap
     // bounds how many polls a pending mutation waits through.
-    config.reorder_rate = Some(
-        Probability::new(rng.random_range(0..=75), 100).expect("a percentage in 0..=75 is valid"),
-    );
+    config.reorder_rate =
+        Probability::new(rng.random_range(0..=75), 100).expect("a percentage in 0..=75 is valid");
     config
 }
 

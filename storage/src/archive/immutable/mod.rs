@@ -265,7 +265,11 @@ mod tests {
             // Retain every unsynced write across the crash, as a runtime that flushes a reopened
             // blob's pending writes would.
             let faults = FaultConfig {
-                reorder_rate: reorder.then_some(probability!(0.75)),
+                reorder_rate: if reorder {
+                    probability!(0.75)
+                } else {
+                    probability!(0.0)
+                },
                 ..FaultConfig::default().write(WriteConfig {
                     failure_rate: probability!(0.0),
                     retention_rate: probability!(1.0),

@@ -116,8 +116,16 @@ pub struct ResizeConfig {
     pub partial_rate: Probability,
 }
 
-/// Configuration for deterministic storage fault injection.
-#[derive(Clone, Debug, Default)]
+/// Rate at which [Config::default] passes over a pending mutation, see [Config::reorder_rate].
+const DEFAULT_REORDER_RATE: Probability = probability!(0.5);
+
+/// Configuration for deterministic storage fault injection and for the order in which storage
+/// mutations take effect.
+///
+/// [Config::default] injects no faults and reorders pending mutations, as the io_uring and Tokio
+/// backends may. Reordering is not a fault, so replacing the configuration with [Config::default]
+/// to clear faults keeps it.
+#[derive(Clone, Debug)]
 pub struct Config {
     /// Failure rate for `open_versioned` operations.
     pub open_rate: Option<Probability>,
@@ -143,21 +151,38 @@ pub struct Config {
     pub scan_rate: Option<Probability>,
 
     /// Probability that a pending `write_at` or `resize` is passed over each time it could
-    /// take effect.
+    /// take effect, one half by default.
     ///
-    /// When set, a mutation is accepted on its first poll and then takes effect at a later
+    /// A nonzero rate models the [crate::Blob] contract as the io_uring and Tokio backends
+    /// exercise it. A mutation is accepted on its first poll and then takes effect at a later
     /// point chosen from the shared RNG: a poll of its own future, or a later storage call that
     /// drives pending mutations. Mutations pending at the same time therefore take effect in any
     /// order, and dropping a mutation's future does not cancel it, so it may take effect after
-    /// later operations complete, as on the io_uring and Tokio backends. A mutation's future
-    /// completes only once it has taken effect, opening a blob first applies every mutation still
-    /// pending on it, and a simulated crash discards mutations that have not taken effect. Unset
-    /// or zero, mutations take effect when they are first polled, in call order.
+    /// later operations complete. A mutation's future completes only once it has taken effect,
+    /// opening a blob first applies every mutation still pending on it, and a simulated crash
+    /// discards mutations that have not taken effect. Zero makes mutations take effect when they
+    /// are first polled, in call order, for tests that pin an order the contract does not
+    /// promise.
     ///
     /// Must be less than one, or a pending mutation never takes effect. Opening a blob requires
     /// each of its pending mutations to finish in one poll, as the in-memory storage of the
     /// deterministic runtime does.
-    pub reorder_rate: Option<Probability>,
+    pub reorder_rate: Probability,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            open_rate: None,
+            read_rate: None,
+            write_rate: None,
+            sync_rate: None,
+            resize_rate: None,
+            remove_rate: None,
+            scan_rate: None,
+            reorder_rate: DEFAULT_REORDER_RATE,
+        }
+    }
 }
 
 impl Config {
@@ -217,16 +242,37 @@ impl Config {
         self
     }
 
-    /// Set the rate at which pending mutations are passed over. See [`Self::reorder_rate`].
+    /// No faults, with every mutation taking effect when it is first polled, in call order.
+    ///
+    /// The real backends do not promise this order. Use it only for tests that pin a single
+    /// outcome, such as storage format conformance, rather than the behavior of a backend.
+    pub const fn in_call_order() -> Self {
+        Self {
+            open_rate: None,
+            read_rate: None,
+            write_rate: None,
+            sync_rate: None,
+            resize_rate: None,
+            remove_rate: None,
+            scan_rate: None,
+            reorder_rate: probability!(0.0),
+        }
+    }
+
+    /// Set the rate at which pending mutations are passed over, zero to apply them in call
+    /// order. See [`Self::reorder_rate`].
     pub const fn reorder(mut self, rate: Probability) -> Self {
-        self.reorder_rate = Some(rate);
+        self.reorder_rate = rate;
         self
     }
 
     /// The reorder rate, if mutations are deferred at all. Panics on a rate of one, which would
     /// leave every mutation pending forever.
     fn deferral(&self) -> Option<Probability> {
-        let rate = self.reorder_rate.filter(|rate| !rate.is_zero())?;
+        let rate = self.reorder_rate;
+        if rate.is_zero() {
+            return None;
+        }
         assert!(!rate.is_one(), "storage reorder rate must be less than one");
         Some(rate)
     }
@@ -2011,9 +2057,11 @@ mod tests {
     #[tokio::test]
     async fn test_crash_replays_writes_and_resizes_in_issue_order() {
         let retained_resizes = [u64::MAX, 0].repeat(3);
+        // The script covers fault draws only, so mutations apply in call order.
         let h = Harness::with_rng(
             Box::new(ScriptedRng::new(retained_resizes)),
             Config::default()
+                .reorder(probability!(0.0))
                 .write(WriteConfig {
                     failure_rate: probability!(0.0),
                     retention_rate: probability!(1.0),
@@ -2071,14 +2119,17 @@ mod tests {
     async fn test_partial_sync_write_replays_after_retained_resize() {
         let retained_resize = [u64::MAX, 0];
         let retained_write_bytes = [0, u64::MAX, 0, u64::MAX];
+        // The script covers fault draws only, so mutations apply in call order.
         let h = Harness::with_rng(
             Box::new(ScriptedRng::new(
                 retained_resize.into_iter().chain(retained_write_bytes),
             )),
-            Config::default().resize(ResizeConfig {
-                failure_rate: probability!(0.5),
-                partial_rate: probability!(0.0),
-            }),
+            Config::default()
+                .reorder(probability!(0.0))
+                .resize(ResizeConfig {
+                    failure_rate: probability!(0.5),
+                    partial_rate: probability!(0.0),
+                }),
         );
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
@@ -2576,12 +2627,17 @@ mod tests {
     #[test]
     fn test_invalid_memory_reads_do_not_sample_faults() {
         crate::deterministic::Runner::default().start(|_| async {
-            // The first sample lets a read through and the second injects a fault.
+            // The first sample lets a read through and the second injects a fault. The script
+            // covers fault draws only, so mutations apply in call order.
             let rng: BoxDynRng = ScriptedRng::new([u64::MAX, 0, 0]).into();
             let storage = Storage::new(
                 MemStorage::new(),
                 Arc::new(Mutex::new(rng)),
-                Arc::new(RwLock::new(Config::default().read(probability!(0.5)))),
+                Arc::new(RwLock::new(
+                    Config::default()
+                        .reorder(probability!(0.0))
+                        .read(probability!(0.5)),
+                )),
             );
             let (blob, _) = storage.open("partition", b"test").await.unwrap();
             blob.write_at(0, b"data", WriteOptions::default())

@@ -15,6 +15,12 @@
 //! require a length beyond the addressable allocation size returns [crate::Error::OffsetOverflow],
 //! even when its physical extent is otherwise valid.
 //!
+//! Storage models the [Blob](crate::Blob) contract as the io_uring and Tokio backends exercise
+//! it rather than any one order. By default, mutations pending at the same time take effect in an
+//! order chosen from the seed, and a mutation whose future was dropped can still take effect after
+//! later operations complete (see [FaultConfig::reorder_rate]). Tests that must pin a single
+//! outcome can opt out with [FaultConfig::in_call_order].
+//!
 //! # External Processes
 //!
 //! When testing an application that interacts with some external process, it can appear to
@@ -307,7 +313,7 @@ impl Config {
         self
     }
 
-    /// Configure storage fault injection.
+    /// Configure storage fault injection and the order in which storage mutations take effect.
     ///
     /// When set, the runtime will inject deterministic storage errors based on
     /// the provided configuration. Faults are drawn from the shared RNG, ensuring
@@ -2387,14 +2393,46 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_reorders_pending_mutations_by_default() {
+        // Two overlapping writes pending at once land in an order chosen from the seed, unless the
+        // configuration pins call order.
+        let last_writer = |faults: Option<FaultConfig>| {
+            (0..32u64)
+                .map(|seed| {
+                    let mut cfg = Config::default().with_seed(seed);
+                    if let Some(faults) = faults.clone() {
+                        cfg = cfg.with_storage_fault_config(faults);
+                    }
+                    Runner::new(cfg).start(|context| async move {
+                        let (blob, _) = context.open("reorder", b"blob").await.unwrap();
+                        let (first, second) = futures::join!(
+                            blob.write_at(0, vec![1u8; 4], WriteOptions::default()),
+                            blob.write_at(0, vec![2u8; 4], WriteOptions::default()),
+                        );
+                        first.unwrap();
+                        second.unwrap();
+                        let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+                        read.coalesce().as_ref()[0]
+                    })
+                })
+                .collect::<std::collections::HashSet<_>>()
+        };
+        assert_eq!(last_writer(None), [1, 2].into());
+        assert_eq!(last_writer(Some(FaultConfig::in_call_order())), [2].into());
+    }
+
+    #[test]
     fn test_recover_retained_successful_resize() {
         let retained_resize = [u64::MAX, 0];
+        // The script covers fault draws only, so mutations apply in call order.
         let cfg = deterministic::Config::default()
             .with_rng(ScriptedRng::new(retained_resize))
-            .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
-                failure_rate: probability!(0.5),
-                partial_rate: probability!(0.0),
-            }));
+            .with_storage_fault_config(FaultConfig::default().reorder(probability!(0.0)).resize(
+                ResizeConfig {
+                    failure_rate: probability!(0.5),
+                    partial_rate: probability!(0.0),
+                },
+            ));
         let (_, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|context| async move {
                 let (blob, _) = context.open("crash_resize", b"blob").await.unwrap();

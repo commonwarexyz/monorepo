@@ -25,7 +25,13 @@ where
     W: StorageWorkload,
 {
     async fn commit(seed: u64) -> Vec<u8> {
-        let runner = deterministic::Runner::seeded(seed);
+        // Mutations take effect in call order, so the audit pins the storage format rather than
+        // one of the orders in which pending mutations may land.
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_fault_config(deterministic::FaultConfig::in_call_order()),
+        );
         runner.start(|context| async move {
             W::run(context.child("workload"), seed)
                 .await

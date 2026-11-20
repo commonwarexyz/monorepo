@@ -2047,6 +2047,10 @@ mod tests {
     fn test_sync_recreates_settled_section_barrier() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The archive holds a marker publication back while the previous one is in flight,
+            // so the exact sync counts below assume each sync completes in call order.
+            context.storage_fault_config().write().reorder_rate =
+                commonware_utils::probability!(0.0);
             let cfg = test_config("marker-recreate", NZU64!(2), FourCap);
 
             let pending = PendingSyncs::default();
@@ -3309,8 +3313,11 @@ mod tests {
             let (destroyed, checkpoint) = deterministic::Runner::default().start_and_recover({
                 let faults = faults.clone();
                 |context| async move {
-                    context.storage_fault_config().write().reorder_rate =
-                        reorder.then_some(commonware_utils::probability!(0.75));
+                    context.storage_fault_config().write().reorder_rate = if reorder {
+                        commonware_utils::probability!(0.75)
+                    } else {
+                        commonware_utils::probability!(0.0)
+                    };
                     let context = MutationFaultContext {
                         inner: context,
                         faults: faults.clone(),
@@ -3367,8 +3374,11 @@ mod tests {
         for key_mask in 0..=EVERYTHING {
             for value_mask in 0..=EVERYTHING {
                 deterministic::Runner::default().start(|context| async move {
-                    context.storage_fault_config().write().reorder_rate =
-                        reorder.then_some(commonware_utils::probability!(0.75));
+                    context.storage_fault_config().write().reorder_rate = if reorder {
+                        commonware_utils::probability!(0.75)
+                    } else {
+                        commonware_utils::probability!(0.0)
+                    };
                     let context = MutationFaultContext {
                         inner: context,
                         faults: MutationFaults::default(),

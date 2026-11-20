@@ -5319,8 +5319,11 @@ mod tests {
             let (pruned, checkpoint) = deterministic::Runner::default().start_and_recover({
                 let faults = faults.clone();
                 |context| async move {
-                    context.storage_fault_config().write().reorder_rate =
-                        reorder.then_some(commonware_utils::probability!(0.75));
+                    context.storage_fault_config().write().reorder_rate = if reorder {
+                        commonware_utils::probability!(0.75)
+                    } else {
+                        commonware_utils::probability!(0.0)
+                    };
                     let context = MutationFaultContext {
                         inner: context,
                         faults: faults.clone(),
@@ -5442,8 +5445,11 @@ mod tests {
             let (pruned, checkpoint) = deterministic::Runner::default().start_and_recover({
                 let faults = faults.clone();
                 |context| async move {
-                    context.storage_fault_config().write().reorder_rate =
-                        reorder.then_some(commonware_utils::probability!(0.75));
+                    context.storage_fault_config().write().reorder_rate = if reorder {
+                        commonware_utils::probability!(0.75)
+                    } else {
+                        commonware_utils::probability!(0.0)
+                    };
                     let context = MutationFaultContext {
                         inner: context,
                         faults: faults.clone(),

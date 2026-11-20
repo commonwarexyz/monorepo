@@ -2185,8 +2185,10 @@ mod tests {
                 &finalized_block,
                 true,
             ));
-            assert!(futures::poll!(&mut finalize).is_pending());
-            started.await.expect("finalized hook should start");
+            select! {
+                _ = &mut finalize => panic!("finalization must wait at the finalized hook"),
+                result = started => result.expect("finalized hook should start"),
+            }
 
             assert!(execution.pending_contains(&winner_child.digest()));
             assert!(!execution.pending_contains(&block1.digest()));
@@ -2434,8 +2436,10 @@ mod tests {
                 replay_context,
                 marshal_ancestry::from_iter([digested(child.clone())]),
             ));
-            assert!(futures::poll!(&mut first).is_pending());
-            started.await.expect("replay must start");
+            select! {
+                _ = &mut first => panic!("replay must wait at the process gate"),
+                result = started => result.expect("replay must start"),
+            }
 
             let mut second = Box::pin(process_shared(
                 &execution,
@@ -2461,8 +2465,10 @@ mod tests {
                 &finalized_block,
                 true,
             ));
-            assert!(futures::poll!(&mut finalize).is_pending());
-            finalized_started.await.expect("finalized hook must start");
+            select! {
+                _ = &mut finalize => panic!("finalization must wait at the finalized hook"),
+                result = finalized_started => result.expect("finalized hook must start"),
+            }
 
             // Dropping the first request leaves the processing running for the second while the
             // finalized hook reads the applied state, and the processing completes once the

@@ -2209,8 +2209,11 @@ mod tests {
         let mut interrupted = 0;
         loop {
             let outcome = deterministic::Runner::default().start(|ctx| async move {
-                ctx.storage_fault_config().write().reorder_rate =
-                    reorder.then_some(commonware_utils::probability!(0.75));
+                ctx.storage_fault_config().write().reorder_rate = if reorder {
+                    commonware_utils::probability!(0.75)
+                } else {
+                    commonware_utils::probability!(0.0)
+                };
 
                 // Record the digest of empty storage and the state of a new database. A
                 // completed destroy must restore the former.
