@@ -720,11 +720,7 @@ impl<S: crate::Storage> Storage<S> {
 impl Storage<memory::Storage> {
     /// Retire crash evidence excluded from the durable snapshot admitted by a successful open.
     /// The caller holds the logical namespace guard through admission and retirement.
-    pub(crate) fn admit(
-        &self,
-        partition: &str,
-        name: &[u8],
-    ) -> Retired<crate::storage::memory::Blob> {
+    pub(crate) fn admit(&self, partition: &str, name: &[u8]) -> Retired<memory::Blob> {
         let generation = self
             .generations
             .lock()
@@ -740,11 +736,7 @@ impl Storage<memory::Storage> {
     /// at the configured [Config::reopen_flush_rate], which also retires their crash evidence as
     /// a sync would, or are left to be discarded by the open. The caller releases namespace locks
     /// before dropping the returned evidence.
-    pub(crate) fn settle_reopen(
-        &self,
-        partition: &str,
-        name: &[u8],
-    ) -> Retired<crate::storage::memory::Blob> {
+    pub(crate) fn settle_reopen(&self, partition: &str, name: &[u8]) -> Retired<memory::Blob> {
         let key = (partition.to_owned(), name.to_vec());
         settle(&self.accepted, &self.ctx, Some(&key));
         let rate = self.ctx.config.read().reopen_flush_rate;
@@ -1413,12 +1405,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, IoBufMut, Runner, Spawner, Storage as _,
+        Blob as _, IoBufMut, Runner, Spawner, Storage as _, deterministic,
         mocks::RecordingContext,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
     };
     use commonware_utils::ScriptedRng;
-    use futures::task::noop_waker;
+    use futures::{executor::block_on, task::noop_waker};
     use rand::{SeedableRng, rngs::StdRng};
     use rstest::rstest;
     use std::{
@@ -2798,7 +2790,7 @@ mod tests {
 
     #[test]
     fn test_invalid_memory_reads_do_not_sample_faults() {
-        crate::deterministic::Runner::default().start(|_| async {
+        deterministic::Runner::default().start(|_| async {
             // The first sample lets a read through and the second injects a fault. The script
             // covers fault draws only, so mutations apply in call order.
             let rng: BoxDynRng = ScriptedRng::new([u64::MAX, 0, 0]).into();
@@ -3520,13 +3512,13 @@ mod tests {
     /// Run `f` on the deterministic runtime with seed `seed` and mutations reordered at `rate`.
     fn run_reordered<F, Fut, T>(seed: u64, rate: Probability, f: F) -> T
     where
-        F: FnOnce(crate::deterministic::Context) -> Fut,
+        F: FnOnce(deterministic::Context) -> Fut,
         Fut: Future<Output = T>,
     {
-        let cfg = crate::deterministic::Config::default()
+        let cfg = deterministic::Config::default()
             .with_seed(seed)
             .with_storage_fault_config(Config::default().reorder(rate));
-        crate::deterministic::Runner::new(cfg).start(f)
+        deterministic::Runner::new(cfg).start(f)
     }
 
     #[test]
@@ -3694,7 +3686,7 @@ mod tests {
     #[should_panic(expected = "storage reorder rate must be less than one")]
     fn test_reorder_rate_of_one_is_rejected() {
         let h = Harness::new(Config::default().reorder(probability!(1.0)));
-        let (blob, _) = futures::executor::block_on(h.storage.open("partition", b"blob")).unwrap();
-        let _ = futures::executor::block_on(blob.resize(1));
+        let (blob, _) = block_on(h.storage.open("partition", b"blob")).unwrap();
+        let _ = block_on(blob.resize(1));
     }
 }

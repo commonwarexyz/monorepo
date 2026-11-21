@@ -244,7 +244,7 @@ mod tests {
         telemetry::metrics::has_metric_value,
     };
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
+        NZU16, NZU64, NZUsize, probability,
         sequence::{FixedBytes, U64},
     };
     use rand::RngExt as _;
@@ -2049,8 +2049,7 @@ mod tests {
         executor.start(|context| async move {
             // The archive holds a marker publication back while the previous one is in flight,
             // so the exact sync counts below assume each sync completes in call order.
-            context.storage_fault_config().write().reorder_rate =
-                commonware_utils::probability!(0.0);
+            context.storage_fault_config().write().reorder_rate = probability!(0.0);
             let cfg = test_config("marker-recreate", NZU64!(2), FourCap);
 
             let pending = PendingSyncs::default();
@@ -3314,9 +3313,9 @@ mod tests {
                 let faults = faults.clone();
                 |context| async move {
                     context.storage_fault_config().write().reorder_rate = if reorder {
-                        commonware_utils::probability!(0.75)
+                        probability!(0.75)
                     } else {
-                        commonware_utils::probability!(0.0)
+                        probability!(0.0)
                     };
                     let context = MutationFaultContext {
                         inner: context,
@@ -3375,9 +3374,9 @@ mod tests {
             for value_mask in 0..=EVERYTHING {
                 deterministic::Runner::default().start(|context| async move {
                     context.storage_fault_config().write().reorder_rate = if reorder {
-                        commonware_utils::probability!(0.75)
+                        probability!(0.75)
                     } else {
-                        commonware_utils::probability!(0.0)
+                        probability!(0.0)
                     };
                     let context = MutationFaultContext {
                         inner: context,

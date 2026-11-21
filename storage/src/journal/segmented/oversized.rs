@@ -5320,9 +5320,9 @@ mod tests {
                 let faults = faults.clone();
                 |context| async move {
                     context.storage_fault_config().write().reorder_rate = if reorder {
-                        commonware_utils::probability!(0.75)
+                        probability!(0.75)
                     } else {
-                        commonware_utils::probability!(0.0)
+                        probability!(0.0)
                     };
                     let context = MutationFaultContext {
                         inner: context,
@@ -5446,9 +5446,9 @@ mod tests {
                 let faults = faults.clone();
                 |context| async move {
                     context.storage_fault_config().write().reorder_rate = if reorder {
-                        commonware_utils::probability!(0.75)
+                        probability!(0.75)
                     } else {
-                        commonware_utils::probability!(0.0)
+                        probability!(0.0)
                     };
                     let context = MutationFaultContext {
                         inner: context,

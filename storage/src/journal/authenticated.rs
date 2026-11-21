@@ -1412,7 +1412,7 @@ mod tests {
             while operation_syncs.calls() == 0 {
                 assert!(futures::poll!(&mut finish).is_pending());
                 assert_eq!(merkle_syncs.calls(), 0);
-                commonware_runtime::reschedule().await;
+                reschedule().await;
             }
             assert_eq!(operation_syncs.calls(), 1);
             assert_eq!(merkle_syncs.calls(), 0);
@@ -4495,9 +4495,9 @@ mod tests {
             let journal_cfg = journal_cfg.clone();
             let outcome = deterministic::Runner::default().start(|context| async move {
                 context.storage_fault_config().write().reorder_rate = if reorder {
-                    commonware_utils::probability!(0.75)
+                    probability!(0.75)
                 } else {
-                    commonware_utils::probability!(0.0)
+                    probability!(0.0)
                 };
 
                 // Record the digest of empty storage. A completed destroy must restore it.

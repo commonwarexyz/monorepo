@@ -44,6 +44,8 @@ use commonware_utils::{MAX_ALLOCATION_BYTES, futures::try_join_all};
 use futures::{FutureExt as _, Stream, future::try_join};
 #[cfg(test)]
 use std::future::pending;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::BTreeMap,
     iter::once,
@@ -441,7 +443,7 @@ struct Inner<E: Context, V: Codec> {
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
     /// raising the flag once parked so tests can drop the pending future at that exact point.
     #[cfg(test)]
-    halt_before_offsets_prune: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    halt_before_offsets_prune: Option<Arc<AtomicBool>>,
 
     /// The number of items per blob.
     ///
@@ -1905,7 +1907,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         #[cfg(test)]
         if let Some(halted) = &self.halt_before_offsets_prune {
-            halted.store(true, std::sync::atomic::Ordering::Release);
+            halted.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         }
 
@@ -2864,14 +2866,12 @@ mod tests {
             RecordingContext, drive_pending_syncs, fail_pending_syncs, next_pending_sync,
             release_pending_syncs,
         },
+        reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::Rng as _;
-    use std::{
-        num::NonZeroU16,
-        sync::atomic::{AtomicBool, Ordering},
-    };
+    use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -3284,7 +3284,7 @@ mod tests {
                     futures::pin_mut!(prune);
                     while !halted.load(Ordering::Acquire) {
                         assert!(futures::poll!(prune.as_mut()).is_pending());
-                        commonware_runtime::reschedule().await;
+                        reschedule().await;
                     }
                 }
                 assert_eq!(
@@ -4040,7 +4040,7 @@ mod tests {
                 let mut starting = std::pin::pin!(journal.start_sync());
                 while pending.starts() == starts {
                     assert!(futures::poll!(starting.as_mut()).is_pending());
-                    commonware_runtime::reschedule().await;
+                    reschedule().await;
                 }
                 assert_eq!(pending.starts(), starts + 1);
                 prior_data.blocked.await.unwrap();
@@ -6613,7 +6613,7 @@ mod tests {
                         futures::poll!(fut.as_mut()).is_pending(),
                         "prune must park before offsets.prune"
                     );
-                    commonware_runtime::reschedule().await;
+                    reschedule().await;
                 }
             }
 

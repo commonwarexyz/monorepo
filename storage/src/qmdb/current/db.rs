@@ -40,6 +40,8 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
 };
 use core::{borrow::Borrow, num::NonZeroU64};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -264,7 +266,7 @@ pub struct Db<
     /// Test-only: park [Self::prune] after the pruning-metadata sync, before the log prune,
     /// raising the flag once parked so tests can drop the pending future at that exact point.
     #[cfg(test)]
-    pub(super) halt_before_prune_log: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) halt_before_prune_log: Option<Arc<AtomicBool>>,
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
@@ -639,7 +641,7 @@ where
 
         #[cfg(test)]
         if let Some(halted) = &self.halt_before_prune_log {
-            halted.store(true, std::sync::atomic::Ordering::Release);
+            halted.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         }
 
@@ -1270,8 +1272,9 @@ mod tests {
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Storage as _, Supervisor as _, deterministic,
         mocks::{MutationFaultContext, MutationFaults},
+        reschedule,
     };
-    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap};
+    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap, probability};
     use std::future::Future;
 
     const N: usize = sha256::Digest::SIZE;
@@ -1985,18 +1988,18 @@ mod tests {
 
         // Drop the production prune future while it is parked after the metadata sync, before
         // the log prune: a genuine cancellation at that await.
-        let halted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let halted = Arc::new(AtomicBool::new(false));
         db.halt_before_prune_log = Some(halted.clone());
         let boundary = db.sync_boundary();
         {
             let fut = db.prune(boundary);
             futures::pin_mut!(fut);
-            while !halted.load(std::sync::atomic::Ordering::Acquire) {
+            while !halted.load(Ordering::Acquire) {
                 assert!(
                     futures::poll!(fut.as_mut()).is_pending(),
                     "prune must park before the log prune"
                 );
-                commonware_runtime::reschedule().await;
+                reschedule().await;
             }
         }
 
@@ -2210,9 +2213,9 @@ mod tests {
         loop {
             let outcome = deterministic::Runner::default().start(|ctx| async move {
                 ctx.storage_fault_config().write().reorder_rate = if reorder {
-                    commonware_utils::probability!(0.75)
+                    probability!(0.75)
                 } else {
-                    commonware_utils::probability!(0.0)
+                    probability!(0.0)
                 };
 
                 // Record the digest of empty storage and the state of a new database. A

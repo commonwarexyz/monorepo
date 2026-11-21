@@ -1648,6 +1648,7 @@ mod tests {
     use futures::{FutureExt as _, stream::FuturesUnordered};
     use std::{
         cell::Cell,
+        collections::HashSet,
         rc::Rc,
         sync::atomic::{AtomicUsize, Ordering},
     };
@@ -2428,7 +2429,7 @@ mod tests {
                         read.coalesce().as_ref()[0]
                     })
                 })
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<HashSet<_>>()
         };
         assert_eq!(last_writer(None), [1, 2].into());
         assert_eq!(last_writer(Some(FaultConfig::in_call_order())), [2].into());
@@ -2458,7 +2459,7 @@ mod tests {
     #[test]
     fn test_reopen_flushes_or_discards_unsynced_writes() {
         // By default a reopen keeps the dropped open's unsynced write whole or discards it.
-        let outcomes: std::collections::HashSet<_> = (0..32)
+        let outcomes: HashSet<_> = (0..32)
             .map(|seed| reopen_after_unsynced_write(seed, FaultConfig::default()))
             .collect();
         assert_eq!(outcomes, [(0, None), (4, Some(b"data".to_vec()))].into());
