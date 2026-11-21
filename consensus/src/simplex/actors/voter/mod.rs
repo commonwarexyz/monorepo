@@ -2767,6 +2767,18 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
 
+            // The voter reports the finalization before the end of the iteration that syncs it,
+            // and a crash may lose an unsynced finalization. Wait for the batcher update that
+            // follows the sync before restarting.
+            loop {
+                if let batcher::Message::Update { finalized, .. } =
+                    batcher_receiver.recv().await.unwrap()
+                    && finalized == View::new(2)
+                {
+                    break;
+                }
+            }
+
             // Restart voter
             handle.abort();
 
@@ -6463,8 +6475,10 @@ mod tests {
                 .mailbox
                 .recovered(Certificate::Notarization(notarization_3));
             handoff.wait_for_view_4_proposal(View::new(3)).await;
+
+            // The voter may already have requested the next view's proposal on view 4.
             assert_eq!(
-                request_parents(&handoff.propose_requests),
+                request_parents(&handoff.propose_requests)[..2],
                 [(View::new(4), View::new(3)), (View::new(4), View::new(3))]
             );
             assert_handoff_metrics(

@@ -44,6 +44,8 @@ use commonware_utils::{MAX_ALLOCATION_BYTES, futures::try_join_all};
 use futures::{FutureExt as _, Stream, future::try_join};
 #[cfg(test)]
 use std::future::pending;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::BTreeMap,
     iter::once,
@@ -439,9 +441,9 @@ struct Inner<E: Context, V: Codec> {
     bounds: Range<u64>,
 
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
-    /// so tests can drop the pending future at that exact point.
+    /// raising the flag once parked so tests can drop the pending future at that exact point.
     #[cfg(test)]
-    halt_before_offsets_prune: bool,
+    halt_before_offsets_prune: Option<Arc<AtomicBool>>,
 
     /// The number of items per blob.
     ///
@@ -1589,7 +1591,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             offsets,
             bounds,
             #[cfg(test)]
-            halt_before_offsets_prune: false,
+            halt_before_offsets_prune: None,
             items_per_blob: self.cfg.items_per_section,
             compression: self.cfg.compression,
             codec_config: self.cfg.codec_config,
@@ -1904,7 +1906,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.start = new_boundary;
 
         #[cfg(test)]
-        if self.halt_before_offsets_prune {
+        if let Some(halted) = &self.halt_before_offsets_prune {
+            halted.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         }
 
@@ -2863,6 +2866,7 @@ mod tests {
             RecordingContext, drive_pending_syncs, fail_pending_syncs, next_pending_sync,
             release_pending_syncs,
         },
+        reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
@@ -3273,11 +3277,15 @@ mod tests {
                     (journal, _) = journal.append(&value).await.unwrap();
                 }
                 journal = journal.sync().await.unwrap();
-                journal.0.halt_before_offsets_prune = true;
+                let halted = Arc::new(AtomicBool::new(false));
+                journal.0.halt_before_offsets_prune = Some(halted.clone());
                 {
                     let prune = journal.prune(10);
                     futures::pin_mut!(prune);
-                    assert!(futures::poll!(prune.as_mut()).is_pending());
+                    while !halted.load(Ordering::Acquire) {
+                        assert!(futures::poll!(prune.as_mut()).is_pending());
+                        reschedule().await;
+                    }
                 }
                 assert_eq!(
                     context.scan(&cfg.data_partition()).await.unwrap(),
@@ -3606,12 +3614,15 @@ mod tests {
 
                         let count = cfg.codec_config.clone();
                         count.store(0, std::sync::atomic::Ordering::Relaxed);
+                        // The reopen discards the offsets left unsynced by the commit, so recovery
+                        // must rebuild them.
                         *context.storage_fault_config().write() = deterministic::FaultConfig {
                             write_rate: Some(deterministic::WriteConfig {
                                 failure_rate: probability!(1.0),
                                 retention_rate,
                                 mode: deterministic::PartialWriteMode::Prefix,
                             }),
+                            reopen_flush_rate: probability!(0.0),
                             ..Default::default()
                         };
                         assert!(
@@ -4027,7 +4038,10 @@ mod tests {
                 (journal, _) = journal.append(&2).await.unwrap();
                 let starts = pending.starts();
                 let mut starting = std::pin::pin!(journal.start_sync());
-                assert!(futures::poll!(starting.as_mut()).is_pending());
+                while pending.starts() == starts {
+                    assert!(futures::poll!(starting.as_mut()).is_pending());
+                    reschedule().await;
+                }
                 assert_eq!(pending.starts(), starts + 1);
                 prior_data.blocked.await.unwrap();
                 let offsets = next_pending_sync(&pending);
@@ -6589,14 +6603,18 @@ mod tests {
             // Drop the production prune future while it is parked after the data-blob
             // removal, before offsets.prune has made the appended offsets durable: a
             // genuine cancellation at that await.
-            journal.0.halt_before_offsets_prune = true;
+            let halted = Arc::new(AtomicBool::new(false));
+            journal.0.halt_before_offsets_prune = Some(halted.clone());
             {
                 let fut = journal.prune(10);
                 futures::pin_mut!(fut);
-                assert!(
-                    futures::poll!(fut.as_mut()).is_pending(),
-                    "prune must park before offsets.prune"
-                );
+                while !halted.load(Ordering::Acquire) {
+                    assert!(
+                        futures::poll!(fut.as_mut()).is_pending(),
+                        "prune must park before offsets.prune"
+                    );
+                    reschedule().await;
+                }
             }
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
@@ -11244,6 +11262,9 @@ mod tests {
     fn test_variable_destroy_observes_failed_data_sync_before_removal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Pin the reopen that discards unsynced writes, so it shows only the synced items.
+            context.storage_fault_config().write().reopen_flush_rate = probability!(0.0);
+
             // Make three items durable.
             let pending = PendingSyncs::default();
             let cfg = initialization_cfg("destroy-failed-data", 100);

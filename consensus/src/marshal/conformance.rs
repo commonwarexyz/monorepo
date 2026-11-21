@@ -37,10 +37,13 @@ impl Conformance for CodingStorageConformance {
 }
 
 fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
+    // Storage mutations take effect in call order, so the audit pins the storage format rather
+    // than one of the orders in which pending mutations may land.
     let runner = deterministic::Runner::new(
         deterministic::Config::default()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30))),
+            .with_timeout(Some(Duration::from_secs(30)))
+            .with_storage_fault_config(deterministic::FaultConfig::in_call_order()),
     );
     runner.start(|mut context| async move {
         let Fixture {

@@ -1351,6 +1351,9 @@ mod tests {
     async fn destroy_observes_failed_sync_before_removal<F: Family>(
         context: deterministic::Context,
     ) {
+        // Pin the reopen that discards unsynced writes, so it shows only the synced tree.
+        context.storage_fault_config().write().reopen_flush_rate = probability!(0.0);
+
         // Prune a tree of 100 leaves to 60, so the metadata holds the boundary and the pins for
         // nodes the journal has pruned.
         let pending = PendingSyncs::default();

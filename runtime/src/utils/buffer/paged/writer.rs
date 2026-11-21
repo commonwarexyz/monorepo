@@ -1442,7 +1442,7 @@ mod tests {
     };
     use commonware_codec::{Copying, FixedSize, ReadExt};
     use commonware_macros::test_traced;
-    use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
+    use commonware_utils::{NZU16, NZUsize, channel::oneshot, probability, sync::Mutex};
     use futures::FutureExt as _;
     use std::{
         cell::Cell,
@@ -2747,8 +2747,12 @@ mod tests {
     #[test_traced("DEBUG")]
     fn test_append_owned_bypass_with_synced_partial_page() {
         // A large owned append on top of a synced partial page must rewrite the first page in
-        // full (preserving the old CRC slot) before writing the bulk directly.
-        let executor = deterministic::Runner::default();
+        // full (preserving the old CRC slot) before writing the bulk directly. Pin the reopen that
+        // discards unsynced writes, so it shows only what was synced.
+        let executor =
+            deterministic::Runner::new(deterministic::Config::default().with_storage_fault_config(
+                deterministic::FaultConfig::default().reopen_flush(probability!(0.0)),
+            ));
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context
                 .open("test_partition", b"owned_partial")

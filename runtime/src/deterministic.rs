@@ -15,6 +15,17 @@
 //! require a length beyond the addressable allocation size returns [crate::Error::OffsetOverflow],
 //! even when its physical extent is otherwise valid.
 //!
+//! Storage models the [Blob](crate::Blob) contract as the io_uring and Tokio backends exercise
+//! it rather than any one outcome. By default, mutations pending at the same time take effect in
+//! an order chosen from the seed, and a mutation whose future was dropped can still take effect
+//! after later operations complete (see [FaultConfig::reorder_rate]). A read that overlaps a
+//! pending mutation is not an atomic snapshot: it can see a pending write not at all, partway,
+//! or whole, and a pending resize before or after. When a blob opens again
+//! after every handle of its previous open was dropped, that open's unsynced mutations either
+//! become durable, as the io_uring and Tokio backends make them, or are discarded, as the contract
+//! allows (see [FaultConfig::reopen_flush_rate]). Tests that must pin a single outcome can opt
+//! out with [FaultConfig::in_call_order].
+//!
 //! # External Processes
 //!
 //! When testing an application that interacts with some external process, it can appear to
@@ -307,7 +318,7 @@ impl Config {
         self
     }
 
-    /// Configure storage fault injection.
+    /// Configure storage fault injection and the order in which storage mutations take effect.
     ///
     /// When set, the runtime will inject deterministic storage errors based on
     /// the provided configuration. Faults are drawn from the shared RNG, ensuring
@@ -1577,14 +1588,19 @@ impl crate::Storage for Context {
         name: &[u8],
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        // A previous open whose handles are all gone is settled first: its unsynced mutations
+        // either become durable, as the io_uring and Tokio backends make them, or are discarded.
+        let mut settled = None;
         let opened = self.opens.open(
             partition,
             name,
+            || settled = Some(self.storage.inner().inner().settle_reopen(partition, name)),
             self.storage.open_versioned(partition, name, versions),
         )?;
         let retired = self.storage.inner().inner().admit(partition, name);
         let opened = opened.finish();
         drop(retired);
+        drop(settled);
         Ok(opened)
     }
 
@@ -1632,6 +1648,7 @@ mod tests {
     use futures::{FutureExt as _, stream::FuturesUnordered};
     use std::{
         cell::Cell,
+        collections::HashSet,
         rc::Rc,
         sync::atomic::{AtomicUsize, Ordering},
     };
@@ -1751,14 +1768,17 @@ mod tests {
     #[case::retained(false)]
     #[case::synced(true)]
     fn test_logical_open_releases_retained_mutations(#[case] sync: bool) {
-        // Keep unsynced writes eligible for crash replay without injecting write failures.
-        let cfg = Config::default().with_storage_fault_config(FaultConfig::default().write(
-            WriteConfig {
-                failure_rate: probability!(0.0),
-                retention_rate: probability!(1.0),
-                mode: PartialWriteMode::Prefix,
-            },
-        ));
+        // Keep unsynced writes eligible for crash replay without injecting write failures, and
+        // pin the reopen that discards them.
+        let cfg = Config::default().with_storage_fault_config(
+            FaultConfig::default()
+                .reopen_flush(probability!(0.0))
+                .write(WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: PartialWriteMode::Prefix,
+                }),
+        );
         let (_, checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
             // The range sync persists only the middle byte of the overwrite. Reopening must
             // discard the unsynced fragments excluded from that durable snapshot.
@@ -2387,14 +2407,157 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_reorders_pending_mutations_by_default() {
+        // Two overlapping writes pending at once land in an order chosen from the seed, unless the
+        // configuration pins call order.
+        let last_writer = |faults: Option<FaultConfig>| {
+            (0..32u64)
+                .map(|seed| {
+                    let mut cfg = Config::default().with_seed(seed);
+                    if let Some(faults) = faults.clone() {
+                        cfg = cfg.with_storage_fault_config(faults);
+                    }
+                    Runner::new(cfg).start(|context| async move {
+                        let (blob, _) = context.open("reorder", b"blob").await.unwrap();
+                        let (first, second) = futures::join!(
+                            blob.write_at(0, vec![1u8; 4], WriteOptions::default()),
+                            blob.write_at(0, vec![2u8; 4], WriteOptions::default()),
+                        );
+                        first.unwrap();
+                        second.unwrap();
+                        let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+                        read.coalesce().as_ref()[0]
+                    })
+                })
+                .collect::<HashSet<_>>()
+        };
+        assert_eq!(last_writer(None), [1, 2].into());
+        assert_eq!(last_writer(Some(FaultConfig::in_call_order())), [2].into());
+    }
+
+    /// Open a blob, leave an unsynced write in it, drop it, and return what the next open sees.
+    fn reopen_after_unsynced_write(seed: u64, faults: FaultConfig) -> (u64, Option<Vec<u8>>) {
+        let cfg = Config::default()
+            .with_seed(seed)
+            .with_storage_fault_config(faults);
+        Runner::new(cfg).start(|context| async move {
+            let (blob, _) = context.open("reopen", b"blob").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob);
+
+            let (blob, len) = context.open("reopen", b"blob").await.unwrap();
+            if len == 0 {
+                return (len, None);
+            }
+            let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+            (len, Some(read.coalesce().as_ref().to_vec()))
+        })
+    }
+
+    #[test]
+    fn test_reopen_flushes_or_discards_unsynced_writes() {
+        // By default a reopen keeps the dropped open's unsynced write whole or discards it.
+        let outcomes: HashSet<_> = (0..32)
+            .map(|seed| reopen_after_unsynced_write(seed, FaultConfig::default()))
+            .collect();
+        assert_eq!(outcomes, [(0, None), (4, Some(b"data".to_vec()))].into());
+
+        // The rate pins either outcome.
+        for seed in 0..8 {
+            let flushed = FaultConfig::default().reopen_flush(probability!(1.0));
+            assert_eq!(
+                reopen_after_unsynced_write(seed, flushed),
+                (4, Some(b"data".to_vec()))
+            );
+            assert_eq!(
+                reopen_after_unsynced_write(seed, FaultConfig::in_call_order()),
+                (0, None)
+            );
+        }
+    }
+
+    #[test]
+    fn test_reopen_flush_survives_crash_and_retires_evidence() {
+        // Both unsynced writes are retained by a crash in issue order, unless a flush made the
+        // later one durable first. A replay must not then restore the earlier write over it, even
+        // when the open that flushed them fails and admits nothing.
+        let faults = FaultConfig::default()
+            .reopen_flush(probability!(1.0))
+            .write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(0.5),
+                mode: PartialWriteMode::Subset,
+            });
+        for seed in 0..16 {
+            let cfg = Config::default()
+                .with_seed(seed)
+                .with_storage_fault_config(faults.clone());
+            let ((), checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
+                let (blob, _) = context.open("flush", b"blob").await.unwrap();
+                blob.write_at(0, b"aaaa", WriteOptions::default())
+                    .await
+                    .unwrap();
+                blob.write_at(0, b"bbbb", WriteOptions::default())
+                    .await
+                    .unwrap();
+                drop(blob);
+                context.storage_fault_config().write().open_rate = Some(probability!(1.0));
+                assert!(context.open("flush", b"blob").await.is_err());
+            });
+            Runner::from(checkpoint).start(|context| async move {
+                *context.storage_fault_config().write() = FaultConfig::default();
+                let (blob, len) = context.open("flush", b"blob").await.unwrap();
+                assert_eq!(len, 4);
+                let read = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+                assert_eq!(read.coalesce().as_ref(), b"bbbb");
+            });
+        }
+    }
+
+    #[test]
+    fn test_reopen_flush_skips_live_and_removed_opens() {
+        let faults = FaultConfig::default().reopen_flush(probability!(1.0));
+        Runner::new(Config::default().with_storage_fault_config(faults)).start(
+            |context| async move {
+                // A second open while the first is alive is rejected and flushes nothing.
+                let (blob, _) = context.open("flush", b"live").await.unwrap();
+                blob.write_at(0, b"data", WriteOptions::default())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    context.open("flush", b"live").await,
+                    Err(Error::BlobAlreadyOpen(..))
+                ));
+                assert_eq!(context.logical_blob("flush", b"live"), Some(Vec::new()));
+                drop(blob);
+
+                // A removed blob forgets its dropped open, so the next open starts empty.
+                let (blob, _) = context.open("flush", b"removed").await.unwrap();
+                blob.write_at(0, b"data", WriteOptions::default())
+                    .await
+                    .unwrap();
+                drop(blob);
+                context.remove("flush", Some(b"removed")).await.unwrap();
+                let (_, len) = context.open("flush", b"removed").await.unwrap();
+                assert_eq!(len, 0);
+            },
+        );
+    }
+
+    #[test]
     fn test_recover_retained_successful_resize() {
         let retained_resize = [u64::MAX, 0];
+        // The script covers fault draws only, so mutations apply in call order.
         let cfg = deterministic::Config::default()
             .with_rng(ScriptedRng::new(retained_resize))
-            .with_storage_fault_config(FaultConfig::default().resize(ResizeConfig {
-                failure_rate: probability!(0.5),
-                partial_rate: probability!(0.0),
-            }));
+            .with_storage_fault_config(FaultConfig::default().reorder(probability!(0.0)).resize(
+                ResizeConfig {
+                    failure_rate: probability!(0.5),
+                    partial_rate: probability!(0.0),
+                },
+            ));
         let (_, checkpoint) =
             deterministic::Runner::new(cfg).start_and_recover(|context| async move {
                 let (blob, _) = context.open("crash_resize", b"blob").await.unwrap();

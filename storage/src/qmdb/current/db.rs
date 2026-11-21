@@ -40,6 +40,8 @@ use commonware_utils::{
     sequence::prefixed_u64::U64,
 };
 use core::{borrow::Borrow, num::NonZeroU64};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
@@ -262,9 +264,9 @@ pub struct Db<
     pub(super) metrics: Metrics<E>,
 
     /// Test-only: park [Self::prune] after the pruning-metadata sync, before the log prune,
-    /// so tests can drop the pending future at that exact point.
+    /// raising the flag once parked so tests can drop the pending future at that exact point.
     #[cfg(test)]
-    pub(super) halt_before_prune_log: bool,
+    pub(super) halt_before_prune_log: Option<Arc<AtomicBool>>,
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> std::fmt::Debug for Db<F, E, C, I, H, U, N, S>
@@ -638,7 +640,8 @@ where
         self = self.sync_metadata().await?;
 
         #[cfg(test)]
-        if self.halt_before_prune_log {
+        if let Some(halted) = &self.halt_before_prune_log {
+            halted.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         }
 
@@ -1269,8 +1272,9 @@ mod tests {
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Storage as _, Supervisor as _, deterministic,
         mocks::{MutationFaultContext, MutationFaults},
+        reschedule,
     };
-    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap};
+    use commonware_utils::{NZU64, bitmap::Prunable as PrunableBitMap, probability};
     use std::future::Future;
 
     const N: usize = sha256::Digest::SIZE;
@@ -1984,15 +1988,19 @@ mod tests {
 
         // Drop the production prune future while it is parked after the metadata sync, before
         // the log prune: a genuine cancellation at that await.
-        db.halt_before_prune_log = true;
+        let halted = Arc::new(AtomicBool::new(false));
+        db.halt_before_prune_log = Some(halted.clone());
         let boundary = db.sync_boundary();
         {
             let fut = db.prune(boundary);
             futures::pin_mut!(fut);
-            assert!(
-                futures::poll!(fut.as_mut()).is_pending(),
-                "prune must park before the log prune"
-            );
+            while !halted.load(Ordering::Acquire) {
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before the log prune"
+                );
+                reschedule().await;
+            }
         }
 
         // Reopening must succeed and recover the post-batch state: prune committed the buffered
@@ -2187,8 +2195,11 @@ mod tests {
     /// Stop the destroy of a pruned database holding several commits before its first mutation,
     /// then its second, and so on until one destroy completes. Reopen the database after each
     /// and require that destroy stopped at each of its outcomes, in order.
+    ///
+    /// With `reorder`, pending storage mutations land in any order the blob contract allows.
     fn interrupted_destroy_reopens<F, DB, Fut>(
         stages: &Stages,
+        reorder: bool,
         open: impl Fn(FaultedContext) -> Fut,
     ) where
         F: merkle::Graftable,
@@ -2201,6 +2212,12 @@ mod tests {
         let mut interrupted = 0;
         loop {
             let outcome = deterministic::Runner::default().start(|ctx| async move {
+                ctx.storage_fault_config().write().reorder_rate = if reorder {
+                    probability!(0.75)
+                } else {
+                    probability!(0.0)
+                };
+
                 // Record the digest of empty storage and the state of a new database. A
                 // completed destroy must restore the former.
                 let empty = ctx.storage_audit();
@@ -2368,9 +2385,11 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmr() {
         let (cfg, stages) = fixed_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            FixedDb::<mmr::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                FixedDb::<mmr::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -2380,9 +2399,11 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_fixed_mmb() {
         let (cfg, stages) = fixed_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            FixedDb::<mmb::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                FixedDb::<mmb::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -2392,9 +2413,11 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_variable_mmr() {
         let (cfg, stages) = variable_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            VariableDb::<mmr::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                VariableDb::<mmr::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5668.
@@ -2404,8 +2427,10 @@ mod tests {
     #[test]
     fn issue_5668_regression_interrupted_destroy_reopens_variable_mmb() {
         let (cfg, stages) = variable_destroy_config();
-        interrupted_destroy_reopens(&stages, |ctx| {
-            VariableDb::<mmb::Family>::init(ctx, cfg.clone(), None)
-        });
+        for reorder in [false, true] {
+            interrupted_destroy_reopens(&stages, reorder, |ctx| {
+                VariableDb::<mmb::Family>::init(ctx, cfg.clone(), None)
+            });
+        }
     }
 }

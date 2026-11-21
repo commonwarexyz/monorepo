@@ -86,6 +86,7 @@ impl crate::Storage for Storage {
         let opened = self.opens.open(
             partition,
             name,
+            || {},
             self.inner.open_versioned(partition, name, versions),
         )?;
         Ok(opened.finish())

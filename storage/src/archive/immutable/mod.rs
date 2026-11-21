@@ -243,9 +243,12 @@ mod tests {
     }
 
     /// A destroy interrupted at any point leaves an archive that reopens at its latest commit or
-    /// empty, with index and key views agreeing, and that a retried destroy empties.
-    #[test]
-    fn test_interrupted_destroy_reopens() {
+    /// empty, with index and key views agreeing, and that a retried destroy empties, whether or
+    /// not pending storage mutations land in call order.
+    #[rstest::rstest]
+    #[case::in_call_order(false)]
+    #[case::reordered(true)]
+    fn test_interrupted_destroy_reopens(#[case] reorder: bool) {
         let entries = || -> Vec<(u64, Digest, i32)> {
             (0..11u64)
                 .map(|index| {
@@ -261,11 +264,18 @@ mod tests {
         for seed in 0..32u64 {
             // Retain every unsynced write across the crash, as a runtime that flushes a reopened
             // blob's pending writes would.
-            let faults = FaultConfig::default().write(WriteConfig {
-                failure_rate: probability!(0.0),
-                retention_rate: probability!(1.0),
-                mode: PartialWriteMode::Prefix,
-            });
+            let faults = FaultConfig {
+                reorder_rate: if reorder {
+                    probability!(0.75)
+                } else {
+                    probability!(0.0)
+                },
+                ..FaultConfig::default().write(WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(1.0),
+                    mode: PartialWriteMode::Prefix,
+                })
+            };
             let runner = deterministic::Runner::new(
                 deterministic::Config::default()
                     .with_seed(seed)
