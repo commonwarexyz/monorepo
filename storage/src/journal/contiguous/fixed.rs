@@ -138,12 +138,10 @@ use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
-#[commonware_macros::stability(ALPHA)]
-use crate::journal::authenticated;
 use crate::{
     Context, SyncCompletion,
     journal::{
-        Error,
+        Error, authenticated,
         contiguous::{Many, Mutable, metrics::Metrics},
         decode_sync,
         durability::Barrier,
@@ -638,7 +636,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
     /// Stage a reset to `size` in `checkpoint`, await `clear_dependents`, then complete the reset
     /// without opening any stored blob. A crash after staging leaves an intent that the next open
     /// completes.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn open_cleared<F, Fut>(
         context: E,
         cfg: Config,
@@ -681,7 +678,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
     /// Positions the stored blobs may hold, from blob names and the checkpoint without opening
     /// their contents. The end is an upper bound based on the newest blob's capacity. A staged
     /// clear has not yet been applied.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn span(
         context: &E,
         cfg: &Config,
@@ -1202,7 +1198,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::init_at_size].
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Fail before writing intent if existing blob partitions are already inconsistent.
         Partition::select(&context, &cfg.partition).await?;
@@ -1543,7 +1538,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ///
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(
         mut self: Box<Self>,
         new_size: u64,
@@ -1589,7 +1583,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
         new_size: u64,
@@ -1665,7 +1658,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// # Crash Safety
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `size..size`.
-    #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         Ok(Self(Box::new(
             Inner::init_at_size(context, cfg, size).await?,
@@ -1673,14 +1665,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Discard all items and reposition the journal at or beyond its current end.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
         Ok(self)
     }
 
     /// Wait for every started sync to complete, surfacing a failure without changing storage.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn wait_for_sync(self) -> Result<Self, Error> {
         Ok(Self(Box::new(self.0.wait_for_sync().await?)))
     }
@@ -2139,7 +2129,6 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recovery<E, A> {
     type Journal = Journal<E, A>;
 
@@ -2162,7 +2151,6 @@ impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recover
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A> {
     type Recovery = Recovery<E, A>;
 

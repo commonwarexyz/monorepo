@@ -47,28 +47,21 @@ use self::{
     handle::{CounterHandle, GaugeHandle},
     partition::Partition,
 };
-#[commonware_macros::stability(ALPHA)]
-use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
         Cursor as CursorTrait, Factory, Ordered, Unordered,
-        partitioned::partition_index_and_sub_key,
+        partitioned::{PartitionRange, Partitioned, partition_index_and_sub_key},
     },
     translator::{OrderedTranslator, Translator},
 };
-#[commonware_macros::stability(ALPHA)]
-use commonware_runtime::telemetry::metrics::{Batched, raw};
 use commonware_runtime::{
     Metrics,
-    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
+    telemetry::metrics::{Batched, Counter, Gauge, MetricsExt as _, raw},
 };
-#[commonware_macros::stability(ALPHA)]
-use commonware_utils::NZU32;
-use commonware_utils::prefetch;
-#[commonware_macros::stability(ALPHA)]
-use std::num::NonZeroU32;
+use commonware_utils::{NZU32, prefetch};
 use std::{
     collections::{BTreeMap, HashMap, btree_map, hash_map},
+    num::NonZeroU32,
     ops::Bound,
 };
 
@@ -83,7 +76,6 @@ const SPILL_THRESHOLD: usize = 512;
 /// update of the full index's metric. Until the worker's range is installed, the full index lacks
 /// fewer than this many of the worker's updates to each metric. That lag is small enough to report
 /// build progress. Tests use batches of two so that ordinary test builds publish before install.
-#[commonware_macros::stability(ALPHA)]
 const WORKER_METRICS_BATCH: NonZeroU32 = if cfg!(test) { NZU32!(2) } else { NZU32!(4096) };
 
 /// How many probes ahead `get_many` prefetches a probe's partition header.
@@ -397,7 +389,6 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
     /// Insert every `(sub-key, value)` of `entries` in the partition at local slot `i`, as
     /// [Self::insert_slot] would one at a time. A partition that holds nothing yet gets arrays
     /// of exactly the entries' size, written in one pass.
-    #[commonware_macros::stability(ALPHA)]
     fn load_slot<'a>(&mut self, i: usize, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
         if !self.partitions[i].is_empty() || self.spilled_partition(i).is_some() {
             for (sub, value) in entries {
@@ -419,7 +410,6 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for Index<T, V, P> {
     type Range = RangeIndex<T, V, P>;
 
@@ -493,7 +483,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 /// [Index::install_range]). It accepts only bulk loads, which map a key's global partition index
 /// to the range's local slot. The [Unordered] operations index partitions globally and are
 /// deliberately unavailable, so they cannot be miscalled on a range.
-#[commonware_macros::stability(ALPHA)]
 pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     /// The worker's partitions, addressed by local slot (`global partition - offset`).
     index: Index<T, V, P, Batched<raw::Gauge>, Batched<raw::Counter>>,
@@ -502,7 +491,6 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     offset: usize,
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
 

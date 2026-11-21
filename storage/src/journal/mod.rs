@@ -9,7 +9,7 @@ use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _};
 use commonware_utils::Cached;
 use thiserror::Error;
 
-commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
+pub mod authenticated;
 pub mod contiguous;
 pub(crate) mod durability;
 mod frame;

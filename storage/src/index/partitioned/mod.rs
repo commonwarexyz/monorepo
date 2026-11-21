@@ -26,7 +26,6 @@
 pub mod ordered;
 pub mod unordered;
 
-#[commonware_macros::stability(ALPHA)]
 use crate::index::Unordered;
 
 // Because the prefix length has a max of 3, we can safely use a 4-byte int for the index type
@@ -37,7 +36,6 @@ const INDEX_INT_SIZE: usize = 4;
 /// on its own task. A [Self::Range] is created empty by [Self::new_range], loaded with the keys
 /// of its partitions, and folded back into the full index by [Self::install_range]. An index
 /// that does not partition its keys is one partition.
-#[commonware_macros::stability(ALPHA)]
 pub(crate) trait Partitioned: Unordered {
     /// The contiguous partition range one build task fills.
     type Range: PartitionRange<Value = Self::Value> + Send + 'static;
@@ -59,7 +57,6 @@ pub(crate) trait Partitioned: Unordered {
 
 /// A contiguous range of a [Partitioned] index's partitions, which accepts only bulk loads, so
 /// the globally-addressed [Unordered] methods cannot be miscalled on it.
-#[commonware_macros::stability(ALPHA)]
 pub(crate) trait PartitionRange: Sized {
     /// The value type held by the range.
     type Value: Send + Sync;

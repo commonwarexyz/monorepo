@@ -2,11 +2,10 @@
 //! arbitrary values. If you require ordering over the map's keys, consider
 //! [crate::index::ordered::Index] instead.
 
-#[commonware_macros::stability(ALPHA)]
-use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
         Cursor as CursorTrait, Unordered,
+        partitioned::{PartitionRange, Partitioned},
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
     translator::Translator,
@@ -81,7 +80,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// metrics through detached handles and holds no registrations, so the metrics leave the
     /// registry when this index is dropped. Snapshot-build tasks fill such an index before it
     /// is absorbed.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
         Self {
             translator: self.translator.clone(),
@@ -100,7 +98,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// # Panics
     ///
     /// Panics if self is not empty.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn absorb(&mut self, other: Self) {
         assert!(
             self.map.is_empty() && self.overflow.is_empty(),
@@ -112,7 +109,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Insert every entry of `entries` as [Unordered::insert] would, growing the map once for
     /// all of them and updating the metrics once.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
         self.map.reserve(entries.len());
         let mut keys = 0;
@@ -136,7 +132,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync + 'static> Partitioned for Index<T, V> {
     type Range = Self;
 
@@ -157,7 +152,6 @@ impl<T: Translator, V: Send + Sync + 'static> Partitioned for Index<T, V> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync> PartitionRange for Index<T, V> {
     type Value = V;
 

@@ -4,11 +4,10 @@
 //! key. There is no ordering guarantee provided over the values associated with each key. Ordering
 //! applies only to the _translated_ key space.
 
-#[commonware_macros::stability(ALPHA)]
-use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
         Cursor as CursorTrait, Ordered, Unordered,
+        partitioned::{PartitionRange, Partitioned},
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
     translator::{OrderedTranslator, Translator},
@@ -88,7 +87,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// metrics through detached handles and holds no registrations, so the metrics leave the
     /// registry when this index is dropped. Snapshot-build tasks fill such an index before it
     /// is absorbed.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
         Self {
             overflow: HashMap::with_hasher(self.translator.clone()),
@@ -106,7 +104,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// # Panics
     ///
     /// Panics if self is not empty.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn absorb(&mut self, other: Self) {
         assert!(
             self.map.is_empty() && self.overflow.is_empty(),
@@ -119,7 +116,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Insert every entry of `entries` as [Unordered::insert] would, updating the metrics once.
     /// An empty index takes the entries whose translated keys ascend in one pass that packs its
     /// map densely.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
         let items = entries.len();
         let mut entries = entries.map(|(key, v)| (self.translator.transform(key), v));
@@ -207,7 +203,6 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync + 'static> Partitioned for Index<T, V> {
     type Range = Self;
 
@@ -228,7 +223,6 @@ impl<T: Translator, V: Send + Sync + 'static> Partitioned for Index<T, V> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync> PartitionRange for Index<T, V> {
     type Value = V;
 

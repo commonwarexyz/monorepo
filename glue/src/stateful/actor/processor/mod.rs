@@ -687,7 +687,7 @@ where
                 .map(|entry| entry.merkleized.clone())
         };
 
-        // Marshal delivers finalizations in height order, so the winner's parent state is the
+        // Marshal delivers finalized blocks in height order, so the winner's parent state is the
         // applied state.
         let batch = if let Some(batch) = cached {
             batch

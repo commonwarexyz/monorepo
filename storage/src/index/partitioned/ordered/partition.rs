@@ -44,7 +44,6 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// Fill the partition, which must be empty, with `keys` and their aligned `vals`. Entries
     /// are put in key order if they are not already, keeping those of equal keys in the order
     /// given. Returns the number of distinct keys.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn fill(&mut self, mut keys: Vec<K>, mut vals: Vec<V>) -> usize {
         assert!(self.keys.is_empty(), "fill target must be empty");
         assert_eq!(keys.len(), vals.len(), "keys and values must align");

@@ -39,8 +39,8 @@
 //! ## Backfill
 //!
 //! The actor provides a backfill mechanism for missing blocks. If the actor notices a gap in its
-//! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
-//! that the actor can catch up to the rest of the network if it falls behind.
+//! knowledge of finalized blocks, it will request the missing blocks from its peers. This lets
+//! the actor catch up to the rest of the network if it falls behind.
 //!
 //! ## Message Sizes
 //!
@@ -161,10 +161,11 @@
 //!
 //! ## Storage
 //!
-//! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
-//! to store blocks and finalizations. Internal storage (in-memory caches) is used for data that is only
-//! needed for a short period of time, such as unverified blocks or notarizations. External storage
-//! (archive backends) is used to persist finalized blocks and certificates.
+//! The actor uses a combination of internal and external ([`store::Certificates`],
+//! [`store::Blocks`]) storage to store blocks and finalizations. Internal storage (prunable
+//! on-disk caches) is used for data that is only needed for a short period of time, such as
+//! unverified blocks or notarizations. External storage (archive backends) is used to persist
+//! finalized blocks and certificates.
 //!
 //! Marshal stores finalized blocks from a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. The floor
@@ -176,6 +177,42 @@
 //! _History below the starting height may be unavailable to peers. This feature is only
 //! recommended for applications that support state sync and do not require full block history to
 //! participate in consensus._
+//!
+//! ## Durability
+//!
+//! Marshal stores finalized blocks in [`store::Blocks`] and their finalizations in
+//! [`store::Certificates`]. After it writes a block and its finalization, it syncs both stores
+//! before it delivers the block in an [`Update::Block`].
+//!
+//! The two syncs run concurrently, so a process that stops between them can leave one store
+//! holding a height that the other lacks. A restart can then find either of two states:
+//!
+//! - A finalization without its block. Marshal tries to recover the block from local data or
+//!   peers, and it does not deliver that height until it has the block.
+//! - A block without its finalization. Marshal can still deliver the block, because only
+//!   finalized blocks are written to [`store::Blocks`]. If consensus reports the finalization
+//!   again, marshal stores it unless that height has been pruned.
+//!
+//! [`Identifier::Latest`] identifies the block named by the highest finalization in
+//! [`store::Certificates`]. In the second state, the [processed height](core::Processed) can rise
+//! above that block's height and stay there until a finalization at or above the processed height
+//! is stored.
+//!
+//! After a restart that follows an interrupted sync:
+//!
+//! | Height | [`store::Blocks`] | [`store::Certificates`] |
+//! |--------|-------------------|-------------------------|
+//! | H-2    | stored            | stored                  |
+//! | H-1    | stored            | stored                  |
+//! | H      | stored            | missing                 |
+//!
+//! [`Identifier::Latest`] is the block at H-1. Once the application acknowledges H, the processed
+//! height becomes H.
+//!
+//! A block can also be stored without a finalization while marshal fills a gap. Marshal can reach
+//! an ancestor of a finalized block by following parent links, and a block stored this way may
+//! never receive a finalization of its own. [`core::Mailbox::get_finalization`] can return `None`
+//! for such a block even after marshal delivers it.
 //!
 //! ## Limitations and Future Work
 //!
@@ -198,6 +235,8 @@ mod limits;
 pub use limits::max_payload_size;
 
 pub mod ancestry;
+pub(crate) mod application;
+pub mod coding;
 pub mod core;
 pub mod resolver;
 pub mod standard;
@@ -205,11 +244,6 @@ pub mod store;
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
-
-commonware_macros::stability_scope!(ALPHA {
-    pub(crate) mod application;
-    pub mod coding;
-});
 
 #[cfg(test)]
 pub mod mocks;
@@ -220,8 +254,9 @@ pub enum Identifier<D: Digest> {
     Height(Height),
     /// The digest of the block to retrieve.
     Digest(D),
-    /// The highest finalized block. It may be the case that marshal does not have some of the
-    /// blocks below this height.
+    /// The block named by the highest finalization in [`store::Certificates`]. Marshal may lack
+    /// this block and some of the blocks below it. The Durability section of the
+    /// [module docs](self) describes when the processed height can be above this block's height.
     Latest,
 }
 
@@ -261,7 +296,7 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     ///
     /// This update can be reported before the finalized block and finalization archives complete
     /// a durable sync. Applications must not use this update as a storage durability signal.
-    /// [`Update::Block`] provides that guarantee.
+    /// [`Update::Block`] signals that its block is durable.
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///

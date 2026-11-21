@@ -1084,16 +1084,13 @@ const SUBTREE_HEIGHT: u32 = 4;
 const BUFFERED_CHUNKS: usize = 8;
 
 /// Where a reader that scans a recovering journal's operations sends them hashed, chunk by chunk,
-/// so the journal rebuilds its Merkle structure without reading them again. Only this crate
-/// creates and uses one.
-#[commonware_macros::stability(ALPHA)]
-pub struct LeafSink<F: Family, H: merkle::hasher::Hasher<F>> {
+/// so the journal rebuilds its Merkle structure without reading them again.
+pub(crate) struct LeafSink<F: Family, H: merkle::hasher::Hasher<F>> {
     plan: ChunkPlan,
     hasher: H,
     tx: mpsc::Sender<Chunk<F, H::Digest>>,
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<F: Family, H: merkle::hasher::Hasher<F>> LeafSink<F, H> {
     /// The chunks to scan, hash and send, in position order. Together they cover every operation
     /// from the journal's pruning boundary to its end.
