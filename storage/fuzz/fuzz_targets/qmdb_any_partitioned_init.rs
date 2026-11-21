@@ -7,7 +7,7 @@
 //! follow-up batch merkleized before and after the reopen checks the rebuilt activity state, since
 //! its floor walk moves the active operations it finds.
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -24,7 +24,8 @@ use commonware_storage::{
     },
     translator::OneCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+use commonware_storage_fuzz::stream;
+use commonware_utils::{Entropy, FuzzRng, NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -39,11 +40,38 @@ type Ordered<F> = OrderedDb<F, deterministic::Context, Key, Value, Sha256, OneCa
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(131);
 
-/// Commits past this count are ignored.
+/// The most commits an input holds.
 const MAX_COMMITS: usize = 8;
 
-/// Writes past this count in one batch are ignored.
+/// The most writes one batch holds.
 const MAX_WRITES: usize = 32;
+
+/// One write in this many is a [Write::Flood]. About half of all inputs flood, so ordered
+/// partitions spill in the build, and about a third flood twice, which spends the key budget.
+const FLOOD_ONE_IN: u32 = 64;
+
+/// One key write in this many deletes its key, which often meets a key an earlier commit set.
+const DELETE_ONE_IN: u32 = 4;
+
+/// Partitions that writes use: both ends of the partition range and both sides of its quarter
+/// boundaries, so writes collide in few partitions and straddle the ranges of two and four
+/// build workers.
+const PARTITIONS: [u8; 8] = [0, 1, 63, 64, 127, 128, 254, 255];
+
+/// The concurrency seed that builds serially.
+const SERIAL: u8 = 0;
+
+/// The largest concurrency seed of the smallest parallel builds: seed 1 builds on one insert worker
+/// that owns every partition, seed 2 on two workers that own half of the partitions each.
+const MAX_FEW: u8 = 2;
+
+/// The largest concurrency seed below the one [concurrency] maps to [NonZeroUsize::MAX]. Seeds
+/// above [MAX_FEW] build on 2 to 128 insert workers, and the maximum on one worker per partition.
+const MAX_MANY: u8 = u8::MAX - 1;
+
+/// Bytes at the end of the stream that seed the runtime. The scenario is sampled from the start of
+/// the stream and never reaches them.
+const ENTROPY_BYTES: usize = 32;
 
 /// Keys written past this count across all commits are ignored, which bounds the cost of floods.
 const MAX_KEYS_WRITTEN: usize = 1024;
@@ -58,7 +86,7 @@ const BUCKETS: u8 = 4;
 /// Distinct keys per translated key, which collide in the snapshot.
 const SUFFIXES: u8 = 4;
 
-#[derive(Arbitrary, Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Write {
     /// Set or delete one key.
     Key {
@@ -71,20 +99,85 @@ enum Write {
     Flood { partition: u8, value: u8 },
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct Commit {
     /// Hold the floor at its inherited location instead of walking it forward.
     hold: bool,
     writes: Vec<Write>,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
-    // Read first, so long inputs do not leave the build knobs at their zero defaults.
     init_concurrency: u8,
     init_cache: u8,
     commits: Vec<Commit>,
     probe: Vec<Write>,
+    entropy: Entropy,
+}
+
+impl<'a> Arbitrary<'a> for Write {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let partition = *u.choose(&PARTITIONS)?;
+        if u.ratio(1, FLOOD_ONE_IN)? {
+            return Ok(Self::Flood {
+                partition,
+                value: u.arbitrary()?,
+            });
+        }
+        Ok(Self::Key {
+            partition,
+            bucket: u.int_in_range(0..=BUCKETS - 1)?,
+            suffix: u.int_in_range(0..=SUFFIXES - 1)?,
+            value: if u.ratio(1, DELETE_ONE_IN)? {
+                None
+            } else {
+                Some(u.arbitrary()?)
+            },
+        })
+    }
+}
+
+/// The build concurrency seed: serial 1 in 8, one or two workers 2 in 8, one worker per partition
+/// 1 in 8, and 2 to 128 workers otherwise, so every build is common and two serial inputs are rare.
+fn concurrency_seed(u: &mut Unstructured<'_>) -> arbitrary::Result<u8> {
+    Ok(match u.int_in_range(0..=7)? {
+        0 => SERIAL,
+        1 | 2 => u.int_in_range(SERIAL + 1..=MAX_FEW)?,
+        3 => u8::MAX,
+        _ => u.int_in_range(MAX_FEW + 1..=MAX_MANY)?,
+    })
+}
+
+/// Between `min` and [MAX_WRITES] writes.
+fn writes(u: &mut Unstructured<'_>, min: usize) -> arbitrary::Result<Vec<Write>> {
+    (0..u.int_in_range(min..=MAX_WRITES)?)
+        .map(|_| u.arbitrary())
+        .collect()
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let stream = stream(u)?;
+        let (scenario, entropy) = stream.split_at(stream.len() - ENTROPY_BYTES);
+        let u = &mut Unstructured::new(scenario);
+        let init_concurrency = concurrency_seed(u)?;
+        let init_cache = u.arbitrary()?;
+        let commits = (0..u.int_in_range(1..=MAX_COMMITS)?)
+            .map(|i| {
+                Ok(Commit {
+                    hold: u.arbitrary()?,
+                    writes: writes(u, usize::from(i == 0))?,
+                })
+            })
+            .collect::<arbitrary::Result<_>>()?;
+        Ok(Self {
+            init_concurrency,
+            init_cache,
+            commits,
+            probe: writes(u, 0)?,
+            entropy: Unstructured::new(entropy).arbitrary()?,
+        })
+    }
 }
 
 /// The key writes that `writes` expand to, at most `budget` of them, deducted from it.
@@ -245,8 +338,8 @@ async fn check<D: Open>(context: deterministic::Context, input: &FuzzInput, name
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
-    let runner = deterministic::Runner::default();
-    runner.start(|context| async move {
+    let cfg = deterministic::Config::new().with_rng(FuzzRng::from(input.entropy.clone()));
+    deterministic::Runner::new(cfg).start(|context| async move {
         let unordered = format!("unordered-{suffix}");
         check::<Unordered<F>>(context.child("unordered"), input, &unordered).await;
         let ordered = format!("ordered-{suffix}");
