@@ -140,7 +140,7 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
             page_cache,
         },
         translator: OneCap,
-        init_cache: Some(NZUsize!(3)),
+        init_scratch_partition: format!("{name}-log-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }

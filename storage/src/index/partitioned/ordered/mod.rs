@@ -165,22 +165,6 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle>
     Index<T, V, P, G, C>
 {
-    /// Visit every value held across all partitions (inline and spilled), in unspecified order.
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for (p, partition) in self.partitions.iter().enumerate() {
-            for v in partition.values_iter() {
-                f(v);
-            }
-            if let Some(inner) = self.spilled_partition(p) {
-                for vals in inner.values() {
-                    for v in vals {
-                        f(v);
-                    }
-                }
-            }
-        }
-    }
-
     /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
     fn maybe_spill(&mut self, i: usize) {
         if self.partitions[i].len() < self.threshold {
@@ -362,6 +346,68 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
 
         None
     }
+
+    /// Insert `value` for sub-key `sub` in the partition at local slot `i` (see
+    /// [Unordered::insert]).
+    fn insert_slot(&mut self, i: usize, sub: &[u8], value: V) {
+        let k = self.translator.transform(sub);
+        self.maybe_spill(i);
+        if !self.partitions[i].is_empty() {
+            let run = self.partitions[i].run_range(&k);
+            let new_key = run.is_empty();
+            self.partitions[i].insert_at(run.end, k, value);
+            self.items.inc();
+            if new_key {
+                self.keys.inc();
+            }
+            self.maybe_spill(i);
+            return;
+        }
+
+        // Route into the spilled partition's `BTreeMap`.
+        if !self.spilled.is_empty()
+            && let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i)
+        {
+            match partition.get_mut().entry(k) {
+                btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
+                btree_map::Entry::Vacant(run) => {
+                    run.insert(vec![value]);
+                    self.keys.inc();
+                }
+            }
+            self.items.inc();
+            return;
+        }
+
+        // Genuinely empty partition: start a fresh sorted array.
+        self.partitions[i].insert_at(0, k, value);
+        self.items.inc();
+        self.keys.inc();
+        self.maybe_spill(i);
+    }
+
+    /// Insert every `(sub-key, value)` of `entries` in the partition at local slot `i`, as
+    /// [Self::insert_slot] would one at a time. A partition that holds nothing yet gets arrays
+    /// of exactly the entries' size, written in one pass.
+    fn load_slot<'a>(&mut self, i: usize, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
+        if !self.partitions[i].is_empty() || self.spilled_partition(i).is_some() {
+            for (sub, value) in entries {
+                self.insert_slot(i, sub, value);
+            }
+            return;
+        }
+        let mut keys = Vec::with_capacity(entries.len());
+        let mut vals = Vec::with_capacity(entries.len());
+        for (sub, value) in entries {
+            keys.push(self.translator.transform(sub));
+            vals.push(value);
+        }
+        let items = keys.len();
+        let distinct = self.partitions[i].fill(keys, vals);
+        self.keys.inc_by(distinct as i64);
+        self.items.inc_by(items as i64);
+        self.maybe_spill(i);
+    }
 }
 
 impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for Index<T, V, P> {
@@ -433,10 +479,10 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
-/// parallel snapshot-build worker (created by [Index::new_range], folded back into a full index by
-/// [Index::install_range]). It exposes only the cursor operations, which map a key's global
-/// partition index to the worker's local slot. The other [Unordered] operations index partitions
-/// globally and are deliberately unavailable, so they cannot be miscalled on a worker.
+/// snapshot-build task (created by [Index::new_range], folded back into a full index by
+/// [Index::install_range]). It accepts only bulk loads, which map a key's global partition index
+/// to the range's local slot. The [Unordered] operations index partitions globally and are
+/// deliberately unavailable, so they cannot be miscalled on a range.
 pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     /// The worker's partitions, addressed by local slot (`global partition - offset`).
     index: Index<T, V, P, Batched<raw::Gauge>, Batched<raw::Counter>>,
@@ -447,50 +493,17 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
 
 impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
-    type Cursor<'a>
-        = Cursor<'a, T::Key, V, Batched<raw::Gauge>, Batched<raw::Counter>>
-    where
-        Self: 'a;
 
-    fn get_mut(&mut self, key: &[u8]) -> Option<Self::Cursor<'_>> {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        self.index.get_mut_slot(i - self.offset, sub)
-    }
-
-    fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Self::Cursor<'_>> {
-        let (i, sub) = partition_index_and_sub_key::<P>(key);
-        self.index
-            .get_mut_or_insert_slot(i - self.offset, sub, value)
-    }
-
-    fn for_each_value(&self, f: impl FnMut(&V)) {
-        self.index.for_each_value(f);
-    }
-
-    // Hints the header line without reading it, so its miss overlaps the ops before
-    // `prefetch_entries` reads the header for the arrays' addresses.
-    fn prefetch_header(&self, key: &[u8]) {
-        if !prefetch::ENABLED {
+    fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
+        let mut entries = entries.peekable();
+        let Some((first, _)) = entries.peek() else {
             return;
-        }
-
-        let (i, _) = partition_index_and_sub_key::<P>(key);
-        if let Some(partition) = self.index.partitions.get(i - self.offset) {
-            prefetch::prefetch(partition);
-        }
-    }
-
-    // Reads the header to hint the key and value arrays (see `Partition::prefetch_arrays`).
-    fn prefetch_entries(&self, key: &[u8]) {
-        if !prefetch::ENABLED {
-            return;
-        }
-
-        // A spilled partition's arrays are empty, so its side-table goes unhinted.
-        let (i, _) = partition_index_and_sub_key::<P>(key);
-        if let Some(partition) = self.index.partitions.get(i - self.offset) {
-            partition.prefetch_arrays();
-        }
+        };
+        let (i, _) = partition_index_and_sub_key::<P>(first);
+        self.index.load_slot(
+            i - self.offset,
+            entries.map(|(key, value)| (partition_index_and_sub_key::<P>(key).1, value)),
+        );
     }
 }
 
@@ -604,40 +617,7 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
 
     fn insert(&mut self, key: &[u8], value: Self::Value) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
-        let k = self.translator.transform(sub);
-        self.maybe_spill(i);
-        if !self.partitions[i].is_empty() {
-            let run = self.partitions[i].run_range(&k);
-            let new_key = run.is_empty();
-            self.partitions[i].insert_at(run.end, k, value);
-            self.items.inc();
-            if new_key {
-                self.keys.inc();
-            }
-            self.maybe_spill(i);
-            return;
-        }
-
-        // Route into the spilled partition's `BTreeMap`.
-        if !self.spilled.is_empty()
-            && let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i)
-        {
-            match partition.get_mut().entry(k) {
-                btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
-                btree_map::Entry::Vacant(run) => {
-                    run.insert(vec![value]);
-                    self.keys.inc();
-                }
-            }
-            self.items.inc();
-            return;
-        }
-
-        // Genuinely empty partition: start a fresh sorted array.
-        self.partitions[i].insert_at(0, k, value);
-        self.items.inc();
-        self.keys.inc();
-        self.maybe_spill(i);
+        self.insert_slot(i, sub, value);
     }
 
     fn insert_and_retain(
@@ -1152,8 +1132,8 @@ mod tests {
             // globally-addressed methods are usable directly). Partition 0x10 spills. One spill
             // fills only half a batch, so the full index counts none yet.
             let mut worker = full.new_range(0, full.partition_count());
-            worker.get_mut_or_insert(&[0x10, 0x01], 1);
-            worker.get_mut_or_insert(&[0x10, 0x02], 2); // second key in partition 0x10 -> spills
+            worker.index.insert(&[0x10, 0x01], 1);
+            worker.index.insert(&[0x10, 0x02], 2); // second key in partition 0x10 -> spills
             assert_eq!(full.spills(), 0);
 
             // Partition 0x20 spills and then de-spills once fully drained. Its spill completes the
@@ -1192,9 +1172,12 @@ mod tests {
 
             // A key and two colliding values under its translated key fill a batch of `items`
             // updates but not of `keys` updates, so only `items` publishes.
-            worker.get_mut_or_insert(&[0x10, 0x01], 1);
+            worker.index.get_mut_or_insert(&[0x10, 0x01], 1);
             {
-                let mut cursor = worker.get_mut_or_insert(&[0x10, 0x01, 0xFF], 2).unwrap();
+                let mut cursor = worker
+                    .index
+                    .get_mut_or_insert(&[0x10, 0x01, 0xFF], 2)
+                    .unwrap();
                 while cursor.next().is_some() {}
                 cursor.insert(2);
                 cursor.insert(3);
@@ -1203,14 +1186,14 @@ mod tests {
 
             // A second key fills the batch of `keys` updates and a second batch of `items`
             // updates.
-            worker.get_mut_or_insert(&[0x20, 0x01], 4);
+            worker.index.get_mut_or_insert(&[0x20, 0x01], 4);
             assert_eq!(metrics(&full), (2, 4, 0, 0));
 
             // Partition 0x10 holds three entries, so the next access spills it. After the spill and
             // the deletion of the first key's three values, one update of each metric remains
             // unpublished.
             {
-                let mut cursor = worker.get_mut(&[0x10, 0x01]).unwrap();
+                let mut cursor = worker.index.get_mut(&[0x10, 0x01]).unwrap();
                 while cursor.next().is_some() {
                     cursor.delete();
                 }
@@ -1223,33 +1206,53 @@ mod tests {
         });
     }
 
-    /// A worker's value walk must visit every value it holds exactly once, whichever
-    /// representation each partition uses (inline sorted arrays or the spilled side-table),
-    /// since the snapshot build derives the activity bitmap and active-key counts from it.
+    /// Loading a range must leave the index as inserting the same entries one at a time would,
+    /// whether a partition is loaded once or again, stays inline or spills, and whether or not
+    /// its keys collide.
     #[test_traced]
-    fn test_range_for_each_value_visits_all_values_once() {
+    fn test_range_load_matches_inserts() {
         deterministic::Runner::default().start(|context| async move {
-            let full = new_index_spilling(context.child("full"));
+            let mut loaded =
+                Index::<OneCap, u64, 1>::with_threshold(context.child("loaded"), OneCap, 4);
+            let mut inserted =
+                Index::<OneCap, u64, 1>::with_threshold(context.child("inserted"), OneCap, 4);
 
-            // Two distinct keys spill partition 0x80 (threshold 2), then a translated-key
-            // collision appends a second value to a spilled run. Partition 0x81 holds one key
-            // and stays inline.
-            let mut worker = full.new_range(0x80, 2);
-            assert!(worker.get_mut_or_insert(&[0x80, 0x01], 1).is_none());
-            assert!(worker.get_mut_or_insert(&[0x80, 0x02, 0xAA], 2).is_none());
-            assert!(worker.get_mut_or_insert(&[0x80, 0x02, 0xBB], 3).is_some());
-            {
-                let mut cursor = worker.get_mut(&[0x80, 0x02, 0xBB]).unwrap();
-                cursor.next();
-                cursor.insert(3);
+            // Each load holds one partition's entries in ascending key order. Partition 0x80
+            // has keys that share a translated sub-key and is loaded again once it holds
+            // entries, staying inline. Partition 0x81 is loaded with enough entries to spill at
+            // once, and then again.
+            let loads: [&[(&[u8], u64)]; 6] = [
+                &[(&[0x80, 0x01], 1), (&[0x80, 0x01, 0xAA], 2)],
+                &[
+                    (&[0x81, 0x01], 4),
+                    (&[0x81, 0x02], 5),
+                    (&[0x81, 0x02, 0xAA], 6),
+                    (&[0x81, 0x03], 7),
+                    (&[0x81, 0x04], 8),
+                ],
+                &[],
+                &[(&[0x80, 0x00], 9)],
+                &[(&[0x81, 0x00], 11), (&[0x81, 0x02, 0xBB], 12)],
+                &[(&[0x82], 13)],
+            ];
+            let mut range = loaded.new_range(0x80, 3);
+            for entries in loads {
+                range.load(entries.iter().copied());
+                for &(key, value) in entries {
+                    inserted.insert(key, value);
+                }
             }
-            assert!(worker.get_mut_or_insert(&[0x81, 0x07], 4).is_none());
-            assert_eq!(worker.index.spilled_count(), 1);
-
-            let mut seen = Vec::new();
-            worker.for_each_value(|v| seen.push(*v));
-            seen.sort_unstable();
-            assert_eq!(seen, vec![1, 2, 3, 4]);
+            loaded.install_range(range);
+            assert_eq!(loaded.keys(), inserted.keys());
+            assert_eq!(loaded.items(), inserted.items());
+            assert_eq!(loaded.spilled_count(), inserted.spilled_count());
+            assert_eq!(loaded.spilled_count(), 1);
+            for &(key, _) in loads.iter().copied().flatten() {
+                assert_eq!(
+                    loaded.get(key).collect::<Vec<_>>(),
+                    inserted.get(key).collect::<Vec<_>>()
+                );
+            }
         });
     }
 
@@ -1267,9 +1270,10 @@ mod tests {
             // A worker covering global partitions [0x80, 0x82): two distinct keys spill partition
             // 0x80, and a third key stays inline in partition 0x81.
             let mut worker = full.new_range(0x80, 2);
-            worker.get_mut_or_insert(&[0x80, 0x01], 1);
-            worker.get_mut_or_insert(&[0x80, 0x02], 2);
-            worker.get_mut_or_insert(&[0x81, 0x07], 3);
+            let entries: [(&[u8], u64); 2] = [(&[0x80, 0x01], 1), (&[0x80, 0x02], 2)];
+            worker.load(entries.into_iter());
+            let entries: [(&[u8], u64); 1] = [(&[0x81, 0x07], 3)];
+            worker.load(entries.into_iter());
             assert_eq!(worker.index.spilled_count(), 1);
             assert_eq!(worker.index.keys(), 3);
 

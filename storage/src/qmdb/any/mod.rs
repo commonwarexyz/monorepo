@@ -189,17 +189,19 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// [OrderedTranslator](crate::translator::OrderedTranslator).
     pub translator: T,
 
-    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
-    pub init_cache: Option<NonZeroUsize>,
+    /// The partition init keeps temporary data in when it rebuilds the index from more operations
+    /// than it holds in memory. Init removes that data before it returns, along with any an
+    /// interrupted init left behind. The partition must not be shared with another database or
+    /// used for anything else.
+    pub init_scratch_partition: String,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// Tasks that initialization spawns to scan the log at once. A partitioned index decodes on
-    /// them, beside fewer insert tasks, and any other index builds on the calling task. With 1,
-    /// initialization spawns nothing, and the calling task scans the log while the strategy hashes
-    /// it.
+    /// Tasks that initialization builds the index on. With more than one, they also hash the
+    /// log's operations for the journal as they replay them, so the log is read once. With 1,
+    /// initialization spawns nothing, and the calling task replays the log for the index and
+    /// then again while the strategy hashes it.
     pub init_concurrency: NonZeroUsize,
 }
 
@@ -311,48 +313,47 @@ where
         let index = I::new(context.child("index"), cfg.translator);
         let snapshot_context = context.child("snapshot");
         let metrics = Metrics::new(context);
-        let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
+        let (concurrency, buffer) = (cfg.init_concurrency, cfg.init_buffer);
+        let scratch = cfg.init_scratch_partition;
 
-        // A partitioned index built on decode tasks hashes the journal's operations as it decodes
-        // them, so the log is read once. Any other index builds on this task, and the journal
-        // replays the log as `finish_with` describes.
-        let (log, (index, active_keys, activity)) = match index.hashing_plan(concurrency, cache) {
-            Some(plan) => {
-                pending
-                    .finish_hashing(|journal, leaves| async move {
-                        let mut index = index;
-                        let (active_keys, activity) = index
-                            .build_snapshot_hashing(
-                                snapshot_context,
-                                floor,
-                                &journal,
-                                plan,
-                                buffer,
-                                leaves,
-                            )
-                            .await?;
-                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
-                    })
-                    .await?
-            }
-            None => {
-                pending
-                    .finish_with(concurrency, |journal| async move {
-                        let mut index = index;
-                        let (active_keys, activity) = index
-                            .build_snapshot(
-                                snapshot_context,
-                                floor,
-                                &journal,
-                                concurrency,
-                                buffer,
-                                cache,
-                            )
-                            .await?;
-                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
-                    })
-                    .await?
-            }
+        // A build on several tasks hashes the journal's operations as it replays them, so the log
+        // is read once. A build on one task spawns nothing, and the journal replays the log
+        // afterwards as `finish_with` describes.
+        let (log, (index, active_keys, activity)) = if concurrency.get() > 1 {
+            pending
+                .finish_hashing(|journal, leaves| async move {
+                    let mut index = index;
+                    let (active_keys, activity) = index
+                        .build_snapshot_hashing(
+                            snapshot_context,
+                            floor,
+                            &journal,
+                            concurrency,
+                            buffer,
+                            &scratch,
+                            leaves,
+                        )
+                        .await?;
+                    Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                })
+                .await?
+        } else {
+            pending
+                .finish_with(concurrency, |journal| async move {
+                    let mut index = index;
+                    let (active_keys, activity) = index
+                        .build_snapshot(
+                            snapshot_context,
+                            floor,
+                            &journal,
+                            concurrency,
+                            buffer,
+                            &scratch,
+                        )
+                        .await?;
+                    Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                })
+                .await?
         };
         return db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics);
     }
@@ -375,7 +376,7 @@ where
         bitmap,
         cfg.init_concurrency,
         cfg.init_buffer,
-        cfg.init_cache,
+        &cfg.init_scratch_partition,
         metrics,
     )
     .await
@@ -464,17 +465,18 @@ pub(crate) mod test {
                 replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("scratch-{suffix}"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
     }
 
-    /// Like [fixed_db_config], but initializes serially.
+    /// Like [fixed_db_config], but builds its snapshot on three tasks. The variable configuration
+    /// builds on one, so the shared tests cover both.
     pub(crate) fn fixed_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
     ) -> Config<T, FConfig, Sequential> {
-        fixed_db_config_full(suffix, Sequential, NZUsize!(1))
+        fixed_db_config_full(suffix, Sequential, NZUsize!(3))
     }
 
     /// Like [variable_db_config], but initializes serially.
@@ -513,7 +515,7 @@ pub(crate) mod test {
                 replay_buffer: NZUsize!(1024),
             },
             translator: T::default(),
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("scratch-{suffix}"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -6066,8 +6068,7 @@ pub(crate) mod test {
     }
 
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
-    /// its snapshot workers and decoders rather than leaving them running until they happen
-    /// to observe a closed channel.
+    /// its snapshot build tasks rather than leaving them running.
     #[test_traced("INFO")]
     fn test_parallel_init_aborted_on_cancel() {
         let executor = deterministic::Runner::default();
@@ -6100,8 +6101,8 @@ pub(crate) mod test {
                     }
                     context.sleep(Duration::from_millis(1)).await;
                     let metrics = context.encode();
-                    if tasks(&metrics, RUNNING, "snapshot_worker")
-                        + tasks(&metrics, RUNNING, "snapshot_decoder")
+                    if tasks(&metrics, RUNNING, "snapshot_decoder")
+                        + tasks(&metrics, RUNNING, "snapshot_sorter")
                         > 0
                     {
                         spawned = true;
@@ -6115,13 +6116,13 @@ pub(crate) mod test {
             // the aborted tasks.
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
-            assert_eq!(tasks(&metrics, RUNNING, "snapshot_worker"), 0, "{metrics}");
             assert_eq!(tasks(&metrics, RUNNING, "snapshot_decoder"), 0, "{metrics}");
+            assert_eq!(tasks(&metrics, RUNNING, "snapshot_sorter"), 0, "{metrics}");
         });
     }
 
-    /// With a partitioned index, initialization spawns snapshot decode tasks and none of the
-    /// journal's own replay tasks.
+    /// With an `init_concurrency` above 1, initialization spawns snapshot decode tasks and none
+    /// of the journal's own replay tasks.
     #[test_traced("INFO")]
     fn test_hashing_build_spawns_no_journal_replay() {
         let executor = deterministic::Runner::default();
@@ -6156,10 +6157,10 @@ pub(crate) mod test {
         });
     }
 
-    /// With an unpartitioned index, initialization replays the log on tasks of its own while this
-    /// task scans it for the index, and with an `init_concurrency` of 1 it spawns none.
+    /// An unpartitioned index also builds on snapshot decode tasks that hash the log, and with an
+    /// `init_concurrency` of 1 initialization spawns none.
     #[test_traced("INFO")]
-    fn test_init_concurrency_replays_beside_the_index() {
+    fn test_init_concurrency_of_one_spawns_nothing() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Commit and sync operations for a reopen to scan, then close the database.
@@ -6184,22 +6185,17 @@ pub(crate) mod test {
             let db = db.sync().await.unwrap();
             drop(db);
 
-            // With an `init_concurrency` of 3, initialization replays the log on tasks of its own
-            // while this task builds the index.
+            // With an `init_concurrency` of 3, the build's decode tasks hash the log, so the
+            // journal spawns no replay tasks of its own.
             let metrics = context.encode();
             let chunks = tasks(&metrics, SPAWNED, "replay_chunk");
-            let builders = tasks(&metrics, SPAWNED, "snapshot_decoder")
-                + tasks(&metrics, SPAWNED, "snapshot_worker");
+            let decoders = tasks(&metrics, SPAWNED, "snapshot_decoder");
             let db: UnorderedFixed = UnorderedFixedDb::init(ctx.child("storage"), cfg(3), None)
                 .await
                 .unwrap();
             let metrics = context.encode();
-            assert!(tasks(&metrics, SPAWNED, "replay_chunk") > chunks);
-            assert_eq!(
-                tasks(&metrics, SPAWNED, "snapshot_decoder")
-                    + tasks(&metrics, SPAWNED, "snapshot_worker"),
-                builders
-            );
+            assert_eq!(tasks(&metrics, SPAWNED, "replay_chunk"), chunks);
+            assert!(tasks(&metrics, SPAWNED, "snapshot_decoder") > decoders);
             drop(db);
 
             // One task: nothing is spawned.

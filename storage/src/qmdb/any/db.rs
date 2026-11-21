@@ -11,7 +11,7 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics},
+    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics, operation::same_key},
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -73,7 +73,7 @@ fn match_read_ops<F: Family, U: Update, T>(
         let loc = Location::new(pos);
         let mut pending = None;
         for &(key_idx, _) in group {
-            if results[key_idx].is_some() || data.key() != keys[key_idx].borrow() {
+            if results[key_idx].is_some() || !same_key(data.key(), keys[key_idx].borrow()) {
                 continue;
             }
             if let Some(prev) = pending.replace(key_idx) {
@@ -370,7 +370,7 @@ where
             // Translated keys can collide, so read candidates until the full key matches.
             for loc in self.snapshot.get(key.as_ref()).copied() {
                 let update = self.read_update(loc).await?;
-                if update.key() == key {
+                if same_key(update.key(), key) {
                     return Ok(Some((update, loc)));
                 }
             }
@@ -588,7 +588,7 @@ where
         shared_bitmap: Option<Arc<Shared<N>>>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
+        scratch_partition: &str,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
@@ -596,8 +596,8 @@ where
         I: crate::qmdb::SnapshotBuild<F>,
         C: 'static,
     {
-        // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
-        // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
+        // Share the log so the snapshot build can hand it to each of its tasks. Sole ownership
+        // is recovered (`Arc::into_inner`) once the build has dropped every task's clone.
         let log = Arc::new(log);
         let (inactivity_floor_loc, active_keys, activity) = {
             let bounds = log.bounds();
@@ -616,7 +616,7 @@ where
                     &log,
                     init_concurrency,
                     init_buffer,
-                    cache_size,
+                    scratch_partition,
                 )
                 .await?;
             (inactivity_floor_loc, active_keys, activity)

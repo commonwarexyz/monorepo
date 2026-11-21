@@ -278,7 +278,7 @@ fn config_for<O: commonware_cryptography::PublicKey>(
             log: log(name.to_string()),
             grafted_metadata_partition: format!("{name}-grafted-metadata"),
             translator: EightCap,
-            init_cache: None,
+            init_scratch_partition: format!("{name}-scratch"),
             init_buffer: NZUsize!(1024),
             init_concurrency: NZUsize!(2),
         },

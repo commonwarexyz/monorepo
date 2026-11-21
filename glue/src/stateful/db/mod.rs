@@ -2087,7 +2087,7 @@ mod tests {
                 merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: format!("initial-target-{suffix}-scratch"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }
@@ -2100,7 +2100,7 @@ mod tests {
                 merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: format!("initial-target-{suffix}-scratch"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }
@@ -2114,7 +2114,7 @@ mod tests {
                 log: fixed_journal_config(suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: format!("initial-target-{suffix}-grafted-metadata-scratch"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }
@@ -2128,7 +2128,7 @@ mod tests {
                 log: variable_journal_config(suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: format!("initial-target-{suffix}-grafted-metadata-scratch"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }

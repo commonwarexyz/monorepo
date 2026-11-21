@@ -32,6 +32,22 @@ pub trait Key: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug 
 
 impl<T> Key for T where T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Debug {}
 
+/// Whether `found`, the key of an operation the index holds for the bytes of `key`, is `key`.
+///
+/// # Panics
+///
+/// Panics if the keys differ while their bytes are equal, which [Key] forbids.
+pub(crate) fn same_key<K: Key>(found: &K, key: &K) -> bool {
+    if found == key {
+        return true;
+    }
+    assert!(
+        found.as_ref() != key.as_ref(),
+        "keys with equal bytes must be equal"
+    );
+    false
+}
+
 /// An operation that may be a commit. Commits declare an inactivity floor.
 pub trait Committable<F: Family> {
     /// The inactivity floor if this operation is a commit.

@@ -15,12 +15,13 @@ use crate::{
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
-        build_snapshot_from_log, delete_known_loc,
+        delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
-        operation::{Committable as _, Key, Operation as _},
-        selection_error, update_known_loc, validate_initialization_bound,
-        validate_initialization_commit,
+        operation::{Committable as _, Key, Operation as _, same_key},
+        selection_error,
+        snapshot::Rebuild as _,
+        update_known_loc, validate_initialization_bound, validate_initialization_commit,
         value::{VariableEncoding, VariableValue},
     },
     translator::Translator,
@@ -28,10 +29,13 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::{Widen, bitmap};
 use core::{borrow::Borrow, num::NonZeroUsize};
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
@@ -45,9 +49,11 @@ pub struct Config<T: Translator, C, S: Strategy> {
     /// The translator used by the compressed index.
     pub translator: T,
 
-    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
-    pub init_cache: Option<NonZeroUsize>,
+    /// The partition init keeps temporary data in when it rebuilds the index from more operations
+    /// than it holds in memory. Init removes that data before it returns, along with any an
+    /// interrupted init left behind. The partition must not be shared with another database or
+    /// used for anything else.
+    pub init_scratch_partition: String,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -250,7 +256,7 @@ where
                 unreachable!("location does not reference update operation. loc={loc}");
             };
 
-            if &k == key {
+            if same_key(&k, key) {
                 return Ok(Some(v));
             }
         }
@@ -371,7 +377,10 @@ where
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg, S>,
         max_size: Option<Location>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        E: Spawner,
+    {
         // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
         // recovery owner unpublished until that commit and its replay floor are validated.
         validate_initialization_bound(max_size)?;
@@ -424,7 +433,6 @@ where
             .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
 
         // Build the snapshot only from the durable selected prefix.
-        let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
 
@@ -437,23 +445,21 @@ where
             .expect("pruned chunk count fits in u64 bits");
         bitmap.extend_to(*inactivity_floor_loc);
 
-        // Replay the log from the floor, appending each operation's status and clearing the bit
-        // of any location it supersedes. The state after the last operation is each location's
-        // final status.
-        let active_keys = build_snapshot_from_log(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            init_buffer,
-            cache_size,
-            |is_active, old_loc| {
-                bitmap.push(is_active);
-                if let Some(loc) = old_loc {
-                    bitmap.set_bit(*loc, false);
-                }
-            },
-        )
-        .await?;
+        // Build the snapshot on this task from the operations at and above the floor, then
+        // append their statuses. The build drops every clone of the log before it returns.
+        let log = Arc::new(log);
+        let (active_keys, activity) = snapshot
+            .build_snapshot(
+                context.child("build"),
+                inactivity_floor_loc,
+                &log,
+                NonZeroUsize::MIN,
+                init_buffer,
+                &cfg.init_scratch_partition,
+            )
+            .await?;
+        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
+        bitmap.extend_from_bitmap(&activity);
         assert_eq!(bitmap.len(), bounds.end);
 
         let db = Self {
@@ -809,7 +815,7 @@ mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Metrics as _, Runner, Spawner as _, Supervisor as _,
+        Metrics as _, Runner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -853,7 +859,7 @@ mod test {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: "journal-scratch".into(),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
         }
@@ -1137,7 +1143,7 @@ mod test {
                 page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("journal-{suffix}-scratch"),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
         };
@@ -2305,6 +2311,94 @@ mod test {
         });
     }
 
+    /// A key whose bytes leave out part of it, which [Key] forbids: keys with the same bytes and
+    /// different tags are unequal.
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct Tagged {
+        bytes: [u8; 4],
+        tag: u8,
+    }
+
+    impl AsRef<[u8]> for Tagged {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    impl commonware_codec::Write for Tagged {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.bytes.write(buf);
+            self.tag.write(buf);
+        }
+    }
+
+    impl commonware_codec::FixedSize for Tagged {
+        const SIZE: usize = 5;
+    }
+
+    impl Read for Tagged {
+        type Cfg = ();
+
+        fn read_cfg(
+            buf: &mut impl commonware_codec::Buf,
+            _: &(),
+        ) -> Result<Self, commonware_codec::Error> {
+            use commonware_codec::ReadExt as _;
+            Ok(Self {
+                bytes: <[u8; 4]>::read(buf)?,
+                tag: u8::read(buf)?,
+            })
+        }
+    }
+
+    #[test_traced("DEBUG")]
+    #[should_panic(expected = "keys with equal bytes must be equal")]
+    fn test_store_rejects_unequal_keys_with_equal_bytes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                log: JournalConfig {
+                    partition: "journal".into(),
+                    write_buffer: NZUsize!(64 * 1024),
+                    replay_buffer: NZUsize!(64 * 1024),
+                    compression: None,
+                    codec_config: ((), ((0..=10000).into(), ())),
+                    items_per_section: NZU64!(7),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                },
+                translator: TwoCap,
+                init_scratch_partition: "journal-scratch".into(),
+                init_buffer: NZUsize!(1 << 21),
+                strategy: Sequential,
+            };
+            let db = Db::<_, Tagged, Vec<u8>, TwoCap, Sequential>::init(
+                context.child("store"),
+                cfg,
+                None,
+            )
+            .await
+            .unwrap();
+            let first = Tagged {
+                bytes: [1, 2, 3, 4],
+                tag: 0,
+            };
+            let second = Tagged {
+                bytes: [1, 2, 3, 4],
+                tag: 1,
+            };
+            let batch = db
+                .new_batch()
+                .write(first.clone(), Some(vec![1]))
+                .write(second.clone(), Some(vec![2]))
+                .finalize();
+            let db = db.apply_batch(batch).await.unwrap();
+
+            // Whichever key the index returns first, looking up the other one meets it.
+            let _ = db.get(&first).await;
+            let _ = db.get(&second).await;
+        });
+    }
+
     /// A [Db] keyed by variable-length byte keys.
     type VecKeyStore = Db<deterministic::Context, Vec<u8>, Vec<u8>, TwoCap, Sequential>;
 
@@ -2324,7 +2418,7 @@ mod test {
                     page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 translator: TwoCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: "journal-scratch".into(),
                 init_buffer: NZUsize!(1 << 21),
                 strategy: Sequential,
             };
@@ -2379,7 +2473,7 @@ mod test {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: OneCap,
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("{partition}-scratch"),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
         };
@@ -2531,7 +2625,7 @@ mod test {
                 Config {
                     log: cfg.log,
                     translator: CountingTranslator(lookups.clone()),
-                    init_cache: cfg.init_cache,
+                    init_scratch_partition: cfg.init_scratch_partition,
                     init_buffer: cfg.init_buffer,
                     strategy: cfg.strategy,
                 },

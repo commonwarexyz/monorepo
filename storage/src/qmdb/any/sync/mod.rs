@@ -42,7 +42,7 @@ async fn build_db<F, E, U, I, H, C, S>(
     apply_batch_size: NonZeroU64,
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
+    scratch_partition: &str,
 ) -> Result<Db<F, E, C, I, H, U, S>, qmdb::Error<F>>
 where
     F: merkle::Family,
@@ -77,7 +77,7 @@ where
         None,
         init_concurrency,
         init_buffer,
-        cache_size,
+        scratch_partition,
         metrics,
     )
     .await?;
@@ -166,7 +166,7 @@ where
             apply_batch_size,
             config.init_concurrency,
             config.init_buffer,
-            config.init_cache,
+            &config.init_scratch_partition,
         )
         .await
     }

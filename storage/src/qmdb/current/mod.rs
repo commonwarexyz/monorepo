@@ -385,17 +385,19 @@ pub struct Config<T: Translator, J, S: Strategy> {
     /// [OrderedTranslator](crate::translator::OrderedTranslator).
     pub translator: T,
 
-    /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
-    pub init_cache: Option<NonZeroUsize>,
+    /// The partition init keeps temporary data in when it rebuilds the index from more operations
+    /// than it holds in memory. Init removes that data before it returns, along with any an
+    /// interrupted init left behind. The partition must not be shared with another database or
+    /// used for anything else.
+    pub init_scratch_partition: String,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// Tasks that initialization spawns to scan the log at once. A partitioned index decodes on
-    /// them, beside fewer insert tasks, and any other index builds on the calling task. With 1,
-    /// initialization spawns nothing, and the calling task scans the log while the strategy hashes
-    /// it.
+    /// Tasks that initialization builds the index on. With more than one, they also hash the
+    /// log's operations for the journal as they replay them, so the log is read once. With 1,
+    /// initialization spawns nothing, and the calling task replays the log for the index and
+    /// then again while the strategy hashes it.
     pub init_concurrency: NonZeroUsize,
 }
 
@@ -405,7 +407,7 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             merkle: cfg.merkle,
             log: cfg.log,
             translator: cfg.translator,
-            init_cache: cfg.init_cache,
+            init_scratch_partition: cfg.init_scratch_partition,
             init_buffer: cfg.init_buffer,
             init_concurrency: cfg.init_concurrency,
         }
@@ -888,7 +890,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("{partition_prefix}-scratch-partition"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
@@ -925,17 +927,18 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
-            init_cache: Some(NZUsize!(1024)),
+            init_scratch_partition: format!("{partition_prefix}-scratch-partition"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
         }
     }
 
-    /// Like [fixed_config], but initializes serially.
+    /// Like [fixed_config], but builds its snapshot on three tasks. The variable configuration
+    /// builds on one, so the shared tests cover both.
     pub(crate) fn fixed_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
     ) -> Config<T, FConfig, Sequential> {
-        fixed_config_full(partition_prefix, NZUsize!(1))
+        fixed_config_full(partition_prefix, NZUsize!(3))
     }
 
     /// Like [variable_config], but initializes serially.
@@ -2089,7 +2092,7 @@ pub mod tests {
                 },
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
-                init_cache: Some(NZUsize!(1024)),
+                init_scratch_partition: "forged-exclusion-log-scratch".to_string(),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(1),
             };

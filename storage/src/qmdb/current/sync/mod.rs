@@ -80,7 +80,7 @@ async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     apply_batch_size: NonZeroU64,
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
+    scratch_partition: &str,
     metadata_partition: String,
     strategy: S,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, qmdb::Error<F>>
@@ -129,7 +129,7 @@ where
         Some(bitmap),
         init_concurrency,
         init_buffer,
-        cache_size,
+        scratch_partition,
         any_metrics,
     )
     .await?;
@@ -277,7 +277,7 @@ where
             apply_batch_size,
             config.init_concurrency,
             config.init_buffer,
-            config.init_cache,
+            &config.init_scratch_partition,
             config.grafted_metadata_partition,
             strategy,
         )

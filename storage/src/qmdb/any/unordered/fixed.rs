@@ -73,10 +73,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        journal::{
-            Error as JournalError,
-            contiguous::{Batch, Contiguous},
-        },
+        journal::contiguous::Contiguous,
         merkle::{
             Family, Location as GenericLocation,
             mmr::{self, Location},
@@ -86,14 +83,12 @@ pub(crate) mod test {
             any::{
                 batch::Slot,
                 test::{
-                    colliding_digest, fixed_db_config, fixed_db_config_partitioned,
-                    fixed_db_config_with_strategy,
+                    fixed_db_config, fixed_db_config_partitioned, fixed_db_config_with_strategy,
                 },
                 unordered::{Update, fixed::Operation},
             },
-            cache::Cache,
             floor::{Bounded, Proportional},
-            snapshot::{Rebuild, delete_key, update_key},
+            snapshot::Rebuild,
         },
         translator::{OneCap, TwoCap},
     };
@@ -102,23 +97,17 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
     use commonware_runtime::{
-        Clock as _, Metrics as _, ReadOptions, Runner as _, Spawner as _, Strategizer as _,
-        Supervisor as _,
+        Clock as _, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
-    use core::{num::NonZeroUsize, ops::Range};
-    use futures::{FutureExt as _, Stream};
+    use core::num::NonZeroUsize;
+    use futures::FutureExt as _;
     use rand::Rng;
-    use std::{
-        collections::HashMap,
-        future::{Future, ready},
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::Db<
@@ -661,15 +650,14 @@ pub(crate) mod test {
         Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
-    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
-    /// with the cache disabled (`init_cache = None`) or enabled must produce the identical
-    /// root and key-value state.
+    /// Reopening a database rebuilds its snapshot from the log, which must reproduce the root and
+    /// the key-value state.
     #[test_traced("WARN")]
-    fn test_unordered_fixed_init_cache_equivalence() {
+    fn test_unordered_fixed_init_rebuilds_state() {
         deterministic::Runner::default().start(|context| async move {
-            // Populate a database with enough keys to drive collision resolution in the compressed
-            // index, then commit and drop it.
-            let cfg = fixed_db_config::<TwoCap>("cache_equiv");
+            // Populate a database with enough keys to make translated keys collide in the
+            // compressed index, then commit and drop it.
+            let cfg = fixed_db_config::<TwoCap>("init_rebuild");
             let db = AnyTest::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
@@ -696,124 +684,22 @@ pub(crate) mod test {
             let root = db.root();
             drop(db);
 
-            // Reopen with the cache disabled, with a tiny multi-entry cache that evicts throughout
-            // replay, and with a large cache. All rebuild the snapshot from the same immutable log,
-            // so every root and key-value result must match the pre-drop state.
-            for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
-                let mut cfg = fixed_db_config::<TwoCap>("cache_equiv");
-                cfg.init_cache = cache_size;
-                let ctx = context
-                    .child("reopen")
-                    .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
-                let db = AnyTest::init(ctx, cfg, None).await.unwrap();
-                assert_eq!(
-                    db.root(),
-                    root,
-                    "root mismatch at cache_size={cache_size:?}"
-                );
-                for (key, value) in &expected {
-                    assert_eq!(
-                        db.get(key).await.unwrap(),
-                        *value,
-                        "state mismatch at cache_size={cache_size:?}"
-                    );
-                }
-                drop(db);
-            }
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_unordered_fixed_init_cache_collision_invalidation() {
-        deterministic::Runner::default().start(|context| async move {
-            for cached in [false, true] {
-                let context = context.child(if cached { "cached" } else { "uncached" });
-                let keys = [
-                    colliding_digest(7, 0),
-                    colliding_digest(7, 1),
-                    colliding_digest(7, 2),
-                ];
-                let cfg = fixed_db_config::<OneCap>(if cached { "cached" } else { "uncached" });
-                let mut log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
-                    context.child("log"),
-                    cfg.log,
-                )
+            let cfg = fixed_db_config::<TwoCap>("init_rebuild");
+            let db = AnyTest::init(context.child("reopen"), cfg, None)
                 .await
                 .unwrap();
-                for (loc, key) in [keys[0], keys[1], keys[0]].into_iter().enumerate() {
-                    let (next, position) = log
-                        .append(&Operation::Update(Update(key, val(loc as u64))))
-                        .await
-                        .unwrap();
-                    assert_eq!(position, loc as u64);
-                    log = next;
-                }
-                let log = FailingReads(log);
-                let mut index = Index::<OneCap, Location>::new(context.child("index"), OneCap);
-                index.insert(&keys[0], Location::new(0));
-                index.insert(&keys[1], Location::new(1));
-                assert_eq!(
-                    index.get(&keys[0]).copied().collect::<Vec<_>>(),
-                    [Location::new(1), Location::new(0)]
-                );
-                let mut cache = Cache::new(NZUsize!(2));
-                if cached {
-                    cache.put(0, keys[0]);
-                    cache.put(1, keys[1]);
-                }
-
-                // Resolving the tail of the collision chain retains the preceding candidate.
-                // Cached candidates must not read the log; uncached mismatches are admitted.
-                let new_loc = Location::new(2);
-                let old_loc = if cached {
-                    update_key(&mut index, &log, &keys[0], new_loc, Some(&mut cache)).await
-                } else {
-                    update_key(&mut index, &log.0, &keys[0], new_loc, Some(&mut cache)).await
-                }
-                .unwrap();
-                assert_eq!(old_loc, Some(Location::new(0)));
-                assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc)),
-                    [None, Some(&keys[1]), None]
-                );
-                cache.put(*new_loc, keys[0]);
-                assert_eq!(cache.get(1), Some(&keys[1]));
-
-                // An absent full key sharing the translated key leaves both candidates live.
-                assert_eq!(
-                    delete_key(&mut index, &log, &keys[2], Some(&mut cache))
-                        .await
-                        .unwrap(),
-                    None
-                );
-                assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc)),
-                    [None, Some(&keys[1]), Some(&keys[0])]
-                );
-                assert_eq!(
-                    delete_key(&mut index, &log, &keys[0], Some(&mut cache))
-                        .await
-                        .unwrap(),
-                    Some(new_loc)
-                );
-                assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc)),
-                    [None, Some(&keys[1]), None]
-                );
-                assert_eq!(
-                    index.get(&keys[1]).copied().collect::<Vec<_>>(),
-                    [Location::new(1)]
-                );
+            assert_eq!(db.root(), root);
+            for (key, value) in &expected {
+                assert_eq!(db.get(key).await.unwrap(), *value);
             }
         });
     }
 
     /// Build a `P`-partitioned unordered db with churny ops, then assert that reopening it with a
-    /// range of `init_concurrency` values (`1` for the serial path, `2` for the single-worker
-    /// de-interleave, counts that round down to fewer workers with wider ranges, and counts
-    /// above the partition count that clamp) all reconstruct the identical root and key-value
-    /// state: the parallel build replays the same immutable log, just split across workers
-    /// owning disjoint partition ranges.
+    /// range of `init_concurrency` values (`1` for a build on the init task, counts that split
+    /// the partitions unevenly, and counts above the partition and chunk counts that clamp) all
+    /// reconstruct the identical root and key-value state: every build replays the same immutable
+    /// log, just split across tasks.
     #[commonware_macros::boxed]
     async fn check_parallel_init_equivalence<const P: usize>(
         context: deterministic::Context,
@@ -966,8 +852,9 @@ pub(crate) mod test {
         });
     }
 
-    /// On replay failure, a parallel build must join its workers and release their partition
-    /// ranges. Every log clone must be dropped before returning, as required by [`Rebuild`].
+    /// A replay failure during a parallel build must join every task before surfacing the
+    /// error: no task may outlive the failed build, retaining a clone of the log, as required
+    /// by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
@@ -1008,7 +895,7 @@ pub(crate) mod test {
             );
 
             // The reopened journal has a fresh page cache, so replay's first item requires a read.
-            // Failing that read leaves workers idle because no batches have been routed.
+            // Failing that read fails every task replaying the log.
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
                 .build_snapshot(
@@ -1017,101 +904,46 @@ pub(crate) mod test {
                     &log,
                     NZUsize!(4),
                     NZUsize!(1 << 21),
-                    None,
+                    &cfg.init_scratch_partition,
                 )
                 .await;
             assert!(result.is_err(), "replay must fail under read faults");
 
-            // Every worker was joined before the error surfaced: nothing else may retain the log.
+            // Every task was joined before the error surfaced: nothing else may retain the log.
             assert_eq!(Arc::strong_count(&log), 1);
 
             context.storage_fault_config().write().read_rate = None;
         });
     }
 
-    /// A read-only log view whose random-access reads always fail. During a parallel build only
-    /// the workers read the log directly (collision resolution, with the init cache disabled), so
-    /// this fails a worker's read while the router's replay stream succeeds.
-    struct FailingReads<C>(C);
-
-    impl<C: Contiguous> Contiguous for FailingReads<C> {
-        type Item = C::Item;
-
-        fn bounds(&self) -> Range<u64> {
-            self.0.bounds()
-        }
-
-        fn read(
-            &self,
-            position: u64,
-        ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send {
-            ready(Err(JournalError::ItemPruned(position)))
-        }
-
-        fn read_many(
-            &self,
-            positions: &[u64],
-        ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
-            ready(Err(JournalError::ItemPruned(
-                positions.first().copied().unwrap_or_default(),
-            )))
-        }
-
-        fn try_read_sync(&self, _position: u64) -> Option<Self::Item> {
-            None
-        }
-
-        fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
-            positions.iter().map(|_| None).collect()
-        }
-
-        fn replay(
-            &self,
-            range: Range<u64>,
-            buffer: NonZeroUsize,
-            read_options: ReadOptions,
-        ) -> impl Future<
-            Output = Result<
-                impl Stream<Item = Result<Batch<Self::Item>, JournalError>> + Send,
-                JournalError,
-            >,
-        > + Send {
-            self.0.replay(range, buffer, read_options)
-        }
-    }
-
-    /// A worker failure during a parallel build must surface through the worker join and leave
-    /// no worker retaining the log: the failing worker's channel closes, routing stops, and the
-    /// join returns the worker's error. This is the counterpart of the replay-failure test,
-    /// which fails the router's stream before any worker reads.
+    /// A scratch write failure during a parallel build must surface through the join and leave
+    /// no task retaining the log. This is the counterpart of the replay-failure test, which
+    /// fails before any record is written.
     #[test_traced("WARN")]
-    fn test_unordered_partitioned_parallel_init_worker_failure_drains_workers() {
+    fn test_unordered_partitioned_parallel_init_scratch_failure_drains_tasks() {
         deterministic::Runner::default().start(|context| async move {
             type FailDb<S> =
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
-            // Populate with two keys that share a partition and translated sub-key, so the
-            // second key's replay resolves a collision by reading the first key's operation
-            // from the log.
-            let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail");
+            // Populate a db with more operations than a build holds in memory.
+            let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_scratch_fail");
             let db = FailDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
-            let merkleized = db
-                .new_batch()
-                .write(colliding_digest(0x10, 1), Some(Sha256::hash(&[b"v1"])))
-                .write(colliding_digest(0x10, 2), Some(Sha256::hash(&[b"v2"])))
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0u64..100 {
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
+                batch = batch.write(k, Some(v));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
 
-            // Reopen the op log behind a wrapper that fails every random-access read, and build
-            // with the cache disabled so collision resolution must read the log.
-            let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail");
+            // Reopen the op log directly and build against a fresh index, failing every write.
+            let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_scratch_fail");
             let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
                 context.child("log"),
                 cfg.log,
@@ -1119,11 +951,16 @@ pub(crate) mod test {
             .await
             .unwrap();
             let floor = Location::new(log.bounds().start);
-            let log = Arc::new(FailingReads(log));
+            let log = Arc::new(log);
             let mut index = crate::index::partitioned::unordered::Index::<OneCap, Location, 1>::new(
                 context.child("index"),
                 OneCap,
             );
+            context.storage_fault_config().write().write_rate = Some(deterministic::WriteConfig {
+                failure_rate: probability!(1.0),
+                retention_rate: probability!(0.0),
+                mode: deterministic::PartialWriteMode::Prefix,
+            });
             let result = index
                 .build_snapshot(
                     context.child("build"),
@@ -1131,21 +968,23 @@ pub(crate) mod test {
                     &log,
                     NZUsize!(4),
                     NZUsize!(1 << 21),
-                    None,
+                    &cfg.init_scratch_partition,
                 )
                 .await;
             assert!(
-                matches!(result, Err(Error::Journal(JournalError::ItemPruned(_)))),
-                "worker read failure must surface through the join, got {result:?}"
+                matches!(result, Err(Error::Runtime(_))),
+                "scratch write failure must surface through the join, got {result:?}"
             );
 
-            // Every worker was joined before the error surfaced: nothing else may retain the log.
+            // Every task was joined before the error surfaced: nothing else may retain the log.
             assert_eq!(Arc::strong_count(&log), 1);
+
+            context.storage_fault_config().write().write_rate = None;
         });
     }
 
-    /// A multi-worker build of an empty log must return the serial build's result (zero active
-    /// keys, an empty bitmap) rather than panicking on the last-commit bit.
+    /// A build of an empty log on several tasks must return what a build on one task does (zero
+    /// active keys, an empty bitmap) rather than panicking on the last-commit bit.
     #[test_traced("WARN")]
     fn test_unordered_partitioned_parallel_init_empty_log() {
         deterministic::Runner::default().start(|context| async move {
@@ -1177,7 +1016,7 @@ pub(crate) mod test {
                         &log,
                         NonZeroUsize::new(concurrency).unwrap(),
                         NZUsize!(1 << 21),
-                        None,
+                        &cfg.init_scratch_partition,
                     )
                     .await
                     .unwrap();
