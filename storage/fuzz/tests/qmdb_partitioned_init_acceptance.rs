@@ -67,16 +67,6 @@ fn expected_stream(input: &[u8]) -> Vec<u8> {
     expected
 }
 
-fn unchanged_target_body(source: &str) -> &str {
-    source
-        .split_once("/// The key writes that `writes` expand to")
-        .unwrap()
-        .1
-        .split_once("fn fuzz_family")
-        .unwrap()
-        .0
-}
-
 #[derive(Debug)]
 #[allow(dead_code)] // Fields exist to reproduce the target's derived Debug contract.
 enum ReferenceWrite {
@@ -237,7 +227,6 @@ fn acceptance_at_001_003_005_006_014_015_016_025_source_contract() {
             "deterministic::Config::new().with_rng(FuzzRng::from(input.entropy.clone()))"
         )
     );
-
 }
 
 fn normalized(text: &str) -> String {
