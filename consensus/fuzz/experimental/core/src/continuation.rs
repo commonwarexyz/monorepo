@@ -1906,6 +1906,7 @@ where
                 resolver_sender,
                 gate(tap, resolver_receiver, Channel::Resolver),
             ),
+            false,
         );
         (app, engine)
     }

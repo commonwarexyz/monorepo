@@ -2076,6 +2076,7 @@ version = "2026.11.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-actor",
  "commonware-codec",
  "commonware-consensus",
  "commonware-consensus-fuzz-core",

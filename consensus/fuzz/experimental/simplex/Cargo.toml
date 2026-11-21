@@ -34,6 +34,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
+commonware-actor.workspace = true
 commonware-codec.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
 commonware-consensus-fuzz-core = { path = "../core" }
@@ -226,6 +227,14 @@ required-features = ["twins"]
 [[bin]]
 name = "exp_simplex_cert_mock_flood"
 path = "fuzz_targets/exp_simplex_cert_mock_flood.rs"
+test = false
+doc = false
+bench = false
+required-features = ["base"]
+
+[[bin]]
+name = "exp_simplex_ed25519_equivocation_evidence"
+path = "fuzz_targets/exp_simplex_ed25519_equivocation_evidence.rs"
 test = false
 doc = false
 bench = false

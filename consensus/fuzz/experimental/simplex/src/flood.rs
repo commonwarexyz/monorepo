@@ -489,12 +489,20 @@ pub fn stream_at(raw_bytes: &[u8], drawn: u64) -> FuzzRng {
 
 /// The runtime's RNG: the [`FuzzRng`] stream of the input, counting the bytes drawn
 /// from it.
-struct Tape {
+pub(crate) struct Tape {
     stream: FuzzRng,
     drawn: Arc<AtomicU64>,
 }
 
 impl Tape {
+    /// The stream of `raw_bytes`, adding every byte drawn from it to `drawn`.
+    pub(crate) fn new(raw_bytes: &[u8], drawn: Arc<AtomicU64>) -> Self {
+        Self {
+            stream: FuzzRng::new(raw_bytes.to_vec()),
+            drawn,
+        }
+    }
+
     fn count(&self, bytes: usize) {
         self.drawn.fetch_add(bytes as u64, Ordering::Relaxed);
     }
@@ -788,10 +796,7 @@ fn recorded(bursts: &[Burst], peer_votes: &[PeerVote<Sha256Digest>]) -> ClassCou
 pub fn run_planted(input: &FuzzInput, plant: Option<Plant>) -> Report {
     let base = base(input);
     let drawn = Arc::new(AtomicU64::new(0));
-    let tape: deterministic::BoxDynRng = Box::new(Tape {
-        stream: FuzzRng::new(input.raw_bytes.clone()),
-        drawn: drawn.clone(),
-    });
+    let tape: deterministic::BoxDynRng = Box::new(Tape::new(&input.raw_bytes, drawn.clone()));
     let cfg = deterministic::Config::new()
         .with_rng(tape)
         .with_timeout(Some(fuzz_runtime_timeout(input.required_containers, 0)));

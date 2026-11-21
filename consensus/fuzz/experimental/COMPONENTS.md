@@ -49,6 +49,7 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 | C7 | Chaos and ChaosTwins | `consensus/fuzz/experimental/simplex/src/chaos/` |
 | C8 | Simplex prefix entry points | `consensus/fuzz/experimental/simplex/src/trusted.rs` |
 | C9 | Directed peer flood | `consensus/fuzz/experimental/simplex/src/flood.rs` |
+| C10 | Equivocation evidence | `consensus/fuzz/experimental/simplex/src/evidence.rs` |
 | D1 | Marshal store harness | `consensus/fuzz/experimental/marshal/src/marshal/store.rs` |
 | D2 | Marshal end-to-end drivers | `consensus/fuzz/experimental/marshal/src/marshal/end_to_end/` |
 | D3 | Marshal coding stack and faults | `consensus/fuzz/experimental/marshal/src/marshal/end_to_end/` |
@@ -161,10 +162,10 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 
 ### B2. `Simplex` trait and scheme variants
 - **Goal:** Abstracts the scheme, the elector and fixture setup, so a target picks its whole cryptographic and leader setup with the type parameter `P`.
-- **Path:** `consensus/fuzz/experimental/core/src/simplex.rs` (`Simplex`, `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin`, `SimplexCertificateMockByzantineFirstLeader`); `consensus/fuzz/experimental/core/src/attributable_mock.rs` (`fixture`, `Scheme`, `Certificate`)
+- **Path:** `consensus/fuzz/experimental/core/src/simplex.rs` (`Simplex`, `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin`, `SimplexCertificateMockByzantineFirstLeader`, `SimplexEd25519`); `consensus/fuzz/experimental/core/src/attributable_mock.rs` (`fixture`, `Scheme`, `Certificate`)
 - **When to use:** Every simplex and marshal target. Add a variant here to change the elector or the scheme flags; an attributable variant takes its schemes from `attributable_mock::fixture` (see Gotchas).
 - **Example:** `consensus/fuzz/experimental/simplex/fuzz_targets/exp_simplex_cert_mock_byzantine_first_leader.rs`; `consensus/fuzz/experimental/marshal/fuzz_targets/exp_marshal_e2e_standard_deferred_cert_mock_block_dissemination.rs`
-- **Gotchas:** C2 decodes an attributable scheme's certificate as a signer bitmap followed by the rest. The attributable mock's certificates are opaque ids, so an attributable variant's `setup` returns `attributable_mock::fixture`, as `SimplexCertificateMockAttributable` does.
+- **Gotchas:** C2 decodes an attributable scheme's certificate as a signer bitmap followed by the rest. The attributable mock's certificates are opaque ids, so an attributable variant's `setup` returns `attributable_mock::fixture`, as `SimplexCertificateMockAttributable` does. `SimplexEd25519` is the production ed25519 scheme with real signatures; C10 runs on it.
 
 ### B3. Network setup and partitions
 - **Goal:** Starts N nodes on A2 with three channels each (vote, certificate, resolver), then applies static partitions or partitions that change per view.
@@ -182,10 +183,10 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 
 ### B5. Honest validator builders and lifecycle
 - **Goal:** Spawns honest simplex validators (application, reporter, engine), optionally keeping their task handles so they can be crashed or restarted.
-- **Path:** `consensus/fuzz/experimental/core/src/lib.rs` (`spawn_filtered_honest_validator`, `build_validator`, `build_validator_with_reporter`, `ManagedValidator`, `ValidatorLifecycle`, `HarnessReporter`)
-- **When to use:** `spawn_filtered_honest_validator` for nodes that run to the end. `build_validator` when the harness crashes or restarts nodes (Mallory, Chaos).
+- **Path:** `consensus/fuzz/experimental/core/src/lib.rs` (`spawn_filtered_honest_validator`, `build_validator`, `build_validator_with_reporter`, `start_validator_engine`, `ManagedValidator`, `ValidatorLifecycle`, `HarnessReporter`)
+- **When to use:** `spawn_filtered_honest_validator` for nodes that run to the end. `build_validator` when the harness crashes or restarts nodes (Mallory, Chaos). `start_validator_engine`, the last step of both, when the harness brings its own blocker or reporter (C10).
 - **Example:** `consensus/fuzz/experimental/simplex/src/mallory/lifecycle.rs` (`crash_stop`); `consensus/fuzz/experimental/simplex/src/chaos/runner.rs` (`run`)
-- **Gotchas:** A crash must abort and await both task handles before the storage partition is reused. Otherwise the old incarnation can still send or keep its archives open.
+- **Gotchas:** A crash must abort and await both task handles before the storage partition is reused. Otherwise the old incarnation can still send or keep its archives open. `start_validator_engine` takes the engine's `track_historical_votes`; every caller in this crate passes `false`, and only C10 sets it from its input.
 
 ### B6. Filterable block relay
 - **Goal:** A mock block-dissemination application with a filter for each recipient (drop or delay), and an option to require the block before certifying.
@@ -312,6 +313,13 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 - **When to use:** Target `exp_simplex_cert_mock_flood`. `run` returns the report a test reads; `run_planted` plants the fault of one negative control; `check_floors` proves over `fixed_corpus` that the load was there (`C6-I5`).
 - **Example:** `consensus/fuzz/experimental/simplex/fuzz_targets/exp_simplex_cert_mock_flood.rs`
 - **Gotchas:** The input is its own `FuzzInput`, not B1's: its `raw_bytes` is a copy of the whole input, taken before the other fields. The first burst is always far-future votes at view 1, so the empty input floods. A run ends on a count of finalized containers, not on a view. The flooder waits out the per-peer rate limit of the simulated network, so every vote of a burst is sent. The runtime's RNG counts the bytes drawn from it, and each burst reports the count at its draws: `sample_next` and `sample_burst` on `stream_at` that count give the burst again.
+
+### C10. Equivocation evidence
+- **Goal:** A scripted equivocator on the production ed25519 scheme. Participant 0 runs no engine and sends the three honest engines pairs of conflicting votes it signs (two notarizes, two finalizes, nullify then finalize, finalize then nullify), the second vote up to six views after the first. With `track_historical_votes` on, every pair one honest engine held in full must be exported as fault evidence (`C4-I1`), pass `AttributableReporter` (`C4-I2`) and get the sender blocked (`C4-I3`); no evidence may name another signer (`C4-I4`). The Standard safety invariants run last.
+- **Path:** `consensus/fuzz/experimental/simplex/src/evidence.rs` (`FuzzInput`, `fuzz`, `run`, `run_planted`, `Outcome`, `Report`, `PairKind`, `EvidenceType`, `sample_plan`, `sample_payload`, `stream_at`, `Tap`, `Raw`, `Log`, `Sequence`, `current_view`, `admits`, `certainly_admits`, `retains`, `pairs`, `obligations`, `late`, `check_exported`, `check_forwarded`, `check_blocked`, `check_honest_signers`, `evaluate`, `Plant`, `fixed_corpus`, `check_floors`, `picks`, `ACTOR`)
+- **When to use:** Target `exp_simplex_ed25519_equivocation_evidence`. `run` returns the report, the logs and the equivocator's trace; `evaluate` is the oracle over the logs alone; `run_planted` plants the fault of one negative control; `check_floors` proves over `fixed_corpus` that every pair kind was measured, also after the certificate of its first vote (`C4-I5`).
+- **Example:** `consensus/fuzz/experimental/simplex/fuzz_targets/exp_simplex_ed25519_equivocation_evidence.rs`
+- **Gotchas:** The input is its own `FuzzInput`: its `raw_bytes` is a copy of the whole input, taken before the other fields, and one decoded input in eight runs without `track_historical_votes`, where nothing is an obligation and the late pairs without evidence are only counted. Evidence exists only when one node holds both votes, so a pair is measured per node, and only when the node recorded the first vote and was certain to admit the second: the tap stores the voter's `current_view` gauge with every message of the equivocator, read with `Metrics::encode`. A pair is found in a tap by the bytes of its two votes. The runtime's RNG counts the bytes drawn from it, and every plan and drawn payload reports the count at its draw: `sample_plan` and `sample_payload` on `stream_at` that count give them again. `Outcome::metrics` is sorted by line, because the registry encodes in no fixed order.
 
 ## D. Marshal harness (`consensus/fuzz/experimental/marshal`)
 

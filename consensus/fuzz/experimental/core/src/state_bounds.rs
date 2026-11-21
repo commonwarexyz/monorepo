@@ -115,7 +115,7 @@ pub fn gauge(metrics: &str, suffix: &str, node: &Node) -> u64 {
 }
 
 /// The last view of the term that holds `view`; genesis is its own term.
-const fn term_end(view: u64, term_length: u64) -> u64 {
+pub const fn term_end(view: u64, term_length: u64) -> u64 {
     if view == 0 {
         return 0;
     }

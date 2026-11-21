@@ -1,6 +1,8 @@
 pub mod byzzfuzz;
 pub(crate) mod chaos;
 #[cfg(any(feature = "mocks", test))]
+pub mod evidence;
+#[cfg(any(feature = "mocks", test))]
 pub mod flood;
 pub mod happens_before;
 pub mod invariants;

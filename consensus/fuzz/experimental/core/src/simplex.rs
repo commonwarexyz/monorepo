@@ -4,6 +4,8 @@ use crate::{BYZANTINE_IDX, Configuration};
 #[cfg(any(feature = "mocks", test))]
 use crate::{attributable_mock, simplex_certificate_mock as cert_mock};
 use commonware_codec::Read;
+#[cfg(any(feature = "mocks", test))]
+use commonware_consensus::simplex::scheme::ed25519;
 use commonware_consensus::{
     simplex::{
         elector::{Config as ElectorConfig, Elector, Input, RoundRobin, Terms},
@@ -194,6 +196,32 @@ impl Simplex for SimplexCertificateMockAttributable {
 
     fn audit_rejection_view(configuration: Configuration) -> Option<View> {
         (configuration == N4F1C3).then(|| View::new(3))
+    }
+}
+
+/// The production ed25519 scheme: attributable, with real signatures.
+#[cfg(any(feature = "mocks", test))]
+pub struct SimplexEd25519;
+
+#[cfg(any(feature = "mocks", test))]
+impl Simplex for SimplexEd25519 {
+    type Scheme = ed25519::Scheme;
+    type Elector = RoundRobin;
+
+    fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
+        round_robin(term_length, optimistic_views)
+    }
+
+    fn setup(
+        context: &mut deterministic::Context,
+        namespace: &[u8],
+        n: u32,
+    ) -> (
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
+        Vec<Self::Scheme>,
+    ) {
+        let fixture = ed25519::fixture(context, namespace, n);
+        (fixture.participants, fixture.schemes)
     }
 }
 

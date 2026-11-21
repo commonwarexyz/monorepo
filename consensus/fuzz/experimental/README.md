@@ -105,6 +105,7 @@ cargo +nightly fuzz run --fuzz-dir consensus/fuzz/experimental/simplex exp_simpl
 - `exp_simplex_cert_mock_twins_mutator_audit`
 - `exp_simplex_cert_mock_twins_mutator_hb`
 - `exp_simplex_cert_mock_twins_mutator_state_cov`
+- `exp_simplex_ed25519_equivocation_evidence`
 
 ### `marshal` (`--fuzz-dir consensus/fuzz/experimental/marshal`)
 

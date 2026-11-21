@@ -1060,8 +1060,12 @@ where
     )
 }
 
+/// Starts a production engine over `automaton`, `relay`, `reporter` and `blocker`
+/// with the settings every harness shares. `track_historical_votes` is the engine's
+/// setting of that name: with it, a round keeps every recorded vote until it is
+/// pruned, so a conflicting vote that comes after the certificate is still reported.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn start_validator_engine<
+pub fn start_validator_engine<
     P,
     EC,
     Automaton,
@@ -1090,6 +1094,7 @@ pub(crate) fn start_validator_engine<
     pending: (PendingSender, PendingReceiver),
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
+    track_historical_votes: bool,
 ) -> Handle<()>
 where
     P: simplex::Simplex,
@@ -1142,7 +1147,7 @@ where
         page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forward: forwarding,
-        track_historical_votes: false,
+        track_historical_votes,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
     engine.start(
@@ -1453,6 +1458,7 @@ where
         pending,
         recovered,
         resolver,
+        false,
     );
 
     ManagedValidator {
@@ -1622,6 +1628,7 @@ where
         pending,
         recovered,
         resolver,
+        false,
     );
 
     reporter
