@@ -15,7 +15,7 @@ use commonware_consensus::{
         scheme,
         types::{Activity, Context},
     },
-    types::{Round, View},
+    types::{Participant, Round, View},
 };
 use commonware_cryptography::{Digest, PublicKey, certificate};
 use commonware_macros::select;
@@ -263,6 +263,11 @@ where
     /// Selects the incarnation attached to subsequently recorded events.
     pub fn set_generation(&self, generation: u32) {
         self.audit.set_generation(generation);
+    }
+
+    /// The participant whose engine reports here, if its scheme can sign.
+    pub fn me(&self) -> Option<Participant> {
+        self.scheme.me().map(|me| me.index())
     }
 }
 

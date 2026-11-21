@@ -1172,6 +1172,11 @@ impl<P: Simplex> ReplicaTap<P> {
         let incarnation = self.incarnation.lock();
         incarnation.engine.is_none() && incarnation.respawn.is_some()
     }
+
+    /// Whether this replica was ever crashed.
+    pub fn was_crashed(&self) -> bool {
+        self.crashed_once.load(Ordering::Relaxed)
+    }
 }
 
 /// A receiver behind the gate of an honest replica's channel `L`: it holds what the
@@ -2146,8 +2151,7 @@ impl<P: Simplex> Runner<P> {
 
     /// Whether honest replica `index` was ever crashed.
     pub fn was_crashed(&self, index: usize) -> bool {
-        self.tap(index)
-            .is_some_and(|tap| tap.crashed_once.load(Ordering::Relaxed))
+        self.tap(index).is_some_and(|tap| tap.was_crashed())
     }
 
     /// The compromised identity, if the base runs one.

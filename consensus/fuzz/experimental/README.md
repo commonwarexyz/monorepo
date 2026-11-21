@@ -91,6 +91,7 @@ cargo +nightly fuzz run --fuzz-dir consensus/fuzz/experimental/simplex exp_simpl
 - `exp_simplex_cert_mock_chaos`
 - `exp_simplex_cert_mock_chaos_twins`
 - `exp_simplex_cert_mock_faulty_net`
+- `exp_simplex_cert_mock_flood`
 - `exp_simplex_cert_mock_hb`
 - `exp_simplex_cert_mock_hb_state_cov`
 - `exp_simplex_cert_mock_mallory`

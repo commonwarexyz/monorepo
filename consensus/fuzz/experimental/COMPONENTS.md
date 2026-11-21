@@ -39,6 +39,7 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 | B10 | Audit recorder | `consensus/fuzz/experimental/core/src/simplex_audit.rs` |
 | B11 | Trusted continuation (prefix) framework | `consensus/fuzz/experimental/core/src/continuation.rs` |
 | B12 | BFT reference bounds | `consensus/fuzz/experimental/core/src/bounds.rs` |
+| B13 | Peer-load state bounds | `consensus/fuzz/experimental/core/src/state_bounds.rs` |
 | C1 | Simplex entry point and mode dispatch | `consensus/fuzz/experimental/simplex/src/lib.rs` |
 | C2 | Simplex safety invariants | `consensus/fuzz/experimental/simplex/src/invariants.rs` |
 | C3 | Happens-before coverage | `consensus/fuzz/experimental/simplex/src/happens_before.rs` |
@@ -47,6 +48,7 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 | C6 | Mallory | `consensus/fuzz/experimental/simplex/src/mallory/` |
 | C7 | Chaos and ChaosTwins | `consensus/fuzz/experimental/simplex/src/chaos/` |
 | C8 | Simplex prefix entry points | `consensus/fuzz/experimental/simplex/src/trusted.rs` |
+| C9 | Directed peer flood | `consensus/fuzz/experimental/simplex/src/flood.rs` |
 | D1 | Marshal store harness | `consensus/fuzz/experimental/marshal/src/marshal/store.rs` |
 | D2 | Marshal end-to-end drivers | `consensus/fuzz/experimental/marshal/src/marshal/end_to_end/` |
 | D3 | Marshal coding stack and faults | `consensus/fuzz/experimental/marshal/src/marshal/end_to_end/` |
@@ -234,6 +236,13 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 - **When to use:** Any invariant that needs quorum sizes.
 - **Example:** `consensus/fuzz/experimental/simplex/src/invariants.rs` (`check_basic_invariants`)
 
+### B13. Peer-load state bounds
+- **Goal:** An end-of-run oracle on the state peer traffic can make one honest engine hold. It reads the voter's `current_view` and `tracked_views` gauges and the engine's audit history (B10) and checks three documented bounds: no recorded peer vote beyond the admission bound (`C6-I1`), one recorded vote per signer, kind and view (`C6-I2`), and no more tracked rounds than retention and the admission bound allow (`C6-I3`).
+- **Path:** `consensus/fuzz/experimental/core/src/state_bounds.rs` (`check`, `Measurement`, `Node`, `gauge`, `admission_bound`, `peer_votes`, `second_finalization`, `check_admission`, `check_uniqueness`, `check_retention`, `VIEW_RETENTION`, `MEASURED`, `ADMISSION_CHECKED`, `UNIQUENESS_CHECKED`, `RETENTION_CHECKED`)
+- **When to use:** At the end of a run, for every honest engine that ran for the whole run and reports to a recorder of B10. Standard, FaultyNet, the Standard audit and TwinsMutator call it; C9 puts it under a counted load.
+- **Example:** `consensus/fuzz/experimental/simplex/src/lib.rs` (`check_state_bounds`, `whole_run_engines`); `consensus/fuzz/experimental/simplex/src/flood.rs` (`run_planted`)
+- **Gotchas:** Reading the metrics is an auditor event, so call it after the auditor state a golden test pins. A gauge that is not found panics. Skip an engine that was restarted. `C6-I3` holds only inside the fault tolerance (`Configuration::can_finalize`). Each evaluation counts under its label in the B9 `reach` store.
+
 ## C. Simplex harness (`consensus/fuzz/experimental/simplex`)
 
 ### C1. Simplex entry point and mode dispatch
@@ -296,6 +305,13 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 - **When to use:** Building a target-state scaffold for simplex. No fuzz target uses it yet.
 - **Example:** `consensus/fuzz/experimental/simplex/src/trusted.rs` (`runs_with_a_prefix_are_deterministic`, `ordinary_runs_are_unchanged`)
 - **Gotchas:** `ordinary_runs_are_unchanged` pins the auditor states of runs without a prefix. A changed hash means the driver's behavior changed.
+
+### C9. Directed peer flood
+- **Goal:** A counted flood. Participant 0 runs no engine and sends the three honest engines bursts of votes it signs: far-future votes, one vote repeated and contradicted, and one vote of each kind across the edges of the tracked window. The run checks B13 for every honest node, that they still finalize, and the Standard safety invariants. A tap on each honest vote receiver counts the flood votes the engine took, by class.
+- **Path:** `consensus/fuzz/experimental/simplex/src/flood.rs` (`FuzzInput`, `fuzz`, `run`, `run_planted`, `Report`, `Burst`, `Node`, `FloodClass`, `ClassCounts`, `Choice`, `sample_burst`, `sample_next`, `stream_at`, `Plant`, `fixed_corpus`, `check_floors`, `ACTOR`)
+- **When to use:** Target `exp_simplex_cert_mock_flood`. `run` returns the report a test reads; `run_planted` plants the fault of one negative control; `check_floors` proves over `fixed_corpus` that the load was there (`C6-I5`).
+- **Example:** `consensus/fuzz/experimental/simplex/fuzz_targets/exp_simplex_cert_mock_flood.rs`
+- **Gotchas:** The input is its own `FuzzInput`, not B1's: its `raw_bytes` is a copy of the whole input, taken before the other fields. The first burst is always far-future votes at view 1, so the empty input floods. A run ends on a count of finalized containers, not on a view. The flooder waits out the per-peer rate limit of the simulated network, so every vote of a burst is sent. The runtime's RNG counts the bytes drawn from it, and each burst reports the count at its draws: `sample_next` and `sample_burst` on `stream_at` that count give the burst again.
 
 ## D. Marshal harness (`consensus/fuzz/experimental/marshal`)
 

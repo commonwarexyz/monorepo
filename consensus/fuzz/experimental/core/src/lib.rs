@@ -8,6 +8,7 @@ pub mod network;
 pub mod reach;
 pub mod simplex;
 pub mod simplex_audit;
+pub mod state_bounds;
 #[cfg(any(feature = "mocks", test))]
 pub use commonware_consensus::simplex::mocks::scheme as simplex_certificate_mock;
 pub mod strategy;
@@ -134,9 +135,9 @@ pub fn bounded_fuzz_runtime_config(
         )))
 }
 
-pub(crate) fn fuzz_mailbox_size(
-    u: &mut arbitrary::Unstructured<'_>,
-) -> arbitrary::Result<NonZeroUsize> {
+/// Samples the mailbox capacity of an honest engine: the default for half the inputs,
+/// otherwise a capacity of one to eight messages.
+pub fn fuzz_mailbox_size(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<NonZeroUsize> {
     Ok(match u.int_in_range(0..=99)? {
         0..=49 => DEFAULT_MAILBOX_SIZE,
         50..=74 => NZUsize!(1),

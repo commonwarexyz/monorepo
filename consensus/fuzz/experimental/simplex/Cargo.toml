@@ -222,3 +222,11 @@ test = false
 doc = false
 bench = false
 required-features = ["twins"]
+
+[[bin]]
+name = "exp_simplex_cert_mock_flood"
+path = "fuzz_targets/exp_simplex_cert_mock_flood.rs"
+test = false
+doc = false
+bench = false
+required-features = ["base"]

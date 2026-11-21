@@ -1,5 +1,7 @@
 pub mod byzzfuzz;
 pub(crate) mod chaos;
+#[cfg(any(feature = "mocks", test))]
+pub mod flood;
 pub mod happens_before;
 pub mod invariants;
 pub(crate) mod mallory;
@@ -18,11 +20,11 @@ use commonware_consensus::{
 };
 pub use commonware_consensus_fuzz_core::FuzzInput;
 use commonware_consensus_fuzz_core::{
-    BlockFilterChoice, CertCfgOf, CertifyChoice, EPOCH, FUZZ_LOG_ENV, MAX_SLEEP_DURATION, Mode,
-    N4F0C4, N4F1C3, NetworkChannels, PAGE_CACHE_SIZE, PAGE_SIZE, PublicKeyOf, ReporterWiring,
-    TWINS_MAX_ROUNDS, TwinsBackend, TwinsCase, TwinsDisrupter, TwinsElector, TwinsReporter,
-    TwinsSetup, TwinsTopology, block_relay, bounded_fuzz_runtime_config, continuation,
-    default_link,
+    BlockFilterChoice, CertCfgOf, CertifyChoice, Configuration, EPOCH, FUZZ_LOG_ENV,
+    MAX_SLEEP_DURATION, Mode, N4F0C4, N4F1C3, NetworkChannels, PAGE_CACHE_SIZE, PAGE_SIZE,
+    PublicKeyOf, ReporterWiring, TWINS_MAX_ROUNDS, TwinsBackend, TwinsCase, TwinsDisrupter,
+    TwinsElector, TwinsReporter, TwinsSetup, TwinsTopology, block_relay,
+    bounded_fuzz_runtime_config, continuation, default_link,
     network::{
         FinalizationOmissionChannel, FinalizationOmissionReceiver, NotarizeOmissionReceiver,
     },
@@ -30,7 +32,7 @@ use commonware_consensus_fuzz_core::{
     setup_network, simplex,
     simplex_audit::{self, ActivityRecorder, RecordingReporter, summaries},
     spawn_filtered_honest_validator, spawn_network_fault_scheduler,
-    start_disrupter_with_epoch_and_relay, twins_prefix_views, types,
+    start_disrupter_with_epoch_and_relay, state_bounds, twins_prefix_views, types,
     utils::{Action, Partition, SetPartition, apply_partition, link_peers},
 };
 #[cfg(any(feature = "mocks", test))]
@@ -437,6 +439,67 @@ where
     }
 }
 
+/// An honest engine that ran for the whole run: its metric label and its recorder.
+type WholeRunEngine<P, EC> = (
+    state_bounds::Node,
+    RecordingReporter<deterministic::Context, <P as simplex::Simplex>::Scheme, EC, Sha256Digest>,
+);
+
+/// The engines of `reporters` that ran for the whole run. `reporters` holds the
+/// honest participants in index order from `first`; a trusted continuation may
+/// have crashed some of them.
+fn whole_run_engines<P, EC, R>(
+    runner: Option<&continuation::Runner<P>>,
+    first: usize,
+    reporters: &[(PublicKeyOf<P>, R)],
+    recorder: impl Fn(&R) -> &RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>,
+) -> Vec<WholeRunEngine<P, EC>>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    reporters
+        .iter()
+        .enumerate()
+        .filter(|(offset, _)| !runner.is_some_and(|runner| runner.was_crashed(first + offset)))
+        .map(|(_, (validator, reporter))| {
+            (
+                state_bounds::Node::public_key(validator),
+                recorder(reporter).clone(),
+            )
+        })
+        .collect()
+}
+
+/// Checks the bounds on the state peer traffic can make an honest engine hold (see
+/// [`state_bounds`]), for every engine in `engines`.
+///
+/// Reading the metrics is an auditor event, so a driver calls this last, after it
+/// has taken the auditor state its tests pin.
+fn check_state_bounds<P, EC>(
+    context: &deterministic::Context,
+    configuration: Configuration,
+    term_length: TermLength,
+    optimistic_views: ViewDelta,
+    engines: &[WholeRunEngine<P, EC>],
+) where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    let metrics = context.encode();
+    for (node, recorder) in engines {
+        state_bounds::check(
+            &metrics,
+            node,
+            &recorder.audit().events(),
+            recorder.me().expect("an honest engine signs"),
+            term_length,
+            optimistic_views,
+            configuration.can_finalize(),
+        );
+    }
+}
+
 fn run_standard_once<P: simplex::Simplex>(
     mut input: FuzzInput,
     state_coverage: bool,
@@ -678,7 +741,7 @@ fn run_standard_once<P: simplex::Simplex>(
             runner.check("end");
         }
 
-        if config.is_valid() {
+        let audit = if config.is_valid() {
             // Feedback stays behind the validity gate (like protocol-state
             // coverage): invalid configurations never reach the invariant
             // checks, so their interleavings must not be retained as novel.
@@ -727,7 +790,20 @@ fn run_standard_once<P: simplex::Simplex>(
             audit
         } else {
             None
-        }
+        };
+        check_state_bounds::<P, _>(
+            &context,
+            config,
+            term_length,
+            input.optimistic_views,
+            &whole_run_engines(
+                runner.as_ref(),
+                config.faults as usize,
+                &reporters,
+                ActivityRecorder::recording,
+            ),
+        );
+        audit
     })
 }
 
@@ -1064,13 +1140,23 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             runner.check_with("end", base);
         }
 
+        let whole_run =
+            whole_run_engines(runner.as_ref(), config.faults as usize, &reporters, |r| r);
         if !config.is_valid() {
-            return AuditRun {
+            let run = AuditRun {
                 valid: false,
                 rejected: false,
                 auditor: context.auditor().state(),
                 end: context.current().epoch(),
             };
+            check_state_bounds::<P, _>(
+                &context,
+                config,
+                term_length,
+                input.optimistic_views,
+                &whole_run,
+            );
+            return run;
         }
 
         let omitted_reporter = notarize_omission.as_ref().and_then(|omission| {
@@ -1132,12 +1218,20 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 invariants::check_finalize_recoveries_drained(&reporter_only[index], &earlier);
             }
         }
-        AuditRun {
+        let run = AuditRun {
             valid: true,
             rejected: rejected_certification_observed,
             auditor: context.auditor().state(),
             end: context.current().epoch(),
-        }
+        };
+        check_state_bounds::<P, _>(
+            &context,
+            config,
+            term_length,
+            input.optimistic_views,
+            &whole_run,
+        );
+        run
     })
 }
 
@@ -1225,6 +1319,9 @@ struct MockTwinsBackend<P: simplex::Simplex> {
     record_audit: bool,
     hb_log: Option<happens_before::capture::EventLog>,
     warn_dispatch: Option<Dispatch>,
+    /// The honest engines of a TwinsMutator run that ran for the whole run, kept by
+    /// `check_invariants` for [`Self::check_state_bounds`].
+    whole_run: Vec<WholeRunEngine<P, TwinsElector<P>>>,
     _marker: std::marker::PhantomData<fn() -> P>,
 }
 
@@ -1259,8 +1356,26 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
             record_audit,
             hb_log,
             warn_dispatch,
+            whole_run: Vec::new(),
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Checks the state bounds of the engines `check_invariants` kept.
+    ///
+    /// Reading the metrics is an auditor event, so this runs after the shared Twins
+    /// driver has returned and not inside `check_invariants`.
+    fn check_state_bounds(&self, context: &deterministic::Context) {
+        if !matches!(self.role, TwinsRole::Mutator) {
+            return;
+        }
+        check_state_bounds::<P, _>(
+            context,
+            self.input.configuration,
+            P::effective_term_length(self.input.term_length),
+            self.input.optimistic_views,
+            &self.whole_run,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1797,6 +1912,21 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
         topology: &TwinsTopology<P, Self::Case>,
     ) {
         let config = self.input.configuration;
+        if matches!(self.role, TwinsRole::Mutator) {
+            self.whole_run = state.reporters[state.honest_start..]
+                .iter()
+                .map(TwinsReporter::activities)
+                .filter_map(|recorder| {
+                    let index = usize::from(recorder.me().expect("an honest engine signs"));
+                    let crashed = state
+                        .taps
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|tap| tap.was_crashed());
+                    (!crashed).then(|| (state_bounds::Node::index(index), recorder))
+                })
+                .collect();
+        }
         if !config.is_valid() {
             return;
         }
@@ -1928,6 +2058,7 @@ fn run_twins<P: simplex::Simplex>(
                 hook,
             )
             .await;
+            backend.check_state_bounds(&context);
         });
     };
 
