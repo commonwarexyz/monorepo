@@ -1,0 +1,28 @@
+[package]
+name = "commonware-codec-fuzz-ephyra"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Marks this package as a set of ephyra property tests, so that a script can find every such
+# package. `rev` is the ephyra commit the tests are written for (the pin under
+# `[dev-dependencies]`).
+[package.metadata.ephyra]
+rev = "3983b2e339ac5f6b843bef62c7fa6a88eba75370"
+
+# This package is its own workspace, with its own Cargo.lock. It is not a member of the
+# repository workspace, so workspace-wide commands do not build or run it.
+[workspace]
+
+# Long runs use the release profile: keep the checks a debug build has.
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+
+# `ephyra` is pinned to one commit. Only its library crates are used.
+[dev-dependencies]
+bytes = "1"
+commonware-codec = { path = "../../.." }
+commonware-macros = { path = "../../../../macros" }
+ephyra = { git = "https://github.com/datadog-labs/ephyra", rev = "3983b2e339ac5f6b843bef62c7fa6a88eba75370" }
