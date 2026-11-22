@@ -1299,6 +1299,7 @@ impl EngineDefinition for ReshareEngine {
                 peer_provider: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
                 database: None,
+                operation_codec_config: (),
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
                 fetch_timeout: NZDuration!(Duration::from_secs(2)),

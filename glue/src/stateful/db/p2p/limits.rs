@@ -11,19 +11,27 @@ use std::num::NonZeroU64;
 
 /// Returns an upper bound on the payloads the sync [`Actor`](super::Actor) sends when its
 /// [`Config::max_serve_ops`](super::Config::max_serve_ops) is `max_serve_ops` and each operation
-/// encodes to at most `op` bytes.
+/// encodes to at most `max_operation_size` bytes.
+///
+/// Use [`FixedSize::SIZE`](commonware_codec::FixedSize::SIZE) for a fixed-size operation. For a
+/// variable-size operation, bound every variant using the limits in
+/// [`Config::operation_codec_config`](super::Config::operation_codec_config) and the widest
+/// encoding of each scalar and length prefix.
 ///
 /// # Panics
 ///
 /// Panics if `max_serve_ops` exceeds `u32::MAX`.
-pub fn max_payload_size<F: Family, D: Digest>(max_serve_ops: NonZeroU64, op: usize) -> usize {
+pub fn max_payload_size<F: Family, D: Digest>(
+    max_serve_ops: NonZeroU64,
+    max_operation_size: usize,
+) -> usize {
     let max_ops: usize = u32::try_from(max_serve_ops.get())
         .map(Widen::widen)
         .expect("operations per request must fit in u32");
 
     // A response carries a proof with its operations, or a boundary operation with its pinned
     // nodes, as the resolver's value. A request carries a sync request as its key.
-    let response = max_response_size::<F, D>(max_ops, op);
+    let response = max_response_size::<F, D>(max_ops, max_operation_size);
     max_message_size::<Request<F>>(response)
 }
 
