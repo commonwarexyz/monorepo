@@ -1042,22 +1042,68 @@ mod test {
         any::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
         any::test::variable_db_config_partitioned::<OneCap>
     );
-    test_neighbors!(
+
+    // Current delegates neighbor lookups to Any. Check that each wrapper queries the right view.
+    macro_rules! test_current_neighbors {
+        ($name:ident, $db:ty, $config:path) => {
+            #[test]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    type TestDb = $db;
+                    let config = $config("neighbors");
+                    let db = TestDb::init(context.child("db"), config.clone(), None)
+                        .await
+                        .unwrap();
+                    let keys = [1, 2, 3].map(Sha256::fill);
+                    let [left, middle, right] = keys;
+                    let before = BTreeSet::from(keys);
+                    let after = BTreeSet::from([left, right]);
+
+                    let mut seed = db.new_batch();
+                    for key in keys {
+                        seed = seed.write(key, Some(Sha256::fill(1)));
+                    }
+                    let seed = seed.merkleize(&db).await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
+
+                    let batch = db
+                        .new_batch()
+                        .write(middle, None)
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
+                    assert_neighbors!(batch, &after, &keys, "merkleized", &db);
+                    assert_neighbors!(&db, &before, &keys, "before apply");
+                    let db = db.apply_batch(batch).await.unwrap();
+                    assert_neighbors!(&db, &after, &keys, "applied");
+
+                    drop(db.commit().await.unwrap());
+                    let db = TestDb::init(context.child("reopen"), config, None)
+                        .await
+                        .unwrap();
+                    assert_neighbors!(&db, &after, &keys, "reopened");
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    test_current_neighbors!(
         test_neighbors_current_fixed,
         current::ordered::fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>,
         current::tests::fixed_config::<OneCap>
     );
-    test_neighbors!(
+    test_current_neighbors!(
         test_neighbors_current_variable,
         current::ordered::variable::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>,
         current::tests::variable_config::<OneCap>
     );
-    test_neighbors!(
+    test_current_neighbors!(
         test_neighbors_current_fixed_partitioned,
         current::ordered::fixed::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
         current::tests::fixed_config_partitioned::<OneCap>
     );
-    test_neighbors!(
+    test_current_neighbors!(
         test_neighbors_current_variable_partitioned,
         current::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
         current::tests::variable_config_partitioned::<OneCap>
