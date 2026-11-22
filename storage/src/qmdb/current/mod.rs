@@ -1015,6 +1015,7 @@ pub mod tests {
     async fn build_random_close_reopen_round<M, C, F, Fut>(
         mut context: Context,
         mut open_db: F,
+        num_keys: u64,
     ) -> String
     where
         M: merkle::Graftable + 'static,
@@ -1024,12 +1025,10 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
-        const ELEMENTS: u64 = 1000;
-
         let partition = "build-random".to_string();
         let rng_seed = context.next_u64();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, rng_seed, db)
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
         let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -1052,8 +1051,11 @@ pub mod tests {
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
-    pub async fn test_build_random_close_reopen<M, C, F, Fut>(context: Context, open_db: F)
-    where
+    pub async fn test_build_random_close_reopen<M, C, F, Fut>(
+        context: Context,
+        open_db: F,
+        num_keys: u64,
+    ) where
         M: merkle::Graftable,
         C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
@@ -1063,12 +1065,14 @@ pub mod tests {
     {
         // Run on the provided runner.
         let state1 =
-            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone()).await;
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone(), num_keys)
+                .await;
 
         // Run again on a fresh runner to verify determinism.
         let executor = deterministic::Runner::default();
-        let state2 = executor
-            .start(|context| build_random_close_reopen_round::<M, C, F, Fut>(context, open_db));
+        let state2 = executor.start(|context| {
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db, num_keys)
+        });
 
         assert_eq!(state1, state2);
     }
@@ -2283,7 +2287,7 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
 
-    test_for_all_variants!(test_build_random_close_reopen, "WARN");
+    with_all_variants!(run_variant!(test_build_random_close_reopen, "WARN"));
     with_all_variants!(run_variant!(test_simulate_write_failures, "WARN"));
     test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
     test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
