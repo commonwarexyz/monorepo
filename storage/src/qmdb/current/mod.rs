@@ -1278,80 +1278,6 @@ pub mod tests {
         db_pruning.destroy().await.unwrap();
     }
 
-    /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
-    ///
-    /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
-    /// set during `commit()`. If `sync()` didn't call `write_pruned`, the
-    /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
-    pub async fn test_sync_persists_bitmap_pruning_boundary<M, C, F, Fut>(
-        mut context: Context,
-        mut open_db: F,
-    ) where
-        M: merkle::Graftable,
-        C: DbAny<Family = M> + BitmapPrunedBits + 'static,
-        C::Key: TestKey,
-        C::Value: TestValue,
-        F: FnMut(Context, String) -> Fut + Clone,
-        Fut: Future<Output = C>,
-    {
-        const ELEMENTS: u64 = 500;
-
-        let mut open_db_clone = open_db.clone();
-        let partition = "sync-bitmap-pruning".to_string();
-        let rng_seed = context.next_u64();
-        let db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
-
-        // Apply random operations with commits to advance the inactivity floor.
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-            .await
-            .unwrap();
-        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-
-        // Prune to flatten bitmap layers and advance pruned_chunks.
-        let boundary = db.sync_boundary();
-        let db = db.prune(boundary).await.unwrap();
-
-        let pruned_bits_before = db.pruned_bits();
-        warn!(
-            "pruned_bits_before={}, inactivity_floor={}, op_count={}",
-            pruned_bits_before,
-            *db.inactivity_floor(),
-            *db.bounds().end
-        );
-
-        // Verify we actually have some pruning (otherwise the test is meaningless).
-        assert!(
-            pruned_bits_before > 0,
-            "Expected bitmap to have pruned bits after prune()"
-        );
-
-        // Call sync() to persist the bitmap pruning boundary.
-        let db = db.sync().await.unwrap();
-
-        // Record the root before dropping.
-        let root_before = db.root();
-        drop(db);
-
-        // Reopen the database.
-        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
-
-        // The pruned bits count should match. If sync() didn't persist the bitmap pruned
-        // state, this would be 0.
-        let pruned_bits_after = db.pruned_bits();
-        warn!("pruned_bits_after={}", pruned_bits_after);
-
-        assert_eq!(
-            pruned_bits_after, pruned_bits_before,
-            "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
-        );
-
-        // Also verify the root matches.
-        assert_eq!(db.root(), root_before);
-
-        db.destroy().await.unwrap();
-    }
-
     /// Run `test_current_db_build_big` against a database factory.
     ///
     /// This test builds a database with 1000 keys, updates some, deletes some, and verifies that
@@ -1720,8 +1646,8 @@ pub mod tests {
             let observed_f = Observed::capture(&db);
             observed_f.assert_bits(&expected_f, &format!("{label} after F"));
 
-            // Sync, drop, and reopen. The root and bits survive, and every value matches the
-            // reference.
+            // Sync, drop, and reopen. The root, activity bits, and pruning boundary survive,
+            // and every value matches the reference.
             db.sync().await.unwrap();
             let db: C = Box::pin(open_db(
                 context.child("reopen").with_attribute("index", schedule),
@@ -1733,6 +1659,12 @@ pub mod tests {
                 reopened.root, observed_f.root,
                 "{label}: root diverged on reopen",
             );
+            if pruned {
+                assert_eq!(
+                    reopened.pruned, observed_f.pruned,
+                    "{label}: bitmap pruning boundary changed on reopen",
+                );
+            }
             reopened.assert_bits(&observed_f, &format!("{label} on reopen"));
             for (key, value) in keys.iter().zip(&values) {
                 assert_eq!(
@@ -2300,7 +2232,6 @@ pub mod tests {
     test_for_all_variants!(test_build_random_close_reopen, "WARN");
     test_for_all_variants!(test_simulate_write_failures, "WARN");
     test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
-    test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
     test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(test_stale_batch_side_effect_free, "WARN");
     test_for_all_variants!(test_chained_schedules_match_sequential, "WARN");
