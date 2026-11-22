@@ -138,8 +138,9 @@ impl<P: PublicKey, E: Clock> State<P, E> {
                 reserved.reserve_exact(self.known_peers.len());
                 for peer in &self.known_peers {
                     if reservable(&mut self.rate_limit, &self.in_flight, peer) {
+                        let owned = peer.clone();
                         self.in_flight.insert(peer.clone());
-                        reserved.push(peer.clone());
+                        reserved.push(owned);
                     }
                 }
                 !self.known_peers.is_empty()
