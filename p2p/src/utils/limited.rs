@@ -38,8 +38,14 @@ pub trait Connected: Clone + Send + Sync + 'static {
 ///
 /// Clones share one rate limiter. If a clone consumes a recipient's quota between a check and its
 /// send, the send skips that recipient. If every checked recipient is skipped, the send is
-/// rejected. The wrapped sender submits under the shared limiter lock. Its send method must
-/// return without blocking and must not call back into a clone of this wrapper.
+/// rejected.
+///
+/// A send reserves its recipients while the wrapped sender submits the message, outside the
+/// shared limiter lock. A send that overlaps another send to the same recipient skips that
+/// recipient, even if the other submission is ultimately not accepted, while sends to different
+/// recipients proceed independently. [`LimitedSender::check`] ignores reservations, so it may
+/// retain a recipient that a later send skips. The wrapped sender's send method must return
+/// without blocking.
 pub struct LimitedSender<E, S, P>
 where
     E: Clock,
@@ -61,11 +67,21 @@ struct State<P: PublicKey, E: Clock> {
     peer_subscription: ring::Receiver<Vec<P>>,
     // Snapshot used until the subscription yields a newer peer list
     known_peers: Vec<P>,
+    // Peers reserved by sends whose submission has not yet returned
+    in_flight: HashSet<P>,
     // Number of tracked peers at which the rate limiter is next pruned
     prune_at: usize,
 }
 
 impl<P: PublicKey, E: Clock> State<P, E> {
+    /// Refreshes the peers used for [`Recipients::All`] from the subscription.
+    fn refresh_known_peers(&mut self) {
+        if let Ok(peers) = self.peer_subscription.try_recv() {
+            self.known_peers = peers;
+            self.prune();
+        }
+    }
+
     /// Returns the unique `recipients` that are not currently rate-limited, without charging
     /// them.
     ///
@@ -79,10 +95,7 @@ impl<P: PublicKey, E: Clock> State<P, E> {
             }
             Recipients::Some(peers) => filter_rate_limited(peers.iter(), &mut self.rate_limit),
             Recipients::All => {
-                if let Ok(peers) = self.peer_subscription.try_recv() {
-                    self.known_peers = peers;
-                    self.prune();
-                }
+                self.refresh_known_peers();
                 filter_rate_limited(self.known_peers.iter(), &mut self.rate_limit)
             }
         };
@@ -92,13 +105,63 @@ impl<P: PublicKey, E: Clock> State<P, E> {
         }
     }
 
-    /// Charges each of `peers` for one message.
+    /// Reserves the unique `recipients` that are neither rate-limited nor reserved by another
+    /// send, returning them in order.
+    ///
+    /// Returns `None` if recipients were requested but none could be reserved.
+    fn reserve(&mut self, recipients: Recipients<P>) -> Option<Vec<P>> {
+        // A peer that is already reserved, including an earlier duplicate in the same list, is
+        // skipped, so the reservation set also removes duplicates
+        let (reserved, requested) = match recipients {
+            Recipients::One(peer) => {
+                if reserve_peer(&mut self.rate_limit, &mut self.in_flight, &peer) {
+                    (vec![peer], true)
+                } else {
+                    (Vec::new(), true)
+                }
+            }
+            Recipients::Some(peers) => {
+                let requested = !peers.is_empty();
+                let mut reserved = Vec::with_capacity(peers.len());
+                for peer in peers {
+                    if reserve_peer(&mut self.rate_limit, &mut self.in_flight, &peer) {
+                        reserved.push(peer);
+                    }
+                }
+                (reserved, requested)
+            }
+            Recipients::All => {
+                self.refresh_known_peers();
+                let mut reserved = Vec::with_capacity(self.known_peers.len());
+                for peer in &self.known_peers {
+                    if reserve_peer(&mut self.rate_limit, &mut self.in_flight, peer) {
+                        reserved.push(peer.clone());
+                    }
+                }
+                (reserved, !self.known_peers.is_empty())
+            }
+        };
+        if requested && reserved.is_empty() {
+            return None;
+        }
+        Some(reserved)
+    }
+
+    /// Releases the reservations of `peers`.
+    fn release(&mut self, peers: &[P]) {
+        for peer in peers {
+            self.in_flight.remove(peer);
+        }
+    }
+
+    /// Charges each of `peers` for one message and releases their reservations.
     ///
     /// Space out pruning passes by the number of keys retained by the last pass.
     fn charge(&mut self, peers: &[P]) {
         for peer in peers {
-            // The caller verified availability under the same lock
+            // The reservation kept every other send from spending this quota since it was checked
             let _ = self.rate_limit.check_key(peer);
+            self.in_flight.remove(peer);
         }
         if self.rate_limit.len() >= self.prune_at {
             self.prune();
@@ -109,6 +172,40 @@ impl<P: PublicKey, E: Clock> State<P, E> {
     fn prune(&mut self) {
         self.rate_limit.retain_recent();
         self.prune_at = cmp::max(MIN_PRUNE_AT, self.rate_limit.len().saturating_mul(2));
+    }
+}
+
+/// Reserves `peer` if it is neither reserved nor rate-limited.
+fn reserve_peer<P: PublicKey, E: Clock>(
+    rate_limit: &mut KeyedRateLimiter<P, E>,
+    in_flight: &mut HashSet<P>,
+    peer: &P,
+) -> bool {
+    !in_flight.contains(peer)
+        && rate_limit.check_key_available(peer).is_ok()
+        && in_flight.insert(peer.clone())
+}
+
+/// Reservations held by one send, released without charge unless committed.
+struct Reservation<'a, P: PublicKey, E: Clock> {
+    state: &'a Mutex<State<P, E>>,
+    peers: Vec<P>,
+}
+
+impl<P: PublicKey, E: Clock> Reservation<'_, P, E> {
+    /// Charges the reserved peers and returns them.
+    fn commit(mut self) -> Vec<P> {
+        let peers = mem::take(&mut self.peers);
+        self.state.lock().charge(&peers);
+        peers
+    }
+}
+
+impl<P: PublicKey, E: Clock> Drop for Reservation<'_, P, E> {
+    fn drop(&mut self) {
+        if !self.peers.is_empty() {
+            self.state.lock().release(&self.peers);
+        }
     }
 }
 
@@ -153,6 +250,7 @@ where
             rate_limit: KeyedRateLimiter::new(quota, clock),
             peer_subscription: peers.subscribe(),
             known_peers: peers.peers(),
+            in_flight: HashSet::new(),
             prune_at: MIN_PRUNE_AT,
         }));
         Self {
@@ -239,36 +337,34 @@ impl<S: UnlimitedSender, E: Clock> CheckedSender<'_, S, E> {
         message: impl Into<IoBufs> + Send,
         priority: bool,
     ) -> SendReceipt<S::PublicKey> {
-        // Convert the message before taking the lock shared by all clones, as the conversion may
-        // run arbitrary code
+        // Convert the message before reserving recipients, as the conversion may run arbitrary
+        // code
         let message = message.into();
 
-        // Hold the lock from the availability check until the charge, so no clone can spend the
-        // same quota in between and nothing is charged unless the submission is accepted.
-        let receipt = {
-            let mut state = self.state.lock();
-            let Ok(recipients) = state.available(recipients) else {
-                return SendReceipt::new(Unreliable::Rejected, Vec::new());
-            };
-            let peers = match &recipients {
-                Recipients::One(peer) => vec![peer.clone()],
-                Recipients::Some(peers) => peers.clone(),
-                Recipients::All => unreachable!("available recipients are always resolved"),
-            };
-
-            // Submit a shared reference to the message. The wrapped sender may drop what it is
-            // given before returning, and releasing the last reference to a buffer can run
-            // arbitrary owner code, which must not run under the lock shared by all clones.
-            let feedback = self.sender.send(recipients, message.clone(), priority);
-            if feedback.accepted() {
-                state.charge(&peers);
-            }
-            SendReceipt::new(feedback, peers)
+        // Reserve the recipients so no other send can spend their quota until this submission
+        // returns. The wrapped sender then runs without the lock shared by all clones, as it may
+        // drop messages whose release runs arbitrary code.
+        let single = matches!(recipients, Recipients::One(_));
+        let Some(peers) = self.state.lock().reserve(recipients) else {
+            return SendReceipt::new(Unreliable::Rejected, Vec::new());
+        };
+        let reservation = Reservation {
+            state: self.state,
+            peers,
+        };
+        let recipients = if single {
+            Recipients::One(reservation.peers[0].clone())
+        } else {
+            Recipients::Some(reservation.peers.clone())
         };
 
-        // Release the caller's reference only after the lock is released
-        drop(message);
-        receipt
+        // Charge only an accepted submission. Otherwise, including on unwind, dropping the
+        // reservation releases it without charge.
+        let feedback = self.sender.send(recipients, message, priority);
+        if !feedback.accepted() {
+            return SendReceipt::new(feedback, Vec::new());
+        }
+        SendReceipt::new(feedback, reservation.commit())
     }
 }
 
@@ -306,11 +402,17 @@ mod tests {
 
     type PublicKey = ed25519::PublicKey;
     type SentMessage = (Recipients<PublicKey>, IoBuf, bool);
+    type Hook = Box<dyn FnOnce() + Send>;
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     struct MockSender {
         sent: Arc<Mutex<Vec<SentMessage>>>,
         feedback: Arc<Mutex<Unreliable<Feedback>>>,
+        // Runs once during the next submission, before it returns
+        hook: Arc<Mutex<Option<Hook>>>,
+        // Latest submission, whatever its feedback, replaced (and dropped) by the next one
+        held: Arc<Mutex<Option<IoBuf>>>,
+        hold: bool,
     }
 
     impl MockSender {
@@ -318,6 +420,9 @@ mod tests {
             Self {
                 sent: Arc::new(Mutex::new(Vec::new())),
                 feedback: Arc::new(Mutex::new(Unreliable::new(Feedback::Ok))),
+                hook: Arc::new(Mutex::new(None)),
+                held: Arc::new(Mutex::new(None)),
+                hold: false,
             }
         }
 
@@ -325,8 +430,18 @@ mod tests {
             *self.feedback.lock() = feedback;
         }
 
+        fn set_hook(&self, hook: impl FnOnce() + Send + 'static) {
+            *self.hook.lock() = Some(Box::new(hook));
+        }
+
         fn sent_messages(&self) -> Vec<SentMessage> {
             self.sent.lock().clone()
+        }
+    }
+
+    impl fmt::Debug for MockSender {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("MockSender").finish_non_exhaustive()
         }
     }
 
@@ -348,6 +463,14 @@ mod tests {
             priority: bool,
         ) -> Unreliable<Feedback> {
             let message = message.into().coalesce();
+            let hook = self.hook.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            if self.hold {
+                let previous = self.held.lock().replace(message.clone());
+                drop(previous);
+            }
             let feedback = *self.feedback.lock();
             if feedback.accepted() {
                 self.sent.lock().push((recipients, message, priority));
@@ -905,6 +1028,133 @@ mod tests {
                 .send(IoBuf::from(b"winner"), false);
             assert_eq!(stale.send(probe(), false), Unreliable::Rejected);
             assert_eq!(*releases.lock(), vec![true, true, true, true]);
+        });
+    }
+
+    #[test]
+    fn queued_payload_released_outside_limiter_lock() {
+        Runner::default().start(|context| async move {
+            let mut sender = MockSender::new();
+            sender.hold = true;
+            sender.set_feedback(Unreliable::Rejected);
+            let mut limited =
+                LimitedSender::new(sender, quota_per_second(1), context, MockPeers::new());
+            let state = limited.state.clone();
+            let lock_free: Arc<dyn Fn() -> bool + Send + Sync> =
+                Arc::new(move || state.try_lock().is_some());
+            let releases = Arc::new(Mutex::new(Vec::new()));
+            let probe = || {
+                IoBuf::from(bytes::Bytes::from_owner(LockProbe {
+                    lock_free: lock_free.clone(),
+                    releases: releases.clone(),
+                }))
+            };
+
+            // The wrapped sender retains the first payload and drops it while submitting the
+            // second, as a queue discarding earlier work would
+            for _ in 0..2 {
+                let checked = limited.check(Recipients::One(key(1))).unwrap();
+                assert_eq!(checked.send(probe(), false), Unreliable::Rejected);
+            }
+            assert_eq!(*releases.lock(), vec![true]);
+            assert!(limited.state.lock().in_flight.is_empty());
+        });
+    }
+
+    #[test]
+    fn overlapping_send_skips_only_reserved_peers() {
+        Runner::default().start(|context| async move {
+            let sender = MockSender::new();
+            let mut limited = LimitedSender::new(
+                sender.clone(),
+                quota_per_second(1),
+                context,
+                MockPeers::new(),
+            );
+            let (busy, unrelated) = (key(1), key(2));
+
+            // While the submission to busy is in flight, a clone reaches only the unrelated peer
+            let mut other = limited.clone();
+            let overlapping = Arc::new(Mutex::new(Vec::new()));
+            sender.set_hook({
+                let (busy, unrelated, overlapping) =
+                    (busy.clone(), unrelated.clone(), overlapping.clone());
+                move || {
+                    let both = Recipients::Some(vec![busy.clone(), unrelated]);
+                    let receipt = other
+                        .check(both)
+                        .unwrap()
+                        .send_with_receipt(IoBuf::from(b"both"), false);
+                    overlapping.lock().push(receipt);
+                    let receipt = other
+                        .check(Recipients::One(busy))
+                        .unwrap()
+                        .send_with_receipt(IoBuf::from(b"busy"), false);
+                    overlapping.lock().push(receipt);
+                }
+            });
+            let receipt = limited
+                .check(Recipients::One(busy.clone()))
+                .unwrap()
+                .send_with_receipt(IoBuf::from(b"first"), false);
+            assert_eq!(receipt.recipients(), std::slice::from_ref(&busy));
+
+            let overlapping = overlapping.lock();
+            assert_eq!(overlapping[0].feedback(), Unreliable::new(Feedback::Ok));
+            assert_eq!(
+                overlapping[0].recipients(),
+                std::slice::from_ref(&unrelated)
+            );
+            assert_eq!(overlapping[1].feedback(), Unreliable::Rejected);
+            assert!(overlapping[1].recipients().is_empty());
+
+            // Each accepted submission charged its recipients once and released them
+            assert!(limited.state.lock().in_flight.is_empty());
+            assert!(limited.check(Recipients::One(busy)).is_err());
+            assert!(limited.check(Recipients::One(unrelated)).is_err());
+            assert_eq!(sender.sent_messages().len(), 2);
+        });
+    }
+
+    #[test]
+    fn unaccepted_or_panicked_send_releases_reservations() {
+        Runner::default().start(|context| async move {
+            let sender = MockSender::new();
+            let mut limited = LimitedSender::new(
+                sender.clone(),
+                quota_per_second(1),
+                context,
+                MockPeers::new(),
+            );
+            let peers = Recipients::Some(vec![key(1), key(2)]);
+
+            // A rejected submission releases its reservations without charge
+            sender.set_feedback(Unreliable::Rejected);
+            let checked = limited.check(peers.clone()).unwrap();
+            assert_eq!(
+                checked.send(IoBuf::from(b"rejected"), false),
+                Unreliable::Rejected
+            );
+            assert!(limited.state.lock().in_flight.is_empty());
+
+            // A panicking submission releases its reservations without charge
+            sender.set_feedback(Unreliable::new(Feedback::Ok));
+            sender.set_hook(|| panic!("submission panicked"));
+            let checked = limited.check(peers.clone()).unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                checked.send(IoBuf::from(b"panicked"), false)
+            }));
+            assert!(result.is_err());
+            assert!(limited.state.lock().in_flight.is_empty());
+
+            // Both recipients still have their full quota
+            let receipt = limited
+                .check(peers.clone())
+                .unwrap()
+                .send_with_receipt(IoBuf::from(b"accepted"), false);
+            assert_eq!(receipt.into_recipients(), vec![key(1), key(2)]);
+            assert!(limited.state.lock().in_flight.is_empty());
+            assert!(limited.check(peers).is_err());
         });
     }
 
