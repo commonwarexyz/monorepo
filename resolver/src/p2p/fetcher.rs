@@ -415,7 +415,7 @@ where
             while let Some(index) = selection.next(&mut self.context, retries) {
                 let peer = self.participants.peers[index].0.clone();
 
-                // Check rate limit (consumes a token if not rate-limited)
+                // Check availability; an accepted send spends quota.
                 let checked = match sender.check(Recipients::One(peer.clone())) {
                     Ok(checked) => checked,
                     Err(not_until) => {
