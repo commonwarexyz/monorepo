@@ -24,6 +24,11 @@ use std::{
 };
 use tracing::debug;
 
+/// Wait after a scan that found eligible peers but submitted nothing and received no rate-limit
+/// deadline, used only when the configured retry delay is zero. Without it, a sender that keeps
+/// rejecting or closing would be polled continuously, because rejected submissions spend no quota.
+const ZERO_DELAY_FALLBACK: Duration = Duration::from_millis(1);
+
 /// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 struct Peer<P: PublicKey> {
@@ -152,7 +157,9 @@ pub struct Config<P: PublicKey> {
     pub fetch_timeout: NonZeroDuration,
 
     /// Delay before retrying an unresolved fetch or a failed send.
-    /// Zero permits immediate retries, subject to the sender's rate limit.
+    /// Zero retries after a 1ms fallback when a scan found eligible peers but could not submit to
+    /// any, because rejected submissions spend no quota. Accepted sends remain subject to the
+    /// sender's rate limit.
     pub retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages.
@@ -372,7 +379,8 @@ where
     /// to active. On failure, the key remains pending for retry.
     ///
     /// If no send succeeds, waits for the earliest peer rate-limit expiry, or
-    /// `retry_delay` after failed sends. An earlier pending deadline wakes the
+    /// `retry_delay` after failed sends. A zero `retry_delay` waits 1ms instead, since rejected
+    /// submissions spend no quota. An earlier pending deadline wakes the
     /// queue sooner. With no eligible peers or future deadlines, waits for an
     /// external change.
     pub fn fetch<NetS: Sender<PublicKey = P>>(
@@ -469,7 +477,12 @@ where
         if let Some(rate_limit_time) = earliest_rate_limit {
             next_deadline = next_deadline.min(rate_limit_time);
         } else if found_eligible_peers {
-            next_deadline = next_deadline.min(self.context.current() + self.retry_delay);
+            let delay = if self.retry_delay.is_zero() {
+                ZERO_DELAY_FALLBACK
+            } else {
+                self.retry_delay
+            };
+            next_deadline = next_deadline.min(self.context.current() + delay);
         }
         self.waiter = Some(next_deadline);
     }
@@ -2083,8 +2096,9 @@ mod tests {
         });
     }
 
-    /// Rejected submissions do not spend quota, so with no retry delay a failed send is retried
-    /// at once. An accepted send does spend it, and the next request waits for the refill.
+    /// Rejected submissions do not spend quota, so with no retry delay a failed scan waits for the
+    /// zero-delay fallback instead of polling at once. An accepted send does spend quota, and the
+    /// next request waits for the refill.
     #[test]
     fn test_zero_retry_delay_charges_quota_only_for_accepted_sends() {
         #[derive(Clone)]
@@ -2120,16 +2134,22 @@ mod tests {
             ));
             assert_eq!(fetcher.request_id, None);
 
-            // Each failed send leaves the key pending and is retried immediately.
+            // Each failed scan leaves the key pending and wakes after the fallback, not immediately.
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.len_pending(), 1);
             assert_eq!(fetcher.len_active(), 0);
             let next_id = fetcher.request_id.unwrap();
-            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
+            assert_eq!(
+                fetcher.get_pending_deadline(),
+                Some(context.current() + ZERO_DELAY_FALLBACK)
+            );
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.request_id, Some(next_id.wrapping_add(1)));
-            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
+            assert_eq!(
+                fetcher.get_pending_deadline(),
+                Some(context.current() + ZERO_DELAY_FALLBACK)
+            );
 
             // The accepted send spends the quota and activates the key.
             accept.store(true, Ordering::SeqCst);
