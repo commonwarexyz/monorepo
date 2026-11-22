@@ -647,15 +647,31 @@ struct RunWriter {
     blocks: Vec<(u64, usize)>,
 }
 
-/// One bucket of a build: the records of the operations whose keys fall in a contiguous
-/// range of partitions, and those partitions.
-struct Bucket<R> {
+/// The records of a bucket.
+struct Records {
     /// Records not yet written to the scratch blob.
     buf: Vec<u8>,
     /// Offset and length of each run of records written to the scratch blob.
     runs: Vec<(u64, usize)>,
-    /// The smallest and largest key prefix (see [key_prefix]) among the bucket's records.
+    /// The smallest and largest key prefix (see [key_prefix]) among the records.
     prefixes: (u64, u64),
+}
+
+impl Default for Records {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            runs: Vec::new(),
+            prefixes: (u64::MAX, 0),
+        }
+    }
+}
+
+/// One bucket of a build: the records of the operations whose keys fall in a contiguous
+/// range of partitions, and those partitions.
+struct Bucket<R> {
+    /// The bucket's records, taken by the task that sorts them.
+    records: Records,
     /// The bucket's partitions, taken by the task that fills them.
     range: Option<R>,
 }
@@ -778,18 +794,19 @@ impl<B: Blob, R> Buckets<B, R> {
         let (min, max) = self.layout.prefixes(staged);
         let run = {
             let mut bucket = self.buckets[bucket].lock();
-            bucket.prefixes = (bucket.prefixes.0.min(min), bucket.prefixes.1.max(max));
-            bucket.buf.extend_from_slice(staged);
+            let records = &mut bucket.records;
+            records.prefixes = (records.prefixes.0.min(min), records.prefixes.1.max(max));
+            records.buf.extend_from_slice(staged);
             let added = staged.len() as u64;
             staged.clear();
             let held = self.held.fetch_add(added, Ordering::Relaxed) + added;
-            if held <= MEMORY_BYTES || bucket.buf.len() < SPILL_BYTES {
+            if held <= MEMORY_BYTES || records.buf.len() < SPILL_BYTES {
                 return Ok(());
             }
             self.held
-                .fetch_sub(bucket.buf.len() as u64, Ordering::Relaxed);
+                .fetch_sub(records.buf.len() as u64, Ordering::Relaxed);
             core::mem::replace(
-                &mut bucket.buf,
+                &mut records.buf,
                 Vec::with_capacity(SPILL_BYTES + STAGE_BYTES),
             )
         };
@@ -797,20 +814,16 @@ impl<B: Blob, R> Buckets<B, R> {
         // Buckets are read back only after every decoder is done, so the run can be recorded
         // once its write completes.
         let run = self.write(context, run).await?;
-        self.buckets[bucket].lock().runs.push(run);
+        self.buckets[bucket].lock().records.runs.push(run);
         Ok(())
     }
 
-    /// Take `bucket`'s partitions, the records it holds in memory, its runs in the scratch
-    /// blob and the smallest and largest key prefix among its records. A bucket can be taken
-    /// once.
-    fn take(&self, bucket: usize) -> (R, Vec<u8>, Vec<(u64, usize)>, (u64, u64)) {
+    /// Take `bucket`'s partitions and its records. A bucket can be taken once.
+    fn take(&self, bucket: usize) -> (R, Records) {
         let mut bucket = self.buckets[bucket].lock();
         (
             bucket.range.take().expect("bucket taken twice"),
-            core::mem::take(&mut bucket.buf),
-            core::mem::take(&mut bucket.runs),
-            bucket.prefixes,
+            core::mem::take(&mut bucket.records),
         )
     }
 
@@ -846,25 +859,21 @@ impl<B: Blob, R> Buckets<B, R> {
         Ok(Run::new(blocks))
     }
 
-    /// Insert the keys that survive a bucket too large to sort at once into `index`, where `buf`
-    /// and `runs` hold the bucket's records and `prefixes` their smallest and largest key
-    /// prefix. Calls `activate` with each survivor's offset from the floor and returns their
-    /// number.
+    /// Insert the keys that survive a bucket too large to sort at once into `index`, where
+    /// `records` are the bucket's. Calls `activate` with each survivor's offset from the floor
+    /// and returns their number.
     ///
     /// The records are sorted a piece at a time. Each piece keeps the newest record of each of
     /// its keys and returns to the scratch blob as a sorted run. Merging runs brings every
     /// key's remaining records together, oldest first. At most [MERGE_RUNS] runs are merged at
     /// a time, into a longer run while more remain, so memory holds that many blocks however
     /// many records the bucket has.
-    #[allow(clippy::too_many_arguments)]
     async fn merge<F>(
         &self,
         context: &impl Storage<Blob = B>,
         index: &mut R,
         sorter: &mut Sorter,
-        buf: Vec<u8>,
-        runs: Vec<(u64, usize)>,
-        prefixes: (u64, u64),
+        records: Records,
         mut activate: impl FnMut(u64) + Send,
     ) -> Result<usize, RuntimeError>
     where
@@ -872,6 +881,11 @@ impl<B: Blob, R> Buckets<B, R> {
         R: PartitionRange<Value = Location<F>> + Send,
     {
         let layout = self.layout;
+        let Records {
+            buf,
+            runs,
+            prefixes,
+        } = records;
         let mut sorted = VecDeque::new();
         let mut unsorted = runs.as_slice();
         let mut buf = Some(buf);
@@ -1182,29 +1196,27 @@ where
         if bucket >= buckets.buckets.len() {
             return Ok((filled, active_keys));
         }
-        let (mut range, buf, runs, prefixes) = buckets.take(bucket);
+        let (mut range, records) = buckets.take(bucket);
 
         // A bucket's records can exceed what a narrow address space counts, and such a bucket
         // is merged, so they are counted in 64 bits.
-        let stored: u64 = runs.iter().map(|&(_, len)| len as u64).sum();
+        let stored: u64 = records.runs.iter().map(|&(_, len)| len as u64).sum();
+        let bytes = stored + records.buf.len() as u64;
         let activate = |offset| active.set(offset);
-        active_keys += if runs.is_empty() || stored + buf.len() as u64 <= MERGE_BYTES as u64 {
-            sorter.start(stored as usize + buf.len(), prefixes);
+        active_keys += if records.runs.is_empty() || bytes <= MERGE_BYTES as u64 {
+            let Records {
+                buf,
+                runs,
+                prefixes,
+            } = records;
+            sorter.start(bytes as usize, prefixes);
             sorter.split(&buf, layout);
             drop(buf);
             buckets.read(&runs, |run| sorter.split(run, layout)).await?;
             load_bucket::<F, _>(&mut range, &mut sorter, layout, activate)
         } else {
             buckets
-                .merge::<F>(
-                    context,
-                    &mut range,
-                    &mut sorter,
-                    buf,
-                    runs,
-                    prefixes,
-                    activate,
-                )
+                .merge::<F>(context, &mut range, &mut sorter, records, activate)
                 .await?
         };
         filled.push(range);
@@ -1304,9 +1316,7 @@ where
             .map(|bucket| {
                 let lo = bucket * per_bucket;
                 Mutex::new(Bucket {
-                    buf: Vec::new(),
-                    runs: Vec::new(),
-                    prefixes: (u64::MAX, 0),
+                    records: Records::default(),
                     range: Some(snapshot.new_range(lo, per_bucket.min(partitions - lo))),
                 })
             })
