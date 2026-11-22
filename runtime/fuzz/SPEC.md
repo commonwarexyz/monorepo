@@ -458,8 +458,8 @@ both outcomes are errors:
 
 Status: built. The input is `runtime/fuzz/INTENTS-storage-faults.md`. A number in
 square brackets, such as [11], names the intent a rule comes from. Ids in this part: `SF-G` goals,
-`SF-R` requirements, `SF-I` invariants, `SF-X` exceptions to API coverage, `SF-C` choices the spec
-writer made.
+`SF-R` requirements, `SF-I` invariants, `SF-X` exceptions to API coverage, `SF-C` choices this
+spec makes where the intents file leaves one open.
 
 No rule waits for a decision. The two questions the first draft raised were decided on
 2026-11-18, and intents 13 and 17 hold the answers: a failed fused write has two kinds (SF-R16,
@@ -647,8 +647,8 @@ The bounds follow from the 50 ms target. They are derived, and how they are chec
   byte left it gives the start of the range.
 
   History: this spec was accepted on 2026-11-18 with the two rates only. The samplers and
-  their fixed bytes were added the same day, because the acceptance list could not name a fixed
-  input for the two rates (AT-006, "spec unclear"). The rates did not change, and nothing that
+  their fixed bytes were added the same day, because no fixed input could be written for the
+  two rates from the spec text alone. The rates did not change, and nothing that
   was detected before is lost (SF-C11).
 - **SF-R9.** Every verification operation MUST run while the configuration equals
   `FaultConfig::default()`. The configuration MUST also equal the default at every crash, so
@@ -729,8 +729,8 @@ is the same set with one more freedom: each `ForcedResize` may also be skipped (
 - **SF-R13.** The membership test MUST be exact: it MUST accept every image in the set and reject
   every other image. It MUST be a public function of the library (SF-R19), and the regression
   suite checks it against a brute-force enumeration (SF-R23). Its input is bounded by the sizes
-  above; its cost per call depends on the algorithm, which is the builder's (Run time). A note
-  for the builder, not a rule: for a fixed sequence of lengths after each entry, the positions
+  above; its cost per call depends on the algorithm, which this spec leaves open (Run time). A
+  note on one algorithm, not a rule: for a fixed sequence of lengths after each entry, the positions
   are independent, so a search over (entry, length) pairs with a check per position is enough.
 - **SF-R13a.** Naming the invariant a crash image breaks. The model MUST keep a history for each
   generation: every base and log that a durability cut closed since the generation was created
@@ -955,7 +955,7 @@ No in-scope finding is expected. The reading found no place where the determinis
 breaks one of the invariants above. Three things look like findings and are not:
 
 - RF-2 (#5752). Known and open, and left out of this target by SF-X5 [17].
-- The planted fault of SF-R27. Deliberate, and never in the repository.
+- The planted fault of SF-R27. Deliberate, and never applied in the repository tree (SF-R28).
 - A reopen that drops the intermediate length of a failed resize. Allowed by SF-C4.
 
 If the target finds something, the most intricate code is the most likely place, though nothing
@@ -1031,8 +1031,9 @@ Checked here and by none of the ten:
   view. It has its own operation type and decoding, because its operations carry faults and its sizes
   are smaller, and it adds the base, the log and the reach sets.
 - **SF-R21a.** The move MUST NOT change `storage_differential`: the same input bytes decode to
-  the same operations and give the same run, so its corpus keeps its meaning [19]. Five checks,
-  all required:
+  the same operations and give the same run, so its corpus keeps its meaning [19]. The commit
+  before the move is `9cfc5fb66ed0c21d340ee5d1e86f871372bcac45`, and the commit that holds the
+  move is `75c3d69a694397e440524e7cac5a9725172060e4`. Five checks, all required:
   1. Decoding. For the fixed inputs of [Run time](#run-time), the `Debug` text of the decoded
      `FuzzInput` is the same before and after the move. The values from before the move are taken
      once, in a disposable worktree at the commit before the move, and pinned in a test of the
@@ -1041,11 +1042,16 @@ Checked here and by none of the ten:
      `use` lines, comments and blank lines removed), the old file MUST be an exact interleaving
      of the new `storage_differential.rs` and the new `storage_model.rs`: every old line has its
      place in one of the two, and each of the two keeps the old order of its lines. So a moved
-     item cannot lose, gain or reorder a statement. The check is the script of V6. It reads both
-     new files from the work tree, so it does not depend on staging. A line that had to change
-     (one that reads the allowlist and now takes the answer from the caller) is listed, in its
-     old and its new form, in a file the script takes; the build report holds the same list, and
-     the review reads every line of it.
+     item cannot lose, gain or reorder a statement. The check is the script of V6. It reads the
+     old file from the commit before the move and both new files from the commit that holds the
+     move, so it gives the same result in every clone. A line that had to change is listed, in
+     its old and its new form, in the script of V6, which holds the whole list. The list MUST
+     hold only these lines: the allowlist note `rf2_note`, which read the allowlist and now
+     takes the answer from the caller, with its callers; and the continuation lines of the
+     `use` statements that changed, which the normalization does not remove. Each row names
+     the file, the number of times the line occurs in it, and the line. The check MUST fail
+     when a listed line occurs any other number of times in any of the three files, so one
+     of two identical lines cannot be lost.
   3. The same model behaviour. For fixed sequences of model transitions, the text the model
      prints for its state (`BlobModel::summary`, `Model::partition_summary`) and the result of
      every query (`allowed_sizes`, `expected`, `read_expect`) after every step is the same before
@@ -1061,6 +1067,15 @@ Checked here and by none of the ten:
      same way: both pass, or both fail with the same `[class]` tag.
   5. A 10-minute smoke run of `storage_differential` from an empty corpus after the move: no
      failure class that the target did not report before.
+
+  History: this spec was accepted on 2026-11-18 with `HEAD` as the commit before the move, the
+  two new files read from the work tree, and the list of changed lines in a file outside the
+  repository. That held only until the move was committed. 2026-11-22: this rule names the two
+  commits, and the script of V6 reads the three files from them and holds the list. The list
+  now gives each line with its file and its count: before, a listed line was dropped wherever
+  it occurred, so the loss of one of two identical callers would have passed. Nothing that
+  was detected before is lost. A later change to one of the two new files is not judged by
+  this check.
 
 ### Library entry points and the seam
 
@@ -1220,22 +1235,82 @@ failure. A differing byte is a byte other than the one at that position.
 ### The planted runtime fault
 
 - **SF-R27.** One fault MUST be planted in a copy of `runtime/src` (SF-R28) to show that the target finds a bug in the
-  runtime itself and not only at the seam [25]. The patch is
-  `scratchpad/storage-faults-plant.patch`. It removes the retirement of pending crash outcomes
+  runtime itself and not only at the seam [25]. The patch is the diff below, in this rule, and
+  this rule holds its only copy. It removes the retirement of pending crash outcomes
   from `Context::open_versioned` (`runtime/src/deterministic.rs:1580` and `1582`, the `admit`
   call), so a successful reopen is no longer a durability cut: a write that was unsynced before
   the reopen can still land at the next crash and change bytes the reopen had shown. It breaks
   SF-I11 and looks like a real omission. None of the ten recovery targets checks this rule at the
   blob level. The removed call is the only caller of the faulty storage's `admit`
-  (`runtime/src/storage/faulty.rs:506`), and the workspace denies warnings (`Cargo.toml:90`), so
+  (`runtime/src/storage/faulty.rs:506`), and the workspace denies warnings (`Cargo.toml:91`), so
   without more the plant build stops on `dead_code` before the target runs. The patch MUST
   therefore also add one line, `#[allow(dead_code)]`, directly above that method, and MUST NOT
   add any other line. The attribute changes no behaviour. It is part of the plant, so SF-R28
-  keeps it out of the repository tree and of the delivered diff. The plant build MUST NOT relax lints
-  in any other way: no `RUSTFLAGS`, no `--cap-lints`.
+  keeps it out of `runtime/src` in the repository tree and in the delivered diff. The plant build
+  MUST NOT relax lints in any other way: no `RUSTFLAGS`, no `--cap-lints`.
+
+  The patch. Its line numbers, and the line numbers this rule names, are those of the tree on
+  2026-11-22. It is the only fenced `diff` block of this spec, and the script of V9 reads it
+  from this file (SF-C12):
+
+  ```diff
+  diff --git a/runtime/src/deterministic.rs b/runtime/src/deterministic.rs
+  --- a/runtime/src/deterministic.rs
+  +++ b/runtime/src/deterministic.rs
+  @@ -1577,9 +1577,7 @@ impl crate::Storage for Context {
+               name,
+               self.storage.open_versioned(partition, name, versions),
+           )?;
+  -        let retired = self.storage.inner().inner().admit(partition, name);
+           let opened = opened.finish();
+  -        drop(retired);
+           Ok(opened)
+       }
+
+  diff --git a/runtime/src/storage/faulty.rs b/runtime/src/storage/faulty.rs
+  --- a/runtime/src/storage/faulty.rs
+  +++ b/runtime/src/storage/faulty.rs
+  @@ -504,6 +504,7 @@ impl Storage<crate::storage::memory::Storage> {
+       /// Retire crash evidence excluded from the durable snapshot admitted by a successful open.
+       /// The caller holds the logical namespace guard through admission and retirement.
+  +    #[allow(dead_code)]
+       pub(crate) fn admit(
+           &self,
+           partition: &str,
+           name: &[u8],
+  ```
+
+  The same change by function and call, so that the diff can be written again when the code
+  around it has changed:
+
+  1. In `runtime/src/deterministic.rs`, in `impl crate::Storage for Context`, in the method
+     `open_versioned`: delete the statement
+     `let retired = self.storage.inner().inner().admit(partition, name);` and the statement
+     `drop(retired);`. Every other statement of the method stays, `let opened = opened.finish();`
+     between the two included.
+  2. In `runtime/src/storage/faulty.rs`, in `impl Storage<crate::storage::memory::Storage>`: add
+     the line `#[allow(dead_code)]` between the doc comment of `pub(crate) fn admit` and its
+     signature.
+
+  `git apply` places a hunk by its context lines, so a shift of the line numbers alone needs no
+  change. When a context line or a changed line no longer matches, `git apply` refuses the
+  patch. The diff and the line numbers of this rule MUST then be written again from the two
+  steps above, in this spec, before V9 is run.
+
+  History: this spec was accepted on 2026-11-18 with the patch in a file outside the repository.
+  A clone does not get that file, so V9 could run only in the one tree that held it. Decision,
+  2026-11-22: the text of the patch is part of this rule [25], and V9 reads it from here. The
+  planted fault, its failing input and the worktree rule of SF-R28 did not change, and nothing
+  that was detected before is lost. SF-R28 and the Expected findings said that the plant is
+  never in the repository; since the same day they say that it is never applied there. Future
+  work 31 proposed more patch files outside the repository; it now proposes more diffs in this
+  spec.
 - **SF-R28.** The patch MUST be applied only in a disposable git worktree, the target MUST fail
   there with `[crash_image]` and invariant SF-I11, and the worktree MUST then be removed. The
-  repository tree and the delivered diff MUST NOT hold the plant [25]. The shortest failing run is the baseline plus two input operations:
+  repository tree and the delivered diff MUST NOT hold the applied plant: under `runtime/src`
+  they hold no change at all (SF-R1), the `#[allow(dead_code)]` line of SF-R27 included [25].
+  The text of the diff in SF-R27 is not an applied plant. The shortest failing run is the
+  baseline plus two input operations:
   a `Write` on slot 0 without `SYNC` that carries a write fault with `failure_rate` 0 and
   `retention_rate` 100, then `Open` slot 0 on `p0`/`a`. The same input must pass in the repository
   tree. The steps are in [Validation](#validation-after-implementation).
@@ -1259,8 +1334,8 @@ How the bounds follow from the target. The work of one run is bounded by counts,
   a mask, SF-R16), so all logs of a run together hold at most 49 entries.
 - Membership tests. At most one per successful reopen and one per blob per recovery
   verification: at most 48 + 4 x 6 = 72 calls, each over at most 49 entries, 2305 lengths and
-  2304 positions. The cost of one call depends on the algorithm, which SF-R13 leaves to the
-  builder. It is the one term this derivation does not fix.
+  2304 positions. The cost of one call depends on the algorithm, which SF-R13 leaves open. It
+  is the one term this derivation does not fix.
 
 The storage part is small: about 830 in-memory calls and 180 KiB. The membership test is the open
 term, so the heavy inputs of rule M2 load it, and each verification path, to the bounds. All of
@@ -1302,7 +1377,7 @@ The measurement:
 
 ### Choices made
 
-Choices the intents file leaves to the spec writer, each stated as it is.
+Choices the intents file leaves open, each stated as it is.
 
 | Id | Choice | Reason | What it costs |
 |---|---|---|---|
@@ -1316,7 +1391,8 @@ Choices the intents file leaves to the spec writer, each stated as it is.
 | SF-C8 | The target is behind the feature `storage-faults` and runs on FuzzCorp only | The rule this spec already has for `storage_differential` and `iobuf` [26] | It does not run in `slow.yml` |
 | SF-C9 | Small sizes: blobs up to 2304 bytes | The 50 ms target and whole-blob checks after every reopen, failure and crash | Large blobs under faults are not explored (Future work 26) |
 | SF-C10 | The planted fault is the missing reopen cut (SF-R27) | It needs three steps in order that only a fuzzer-chosen sequence gives, it is not caught by the empty input, and the ten recovery targets cannot see it | One plant proves one path. The negative controls cover the other invariants |
-| SF-C11 | The two draws of SF-R8 are public samplers with a fixed selector, not pinned input bytes | A sampler that takes an `Unstructured` is the existing decoding style (`storage_differential` samples every field this way), and a test can call it with one byte. Pinned bytes for a whole input would fix the order of every draw of the decoder, which the spec leaves to the builder. The selectors are chosen so that exhausted input arms nothing | That the decoder calls the samplers, and decides these two points nowhere else, is read in the build review, not shown by a fixed-input test |
+| SF-C11 | The two draws of SF-R8 are public samplers with a fixed selector, not pinned input bytes | A sampler that takes an `Unstructured` is the existing decoding style (`storage_differential` samples every field this way), and a test can call it with one byte. Pinned bytes for a whole input would fix the order of every draw of the decoder, which the spec leaves open. The selectors are chosen so that exhausted input arms nothing | That the decoder calls the samplers, and decides these two points nowhere else, is checked by reading the source of the decoder, not shown by a fixed-input test |
+| SF-C12 | The script of V9 reads the patch from the `diff` block of SF-R27 and holds no second copy of it (2026-11-22) | Two copies drift apart, and every clone has this file | V9 needs this file at `runtime/fuzz/SPEC.md`, and the block inside SF-R27, indented by two spaces. The script refuses a spec that holds a second block of that form, and a patch whose files, or whose counts of added and removed lines per file, differ from SF-R27. It does not check which two lines of `deterministic.rs` the patch removes |
 
 ### Limits of the proof
 
@@ -1447,15 +1523,15 @@ All steps below make acceptance [22 to 26]. `N` stands for the pinned nightly, c
 
 | # | Command or check | Result to see | Proves |
 |---|---|---|---|
-| V1 | `git status --short runtime/src`, and `git diff --stat <commit before the build> -- runtime/src` | No change under `runtime/src` | SF-R1 |
+| V1 | `git status --short runtime/src`, and `git diff --stat 9cfc5fb66ed0c21d340ee5d1e86f871372bcac45 75c3d69a694397e440524e7cac5a9725172060e4 -- runtime/src`: the commit before the build and the commit that holds the build (SF-R21a). For a later change to the target, the commit before that change and the commit that holds it | Both print nothing: no change under `runtime/src` | SF-R1 |
 | V2 | Read `runtime/fuzz/fuzz_targets/storage_faults.rs` | Only imports and the typed `fuzz_target!` entry | SF-R19 |
 | V3 | `cargo +N fuzz build --fuzz-dir runtime/fuzz --features runtime-all`, then the same without `--features` | Both succeed. The second builds only `buffer`, `blob_integrity` and `blob_creation` | SF-C8, [26] |
 | V4 | Clippy with `-D warnings` on `runtime/fuzz/Cargo.toml` with `--all-targets --features runtime-all`, and `rustfmt --check` on the changed files, both with the pins of `.github/toolchains.toml` | Clean | fuzzing guide |
 | V5 | `cargo +N test --manifest-path runtime/fuzz/Cargo.toml` | The regression suite of SF-R23 passes, with one negative control per invariant, each naming its invariant | every invariant SF-I1a to SF-I18b, SF-R5, SF-R6, SF-R9, SF-R11, SF-R13, SF-R13a, SF-R24, SF-R25, SF-R30, SF-R31, SF-R32, [23] |
-| V6 | The five checks of SF-R21a: the pinned decoding and model behaviour (in V5); the move check below; the old and the new binary over the fixed inputs of V8; `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_differential "$(mktemp -d)" -- -max_total_time=600 -timeout=60` | The pinned values match. The move check prints `MOVE OK`, and the review has read the list of changed lines. Both binaries end the same way on every fixed input. The smoke run shows no failure class that is new | SF-R21, SF-R21a |
+| V6 | The five checks of SF-R21a: the pinned decoding and model behaviour (in V5); the move check below; the old and the new binary over the fixed inputs of V8; `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_differential "$(mktemp -d)" -- -max_total_time=600 -timeout=60` | The pinned values match. The move check prints `MOVE OK` and `CONTROL OK` and exits 0, and its list holds only the lines that SF-R21a item 2 names. Both binaries end the same way on every fixed input. The smoke run shows no failure class that is new | SF-R21, SF-R21a |
 | V7 | `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults "$(mktemp -d)" -- -max_total_time=600 -timeout=60` | From an empty corpus: no crash, no hang, no out-of-memory, no invariant fires. The executions per second are reported | [24], SF-R5, SF-I17 |
 | V8 | Rule M1: write the 257 fixed inputs to files, then for each file `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults <file> -- -runs=100`. Rule M2: `cargo +N test --release --manifest-path runtime/fuzz/Cargo.toml -- --ignored run_time` | M1: every `Executed <file> in <T> ms` line has `T` at or below 5000. M2: the median of each of the five heavy inputs is at or below 50 ms. On the acceptance host | SF-R29, SF-G4 |
-| V9 | The plant, steps below | In the worktree the plant input fails with `[crash_image]` and a fuzz run from an empty corpus fails with `[crash_image]` within 300 seconds. The artifact passes in the repository tree. The worktree is removed | SF-R27, SF-R28, SF-I11, [25] |
+| V9 | The plant script below, `bash <file> N` | The script prints `PATCH OK` and `PLANT OK` and exits 0: in the worktree the plant input fails with `[crash_image]` and SF-I11, and a fuzz run from an empty corpus fails the same way within 300 seconds and writes one artifact. The artifact passes in the repository tree. The worktree and the temporary directory are removed, and `runtime/src` holds no change | SF-R27, SF-R28, SF-I11, [25] |
 | V10 | V3 passed and `storage_faults` is in `runtime-all` | The target is ready for the next FuzzCorp bundle. Uploading is a separate, manual step | [26] |
 
 The fixed inputs of V8:
@@ -1466,29 +1542,66 @@ python3 -c 'import sys,struct
 for i in range(256): open(f"{sys.argv[1]}/seed{i:03}","wb").write(struct.pack("<Q",i))' "$D"
 ```
 
-The move check of V6 (SF-R21a item 2). `HEAD` is the commit before the move. Both new files are
-read from the work tree, tracked or not. `changed.txt` holds the lines that had to change, old
-and new form, one per line; it may be empty. The script prints `MOVE OK` and exits 0 exactly
-when the old file is an interleaving of the two new files:
+The move check of V6 (SF-R21a item 2), a script. Copy the block into a file and run the file with `bash` from the repo root. Do not paste
+it into an interactive shell: a failed check ends the shell it runs in.
+`BASE` is the commit before the move and `MOVE` the commit that holds it. `changed.txt` holds
+the lines that had to change, old and new form: the 13 rows below are the whole list. The
+script prints `MOVE OK` exactly when every listed line occurs as often as its row says and the
+old file is an interleaving of the two new files. It then prints `CONTROL OK` and exits 0
+exactly when the same check fails on a copy with one of two identical callers deleted:
 
 ```bash
-T="$(mktemp -d)"; : > "$T/changed.txt"        # or the list from the build report
-git show HEAD:runtime/fuzz/fuzz_targets/storage_differential.rs > "$T/old.rs"
+set -euo pipefail                         # a file, run from the repo root: bash <file>
+BASE=9cfc5fb66ed0c21d340ee5d1e86f871372bcac45
+MOVE=75c3d69a694397e440524e7cac5a9725172060e4
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+git show "${BASE}:runtime/fuzz/fuzz_targets/storage_differential.rs" > "$T/old.rs"
+git show "${MOVE}:runtime/fuzz/fuzz_targets/storage_differential.rs" > "$T/stay.rs"
+git show "${MOVE}:runtime/fuzz/src/storage_model.rs" > "$T/moved.rs"
+# The lines that had to change: the file, how many times the line occurs in it, the line.
+cat > "$T/changed.txt" <<'EOF'
+old 1 Blob, BlobLayout, BlobVersion, DEFAULT_BLOB_LAYOUT, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+old 1 ReadOptions, Runner as _, Storage, WriteOptions, deterministic, tokio,
+old 1 ops::RangeInclusive,
+old 1 fn rf2_note(&self) -> String {
+old 1 format!("; this blob is affected by {}", ALLOWLIST[RF2].note())
+old 1 let note = self.model.blobs[&generation].rf2_note();
+old 2 let note = model.rf2_note();
+stay 1 Blob, BlobLayout, BlobVersion, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions,
+stay 1 Runner as _, Storage, WriteOptions, deterministic, tokio,
+stay 1 let note = self.model.blobs[&generation].rf2_note(&ALLOWLIST[RF2].note());
+stay 2 let note = model.rf2_note(&ALLOWLIST[RF2].note());
+moved 1 fn rf2_note(&self, entry: &str) -> String {
+moved 1 format!("; this blob is affected by {entry}")
+EOF
 cat > "$T/move_check.py" <<'EOF'
 import re, sys
+from collections import Counter
 
-def norm(path, drop):
+def norm(path):
     out = []
     for line in open(path):
         line = re.sub(r'^pub(\([a-z]+\))? ', '', line.strip())
-        if line and not line.startswith(('use ', '//')) and line not in drop:
+        if line and not line.startswith(('use ', '//')):
             out.append(line)
     return out
 
-old_path, stay_path, moved_path, *rest = sys.argv[1:]
-drop = set(l.strip() for p in rest for l in open(p) if l.strip())
-old, a, b = norm(old_path, drop), norm(stay_path, drop), norm(moved_path, drop)
-ok = len(old) == len(a) + len(b)
+names = ('old', 'stay', 'moved')
+files = dict(zip(names, map(norm, sys.argv[1:4])))
+listed = Counter()
+for row in open(sys.argv[4]):
+    name, count, text = row.rstrip('\n').split(' ', 2)
+    listed[name, text] = int(count)
+texts = {text for _, text in listed}
+ok = True
+for name in names:
+    for text in sorted(texts):
+        seen = files[name].count(text)
+        if seen != listed[name, text]:
+            print(f'{name}: {seen} of {listed[name, text]}: {text}')
+            ok = False
+old, a, b = ([line for line in files[name] if line not in texts] for name in names)
+ok = ok and len(old) == len(a) + len(b)
 if ok:
     reach = {0}
     for i, line in enumerate(old):
@@ -1501,26 +1614,57 @@ if ok:
 print('MOVE OK' if ok else f'MOVE BROKEN: old {len(old)} lines, stay {len(a)}, moved {len(b)}')
 sys.exit(0 if ok else 1)
 EOF
-python3 -I "$T/move_check.py" "$T/old.rs" runtime/fuzz/fuzz_targets/storage_differential.rs \
-    runtime/fuzz/src/storage_model.rs "$T/changed.txt"
+python3 -I "$T/move_check.py" "$T/old.rs" "$T/stay.rs" "$T/moved.rs" "$T/changed.txt"
+# Control: with one of the two identical callers deleted from the new target file, the check must fail.
+awk '/let note = model.rf2_note\(&ALLOWLIST/ && !cut {cut = 1; next} {print}' "$T/stay.rs" > "$T/control.rs"
+if python3 -I "$T/move_check.py" "$T/old.rs" "$T/control.rs" "$T/moved.rs" "$T/changed.txt" > "$T/control.log"; then
+    echo "CONTROL BROKEN"; exit 1
+fi
+grep -q '^stay: 1 of 2: let note = model.rf2_note' "$T/control.log"
+echo "CONTROL OK"
 ```
+
+V9 is a script. Copy the block into a file and run the file with `bash` from the repo root. Do not paste
+it into an interactive shell: a failed check ends the shell it runs in. Its argument is the
+pinned nightly, for example `bash plant.sh nightly-2026-11-12`. It exits 0 and prints `PLANT OK`
+exactly when every step below holds. On any other end, an interrupt included, it removes the
+worktree and its temporary directory and exits with a failure.
 
 The plant of V9:
 
 ```bash
-W="$(mktemp -d)/plant"
-P="$PWD/scratchpad/storage-faults-plant.patch"
-# SF-R27: the one line the patch adds is `#[allow(dead_code)]` on `admit`. No RUSTFLAGS, no --cap-lints.
-test "$(grep -c '^+[^+]' "$P")" = 1 && grep -qx '+    #\[allow(dead_code)\]' "$P" && echo "PATCH OK"   # must print PATCH OK
+set -euo pipefail                         # a file, run from the repo root: bash <file> <pinned nightly>
+N="$1"; T="$(mktemp -d)"; W="$T/plant"; P="$T/plant.patch"
+cleanup() { [ ! -e "$W" ] || git worktree remove --force "$W"; rm -rf "$T"; }
+trap cleanup EXIT
+trap 'echo "V9 FAILED at line $LINENO"' ERR
+# SF-R27: the patch is the one fenced diff block of this spec, inside SF-R27, indented by two spaces.
+test "$(grep -c '^  ```diff$' runtime/fuzz/SPEC.md)" = 1
+awk '/^- \*\*SF-R27\.\*\*/ {rule = 1} /^- \*\*SF-R28\.\*\*/ {rule = 0}
+     rule && /^  ```diff$/ {on = 1; next} /^  ```$/ {on = 0} on {print substr($0, 3)}' runtime/fuzz/SPEC.md > "$P"
+# Its shape: two lines out of deterministic.rs, one line into faulty.rs, and that line is the attribute.
+test "$(git apply --numstat "$P")" = "$(printf '0\t2\truntime/src/deterministic.rs\n1\t0\truntime/src/storage/faulty.rs')"
+grep -qx '+    #\[allow(dead_code)\]' "$P"
+echo "PATCH OK"
+# SF-R28: applied in the disposable worktree only. No RUSTFLAGS, no --cap-lints.
 git worktree add --detach "$W" HEAD
 rsync -a --exclude target --exclude corpus --exclude artifacts runtime/fuzz/ "$W/runtime/fuzz/"
 git -C "$W" apply "$P"
-(cd "$W" && cargo +N test --manifest-path runtime/fuzz/Cargo.toml plant)          # must fail: [crash_image]
-(cd "$W" && cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults \
-    "$(mktemp -d)" -- -max_total_time=300 -artifact_prefix="$W/")                 # must fail: [crash_image]
-cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults "$W"/crash-*   # must pass
-git worktree remove --force "$W"
-git status --short runtime/src                                                    # must print nothing: no plant, no annotation
+# A command that must fail in the worktree, with [crash_image] and SF-I11 in one line of its output.
+caught() {
+    if (cd "$W" && "$@") > "$T/log" 2>&1; then echo "not caught: $*"; return 1; fi
+    grep -F '[crash_image]' "$T/log" | grep -F 'SF-I11' | cut -c 1-100 || { tail -n 20 "$T/log"; return 1; }
+}
+caught cargo "+$N" test --manifest-path runtime/fuzz/Cargo.toml plant
+mkdir "$T/corpus" "$T/found"
+caught cargo "+$N" fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults "$T/corpus" \
+    -- -max_total_time=300 -artifact_prefix="$T/found/"
+test "$(ls "$T/found" | grep -c '^crash-')" = 1                                    # exactly one artifact
+# The artifact must pass in the repository tree, where the plant is not applied.
+cargo "+$N" fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults "$T"/found/crash-*
+cleanup
+test -z "$(git status --short runtime/src)"                                       # no plant, no annotation
+echo "PLANT OK"
 ```
 
 What these steps do not show is in [Limits of the proof](#limits-of-the-proof).
@@ -1561,5 +1705,5 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 28 | `storage_faults`: the oracle accepts any subset of an unsynced write and ignores the armed retention rate and mode (SF-R12) | An injector that keeps bytes outside its own policy, for example a non-prefix under `Prefix`, is not reported | Add a strict injector check behind a feature that also holds each write to its armed mode and to the 0 and 100 percent endpoints |
 | 29 | `storage_faults`: an armed operation that does not fail is accepted (SF-C7) | An injector that stops injecting is silent | Track the count of injected failures per kind in a campaign, or check the lineage coverage of `runtime/src/storage/faulty.rs` |
 | 30 | `storage_faults`: the images seen are the ones the deterministic injector produces | Images the contract allows but the injector never makes are not seen: it tears only writes issued under a write fault and drops every other unsynced write whole | Extend the injector upstream (a default tearing policy), or lift rows 5 and 6 for tokio |
-| 31 | `storage_faults`: one planted runtime fault (SF-R27) | The end-to-end proof on `runtime/src` covers the reopen cut only; the other invariants are proven at the seam | Keep a small set of plant patches in `scratchpad/`, one per durability rule, and run them in the same disposable worktree |
+| 31 | `storage_faults`: one planted runtime fault (SF-R27) | The end-to-end proof on `runtime/src` covers the reopen cut only; the other invariants are proven at the seam | Add more plant diffs to this spec, one per durability rule, each in a rule of its own and with a mark of its own for the script of V9, and run each in a disposable worktree |
 | 32 | `storage_faults`: durability is seen only at a crash or a reopen (SF-R15, SF-R17) | A failure that makes data durable too early is not detected: a failed sync that syncs, a failed open that takes its reopen cut, a fused write with a sync fault that persists its bytes | Compare the durable image after every operation through a test accessor such as `Context::logical_blob` (`runtime/src/deterministic.rs:1086-1094`). This leaves the public contract (SF-X9), so it needs a separate decision |

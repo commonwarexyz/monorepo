@@ -81,9 +81,11 @@
 23. Tests written from the spec, by someone other than the target's author, pass, with **one negative control per invariant**
     (`runtime/src` is on the tests-from-spec list).
 24. A **10-minute smoke run** from an empty corpus shows no crash and no false positive.
-25. **A planted runtime bug is found**: a patch kept outside the repository, applied only in a disposable
-    git worktree, where `storage_faults` must catch it; the worktree is then removed. The repository tree
-    and the delivered diff never contain the plant (2.5).
+25. **A planted runtime bug is found**: a patch whose text is written out in the spec, applied only in a
+    disposable git worktree, where `storage_faults` must catch it; the worktree is then removed. The
+    repository tree never contains the applied plant: `runtime/src` stays unchanged (2.5). Amended
+    2026-11-22: the patch text moved into the spec, so that a fresh clone can run the check; before, the
+    patch was kept outside the repository and only one machine could run it.
 
 Recorded limit of the proof (2.6, 1.13): it shows the deterministic fault model only, not a real
 disk, not tokio under faults, and not every possible bug.

@@ -598,8 +598,8 @@ should confirm. `cargo fuzz` requires a nightly toolchain; set it as a directory
    `cargo metadata --no-deps` lists `commonware-glue-fuzz`.
 
 3. **The target is thin.**
-   The target file contains only the libFuzzer entry point and a call into the library; a reviewer
-   confirms no fuzzing logic or primitive is defined in it (R2).
+   The target file contains only the libFuzzer entry point and a call into the library; reading
+   the file confirms that no fuzzing logic or primitive is defined in it (R2).
 
 4. **Everything compiles and lints clean.**
    `cargo check -p commonware-glue-fuzz --tests` succeeds and

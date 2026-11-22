@@ -1389,8 +1389,8 @@ sections refer to it as "Choices made" and to its entries by item number.
     report of each run only with `GLUE_FUZZ_LOG`. Two options were not taken: writing both
     only with the variable, and printing every run that has an unmeasured invariant, as the
     stateful harness prints a run that measured nothing (`glue/fuzz/src/stateful/runner.rs`),
-    which here would print nearly every run because of I6. Beside the decision, these are the
-    writer's choices: standard error, where the report line of `glue/fuzz` goes today; the
+    which here would print nearly every run because of I6. Beside the decision, these are
+    choices of this spec: standard error, where the report line of `glue/fuzz` goes today; the
     form of the aggregate line; that the end is one the process reaches by itself; and that
     the interval is counted in runs (section 11, Report emission).
 28. **Per-target set of run-time invariants (7.1-7.5, 8, 8.1).** Until this change section 8
