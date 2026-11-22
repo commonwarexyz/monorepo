@@ -26,8 +26,7 @@ use crate::{
 use bytes::BufMut as _;
 use commonware_codec::Encode;
 use commonware_runtime::{
-    AbortOnDrop, Blob, Error as RuntimeError, Handle, IoBufMut, ReadOptions, Spawner, Storage,
-    WriteOptions,
+    Blob, Error as RuntimeError, Handle, IoBufMut, ReadOptions, Spawner, Storage, WriteOptions,
 };
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
@@ -872,19 +871,42 @@ where
     Ok(())
 }
 
-/// The decoder tasks of a build that are still running. Dropping them aborts each one.
-struct Decoders<T: Send + 'static>(FuturesUnordered<Handle<T>>);
+/// The tasks of a build that are still running. Dropping them aborts each one.
+struct Tasks<T: Send + 'static>(FuturesUnordered<Handle<T>>);
 
-impl<T: Send + 'static> Decoders<T> {
-    /// Abort every decoder still running.
+impl<T: Send + 'static> Tasks<T> {
+    /// Abort every task still running.
     fn abort(&self) {
-        for decoder in &self.0 {
-            decoder.abort();
+        for task in &self.0 {
+            task.abort();
         }
+    }
+
+    /// Abort every task still running and wait for each to end.
+    async fn stop(&mut self) {
+        self.abort();
+        while self.0.next().await.is_some() {}
     }
 }
 
-impl<T: Send + 'static> Drop for Decoders<T> {
+impl<T: Send + 'static, F: Family> Tasks<Result<T, Error<F>>> {
+    /// Wait for the tasks and return what they produced, in the order they finished. The first
+    /// to fail aborts those still running. Every task has ended when this returns.
+    async fn join(mut self) -> Result<Vec<T>, Error<F>> {
+        let mut outputs = Vec::with_capacity(self.0.len());
+        let joined = async {
+            while let Some(output) = self.0.next().await {
+                outputs.push(output??);
+            }
+            Ok(())
+        }
+        .await;
+        self.stop().await;
+        joined.map(|()| outputs)
+    }
+}
+
+impl<T: Send + 'static> Drop for Tasks<T> {
     fn drop(&mut self) {
         self.abort();
     }
@@ -933,7 +955,7 @@ where
     // many wait without idling a decoder behind a slow chunk.
     let window = 2 * decoders;
     let mut chunks = chunks.into_iter().enumerate();
-    let mut running = Decoders(FuturesUnordered::new());
+    let mut running = Tasks(FuturesUnordered::new());
     let mut waiting = BTreeMap::new();
     let (mut started, mut passed) = (0, 0);
     let routed = async {
@@ -970,8 +992,7 @@ where
 
     // Decoders are still running if one failed or the scan stopped the build. Abort them, and
     // wait for each to end so that none outlives the build.
-    running.abort();
-    while running.0.next().await.is_some() {}
+    running.stop().await;
     routed
 }
 
@@ -1150,7 +1171,9 @@ where
     } else if sorters <= 1 {
         vec![sort_and_load::<F, _, _>(&context, &shared, &next, &active).await?]
     } else {
-        let mut handles = Vec::with_capacity(sorters);
+        // A sorter fills the partitions of the buckets it claims, so the order the sorters
+        // finish in does not matter.
+        let running = Tasks(FuturesUnordered::new());
         for sorter in 0..sorters {
             let next = next.clone();
             let shared = shared.clone();
@@ -1162,9 +1185,9 @@ where
                 .spawn(move |context| async move {
                     sort_and_load::<F, _, _>(&context, &shared, &next, &active).await
                 });
-            handles.push(handle.abort_on_drop());
+            running.0.push(handle);
         }
-        AbortOnDrop::join_all::<Error<F>>(handles).await?
+        running.join().await?
     };
 
     // The joins reclaimed exclusive ownership of the buckets and the bitmap. Dropping the
@@ -2033,6 +2056,52 @@ mod tests {
                 }
                 assert_eq!(Arc::strong_count(&log), 1);
             }
+        });
+    }
+
+    #[test]
+    fn test_tasks_join() {
+        deterministic::Runner::default().start(|context| async move {
+            // Every task's output is returned.
+            let tasks = Tasks(FuturesUnordered::new());
+            for output in 0..3 {
+                let task = context.child("task").with_attribute("output", output);
+                tasks.0.push(task.spawn(move |_| async move {
+                    for _ in output..3 {
+                        reschedule().await;
+                    }
+                    Ok::<_, Error<mmr::Family>>(output)
+                }));
+            }
+            let mut outputs = tasks.join().await.unwrap();
+            outputs.sort_unstable();
+            assert_eq!(outputs, [0, 1, 2]);
+
+            // A task that fails ends the join, even while one spawned before it never finishes
+            // on its own. That task has ended by the time the join returns.
+            let held = Arc::new(());
+            let tasks = Tasks(FuturesUnordered::new());
+            let stuck = held.clone();
+            tasks
+                .0
+                .push(context.child("stuck").spawn(move |_| async move {
+                    let _stuck = stuck;
+                    pending::<()>().await;
+                    Ok::<_, Error<mmr::Family>>(())
+                }));
+            tasks.0.push(context.child("failed").spawn(|_| async move {
+                reschedule().await;
+                Err(Error::Runtime(RuntimeError::ReadFailed))
+            }));
+            let result = context
+                .timeout(Duration::from_secs(1), tasks.join())
+                .await
+                .expect("join waited on a task");
+            assert!(matches!(
+                result,
+                Err(Error::Runtime(RuntimeError::ReadFailed))
+            ));
+            assert_eq!(Arc::strong_count(&held), 1);
         });
     }
 
