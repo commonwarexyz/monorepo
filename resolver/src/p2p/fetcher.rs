@@ -2142,16 +2142,22 @@ mod tests {
             let next_id = fetcher.request_id.unwrap();
             assert_eq!(
                 fetcher.get_pending_deadline(),
-                Some(context.current() + ZERO_DELAY_FALLBACK)
+                Some(context.current() + Duration::from_millis(1))
             );
+            context
+                .sleep_until(fetcher.get_pending_deadline().unwrap())
+                .await;
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.request_id, Some(next_id.wrapping_add(1)));
             assert_eq!(
                 fetcher.get_pending_deadline(),
-                Some(context.current() + ZERO_DELAY_FALLBACK)
+                Some(context.current() + Duration::from_millis(1))
             );
 
             // The accepted send spends the quota and activates the key.
+            context
+                .sleep_until(fetcher.get_pending_deadline().unwrap())
+                .await;
             accept.store(true, Ordering::SeqCst);
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.len_pending(), 0);
