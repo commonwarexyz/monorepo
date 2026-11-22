@@ -1514,32 +1514,37 @@ mod tests {
         deterministic::Runner::default().start(replay_regrows_no_level::<mmb::Family>);
     }
 
-    /// Reserving for more nodes than memory can hold skips the levels that do not fit, and the
-    /// tree still appends.
-    async fn reserve_skips_levels_too_large<F: Family>(context: deterministic::Context) {
-        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
-        let ops = Operations::new(100);
-        let mut tree =
-            Tree::<F, D, _>::new(Location::new(0), Vec::new(), &config(5), &context).unwrap();
-        tree.reserve(F::MAX_LEAVES);
-        assert_eq!(tree.resident.levels[0].nodes.capacity(), 0);
-        let tree = tree
-            .replay(&ops, &hasher, Location::new(100), NZU64!(7))
-            .await
+    /// A level whose room cannot be reserved is skipped, and still takes the nodes that arrive.
+    /// The level holds leaves, and room for every leaf is more than one allocation can describe,
+    /// so the reservation is refused before any allocator is asked.
+    fn reserve_skips_a_level_too_large<F: Family>() {
+        let mut resident = Resident {
+            height: 0,
+            levels: vec![Level {
+                first: 0,
+                nodes: VecDeque::<D>::new(),
+            }],
+        };
+        assert!(u128::from(*F::MAX_LEAVES) * size_of::<D>() as u128 > isize::MAX as u128);
+        resident.reserve(F::location_to_position(F::MAX_LEAVES));
+        assert_eq!(resident.levels[0].nodes.capacity(), 0);
+
+        let end = F::location_to_position(Location::new(100));
+        resident
+            .extend_with::<F>(end, |_, ordinal| Ok(Sha256::fill(ordinal as u8)))
             .unwrap();
-        assert_eq!(
-            tree.root(&hasher, 0).unwrap(),
-            oracle::<F>(&ops, &hasher).root(&hasher, 0).unwrap()
-        );
+        let level = &resident.levels[0];
+        assert_eq!(level.nodes.len(), 100);
+        assert_eq!(level.get(99), Some(Sha256::fill(99)));
     }
 
     #[test]
-    fn reserve_skips_levels_too_large_mmr() {
-        deterministic::Runner::default().start(reserve_skips_levels_too_large::<mmr::Family>);
+    fn reserve_skips_a_level_too_large_mmr() {
+        reserve_skips_a_level_too_large::<mmr::Family>();
     }
     #[test]
-    fn reserve_skips_levels_too_large_mmb() {
-        deterministic::Runner::default().start(reserve_skips_levels_too_large::<mmb::Family>);
+    fn reserve_skips_a_level_too_large_mmb() {
+        reserve_skips_a_level_too_large::<mmb::Family>();
     }
 
     /// A chunk, whole or partial, that does not start at the tree's end is rejected.
