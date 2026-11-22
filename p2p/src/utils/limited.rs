@@ -106,45 +106,46 @@ impl<P: PublicKey, E: Clock> State<P, E> {
     }
 
     /// Reserves the unique `recipients` that are neither rate-limited nor reserved by another
-    /// send, returning them in order.
+    /// send, appending each to `reserved` as soon as it is marked.
     ///
-    /// Returns `None` if recipients were requested but none could be reserved.
-    fn reserve(&mut self, recipients: Recipients<P>) -> Option<Vec<P>> {
+    /// Returns whether the reservation should be submitted: `false` if recipients were requested
+    /// but none could be reserved.
+    fn reserve(&mut self, recipients: Recipients<P>, reserved: &mut Vec<P>) -> bool {
         // A peer that is already reserved, including an earlier duplicate in the same list, is
         // skipped, so the reservation set also removes duplicates
-        let (reserved, requested) = match recipients {
+        let requested = match recipients {
             Recipients::One(peer) => {
-                if reserve_peer(&mut self.rate_limit, &mut self.in_flight, &peer) {
-                    (vec![peer], true)
-                } else {
-                    (Vec::new(), true)
+                if reservable(&mut self.rate_limit, &self.in_flight, &peer) {
+                    reserved.reserve_exact(1);
+                    self.in_flight.insert(peer.clone());
+                    reserved.push(peer);
                 }
+                true
             }
             Recipients::Some(peers) => {
                 let requested = !peers.is_empty();
-                let mut reserved = Vec::with_capacity(peers.len());
+                reserved.reserve_exact(peers.len());
                 for peer in peers {
-                    if reserve_peer(&mut self.rate_limit, &mut self.in_flight, &peer) {
+                    if reservable(&mut self.rate_limit, &self.in_flight, &peer) {
+                        self.in_flight.insert(peer.clone());
                         reserved.push(peer);
                     }
                 }
-                (reserved, requested)
+                requested
             }
             Recipients::All => {
                 self.refresh_known_peers();
-                let mut reserved = Vec::with_capacity(self.known_peers.len());
+                reserved.reserve_exact(self.known_peers.len());
                 for peer in &self.known_peers {
-                    if reserve_peer(&mut self.rate_limit, &mut self.in_flight, peer) {
+                    if reservable(&mut self.rate_limit, &self.in_flight, peer) {
+                        self.in_flight.insert(peer.clone());
                         reserved.push(peer.clone());
                     }
                 }
-                (reserved, !self.known_peers.is_empty())
+                !self.known_peers.is_empty()
             }
         };
-        if requested && reserved.is_empty() {
-            return None;
-        }
-        Some(reserved)
+        !requested || !reserved.is_empty()
     }
 
     /// Releases the reservations of `peers`.
@@ -154,15 +155,18 @@ impl<P: PublicKey, E: Clock> State<P, E> {
         }
     }
 
-    /// Charges each of `peers` for one message and releases their reservations.
-    ///
-    /// Space out pruning passes by the number of keys retained by the last pass.
+    /// Charges each of `peers` for one message, leaving their reservations in place.
     fn charge(&mut self, peers: &[P]) {
         for peer in peers {
             // The reservation kept every other send from spending this quota since it was checked
             let _ = self.rate_limit.check_key(peer);
-            self.in_flight.remove(peer);
         }
+    }
+
+    /// Prunes the rate limiter if it has grown enough since the last pass.
+    ///
+    /// Space out pruning passes by the number of keys retained by the last pass.
+    fn maybe_prune(&mut self) {
         if self.rate_limit.len() >= self.prune_at {
             self.prune();
         }
@@ -175,28 +179,39 @@ impl<P: PublicKey, E: Clock> State<P, E> {
     }
 }
 
-/// Reserves `peer` if it is neither reserved nor rate-limited.
-fn reserve_peer<P: PublicKey, E: Clock>(
+/// Returns whether `peer` is neither reserved nor rate-limited.
+///
+/// Callers mark a reservable peer and record it in spare capacity of the reservation's list
+/// without any fallible step in between, so every mark is owned as soon as it exists.
+fn reservable<P: PublicKey, E: Clock>(
     rate_limit: &mut KeyedRateLimiter<P, E>,
-    in_flight: &mut HashSet<P>,
+    in_flight: &HashSet<P>,
     peer: &P,
 ) -> bool {
-    !in_flight.contains(peer)
-        && rate_limit.check_key_available(peer).is_ok()
-        && in_flight.insert(peer.clone())
+    !in_flight.contains(peer) && rate_limit.check_key_available(peer).is_ok()
 }
 
 /// Reservations held by one send, released without charge unless committed.
+///
+/// Owns every mark from the moment it is inserted until it is removed under the same lock as the
+/// final charge, so an unwind at any point (including from [`Clock::current`]) releases exactly
+/// the marks this send holds.
 struct Reservation<'a, P: PublicKey, E: Clock> {
     state: &'a Mutex<State<P, E>>,
     peers: Vec<P>,
 }
 
 impl<P: PublicKey, E: Clock> Reservation<'_, P, E> {
-    /// Charges the reserved peers and returns them.
+    /// Charges the reserved peers, releases them, and returns them.
     fn commit(mut self) -> Vec<P> {
+        let mut state = self.state.lock();
+
+        // Keep the marks until every charge succeeds, so an unwinding charge releases them all
+        // and cannot leave a gap in which another send reserves a peer this one later releases
+        state.charge(&self.peers);
+        state.release(&self.peers);
         let peers = mem::take(&mut self.peers);
-        self.state.lock().charge(&peers);
+        state.maybe_prune();
         peers
     }
 }
@@ -343,15 +358,20 @@ impl<S: UnlimitedSender, E: Clock> CheckedSender<'_, S, E> {
 
         // Reserve the recipients so no other send can spend their quota until this submission
         // returns. The wrapped sender then runs without the lock shared by all clones, as it may
-        // drop messages whose release runs arbitrary code.
+        // drop messages whose release runs arbitrary code. The reservation exists before the
+        // first mark, so an unwind while reserving releases every mark already taken.
         let single = matches!(recipients, Recipients::One(_));
-        let Some(peers) = self.state.lock().reserve(recipients) else {
-            return SendReceipt::new(Unreliable::Rejected, Vec::new());
-        };
-        let reservation = Reservation {
+        let mut reservation = Reservation {
             state: self.state,
-            peers,
+            peers: Vec::new(),
         };
+        if !self
+            .state
+            .lock()
+            .reserve(recipients, &mut reservation.peers)
+        {
+            return SendReceipt::new(Unreliable::Rejected, Vec::new());
+        }
         let recipients = if single {
             Recipients::One(reservation.peers[0].clone())
         } else {
@@ -1162,6 +1182,108 @@ mod tests {
             assert!(limited.state.lock().in_flight.is_empty());
             assert!(limited.check(peers).is_err());
         });
+    }
+
+    /// A fixed clock whose read panics once a countdown of reads elapses.
+    #[derive(Clone)]
+    struct FaultyClock {
+        countdown: Arc<Mutex<Option<usize>>>,
+    }
+
+    impl FaultyClock {
+        fn new() -> Self {
+            Self {
+                countdown: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        /// Makes the `reads`-th subsequent read panic.
+        fn panic_on_read(&self, reads: usize) {
+            *self.countdown.lock() = Some(reads);
+        }
+    }
+
+    impl commonware_runtime::Clock for FaultyClock {
+        fn current(&self) -> SystemTime {
+            let fault = {
+                let mut countdown = self.countdown.lock();
+                let remaining = countdown.map(|remaining| remaining - 1);
+                *countdown = remaining.filter(|remaining| *remaining > 0);
+                remaining == Some(0)
+            };
+            assert!(!fault, "clock read failed");
+            SystemTime::UNIX_EPOCH
+        }
+
+        fn sleep(&self, _: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
+            std::future::ready(())
+        }
+
+        fn sleep_until(&self, _: SystemTime) -> impl Future<Output = ()> + Send + 'static + use<> {
+            std::future::ready(())
+        }
+    }
+
+    #[test]
+    fn clock_panic_while_reserving_releases_marks() {
+        let sender = MockSender::new();
+        let clock = FaultyClock::new();
+        let mut limited = LimitedSender::new(
+            sender.clone(),
+            quota_per_second(1),
+            clock.clone(),
+            MockPeers::new(),
+        );
+        let peers = Recipients::Some(vec![key(1), key(2)]);
+
+        // The first peer is marked before reading the clock for the second panics
+        let checked = limited.check(peers.clone()).unwrap();
+        clock.panic_on_read(2);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            checked.send(IoBuf::from(b"reserving"), false)
+        }));
+        assert!(result.is_err());
+        assert!(limited.state.lock().in_flight.is_empty());
+        assert!(sender.sent_messages().is_empty());
+
+        // Nothing was charged, so both peers remain reachable
+        let receipt = limited
+            .check(peers)
+            .unwrap()
+            .send_with_receipt(IoBuf::from(b"accepted"), false);
+        assert_eq!(receipt.into_recipients(), vec![key(1), key(2)]);
+    }
+
+    #[test]
+    fn clock_panic_while_charging_releases_marks() {
+        let sender = MockSender::new();
+        let clock = FaultyClock::new();
+        let mut limited = LimitedSender::new(
+            sender.clone(),
+            quota_per_second(1),
+            clock.clone(),
+            MockPeers::new(),
+        );
+        let peers = Recipients::Some(vec![key(1), key(2)]);
+
+        // Reserving reads the clock once per peer, and charging the second peer panics after the
+        // submission was accepted
+        let checked = limited.check(peers).unwrap();
+        clock.panic_on_read(4);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            checked.send(IoBuf::from(b"charging"), false)
+        }));
+        assert!(result.is_err());
+        assert_eq!(sender.sent_messages().len(), 1);
+        assert!(limited.state.lock().in_flight.is_empty());
+
+        // Released marks let a later send reserve any peer it still has quota for
+        let receipt = limited
+            .check(Recipients::One(key(2)))
+            .unwrap()
+            .send_with_receipt(IoBuf::from(b"after"), false);
+        assert_eq!(receipt.into_recipients(), vec![key(2)]);
+        assert!(limited.state.lock().in_flight.is_empty());
     }
 
     #[test]
