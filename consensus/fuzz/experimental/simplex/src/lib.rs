@@ -1,3 +1,5 @@
+#[cfg(any(feature = "mocks", test))]
+pub mod blame;
 pub mod byzzfuzz;
 pub(crate) mod chaos;
 #[cfg(any(feature = "mocks", test))]
