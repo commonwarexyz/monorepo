@@ -130,7 +130,7 @@ stability_scope!(BETA {
         /// Recipients that exceed their rate limit will be filtered out. The
         /// returned [`CheckedSender`] will only send to non-limited recipients.
         ///
-        /// Checking does not consume a recipient's rate limit. It is consumed when
+        /// Checking neither reserves nor consumes quota. Quota is consumed when
         /// [`CheckedSender::send`] submits a message to that recipient and the
         /// submission is accepted.
         ///
@@ -138,7 +138,7 @@ stability_scope!(BETA {
         ///
         /// A [`CheckedSender`] containing only the recipients that are not
         /// currently rate-limited, or an error with the earliest instant at which
-        /// all recipients will be available if all are rate-limited.
+        /// any recipient can be retried if all are rate-limited.
         fn check(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
@@ -204,7 +204,9 @@ stability_scope!(BETA {
         ///
         /// The rate limit is shared with every clone of the originating [`LimitedSender`].
         /// A pre-checked recipient whose rate limit was consumed through a clone since the
-        /// check is skipped. If every pre-checked recipient is skipped, the send is rejected.
+        /// check is skipped. A recipient may also be skipped while another submission to it
+        /// is in progress, even if quota remains. The send proceeds with the remaining
+        /// recipients; if all are skipped, it is rejected.
         ///
         /// # Offline Recipients
         ///
@@ -251,8 +253,9 @@ stability_scope!(BETA {
         ///
         /// # Rate Limiting
         ///
-        /// Recipients that exceed their rate limit will be skipped. The message is
-        /// still sent to non-limited recipients.
+        /// Skips rate-limited recipients and may skip recipients busy with another submission.
+        /// The sender still attempts the remaining recipients. If all are skipped, the returned
+        /// list is empty.
         ///
         /// # Panics
         ///
