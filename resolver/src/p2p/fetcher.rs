@@ -482,7 +482,7 @@ where
             } else {
                 self.retry_delay
             };
-            next_deadline = next_deadline.min(self.context.current() + delay);
+            next_deadline = next_deadline.min(self.context.current().saturating_add_ext(delay));
         }
         self.waiter = Some(next_deadline);
     }
@@ -552,6 +552,12 @@ where
     pub fn get_pending_deadline(&self) -> Option<SystemTime> {
         // Pending may be emptied by cancel/retain
         if self.pending.is_empty() {
+            return None;
+        }
+
+        // A waiter at the clock ceiling cannot become due once the clock reaches it, so
+        // leave the queue idle until an external change clears the waiter.
+        if self.waiter == Some(SystemTime::limit()) && self.context.current() >= SystemTime::limit() {
             return None;
         }
 
@@ -2094,6 +2100,31 @@ mod tests {
             assert!(!fetcher.pending.contains(&MockKey(1)));
             assert_eq!(fetcher.len_active(), 1);
         });
+    }
+
+    /// A zero-delay fallback saturates at the clock ceiling instead of overflowing. It still
+    /// wakes from an earlier time, but cannot spin once the clock has reached the ceiling.
+    #[test]
+    fn test_zero_delay_fallback_saturates_at_clock_ceiling() {
+        for (offset, expected) in [
+            (Duration::from_nanos(1), Some(SystemTime::limit())),
+            (Duration::ZERO, None),
+        ] {
+            let cfg = deterministic::Config::default()
+                .with_start_time(SystemTime::limit() - offset);
+            Runner::new(cfg).start(|context| async move {
+                let mut fetcher = create_test_fetcher(context.child("fetcher"));
+                fetcher.retry_delay = Duration::ZERO;
+                let peer = PrivateKey::from_seed(1).public_key();
+                fetcher.reconcile(slice::from_ref(&peer));
+                let mut sender = WrappedSender::new(FailMockSender::default());
+
+                fetcher.add_ready(MockKey(1));
+                fetcher.fetch(&mut sender);
+                assert_eq!(fetcher.len_pending(), 1);
+                assert_eq!(fetcher.get_pending_deadline(), expected);
+            });
+        }
     }
 
     /// Rejected submissions do not spend quota, so with no retry delay a failed scan waits for the
