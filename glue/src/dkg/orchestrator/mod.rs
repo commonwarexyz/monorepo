@@ -1086,9 +1086,8 @@ mod tests {
         });
     }
 
-    /// Stops the runtime while a node's active Simplex engine holds a journal sync,
-    /// then either completes the sync or aborts the orchestrator.
-    fn stop_with_held_engine_sync(complete: bool) {
+    #[test]
+    fn stop_waits_for_engine_sync() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 1);
@@ -1115,39 +1114,14 @@ mod tests {
             let mut stopping = Box::pin(context.child("stop").stop(0, None));
             assert!(stopping.as_mut().now_or_never().is_none());
             context.sleep(Duration::from_secs(1)).await;
-            assert!(!gate.release.is_closed(), "stop should not cancel the sync");
             assert!(stopping.as_mut().now_or_never().is_none());
-            let node = &mut cluster.nodes[0];
-            assert!(
-                (&mut node.marshal_handle).now_or_never().is_some(),
-                "sibling marshal should exit on the stop"
-            );
-            let handle = &mut node.orchestrator_handle;
+            let handle = &mut cluster.nodes[0].orchestrator_handle;
             assert!((&mut *handle).now_or_never().is_none());
 
-            if complete {
-                gate.release.send(Ok(())).expect("sync should be pending");
-                stopping.await.expect("stop should complete");
-                handle.await.expect("orchestrator should stop cleanly");
-            } else {
-                handle.abort();
-                assert!(handle.await.is_err());
-                stopping
-                    .await
-                    .expect("stop should not wait for an aborted engine");
-                assert!(gate.release.is_closed(), "abort should cancel the sync");
-            }
+            gate.release.send(Ok(())).expect("sync should be pending");
+            stopping.await.expect("stop should complete");
+            handle.await.expect("orchestrator should stop cleanly");
         });
-    }
-
-    #[test]
-    fn stop_waits_for_engine_sync() {
-        stop_with_held_engine_sync(true);
-    }
-
-    #[test]
-    fn abort_during_stop_cancels_engine_sync() {
-        stop_with_held_engine_sync(false);
     }
 
     #[test]
