@@ -1067,7 +1067,7 @@ mod tests {
             let sender = MockSender::new();
             let mut limited = LimitedSender::new(
                 sender.clone(),
-                quota_per_second(1),
+                quota_per_second(2),
                 context,
                 MockPeers::new(),
             );
@@ -1110,9 +1110,15 @@ mod tests {
 
             // Each accepted submission charged its recipients once and released them
             assert!(limited.state.lock().in_flight.is_empty());
-            assert!(limited.check(Recipients::One(busy)).is_err());
-            assert!(limited.check(Recipients::One(unrelated)).is_err());
             assert_eq!(sender.sent_messages().len(), 2);
+            for peer in [busy, unrelated] {
+                let receipt = limited
+                    .check(Recipients::One(peer.clone()))
+                    .unwrap()
+                    .send_with_receipt(IoBuf::from(b"remaining cell"), false);
+                assert_eq!(receipt.recipients(), std::slice::from_ref(&peer));
+                assert!(limited.check(Recipients::One(peer)).is_err());
+            }
         });
     }
 
