@@ -356,9 +356,10 @@ impl Sorter {
             at = end;
 
             // A prefix outside the span joins the nearest group, which keeps the groups in key
-            // order.
+            // order. The group is bounded before it is narrowed, because a prefix far above the
+            // span would otherwise wrap where addresses are narrower than a prefix.
             let prefix = key_prefix(&data[key_at..end]);
-            let group = ((prefix.saturating_sub(self.base) >> self.shift) as usize).min(last);
+            let group = (prefix.saturating_sub(self.base) >> self.shift).min(last as u64) as usize;
             let len = self.lens[group];
             let region = &mut self.regions[group * self.width..][len..self.width];
             match region.get_mut(..record.len()) {
