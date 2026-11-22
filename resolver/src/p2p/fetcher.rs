@@ -750,14 +750,25 @@ mod tests {
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
+    use commonware_p2p::{
+        LimitedSender, Recipients, UnlimitedSender,
+        utils::limited::{self, Connected},
+    };
     use commonware_runtime::{
-        IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
+        Clock, IoBufs, Quota, Runner as _, Supervisor as _,
         deterministic::{self, Context, Runner},
         telemetry::metrics::metric_samples,
     };
     use commonware_utils::{NZDuration, NZU32, sync::RwLock};
-    use std::{collections::BTreeMap, slice, sync::Arc, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        slice,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
+    };
 
     #[derive(Debug)]
     struct CheckedSender<'a, S: UnlimitedSender> {
@@ -861,27 +872,33 @@ mod tests {
         }
     }
 
-    // Mock sender that rate-limits per peer
-    struct LimitedMockSender<E: Clock, S> {
-        inner: S,
-        rate_limiter: Arc<RwLock<KeyedRateLimiter<PublicKey, E>>>,
-    }
+    // Peer source with no known peers, as the resolver never sends to `Recipients::All`
+    #[derive(Clone)]
+    struct NoPeers;
 
-    impl<E: Clock, S: Clone> Clone for LimitedMockSender<E, S> {
-        fn clone(&self) -> Self {
-            Self {
-                inner: self.inner.clone(),
-                rate_limiter: self.rate_limiter.clone(),
-            }
+    impl Connected for NoPeers {
+        type PublicKey = PublicKey;
+
+        fn subscribe(&self) -> commonware_utils::channel::ring::Receiver<Vec<PublicKey>> {
+            commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1)).1
         }
     }
 
-    impl<E: Clock, S> LimitedMockSender<E, S> {
+    // Rate-limits per peer with the production limiter, which charges a peer only when its
+    // submission is accepted
+    struct LimitedMockSender<E: Clock, S: UnlimitedSender<PublicKey = PublicKey>>(
+        limited::LimitedSender<E, S, NoPeers>,
+    );
+
+    impl<E: Clock, S: UnlimitedSender<PublicKey = PublicKey>> Clone for LimitedMockSender<E, S> {
+        fn clone(&self) -> Self {
+            Self(self.0.clone())
+        }
+    }
+
+    impl<E: Clock, S: UnlimitedSender<PublicKey = PublicKey>> LimitedMockSender<E, S> {
         fn new(inner: S, quota: Quota, clock: E) -> Self {
-            Self {
-                inner,
-                rate_limiter: Arc::new(RwLock::new(KeyedRateLimiter::new(quota, clock))),
-            }
+            Self(limited::LimitedSender::new(inner, quota, clock, NoPeers))
         }
     }
 
@@ -889,23 +906,13 @@ mod tests {
         for LimitedMockSender<E, S>
     {
         type PublicKey = PublicKey;
-        type Checked<'a> = CheckedSender<'a, S>;
+        type Checked<'a> = limited::CheckedSender<'a, S, E>;
 
         fn check(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
         ) -> Result<Self::Checked<'_>, SystemTime> {
-            let peer = match &recipients {
-                Recipients::One(p) => p,
-                _ => unimplemented!(),
-            };
-
-            self.rate_limiter.write().check_key(peer)?;
-
-            Ok(CheckedSender {
-                sender: &mut self.inner,
-                recipients,
-            })
+            self.0.check(recipients)
         }
     }
 
@@ -2076,44 +2083,68 @@ mod tests {
         });
     }
 
-    /// Failed sends consume quota even with no retry delay, so retries wait for it to refill.
+    /// Rejected submissions do not spend quota, so with no retry delay a failed send is retried
+    /// at once. An accepted send does spend it, and the next request waits for the refill.
     #[test]
-    fn test_zero_retry_delay_respects_rate_limit_after_send_failure() {
+    fn test_zero_retry_delay_charges_quota_only_for_accepted_sends() {
+        #[derive(Clone)]
+        struct Toggle(Arc<AtomicBool>);
+
+        impl UnlimitedSender for Toggle {
+            type PublicKey = PublicKey;
+
+            fn send(
+                &mut self,
+                _recipients: Recipients<Self::PublicKey>,
+                _message: impl Into<IoBufs> + Send,
+                _priority: bool,
+            ) -> Unreliable<Feedback> {
+                if self.0.load(Ordering::SeqCst) {
+                    Unreliable::new(Feedback::Ok)
+                } else {
+                    Unreliable::Rejected
+                }
+            }
+        }
+
         Runner::timed(Duration::from_secs(3)).start(|context| async move {
             let mut fetcher = create_test_fetcher(context.child("fetcher"));
             fetcher.retry_delay = Duration::ZERO;
             let peer = PrivateKey::from_seed(1).public_key();
             fetcher.reconcile(slice::from_ref(&peer));
+            let accept = Arc::new(AtomicBool::new(false));
             let mut sender = WrappedSender::new(LimitedMockSender::new(
-                FailMockSenderInner,
+                Toggle(accept.clone()),
                 Quota::per_second(NZU32!(1)),
                 context.child("rate_limiter"),
             ));
             assert_eq!(fetcher.request_id, None);
 
-            // The failed send leaves the key pending and permits an immediate retry.
+            // Each failed send leaves the key pending and is retried immediately.
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.len_pending(), 1);
             assert_eq!(fetcher.len_active(), 0);
             let next_id = fetcher.request_id.unwrap();
             assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
-
-            // The retry finds the quota exhausted and waits for its refill deadline.
-            fetcher.fetch(&mut sender);
-            let refill = context.current() + Duration::from_secs(1);
-            assert_eq!(fetcher.request_id, Some(next_id));
-            assert_eq!(fetcher.get_pending_deadline(), Some(refill));
-
-            // Refilling permits one more failed send before the next rate-limit wait.
-            context.sleep_until(refill).await;
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.request_id, Some(next_id.wrapping_add(1)));
+            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
+
+            // The accepted send spends the quota and activates the key.
+            accept.store(true, Ordering::SeqCst);
             fetcher.fetch(&mut sender);
-            assert_eq!(fetcher.request_id, Some(next_id.wrapping_add(1)));
+            assert_eq!(fetcher.len_pending(), 0);
+            assert_eq!(fetcher.len_active(), 1);
+
+            // The next request finds the quota exhausted and waits for the refill.
+            let sent_id = fetcher.request_id;
+            fetcher.add_ready(MockKey(2));
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.request_id, sent_id);
             assert_eq!(
                 fetcher.get_pending_deadline(),
-                Some(refill + Duration::from_secs(1))
+                Some(context.current() + Duration::from_secs(1))
             );
         });
     }
