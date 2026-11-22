@@ -624,7 +624,6 @@ pub mod tests {
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
     use rand::Rng;
     use std::{
-        any::TypeId,
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
         ops::Range,
@@ -1117,8 +1116,11 @@ pub mod tests {
 
     /// Reopen a pruned database after dropping an unapplied batch, then after committing a batch
     /// without syncing Current's bitmap metadata.
-    pub async fn test_simulate_write_failures<M, C, F, Fut>(mut context: Context, mut open_db: F)
-    where
+    pub async fn test_simulate_write_failures<M, C, F, Fut>(
+        mut context: Context,
+        mut open_db: F,
+        num_keys: u64,
+    ) where
         M: merkle::Graftable,
         C: DbAny<Family = M> + 'static,
         C::Key: TestKey,
@@ -1126,20 +1128,6 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        // Keep long histories for all four ordered/unordered and fixed/variable combinations,
-        // covering both Merkle families and the plain, P1, and P2 index layouts.
-        let long_history_variants = [
-            TypeId::of::<OrderedFixedDb>(),
-            TypeId::of::<UnorderedVariableP1Db>(),
-            TypeId::of::<OrderedVariableMmbDb>(),
-            TypeId::of::<UnorderedFixedMmbP2Db>(),
-        ];
-        let num_keys = if long_history_variants.contains(&TypeId::of::<C>()) {
-            1_000
-        } else {
-            128
-        };
-
         let partition = "build-random-fail-commit".to_string();
         let rng_seed = context.next_u64();
         let db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
@@ -2177,90 +2165,75 @@ pub mod tests {
         };
     }
 
+    // Ordered variants. The last field is the recovery workload in keys.
+    // The four long histories across both lists cover every
+    // ordered/unordered and fixed/variable combination, both Merkle families, and all index layouts.
+    macro_rules! with_ordered_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, of, OrderedFixedDb, fixed_config, 1000);
+            $cb!($($args)*, ov, OrderedVariableDb, variable_config, 128);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned, 128);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned, 128);
+            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config, 128);
+            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config, 128);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned, 128);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned, 1000);
+        };
+    }
+
+    // Unordered variants, with the same recovery workload field.
+    macro_rules! with_unordered_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config, 128);
+            $cb!($($args)*, uv, UnorderedVariableDb, variable_config, 128);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned, 1000);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned, 128);
+            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config, 1000);
+            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config, 128);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned, 128);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned, 128);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned, 128);
+        };
+    }
+
     // Defines all variants across both supported Merkle families.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
-            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
-            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned);
+            with_ordered_variants!($cb!($($args)*));
+            with_unordered_variants!($cb!($($args)*));
         };
     }
 
-    // Defines 6 ordered variants.
-    macro_rules! with_ordered_variants {
-        ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
-            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
-            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config_partitioned);
-        };
-    }
-
-    // Defines 6 unordered variants.
-    macro_rules! with_unordered_variants {
-        ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
-            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config_partitioned);
-            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config_partitioned);
-            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config_partitioned);
-            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config_partitioned);
-        };
-    }
-
-    // Emit one `#[test_group("slow")] #[test_traced]` test per variant.
-    // The fn name is `<f>_<variant_label>`, the body runs the async test
-    // function `f` on a fresh runner, passing it the `Context` and a DB opener
-    // for the variant.
-    macro_rules! test_for_variant {
-        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident) => {
+    // Emit one slow test per variant. Each gets a fresh runner and database opener.
+    // Recovery tests also show the number of keys in their name and pass it to the test.
+    macro_rules! run_variant {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident $(, $keys:literal)?) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[test_traced($traced)]
-                fn [<$f _ $label>]() {
+                fn [<$f _ $label $(_ $keys _keys)?>]() {
                     let executor = deterministic::Runner::default();
                     executor.start(|context| async move {
                         // Box the future to prevent stack overflow when
                         // monomorphized across DB variants.
-                        Box::pin($f(context, open_db_fn!($db, $cfg))).await
+                        Box::pin($f(context, open_db_fn!($db, $cfg) $(, $keys)?)).await
                     });
                 }
             }
+        };
+    }
+
+    // Other tests choose their own workload.
+    macro_rules! test_for_variant {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_recovery_keys:literal) => {
+            run_variant!($f, $traced, $label, $db, $cfg);
         };
     }
 
@@ -2311,7 +2284,7 @@ pub mod tests {
     }
 
     test_for_all_variants!(test_build_random_close_reopen, "WARN");
-    test_for_all_variants!(test_simulate_write_failures, "WARN");
+    with_all_variants!(run_variant!(test_simulate_write_failures, "WARN"));
     test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
     test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
     test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
