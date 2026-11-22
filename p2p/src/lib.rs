@@ -138,7 +138,7 @@ stability_scope!(BETA {
         ///
         /// A [`CheckedSender`] containing only the recipients that are not
         /// currently rate-limited, or an error with the earliest instant at which
-        /// any recipient can be retried if all are rate-limited.
+        /// all recipients will be available if all are rate-limited.
         fn check(
             &mut self,
             recipients: Recipients<Self::PublicKey>,
