@@ -236,6 +236,10 @@ where
     /// to the next time to try the request.
     waiter: Option<SystemTime>,
 
+    /// Whether the last unsuccessful scan ran at the clock ceiling with nothing later to wait for.
+    /// Only meaningful while the waiter is set to the ceiling, and cleared by the next scan.
+    parked: bool,
+
     /// Delay before retrying an unresolved fetch or a failed send.
     retry_delay: Duration,
 
@@ -303,6 +307,7 @@ where
             pending: PrioritySet::new(),
             pending_sequence: 0,
             waiter: None,
+            parked: false,
             retry_delay: config.retry_delay,
             priority_requests: config.priority_requests,
             targets: AHashMap::new(),
@@ -388,6 +393,7 @@ where
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
     ) {
         self.waiter = None;
+        self.parked = false;
 
         // Track when an unsuccessful scan can try again. Without a future deadline or
         // eligible peer, the queue waits for an external change.
@@ -484,6 +490,9 @@ where
             };
             next_deadline = next_deadline.min(self.context.current().saturating_add_ext(delay));
         }
+        // Time cannot advance past the ceiling, so a scan that fails there would be retried
+        // at once forever. Park until an external change clears the waiter.
+        self.parked = next_deadline == SystemTime::limit() && now >= SystemTime::limit();
         self.waiter = Some(next_deadline);
     }
 
@@ -555,9 +564,7 @@ where
             return None;
         }
 
-        // A waiter at the clock ceiling cannot become due once the clock reaches it, so
-        // leave the queue idle until an external change clears the waiter.
-        if self.waiter == Some(SystemTime::limit()) && self.context.current() >= SystemTime::limit() {
+        if self.parked && self.waiter == Some(SystemTime::limit()) {
             return None;
         }
 
@@ -2110,8 +2117,8 @@ mod tests {
             (Duration::from_nanos(1), Some(SystemTime::limit())),
             (Duration::ZERO, None),
         ] {
-            let cfg = deterministic::Config::default()
-                .with_start_time(SystemTime::limit() - offset);
+            let cfg =
+                deterministic::Config::default().with_start_time(SystemTime::limit() - offset);
             Runner::new(cfg).start(|context| async move {
                 let mut fetcher = create_test_fetcher(context.child("fetcher"));
                 fetcher.retry_delay = Duration::ZERO;
@@ -2123,6 +2130,15 @@ mod tests {
                 fetcher.fetch(&mut sender);
                 assert_eq!(fetcher.len_pending(), 1);
                 assert_eq!(fetcher.get_pending_deadline(), expected);
+
+                // Only a scan that fails at the ceiling parks the queue. A retry scheduled for the
+                // ceiling from an earlier time stays an ordinary due deadline, and an external
+                // change wakes a parked queue.
+                assert_eq!(fetcher.parked, expected.is_none());
+                if expected.is_none() {
+                    fetcher.add_ready(MockKey(2));
+                    assert!(fetcher.get_pending_deadline().is_some());
+                }
             });
         }
     }
