@@ -1659,12 +1659,10 @@ pub mod tests {
                 reopened.root, observed_f.root,
                 "{label}: root diverged on reopen",
             );
-            if pruned {
-                assert_eq!(
-                    reopened.pruned, observed_f.pruned,
-                    "{label}: bitmap pruning boundary changed on reopen",
-                );
-            }
+            assert_eq!(
+                reopened.pruned, observed_f.pruned,
+                "{label}: bitmap pruning boundary changed on reopen",
+            );
             reopened.assert_bits(&observed_f, &format!("{label} on reopen"));
             for (key, value) in keys.iter().zip(&values) {
                 assert_eq!(
