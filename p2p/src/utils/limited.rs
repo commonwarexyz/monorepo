@@ -245,20 +245,30 @@ impl<S: UnlimitedSender, E: Clock> CheckedSender<'_, S, E> {
 
         // Hold the lock from the availability check until the charge, so no clone can spend the
         // same quota in between and nothing is charged unless the submission is accepted.
-        let mut state = self.state.lock();
-        let Ok(recipients) = state.available(recipients) else {
-            return SendReceipt::new(Unreliable::Rejected, Vec::new());
+        let receipt = {
+            let mut state = self.state.lock();
+            let Ok(recipients) = state.available(recipients) else {
+                return SendReceipt::new(Unreliable::Rejected, Vec::new());
+            };
+            let peers = match &recipients {
+                Recipients::One(peer) => vec![peer.clone()],
+                Recipients::Some(peers) => peers.clone(),
+                Recipients::All => unreachable!("available recipients are always resolved"),
+            };
+
+            // Submit a shared reference to the message. The wrapped sender may drop what it is
+            // given before returning, and releasing the last reference to a buffer can run
+            // arbitrary owner code, which must not run under the lock shared by all clones.
+            let feedback = self.sender.send(recipients, message.clone(), priority);
+            if feedback.accepted() {
+                state.charge(&peers);
+            }
+            SendReceipt::new(feedback, peers)
         };
-        let peers = match &recipients {
-            Recipients::One(peer) => vec![peer.clone()],
-            Recipients::Some(peers) => peers.clone(),
-            Recipients::All => unreachable!("available recipients are always resolved"),
-        };
-        let feedback = self.sender.send(recipients, message, priority);
-        if feedback.accepted() {
-            state.charge(&peers);
-        }
-        SendReceipt::new(feedback, peers)
+
+        // Release the caller's reference only after the lock is released
+        drop(message);
+        receipt
     }
 }
 
@@ -826,6 +836,75 @@ mod tests {
                 .unwrap()
                 .send_with_receipt(IoBuf::from(b"hello"), false);
             assert_eq!(receipt.into_recipients(), vec![peer]);
+        });
+    }
+
+    /// Buffer owner that records, when released, whether the limiter lock was free.
+    struct LockProbe {
+        lock_free: Arc<dyn Fn() -> bool + Send + Sync>,
+        releases: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl AsRef<[u8]> for LockProbe {
+        fn as_ref(&self) -> &[u8] {
+            b"probe"
+        }
+    }
+
+    impl Drop for LockProbe {
+        fn drop(&mut self) {
+            // Probe without blocking so a violation fails the test instead of deadlocking
+            self.releases.lock().push((self.lock_free)());
+        }
+    }
+
+    #[test]
+    fn message_released_outside_limiter_lock() {
+        Runner::default().start(|context| async move {
+            let sender = MockSender::new();
+            let peers = MockPeers::new();
+            let mut limited =
+                LimitedSender::new(sender.clone(), quota_per_second(1), context, peers);
+            let state = limited.state.clone();
+            let lock_free: Arc<dyn Fn() -> bool + Send + Sync> =
+                Arc::new(move || state.try_lock().is_some());
+            let releases = Arc::new(Mutex::new(Vec::new()));
+            let probe = || {
+                IoBuf::from(bytes::Bytes::from_owner(LockProbe {
+                    lock_free: lock_free.clone(),
+                    releases: releases.clone(),
+                }))
+            };
+            let peer = key(1);
+
+            // The wrapped sender drops unaccepted submissions before returning
+            for feedback in [Unreliable::Rejected, Unreliable::new(Feedback::Closed)] {
+                sender.set_feedback(feedback);
+                let receipt = limited
+                    .check(Recipients::One(peer.clone()))
+                    .unwrap()
+                    .send_with_receipt(probe(), false);
+                assert_eq!(receipt.feedback(), feedback);
+            }
+            assert_eq!(*releases.lock(), vec![true, true]);
+
+            // An accepted submission is charged and retained by the wrapped sender
+            sender.set_feedback(Unreliable::new(Feedback::Ok));
+            let checked = limited.check(Recipients::One(peer)).unwrap();
+            assert!(checked.send(probe(), false).accepted());
+            assert_eq!(releases.lock().len(), 2);
+            sender.sent.lock().clear();
+            assert_eq!(*releases.lock(), vec![true, true, true]);
+
+            // A send whose recipient was charged through a clone since the check is not submitted
+            let mut other = limited.clone();
+            let stale = limited.check(Recipients::One(key(2))).unwrap();
+            other
+                .check(Recipients::One(key(2)))
+                .unwrap()
+                .send(IoBuf::from(b"winner"), false);
+            assert_eq!(stale.send(probe(), false), Unreliable::Rejected);
+            assert_eq!(*releases.lock(), vec![true, true, true, true]);
         });
     }
 
