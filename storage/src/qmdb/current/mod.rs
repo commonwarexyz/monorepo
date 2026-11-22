@@ -1010,7 +1010,8 @@ pub mod tests {
         commit_writes(db, pending).await
     }
 
-    /// Build a random database, close and reopen it, and return the auditor state.
+    /// Build a random history over `num_keys` keys, sync and reopen the database,
+    /// verify its root, and return the runtime auditor state.
     #[boxed]
     async fn build_random_close_reopen_round<M, C, F, Fut>(
         mut context: Context,
@@ -1047,7 +1048,7 @@ pub mod tests {
         context.auditor().state()
     }
 
-    /// Run `test_build_random_close_reopen` against a database factory.
+    /// Compare runtime audit hashes from two runs of the same random history over `num_keys` keys.
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
@@ -2169,7 +2170,8 @@ pub mod tests {
         };
     }
 
-    // Ordered variants. The last field is the recovery workload in keys.
+    // Ordered variants. The last field sets the history size in keys for both the write-recovery
+    // and close/reopen determinism tests.
     // The four long histories across both lists cover every
     // ordered/unordered and fixed/variable combination, both Merkle families, and all index layouts.
     macro_rules! with_ordered_variants {
@@ -2189,7 +2191,7 @@ pub mod tests {
         };
     }
 
-    // Unordered variants, with the same recovery workload field.
+    // Unordered variants, with the same history size field.
     macro_rules! with_unordered_variants {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, uf, UnorderedFixedDb, fixed_config, 128);
@@ -2216,7 +2218,7 @@ pub mod tests {
     }
 
     // Emit one slow test per variant. Each gets a fresh runner and database opener.
-    // Recovery tests also show the number of keys in their name and pass it to the test.
+    // Pass the optional key count to the test and include it in its name.
     macro_rules! run_variant {
         ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident $(, $keys:literal)?) => {
             paste::paste! {
@@ -2236,7 +2238,7 @@ pub mod tests {
 
     // Other tests choose their own workload.
     macro_rules! test_for_variant {
-        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_recovery_keys:literal) => {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_history_keys:literal) => {
             run_variant!($f, $traced, $label, $db, $cfg);
         };
     }
