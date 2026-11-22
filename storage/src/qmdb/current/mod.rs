@@ -624,6 +624,7 @@ pub mod tests {
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
     use rand::Rng;
     use std::{
+        any::TypeId,
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
         ops::Range,
@@ -965,12 +966,10 @@ pub mod tests {
         })
     }
 
-    /// Apply random operations to the given db, committing them (randomly and at the end) only if
-    /// `commit_changes` is true. Returns the db; callers should commit if needed.
+    /// Apply random operations to the database, committing periodically and at the end.
     #[boxed]
     pub async fn apply_random_ops<F, C>(
         num_elements: u64,
-        commit_changes: bool,
         rng_seed: u64,
         mut db: C,
     ) -> Result<C, Error<F>>
@@ -992,9 +991,7 @@ pub mod tests {
                 (k, Some(v))
             })
             .collect();
-        if commit_changes {
-            db = commit_writes(db, writes).await?;
-        }
+        db = commit_writes(db, writes).await?;
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency. Accumulate writes and commit periodically.
@@ -1007,14 +1004,11 @@ pub mod tests {
             }
             let v = TestValue::from_seed(rng.next_u64());
             pending.push((rand_key, Some(v)));
-            if commit_changes && rng.next_u32().is_multiple_of(20) {
+            if rng.next_u32().is_multiple_of(20) {
                 db = commit_writes(db, pending.drain(..)).await?;
             }
         }
-        if commit_changes {
-            db = commit_writes(db, pending).await?;
-        }
-        Ok(db)
+        commit_writes(db, pending).await
     }
 
     /// Build a random database, close and reopen it, and return the auditor state.
@@ -1036,7 +1030,7 @@ pub mod tests {
         let partition = "build-random".to_string();
         let rng_seed = context.next_u64();
         let db: C = open_db(context.child("first"), partition.clone()).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+        let db = apply_random_ops::<M, C>(ELEMENTS, rng_seed, db)
             .await
             .unwrap();
         let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -1121,10 +1115,8 @@ pub mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Run `test_simulate_write_failures` against a database factory.
-    ///
-    /// This test builds a random database and simulates recovery from different types of
-    /// failure scenarios.
+    /// Reopen a pruned database after dropping an unapplied batch, then after committing a batch
+    /// without syncing Current's bitmap metadata.
     pub async fn test_simulate_write_failures<M, C, F, Fut>(mut context: Context, mut open_db: F)
     where
         M: merkle::Graftable,
@@ -1134,27 +1126,50 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        const ELEMENTS: u64 = 1000;
+        // Keep long histories for all four ordered/unordered and fixed/variable combinations,
+        // covering both Merkle families and the plain, P1, and P2 index layouts.
+        let long_history_variants = [
+            TypeId::of::<OrderedFixedDb>(),
+            TypeId::of::<UnorderedVariableP1Db>(),
+            TypeId::of::<OrderedVariableMmbDb>(),
+            TypeId::of::<UnorderedFixedMmbP2Db>(),
+        ];
+        let num_keys = if long_history_variants.contains(&TypeId::of::<C>()) {
+            1_000
+        } else {
+            128
+        };
 
         let partition = "build-random-fail-commit".to_string();
         let rng_seed = context.next_u64();
         let db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
-        let db = commit_writes(db, []).await.unwrap();
+
+        // Use a key outside the random histories so its value is known at both reopens.
+        let key = <C::Key as TestKey>::from_seed(num_keys);
+        let value = C::Value::from_seed(0);
+        let db = commit_writes(db, [(key, Some(value.clone()))])
+            .await
+            .unwrap();
         let committed_root = db.root();
-        let committed_op_count = db.bounds().end;
+        let committed_bounds = db.bounds();
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
+        assert!(
+            db.bounds().start > committed_bounds.start,
+            "fixture must prune operation history"
+        );
 
-        // Perform more random operations without committing any of them.
-        let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
+        // Drop the merkleized deletion before applying it. Reopen must recover the committed value.
+        let batch = db
+            .new_batch()
+            .write(key, None)
+            .merkleize(&db)
             .await
             .unwrap();
-
-        // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
-        // state of the DB should be as of the last commit.
+        drop(batch);
         drop(db);
         let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 1),
@@ -1162,44 +1177,42 @@ pub mod tests {
         ))
         .await;
         assert_eq!(db.root(), committed_root);
-        assert_eq!(db.bounds().end, committed_op_count);
+        assert_eq!(db.bounds().end, committed_bounds.end);
+        assert_eq!(db.get(&key).await.unwrap(), Some(value.clone()));
 
-        // Re-apply the exact same operations, this time committed.
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
+        // Commit the second history and the deletion. Drop before sync or prune so the journal
+        // is durable but Current must recover using the older bitmap metadata.
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed + 1, db)
             .await
             .unwrap();
-
-        // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
-        // before sync/prune is called. We do this by dropping the db without calling
-        // sync or prune.
+        let db = commit_writes(db, [(key, None)]).await.unwrap();
         let committed_op_count = db.bounds().end;
         drop(db);
-
-        // We should be able to recover, so the root should differ from the previous commit, and
-        // the op count should be greater than before.
         let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 2),
-            partition.clone(),
+            partition,
         ))
         .await;
-        let scenario_2_root = db.root();
+        assert_eq!(db.bounds().end, committed_op_count);
+        assert_eq!(db.get(&key).await.unwrap(), None);
+        let recovered_root = db.root();
+        drop(db);
 
-        // To confirm the second committed hash is correct we'll re-build the DB in a new
-        // partition, but without any failures. They should have the exact same state.
+        // An uninterrupted database with the same commits must have the same root and op count.
         let fresh_partition = "build-random-fail-commit-fresh".to_string();
-        let db: C = Box::pin(open_db(context.child("fresh"), fresh_partition.clone())).await;
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+        let db: C = Box::pin(open_db(context.child("fresh"), fresh_partition)).await;
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
-        let db = commit_writes(db, []).await.unwrap();
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
+        let db = commit_writes(db, [(key, Some(value))]).await.unwrap();
+        let db = apply_random_ops::<M, C>(num_keys, rng_seed + 1, db)
             .await
             .unwrap();
+        let db = commit_writes(db, [(key, None)]).await.unwrap();
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
-        // State from scenario #2 should match that of a successful commit.
         assert_eq!(db.bounds().end, committed_op_count);
-        assert_eq!(db.root(), scenario_2_root);
+        assert_eq!(db.root(), recovered_root);
 
         db.destroy().await.unwrap();
     }
@@ -1302,7 +1315,7 @@ pub mod tests {
         let db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
 
         // Apply random operations with commits to advance the inactivity floor.
-        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+        let db = apply_random_ops::<M, C>(ELEMENTS, rng_seed, db)
             .await
             .unwrap();
         let merkleized = db.new_batch().merkleize(&db).await.unwrap();
