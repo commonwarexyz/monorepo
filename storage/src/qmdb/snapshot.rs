@@ -25,7 +25,8 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_runtime::{
-    AbortOnDrop, Blob, Error as RuntimeError, IoBufMut, ReadOptions, Spawner, Storage, WriteOptions,
+    AbortOnDrop, Blob, Error as RuntimeError, Handle, IoBufMut, ReadOptions, Spawner, Storage,
+    WriteOptions,
 };
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
@@ -1090,10 +1091,29 @@ where
     Ok(())
 }
 
+/// The decoder tasks of a build that are still running. Dropping them aborts each one.
+struct Decoders<T: Send + 'static>(FuturesUnordered<Handle<T>>);
+
+impl<T: Send + 'static> Decoders<T> {
+    /// Abort every decoder still running.
+    fn abort(&self) {
+        for decoder in &self.0 {
+            decoder.abort();
+        }
+    }
+}
+
+impl<T: Send + 'static> Drop for Decoders<T> {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
 /// Replay the chunks of `scan` into `buckets` (see [route]), on up to `tasks` tasks at a time,
 /// and pass each chunk's result on in position order. Returns false if `scan` stopped the build.
 ///
-/// Every task has ended when this returns, whatever it returns.
+/// Every task has ended when this returns, whatever it returns. A failure, or a scan that stops
+/// the build, aborts the tasks still replaying.
 #[allow(clippy::too_many_arguments)]
 async fn route_chunks<F, E, C, R, S>(
     context: &E,
@@ -1132,32 +1152,31 @@ where
     // many wait without idling a decoder behind a slow chunk.
     let window = 2 * decoders;
     let mut chunks = chunks.into_iter().enumerate();
-    let mut running = FuturesUnordered::new();
+    let mut running = Decoders(FuturesUnordered::new());
     let mut waiting = BTreeMap::new();
     let (mut started, mut passed) = (0, 0);
     let routed = async {
         loop {
-            while running.len() < decoders && started - passed < window {
+            while running.0.len() < decoders && started - passed < window {
                 let Some((index, chunk)) = chunks.next() else {
                     break;
                 };
                 let mut visitor = scan.visitor(chunk.clone());
                 let (log, buckets) = (log.clone(), buckets.clone());
-                let decoder = context
-                    .child("snapshot_decoder")
-                    .dedicated()
-                    .spawn(move |context| async move {
+                let decoder = context.child("snapshot_decoder").dedicated().spawn(
+                    move |context| async move {
                         route(&context, &*log, chunk, init_buffer, &buckets, &mut visitor).await?;
-                        Ok::<_, Error<F>>(visitor.finish()?)
-                    })
-                    .abort_on_drop();
-                running.push(async move { (index, decoder.join().await) });
+                        Ok::<_, Error<F>>((index, visitor.finish()?))
+                    },
+                );
+                running.0.push(decoder);
                 started += 1;
             }
-            let Some((index, output)) = running.next().await else {
+            let Some(output) = running.0.next().await else {
                 return Ok(true);
             };
-            waiting.insert(index, output??);
+            let (index, output) = output??;
+            waiting.insert(index, output);
             while let Some(output) = waiting.remove(&passed) {
                 if !scan.send(output).await {
                     return Ok(false);
@@ -1168,8 +1187,10 @@ where
     }
     .await;
 
-    // Wait for the decoders still running before surfacing a failure, so that none outlives it.
-    while running.next().await.is_some() {}
+    // Decoders are still running if one failed or the scan stopped the build. Abort them, and
+    // wait for each to end so that none outlives the build.
+    running.abort();
+    while running.0.next().await.is_some() {}
     routed
 }
 
@@ -1538,11 +1559,15 @@ mod tests {
         translator::{EightCap, OneCap},
     };
     use commonware_runtime::{
-        BlobVersion, Runner as _, Supervisor as _, deterministic, reschedule,
+        BlobVersion, Clock as _, Runner as _, Supervisor as _, deterministic, reschedule,
     };
     use commonware_utils::{NZUsize, TestRng, probability, test_rng};
-    use core::ops::Range;
-    use futures::{Stream, future::ready, stream};
+    use core::{ops::Range, time::Duration};
+    use futures::{
+        Stream,
+        future::{pending, ready},
+        stream,
+    };
     use rand::RngExt as _;
     use std::collections::HashMap;
 
@@ -2121,6 +2146,120 @@ mod tests {
                     context.scan("scratch").await,
                     Err(RuntimeError::PartitionMissing(_))
                 ));
+            }
+        });
+    }
+
+    /// A log whose first chunk fails to replay, or replays as [MemoryLog]'s does, and whose other
+    /// chunks never finish replaying.
+    struct StuckLog {
+        log: MemoryLog,
+        fail: bool,
+    }
+
+    impl Contiguous for StuckLog {
+        type Item = TestOp;
+
+        fn bounds(&self) -> Range<u64> {
+            self.log.bounds()
+        }
+
+        fn read(
+            &self,
+            position: u64,
+        ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send {
+            self.log.read(position)
+        }
+
+        fn read_many(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
+            self.log.read_many(positions)
+        }
+
+        fn try_read_sync(&self, position: u64) -> Option<Self::Item> {
+            self.log.try_read_sync(position)
+        }
+
+        fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
+            self.log.try_read_many_sync(positions)
+        }
+
+        async fn replay(
+            &self,
+            range: Range<u64>,
+            buffer: NonZeroUsize,
+            read_options: ReadOptions,
+        ) -> Result<impl Stream<Item = Result<Batch<Self::Item>, JournalError>> + Send, JournalError>
+        {
+            if range.start > 0 {
+                pending::<()>().await;
+            }
+
+            // The decoders of the other chunks get a turn first, so that they are replaying by
+            // the time this chunk's replay returns.
+            reschedule().await;
+            if self.fail {
+                return Err(JournalError::Runtime(RuntimeError::ReadFailed));
+            }
+            self.log.replay(range, buffer, read_options).await
+        }
+    }
+
+    #[test]
+    fn test_build_aborts_decoders() {
+        // A decoder whose read never returns must not hold up a build that has failed, or one
+        // that its scan has stopped. Every task must still have ended when the build returns.
+        deterministic::Runner::default().start(|context| async move {
+            let ops = test_log(4000, |rng| vec![rng.random(); 32]);
+            for fail in [true, false] {
+                let context = context.child("case").with_attribute("fail", fail);
+                let log = Arc::new(StuckLog {
+                    log: MemoryLog(ops.clone()),
+                    fail,
+                });
+                let passed = Passed::default();
+                let scan = Recorder {
+                    end: ops.len() as u64,
+                    passed: passed.clone(),
+                    limit: 1,
+                };
+                let building = {
+                    let (context, log) = (context.child("build"), log.clone());
+                    async move {
+                        let mut index = unordered::Index::new(context.child("index"), EightCap);
+                        build(
+                            &mut index,
+                            context,
+                            Location::<mmr::Family>::new(0),
+                            &log,
+                            NZUsize!(3),
+                            NZUsize!(1024),
+                            "scratch",
+                            scan,
+                        )
+                        .await
+                        .map(|_| ())
+                    }
+                };
+                let result = context
+                    .timeout(Duration::from_secs(1), building)
+                    .await
+                    .expect("build waited on a decoder");
+                if fail {
+                    assert!(matches!(
+                        result,
+                        Err(Error::Journal(JournalError::Runtime(
+                            RuntimeError::ReadFailed
+                        )))
+                    ));
+                    assert!(passed.lock().is_empty());
+                } else {
+                    result.unwrap();
+                    assert_eq!(passed.lock().len(), 1);
+                }
+                assert_eq!(Arc::strong_count(&log), 1);
             }
         });
     }

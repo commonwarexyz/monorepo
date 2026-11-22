@@ -107,10 +107,14 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         self.overflow = other.overflow;
     }
 
-    /// Insert every entry of `entries` as [Unordered::insert] would, growing the map once for
-    /// all of them and updating the metrics once.
+    /// Insert every entry of `entries` as [Unordered::insert] would, updating the metrics once.
+    /// An empty index grows its map once for all of them, and keeps no more room than their
+    /// translated keys need.
     pub(crate) fn load<'a>(&mut self, entries: impl ExactSizeIterator<Item = (&'a [u8], V)>) {
-        self.map.reserve(entries.len());
+        let empty = self.map.is_empty();
+        if empty {
+            self.map.reserve(entries.len());
+        }
         let mut keys = 0;
         let mut items = 0;
         for (key, v) in entries {
@@ -126,6 +130,12 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
                 }
             }
             items += 1;
+        }
+
+        // Entries that share a translated key take one slot of the map between them, so the map
+        // gives back the room they left unused.
+        if empty {
+            self.map.shrink_to_fit();
         }
         self.keys.inc_by(keys);
         self.items.inc_by(items);
@@ -327,6 +337,28 @@ mod tests {
     use crate::translator::OneCap;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+
+    /// Loading keys in order must leave the map no larger than inserting them one at a time
+    /// does, however many of them share a translated key.
+    #[test_traced]
+    fn test_load_sizes_map_for_translated_keys() {
+        deterministic::Runner::default().start(|context| async move {
+            // Ascending keys that all share one translated key, and that share one in runs.
+            for (case, stride) in [("shared", 1u64), ("runs", 1 << 50)] {
+                let context = context.child("case").with_attribute("keys", case);
+                let keys: Vec<_> = (0..8192).map(|i| (i * stride).to_be_bytes()).collect();
+                let mut loaded = Index::new(context.child("loaded"), OneCap);
+                let mut inserted = Index::new(context.child("inserted"), OneCap);
+                loaded.load(keys.iter().enumerate().map(|(i, key)| (key.as_slice(), i)));
+                for (i, key) in keys.iter().enumerate() {
+                    inserted.insert(key, i);
+                }
+                assert_eq!(loaded.items(), 8192);
+                assert_eq!(loaded.map.len(), inserted.map.len());
+                assert!(loaded.map.capacity() <= inserted.map.capacity());
+            }
+        });
+    }
 
     /// Loading must leave the index as inserting the same entries one at a time would, whether
     /// the index is empty or not, whether or not keys share a translated key, and whatever
