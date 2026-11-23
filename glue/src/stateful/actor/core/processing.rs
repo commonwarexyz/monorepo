@@ -5,7 +5,7 @@ use crate::stateful::{
             mailbox::{Message, Proposal, ProposalRequest},
             verifications::{Handler as Verifications, Request, VerificationRequest},
         },
-        processor::{Applied, Processor},
+        processor::{Applied, Processor, Prune},
     },
     db::Barrier,
 };
@@ -250,8 +250,14 @@ where
                     return;
                 }
 
-                // A pending prune suppresses successor barriers.
-                if pending_prune.is_none()
+                // A prune is ready once no barrier is active and a completed barrier covers its
+                // target. Until then the loop keeps working and barriers start as usual, which
+                // makes the target durable. A ready prune runs before the next barrier starts, so
+                // a steady stream of finalized blocks cannot postpone it forever.
+                let prune_ready = pending_prune.as_ref().is_some_and(|prune: &Prune<_>| {
+                    durability.barrier.is_none() && durability.covers(prune.barrier_height)
+                });
+                if !prune_ready
                     && durability.needs_barrier()
                     && !start_barrier(
                         self.context.as_present(),
@@ -268,35 +274,54 @@ where
                 // stream may yield while other requests are still ready.
                 verifications.complete_ready(&mut actions);
 
-                // A pending prune suppresses successor barriers, so run it before queued work
-                // when applied state needs a barrier. Otherwise, prune once the action queue
-                // and mailbox are empty.
-                let prune_needs_barrier = pending_prune.is_some() && durability.needs_barrier();
-                let action = if prune_needs_barrier {
+                // A ready prune runs before queued work. Otherwise work that is already available
+                // runs at once, a closed mailbox stops the loop, and an empty one waits for the
+                // first of a request completing, a message arriving, or the active barrier
+                // finishing.
+                let action = if prune_ready {
                     Err(TryRecvError::Empty)
                 } else if let Some(action) = actions.pop_front() {
                     Ok(action)
                 } else {
                     self.mailbox.try_recv().map(Action::Message)
                 };
-
-                // Work that is already available runs at once. Otherwise a pending prune runs, a
-                // closed mailbox stops the loop, and an empty one waits for the first of a request
-                // completing, a message arriving, or the active barrier finishing.
                 let next = match action {
                     Ok(action) => Either::Left(ready(Some(Step::Action(action)))),
-                    Err(error) => match (pending_prune.take(), error) {
-                        (Some(prune), _) => Either::Left(ready(Some(Step::Prune(prune)))),
-                        (None, TryRecvError::Disconnected) => {
+                    Err(error) => match (prune_ready, error) {
+                        (true, _) => Either::Left(ready(Some(Step::Prune(
+                            pending_prune.take().expect("ready prune must be pending"),
+                        )))),
+                        (false, TryRecvError::Disconnected) if pending_prune.is_none() => {
                             debug!("mailbox closed, stopping processing");
                             return;
                         }
-                        (None, TryRecvError::Empty) => {
+                        // A closed mailbox still lets a scheduled prune finish: wait for the
+                        // barrier that makes its target durable.
+                        (false, TryRecvError::Disconnected) => {
+                            let durability = &mut durability;
+                            let verifications = &mut verifications;
+                            let actions = &mut actions;
+                            Either::Right(Either::Left(async move {
+                                loop {
+                                    select! {
+                                        _ = verifications.complete_next(actions) => {
+                                            if let Some(action) = actions.pop_front() {
+                                                break Some(Step::Action(action));
+                                            }
+                                        },
+                                        completion = durability.completion() => {
+                                            break Some(Step::Barrier(completion));
+                                        },
+                                    }
+                                }
+                            }))
+                        }
+                        (false, TryRecvError::Empty) => {
                             let mailbox = &mut self.mailbox;
                             let durability = &mut durability;
                             let verifications = &mut verifications;
                             let actions = &mut actions;
-                            Either::Right(async move {
+                            Either::Right(Either::Right(async move {
                                 loop {
                                     select! {
                                         _ = verifications.complete_next(actions) => {
@@ -312,7 +337,7 @@ where
                                         },
                                     }
                                 }
-                            })
+                            }))
                         }
                     },
                 };
@@ -357,13 +382,19 @@ where
 
                     // Verifications start as they arrive, since one may certify the parent this
                     // build needs. Other messages and newly ready builds queue in order until the
-                    // build finishes.
+                    // build finishes. The active barrier still completes, so acknowledgements do
+                    // not wait for the build.
                     let mut receive_messages = true;
                     loop {
                         if receive_messages {
                             select! {
                                 _ = &mut build => break,
                                 _ = verifications.complete_next(&mut actions) => {},
+                                completion = durability.completion() => {
+                                    if !durability.complete(completion) {
+                                        return;
+                                    }
+                                },
                                 message = self.mailbox.recv() => match message {
                                     Some(Message::Verify(request)) => {
                                         verifications.schedule(Request::Verify(request));
@@ -376,6 +407,11 @@ where
                             select! {
                                 _ = &mut build => break,
                                 _ = verifications.complete_next(&mut actions) => {},
+                                completion = durability.completion() => {
+                                    if !durability.complete(completion) {
+                                        return;
+                                    }
+                                },
                             }
                         }
                     }
@@ -433,38 +469,13 @@ where
                     response.send_lossy(self.processor.readers());
                 }
                 Step::Prune(prune) => {
-                    // Pruning waits for the active barrier. It removes only history below a
-                    // durable finalized target, which no branch descending from the anchor reads,
-                    // so requests keep running.
-                    if durability.barrier.is_some() {
-                        let completion = verifications
-                            .drive(durability.completion(), &mut actions)
-                            .await;
-                        if !durability.complete(completion) {
-                            return;
-                        }
-                    }
-                    // A prune target applied after the last barrier started is not yet durable.
-                    if !durability.covers(prune.barrier_height) {
-                        assert!(
-                            durability.needs_barrier(),
-                            "uncovered prune target must have unapplied durability",
-                        );
-                        if !start_barrier(
-                            self.context.as_present(),
-                            &mut durability,
-                            &mut verifications,
-                            &mut actions,
-                            &mut self.processor,
-                        ).await {
-                            return;
-                        }
-                        let completion = durability.completion().await;
-                        if !durability.complete(completion) {
-                            return;
-                        }
-                        assert!(durability.covers(prune.barrier_height));
-                    }
+                    // A prune runs only once no barrier is active and its target is durable. It
+                    // removes only history below that target, which no branch descending from the
+                    // anchor reads, so requests keep running.
+                    assert!(
+                        durability.barrier.is_none() && durability.covers(prune.barrier_height),
+                        "prune must wait for a completed barrier covering its target",
+                    );
                     verifications
                         .drive(self.processor.prune(prune, &self.marshal), &mut actions)
                         .await;
