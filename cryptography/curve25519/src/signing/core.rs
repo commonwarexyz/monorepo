@@ -8,7 +8,7 @@ use crate::curve::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use commonware_codec::Write as _;
+use commonware_codec::{Buf, Write as _};
 use commonware_cryptography::{Hasher as _, Sha512, sha512::Digest};
 use commonware_parallel::{Sequential, Strategy};
 use core::num::NonZeroUsize;
@@ -18,8 +18,8 @@ pub(super) use scalar::Scalar;
 
 /// The exact byte encoding used to identify an Ed25519 verifying key.
 ///
-/// Batch verification hashes and groups keys by this encoding, then decompresses each distinct
-/// key in its point-processing phase.
+/// Batch verification hashes and groups keys by this encoding, then takes each distinct key's
+/// point from the first of its items.
 #[derive(Copy, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
 pub struct VerifyingKeyBytes([u8; 32]);
@@ -56,6 +56,8 @@ impl Signature {
 #[derive(Clone, Copy)]
 pub(super) struct Item<'a> {
     pub(super) key: &'a VerifyingKeyBytes,
+    /// The point `key` encodes.
+    pub(super) point: &'a GAffine,
     pub(super) r: &'a [u8; 32],
     pub(super) s: &'a [u8; 32],
     pub(super) namespace: Option<&'a [u8]>,
@@ -84,9 +86,7 @@ fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
 
 /// Groups `sorted` (pre-sorted `(key, original index)` pairs) into runs of equal keys, returned
 /// as `(start, end)` positions into `sorted`. This is batch verification's `A`-term coalescing:
-/// a signer reused across the batch contributes one MSM term instead of one per signature, and
-/// operating on raw `[u8; 32]` keys (rather than decompressed points) means a repeated `A` is
-/// only ever decompressed once, not once per occurrence.
+/// a signer reused across the batch contributes one MSM term instead of one per signature.
 fn group_ranges(sorted: &[(VerifyingKeyBytes, u32)]) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -304,55 +304,6 @@ fn signature_phase<B: Backend>(
     )
 }
 
-/// The decompression phase: turns a flat worklist of `count` point encodings, resolved by index
-/// via `encoding`, into terms of scalar zero, in one parallel pass over [`LANES`]-sized units.
-/// Each partition decompresses its units into one exactly sized term vector. The final unit is
-/// padded with identity terms.
-///
-/// Returns the term vectors in worklist order, or `None` if any encoding fails to decompress.
-fn decompress_phase<B, F>(
-    backend: B,
-    count: usize,
-    encoding: F,
-    strategy: &impl Strategy,
-) -> Option<Vec<Vec<[Term; LANES]>>>
-where
-    B: Backend,
-    F: Fn(usize) -> [u8; 32] + Send + Sync,
-{
-    // Unit `u` holds worklist entries from `u * LANES`, and entries past `count` pad the final
-    // unit with the identity encoding.
-    let unit = |unit: usize| -> [[u8; 32]; LANES] {
-        core::array::from_fn(|lane| {
-            let index = unit * LANES + lane;
-            if index < count {
-                encoding(index)
-            } else {
-                IDENTITY_ENCODING
-            }
-        })
-    };
-    strategy.run_batches(count.div_ceil(LANES), NonZeroUsize::MIN, LANES, |batches| {
-        // Each batch decompresses its contiguous range of units into its own vector, finishing
-        // every unit even after a failure. The vectors return in batch order, so together they
-        // follow the worklist, and the phase returns `None` if any encoding failed.
-        batches
-            .map_collect_vec(
-                |ranges| ranges,
-                |range| {
-                    let mut terms = Vec::with_capacity(range.len());
-                    let mut valid = true;
-                    for index in range {
-                        valid &= decompress_terms(backend, &unit(index), &mut terms);
-                    }
-                    valid.then_some(terms)
-                },
-            )
-            .into_iter()
-            .collect()
-    })
-}
-
 /// A signer with more signatures than this sums their `z*h` scalars in parallel, this many per
 /// task.
 const SUM_CHUNK: usize = 1024;
@@ -410,17 +361,18 @@ fn verify_batch_inner<B: Backend>(
 /// 1. Two concurrent tasks. [`signature_phase`] derives coefficients, hashes, computes the
 ///    per-signature scalars, and decompresses every `R` into a term with its `z`. Meanwhile
 ///    a sort by key and [`group_ranges`] place every signer's signatures adjacent in sorted
-///    order and group them, and [`decompress_phase`] decompresses every distinct `A`.
-/// 2. Every `A` term is recoded with its coalesced scalar, the sum of its signatures' `z*h`.
+///    order and group them.
+/// 2. Each distinct `A` contributes one term: its key's cached point with its coalesced scalar,
+///    the sum of its signatures' `z*h`.
 /// 3. One MSM over the terms, with the coalesced basepoint term `sum(z*s)*(-B)` riding along as
 ///    one final term, then the cofactored identity check.
 ///
-/// Returns `Err` if any `s` is non-canonical or any `R` or `A` fails to decompress, which
-/// stops the pipeline before the MSM, and otherwise whether the batch equation holds.
+/// Returns `Err` if any `s` is non-canonical or any `R` fails to decompress, which stops the
+/// pipeline before the MSM, and otherwise whether the batch equation holds.
 ///
-/// Step 1 finishes every unit of both tasks even after a failure. Signatures that are well
-/// formed but wrong already reach the MSM, so stopping step 1 early would not bound the work an
-/// adversary can cause.
+/// Step 1 finishes every unit even after a failure. Signatures that are well formed but wrong
+/// already reach the MSM, so stopping step 1 early would not bound the work an adversary can
+/// cause.
 fn verify_pipeline<B: Backend>(
     backend: B,
     items: &[Item<'_>],
@@ -428,7 +380,7 @@ fn verify_pipeline<B: Backend>(
     width: u32,
     strategy: &impl Strategy,
 ) -> Result<bool, ()> {
-    let (signatures, (order, groups, a_terms)) = strategy.join(
+    let (signatures, (order, groups)) = strategy.join(
         || signature_phase(backend, items, seed, width, strategy),
         || {
             // Each key carries its signature's original index, which leads from a signer's run
@@ -442,17 +394,13 @@ fn verify_pipeline<B: Backend>(
             // The signature phase occupies the pool meanwhile, so sort on this thread.
             order.sort_unstable_by_key(|&(key, _)| key);
             let groups = group_ranges(&order);
-
-            // Each signer's `A` decompresses once, from the key at the start of its run.
-            let encoding = |i: usize| *order[groups[i].0 as usize].0.as_bytes();
-            let a_terms = decompress_phase(backend, groups.len(), encoding, strategy);
-            (order, groups, a_terms)
+            (order, groups)
         },
     );
 
-    // Both tasks have finished every unit, and a non-canonical `s` or an undecodable `R` or `A`
+    // The signature phase has finished every unit, and a non-canonical `s` or an undecodable `R`
     // rejects the batch before the MSM.
-    let (Some(signatures), Some(mut a_terms)) = (signatures, a_terms) else {
+    let Some(signatures) = signatures else {
         return Err(());
     };
 
@@ -481,36 +429,41 @@ fn verify_pipeline<B: Backend>(
         )
     };
 
-    // Every `A` term vector with the index of its first group.
-    let mut next = 0;
-    let a_work: Vec<_> = a_terms
-        .iter_mut()
-        .map(|terms| {
-            let first = next;
-            next += terms.len() * LANES;
-            (terms, first)
-        })
-        .collect();
+    // Unit `k` holds the `A` terms of groups `k * LANES` onward. Each term pairs the cached
+    // point of the group's first key with the group's coalesced scalar. Padding lanes in the final
+    // unit hold identity terms of scalar zero. For the strategy's cost estimate, each unit counts
+    // its average share of the summed signatures and recoded groups.
+    let units = groups.len().div_ceil(LANES);
+    let work_per_unit = (order.len() + groups.len()).div_ceil(units);
+    let a_terms: Vec<Vec<[Term; LANES]>> =
+        strategy.run_batches(units, NonZeroUsize::MIN, work_per_unit, |batches| {
+            batches.map_collect_vec(
+                |ranges| ranges,
+                |range| {
+                    range
+                        .map(|unit| {
+                            let start = unit * LANES;
+                            let groups = &groups[start..groups.len().min(start + LANES)];
 
-    // The partition count stops growing at the strategy's parallelism, so each partition is
-    // weighted by its average share of the summed signatures and recoded groups, which keeps the
-    // strategy's estimates for different batch sizes apart.
-    let work_per_partition = (order.len() + groups.len()).div_ceil(a_work.len());
-    strategy.map_collect_vec_with_multiplier(a_work, work_per_partition, |(terms, first)| {
-        // Unit `k` of a vector holds groups from `first + k * LANES`. Padding lanes in the final
-        // unit have no group and keep scalar zero.
-        for (terms, groups) in terms.iter_mut().zip(groups[first..].chunks(LANES)) {
-            // Summing a unit's groups before recoding any of them overlaps the scattered loads of
-            // their summands.
-            let mut scalars = [Scalar::ZERO; LANES];
-            for (scalar, &group) in scalars.iter_mut().zip(groups) {
-                *scalar = group_scalar(group);
-            }
-            for (term, scalar) in terms.iter_mut().zip(&scalars[..groups.len()]) {
-                term.recode(scalar, width);
-            }
-        }
-    });
+                            // Summing a unit's groups before recoding any of them overlaps the
+                            // scattered loads of their summands.
+                            let mut scalars = [Scalar::ZERO; LANES];
+                            for (scalar, &group) in scalars.iter_mut().zip(groups) {
+                                *scalar = group_scalar(group);
+                            }
+                            let mut terms = [Term::zero(GAffine::IDENTITY); LANES];
+                            for ((term, scalar), &(first, _)) in
+                                terms.iter_mut().zip(&scalars).zip(groups)
+                            {
+                                let point = items[order[first as usize].1 as usize].point;
+                                *term = Term::new(*point, scalar, width);
+                            }
+                            terms
+                        })
+                        .collect()
+                },
+            )
+        });
 
     // The coalesced basepoint term: `sum(z*s)*B` moved to the equation's other side by negating
     // its scalar, one more ordinary MSM term.
@@ -619,13 +572,8 @@ fn straus<B: Backend, const N: usize>(
 
 /// Verifies one signature per the [module's validation criteria](super).
 ///
-/// `a_point`, when present, must be the point `a_bytes` encodes.
-pub fn verify(
-    a_bytes: &VerifyingKeyBytes,
-    a_point: Option<&G>,
-    sig: &Signature,
-    msg: &[u8],
-) -> bool {
+/// `a_point` must be the point `a_bytes` encodes.
+pub fn verify(a_bytes: &VerifyingKeyBytes, a_point: &GAffine, sig: &Signature, msg: &[u8]) -> bool {
     with_backend(Verify {
         a_bytes,
         a_point,
@@ -635,10 +583,9 @@ pub fn verify(
 }
 
 /// The inputs of [`verify`], checked with the selected backend's single-point operations.
-/// Without a cached point, the backend also decompresses the signature's `R` together with `A`.
 struct Verify<'a> {
     a_bytes: &'a VerifyingKeyBytes,
-    a_point: Option<&'a G>,
+    a_point: &'a GAffine,
     sig: &'a Signature,
     msg: &'a [u8],
 }
@@ -653,17 +600,10 @@ impl WithBackend for Verify<'_> {
         let Some(s) = Scalar::from_canonical_bytes(&self.sig.s) else {
             return false;
         };
-        let points = self.a_point.map_or_else(
-            || {
-                backend
-                    .decompress_pair([&self.sig.r, self.a_bytes.as_bytes()])
-                    .map(|[r, a]| (r, a.to_extended()))
-            },
-            |point| GAffine::decompress(&self.sig.r).map(|r| (r, *point)),
-        );
-        let Some((r, a)) = points else {
+        let Some(r) = GAffine::decompress(&self.sig.r) else {
             return false;
         };
+        let a = self.a_point.to_extended();
         let h = Scalar::from_bytes_mod_order_wide(
             &Sha512::hash(&[&self.sig.r, self.a_bytes.as_bytes(), self.msg]).0,
         );
@@ -709,8 +649,8 @@ impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
 ///
 /// Empty input is rejected.
 ///
-/// `A` is coalesced by its raw encoding before ever being decompressed (see [`group_ranges`]), so
-/// a signer reused across the batch is decompressed once, not once per signature.
+/// `A` is coalesced by its raw encoding (see [`group_ranges`]), so a signer reused across the
+/// batch contributes one term, not one per signature.
 pub(super) fn verify_batch_bytes(
     rng: &mut impl CryptoRng,
     items: &[Item<'_>],
@@ -721,6 +661,67 @@ pub(super) fn verify_batch_bytes(
         items,
         strategy,
     })
+}
+
+/// Reads `len` point encodings from `buf`, which must hold at least `len * 32` bytes, and
+/// decompresses them as [`GAffine::decompress`] does. Selects the backend once and decompresses
+/// [`LANES`] encodings per unit. Pads a final unit of more than [`SCALAR_TAIL`] encodings with
+/// the identity encoding, and decompresses a shorter one an encoding at a time.
+///
+/// Returns `map(encoding, point)` for every encoding in order, or `None` if any encoding is not
+/// a curve point.
+pub(super) fn read_points<T>(
+    buf: &mut impl Buf,
+    len: usize,
+    map: impl Fn(VerifyingKeyBytes, GAffine) -> T,
+) -> Option<Vec<T>> {
+    with_backend(ReadPoints { buf, len, map })
+}
+
+/// The longest final unit that [`read_points`] decompresses an encoding at a time. On NEON, one
+/// batched unit costs about as much as decompressing half its lanes one at a time.
+const SCALAR_TAIL: usize = LANES / 2;
+
+/// The inputs of [`read_points`].
+struct ReadPoints<'a, R, M> {
+    buf: &'a mut R,
+    len: usize,
+    map: M,
+}
+
+impl<R, M, T> WithBackend for ReadPoints<'_, R, M>
+where
+    R: Buf,
+    M: Fn(VerifyingKeyBytes, GAffine) -> T,
+{
+    type Output = Option<Vec<T>>;
+
+    // Inlined so the decompression compiles inside the backend's target-feature entry.
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        let mut values = Vec::with_capacity(self.len);
+        let mut remaining = self.len;
+        while remaining > 0 {
+            let count = remaining.min(LANES);
+            let mut encodings = [IDENTITY_ENCODING; LANES];
+            for encoding in &mut encodings[..count] {
+                self.buf.copy_to_slice(encoding);
+            }
+            if count <= SCALAR_TAIL {
+                for encoding in &encodings[..count] {
+                    let point = GAffine::decompress(encoding)?;
+                    values.push((self.map)(VerifyingKeyBytes::new(*encoding), point));
+                }
+            } else {
+                let points = GAffine::decompress_batch(backend, &encodings);
+                for (encoding, point) in encodings.iter().zip(points).take(count) {
+                    values.push((self.map)(VerifyingKeyBytes::new(*encoding), point?));
+                }
+            }
+            remaining -= count;
+        }
+        Some(values)
+    }
 }
 
 #[cfg(test)]
@@ -746,8 +747,8 @@ mod tests {
 
     #[test]
     fn structural_rejection_does_not_record_complete_work() {
-        // A valid signature, copies with a non-canonical `s` (top bit set) and an undecodable
-        // `R`, and a key with an undecodable encoding.
+        // A valid signature, and copies with a non-canonical `s` (top bit set) and an
+        // undecodable `R`.
         let signer = SigningKey::from_seed(&[7; 32]);
         let key = signer.verifying_key();
         let valid = signer.sign(b"resource", b"control");
@@ -755,8 +756,6 @@ mod tests {
         bad_s.bytes[63] |= 0x80;
         let mut bad_r = valid.clone();
         bad_r.bytes[..32].copy_from_slice(&undecodable());
-        let bad_key =
-            crate::signing::VerifyingKey::decode(Copying(undecodable().as_slice())).unwrap();
 
         // The last sample comes from the batch's outer `try_run`, which counts complete work only
         // when the pipeline reaches the batch equation. A signature over another message reaches
@@ -766,7 +765,6 @@ mod tests {
                 (&key, &valid, b"control".as_slice(), true, true),
                 (&key, &bad_s, b"control".as_slice(), false, false),
                 (&key, &bad_r, b"control".as_slice(), false, false),
-                (&bad_key, &valid, b"control".as_slice(), false, false),
                 (&key, &valid, b"different".as_slice(), false, true),
             ] {
                 let strategy = Recording::new(parallel);
@@ -895,88 +893,20 @@ mod tests {
             .unwrap()
     }
 
-    /// [`decompress_phase`] returns the terms in worklist order under every strategy. Every entry
-    /// must become one term carrying its own point, and an undecodable encoding in any position
-    /// must reject the worklist.
-    #[test]
-    fn decompress_phase_keeps_worklist_order() {
-        fn check<B: Backend>(backend: B, strategy: &impl Strategy) {
-            // Entry `i` encodes `(i + 1)*B`.
-            let base = GAffine::BASEPOINT.to_extended();
-            let mut point = base;
-            let encodings: Vec<[u8; 32]> = (0..18 * LANES + 3)
-                .map(|_| {
-                    let encoding = point.compress();
-                    point = point.add(base);
-                    encoding
-                })
-                .collect();
-            let invalid = undecodable();
+    type BatchItem = (VerifyingKey, Signature, Vec<u8>);
 
-            // Whole units and partial tails must preserve the original worklist indices.
-            for count in [
-                1,
-                LANES,
-                LANES + 1,
-                2 * LANES,
-                3 * LANES - 1,
-                3 * LANES + 1,
-                4 * LANES,
-                18 * LANES + 3,
-            ] {
-                // With entry `i` recoded at scalar `i + 1`, the terms sum to `sum((i + 1)^2)*B`.
-                let mut terms = decompress_phase(backend, count, |i| encodings[i], strategy)
-                    .expect("valid encodings decompress");
-                let units: usize = terms.iter().map(Vec::len).sum();
-                assert_eq!(units, count.div_ceil(LANES));
-                let width = msm::width_for(count, false);
-                for (i, term) in terms
-                    .iter_mut()
-                    .flat_map(|chunk| chunk.as_flattened_mut())
-                    .take(count)
-                    .enumerate()
-                {
-                    term.recode(&Scalar::from_u128(i as u128 + 1), width);
-                }
-                let chunks: Vec<&[Term]> = terms.iter().map(|chunk| chunk.as_flattened()).collect();
-                let actual = msm::multiscalar_mul(backend, &chunks, width, &Sequential);
-                let total: u128 = (1..=count as u128).map(|i| i * i).sum();
-                let expected = base.scalar_mul(Scalar::from_u128(total).bits_be());
-                assert_eq!(actual.compress(), expected.compress(), "count {count}");
-
-                // An undecodable encoding in the first unit, the second unit, the middle, or the
-                // last unit rejects.
-                for bad in [0, LANES.min(count - 1), count / 2, count - 1] {
-                    let encoding = |i: usize| if i == bad { invalid } else { encodings[i] };
-                    assert!(
-                        decompress_phase(backend, count, encoding, strategy).is_none(),
-                        "count {count}, bad {bad}",
-                    );
-                }
-            }
-        }
-
-        struct Check;
-
-        impl WithBackend for Check {
-            type Output = ();
-
-            fn call<B: Backend>(self, backend: B) {
-                explore(|strategy| check(backend, strategy));
-            }
-        }
-
-        with_backend(Check);
+    /// Decodes a verifying key, panicking if `bytes` is not a curve point.
+    fn verifying_key(bytes: [u8; 32]) -> VerifyingKey {
+        VerifyingKey::decode(Copying(&bytes[..])).unwrap()
     }
-
-    type BatchItem = (VerifyingKeyBytes, Signature, Vec<u8>);
 
     /// Borrows `batch` as items whose messages are hashed as given.
     fn items(batch: &[BatchItem]) -> Vec<Item<'_>> {
         batch
             .iter()
             .map(|(key, sig, message)| Item {
-                key,
+                key: &key.bytes,
+                point: &key.point,
                 r: &sig.r,
                 s: &sig.s,
                 namespace: None,
@@ -1011,7 +941,7 @@ mod tests {
                     RefSigningKey::from(draw())
                 };
                 (
-                    VerifyingKeyBytes::new(signer.verification_key().to_bytes()),
+                    verifying_key(signer.verification_key().to_bytes()),
                     Signature::from_bytes(signer.sign(&message).to_bytes()),
                     message,
                 )
@@ -1019,7 +949,7 @@ mod tests {
             .collect();
 
         // One repeated key plus one key per position not divisible by 3.
-        let mut keys: Vec<_> = batch.iter().map(|(key, _, _)| *key).collect();
+        let mut keys: Vec<_> = batch.iter().map(|(key, _, _)| key.clone()).collect();
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), 1 + n - n.div_ceil(3));
@@ -1144,7 +1074,7 @@ mod tests {
         verify_batch_bytes(&mut FuzzRng::new(vec![7; 32]), &items(batch), strategy)
     }
 
-    /// An undecodable `R` or `A`, a non-canonical `s`, or a signature over another message
+    /// An undecodable `R`, a non-canonical `s`, or a signature over another message
     /// rejects the batch wherever it sits: in the first or last lane of a unit, on either side of
     /// partition boundaries, and on the repeated signer or an independent one.
     #[test]
@@ -1161,13 +1091,12 @@ mod tests {
 
                     // Every corruption rejects at both sides of unit boundaries and in the tail.
                     for position in [0, 1, 7, 8, 15, 16, 23, 24, 39, 40, 63, 64, 69] {
-                        for corruption in 0..4 {
+                        for corruption in 0..3 {
                             let mut batch = batch.clone();
-                            let (key, sig, msg) = &mut batch[position];
+                            let (_, sig, msg) = &mut batch[position];
                             match corruption {
                                 0 => sig.r = invalid,
-                                1 => *key = VerifyingKeyBytes::new(invalid),
-                                2 => sig.s[31] |= 0x80,
+                                1 => sig.s[31] |= 0x80,
                                 _ => msg[0] ^= 1,
                             }
                             assert!(
@@ -1181,10 +1110,10 @@ mod tests {
             });
     }
 
-    /// Signatures whose equation holds when an undecodable point counts as the identity, so only
-    /// the decoding check rejects them. Each comes with a control that swaps the undecodable
-    /// encoding for the identity's encoding and verifies.
-    fn decode_only_forgeries() -> [(BatchItem, BatchItem); 2] {
+    /// Returns a forged signature and a control. The forgery's equation holds if its undecodable
+    /// `R` counts as the identity, so only the decoding check rejects it. The control replaces
+    /// that `R` with the identity's encoding and verifies.
+    fn decode_only_forgery() -> (BatchItem, BatchItem) {
         let invalid = undecodable();
         let mut identity = [0u8; 32];
         identity[0] = 1;
@@ -1195,7 +1124,7 @@ mod tests {
             bytes[..32].copy_from_slice(&r);
             bytes[32..].copy_from_slice(&s.to_bytes());
             (
-                VerifyingKeyBytes::new(key),
+                verifying_key(key),
                 Signature::from_bytes(bytes),
                 message.clone(),
             )
@@ -1207,49 +1136,45 @@ mod tests {
         };
         let bad_r = item(invalid, basepoint, challenge(&invalid, &basepoint));
         let good_r = item(identity, basepoint, challenge(&identity, &basepoint));
-
-        // With `R = k*B` and `s = k`, the equation holds for `A` the identity.
-        let k = Scalar::from_u128(0x1234_5678_9abc_def0);
-        let r = G::mul_base_secret(&k.to_bytes()).compress();
-        [(bad_r, good_r), (item(r, invalid, k), item(r, identity, k))]
+        (bad_r, good_r)
     }
 
-    /// An undecodable `R` or `A` rejects the batch even where the rest of its equation holds,
-    /// wherever it sits.
+    /// An undecodable `R` rejects the batch even where the rest of its equation holds, wherever it
+    /// sits.
     #[test]
-    fn verify_batch_bytes_rejects_undecodable_points_alone() {
+    fn verify_batch_bytes_rejects_undecodable_r_alone() {
         Builder::default()
             .with_seed(0)
             .with_search_limit(1)
             .test(|u| {
                 let batch = mixed_batch_with_repeats(u, 70)?;
-                for (forged, control) in decode_only_forgeries() {
-                    // In place of one signature of a valid batch, the control keeps the batch
-                    // valid, so the forgery can fail only on its undecodable point. Alone, the
-                    // pair must behave the same.
-                    for position in [0, 7, 8, 15, 16, 39, 69] {
-                        let mut accepted = batch.clone();
-                        accepted[position] = control.clone();
-                        assert!(
-                            explore(|strategy| verify_with(&accepted, strategy)),
-                            "position {position}"
-                        );
-                        let mut rejected = batch.clone();
-                        rejected[position] = forged.clone();
-                        assert!(
-                            !explore(|strategy| verify_with(&rejected, strategy)),
-                            "position {position}"
-                        );
-                    }
-                    assert!(explore(|strategy| verify_with(
-                        from_ref(&control),
-                        strategy
-                    )));
-                    assert!(!explore(|strategy| verify_with(
-                        from_ref(&forged),
-                        strategy
-                    )));
+                let (forged, control) = decode_only_forgery();
+
+                // In place of one signature of a valid batch, the control keeps the batch
+                // valid, so the forgery can fail only on its undecodable `R`. Verified alone,
+                // each item must give the same result.
+                for position in [0, 7, 8, 15, 16, 39, 69] {
+                    let mut accepted = batch.clone();
+                    accepted[position] = control.clone();
+                    assert!(
+                        explore(|strategy| verify_with(&accepted, strategy)),
+                        "position {position}"
+                    );
+                    let mut rejected = batch.clone();
+                    rejected[position] = forged.clone();
+                    assert!(
+                        !explore(|strategy| verify_with(&rejected, strategy)),
+                        "position {position}"
+                    );
                 }
+                assert!(explore(|strategy| verify_with(
+                    from_ref(&control),
+                    strategy
+                )));
+                assert!(!explore(|strategy| verify_with(
+                    from_ref(&forged),
+                    strategy
+                )));
                 Ok(())
             });
     }
@@ -1268,7 +1193,7 @@ mod tests {
                     let signer = &signers[i % distinct];
                     let message = (i as u64).to_le_bytes().to_vec();
                     (
-                        VerifyingKeyBytes::new(signer.verification_key().to_bytes()),
+                        verifying_key(signer.verification_key().to_bytes()),
                         Signature::from_bytes(signer.sign(&message).to_bytes()),
                         message,
                     )

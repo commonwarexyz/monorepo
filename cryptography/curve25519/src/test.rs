@@ -33,7 +33,7 @@ use crate::{
     signing::{Signature, SigningKey, VerifyingKey},
 };
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{Copying, DecodeExt as _};
+use commonware_codec::{Copying, DecodeExt as _, Encode as _, RangeCfg, Read as _};
 use commonware_cryptography::{BatchEntry, BatchVerifier as _};
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
@@ -42,7 +42,7 @@ use commonware_parallel::Sequential;
 use commonware_parallel::Strategy;
 #[cfg(test)]
 use commonware_parallel::mocks::explore;
-use commonware_utils::{FuzzRng, union_unique};
+use commonware_utils::{FuzzRng, TestRng, union_unique};
 use ed25519_consensus::SigningKey as ConsensusSigningKey;
 
 const SCALAR_ORDER: [u8; 32] = [
@@ -84,6 +84,10 @@ const LOW_ORDER_ENCODINGS: [[u8; 32]; 6] = [
     hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
     hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
 ];
+
+// The field modulus p = 2^255 - 19. Adding at most 18 to it gives the non-canonical `y` encodings.
+const FIELD_MODULUS: [u8; 32] =
+    hex!("0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f");
 
 // Bias payloads around fixed Ed25519 widths, SHA-512 boundaries, and length-prefix transitions.
 const INTERESTING_LENGTHS: [usize; 18] = [
@@ -235,6 +239,188 @@ impl Arbitrary<'_> for EncodedScalar {
     }
 }
 
+/// Decodes `bytes` as a verifying key, or derives a key from them as a seed when they do not
+/// encode a curve point.
+fn verifying_key(bytes: &[u8; 32]) -> VerifyingKey {
+    VerifyingKey::decode(Copying(bytes))
+        .unwrap_or_else(|_| SigningKey::decode(Copying(bytes)).unwrap().verifying_key())
+}
+
+/// A verifying key encoding, drawn so that accepted and rejected encodings are both common.
+#[derive(Clone, Copy, Debug)]
+struct KeyEncoding([u8; 32]);
+
+impl KeyEncoding {
+    /// Draws the encoding of a curve point, canonical or not.
+    fn point(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let mut bytes = if u.ratio(1, 4)? {
+            *u.choose(&LOW_ORDER_ENCODINGS)?
+        } else {
+            let SecretBytes(seed) = u.arbitrary()?;
+            SigningKey::decode(Copying(&seed))
+                .unwrap()
+                .verifying_key()
+                .as_ref()
+                .try_into()
+                .unwrap()
+        };
+
+        // `y` and `y + p` encode the same point when `y + p < 2^255`.
+        let y = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if bytes[2..31].iter().all(|&b| b == 0)
+            && bytes[31] & 0x7f == 0
+            && y <= 18
+            && u.arbitrary()?
+        {
+            let sign = bytes[31] & 0x80;
+            bytes = FIELD_MODULUS;
+            bytes[0] += y as u8;
+            bytes[31] |= sign;
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Checks that a key decodes exactly when the in-tree Ed25519 public key does, and that both
+    /// re-encode to the input.
+    fn run(self) {
+        let Self(bytes) = self;
+        let key = VerifyingKey::decode(Copying(&bytes));
+        let reference = commonware_cryptography::ed25519::PublicKey::decode(Copying(&bytes));
+        assert_eq!(key.is_ok(), reference.is_ok(), "key encoding: {self:?}");
+        if let (Ok(key), Ok(reference)) = (key, reference) {
+            assert_eq!(key.encode()[..], bytes, "key encoding: {self:?}");
+            assert_eq!(reference.encode()[..], bytes, "key encoding: {self:?}");
+        }
+    }
+}
+
+impl Arbitrary<'_> for KeyEncoding {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let mut bytes = match u.int_in_range(0u8..=5)? {
+            0..=2 => return Self::point(u),
+            3 => {
+                let mut bytes = FIELD_MODULUS;
+                bytes[0] += u.int_in_range(0..=18)?;
+                bytes
+            }
+            _ => u.arbitrary()?,
+        };
+        if u.arbitrary()? {
+            bytes[31] ^= 0x80;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+/// A sequence of key encodings, decoded together and one at a time.
+#[derive(Debug)]
+struct KeySequence {
+    encodings: Vec<KeyEncoding>,
+    /// The length prefix of the vector encoding, at least the number of encodings.
+    declared: usize,
+    /// How many trailing bytes to drop from the concatenated encodings.
+    truncate: usize,
+}
+
+impl Arbitrary<'_> for KeySequence {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Keys are drawn from seeded random bytes, so long sequences cost little input.
+        let len = u.arbitrary_len::<u8>()?;
+        let mut pool = vec![0u8; 64 * len];
+        rand_core::Rng::fill_bytes(&mut TestRng::new(u.arbitrary()?), &mut pool);
+        let mut pool = Unstructured::new(&pool);
+        let mode = u.int_in_range(0u8..=2)?;
+        let mut encodings = (0..len)
+            .map(|_| match mode {
+                0 | 1 => KeyEncoding::point(&mut pool),
+                _ => pool.arbitrary(),
+            })
+            .collect::<arbitrary::Result<Vec<_>>>()?;
+        if mode == 1 && len != 0 {
+            let index = arbitrary_item_index(u, len)?;
+            encodings[index] = u.arbitrary()?;
+        }
+        let declared = match u.int_in_range(0u8..=7)? {
+            0 => u32::MAX as usize,
+            1 => len + u.int_in_range(1..=2)?,
+            _ => len,
+        };
+        let truncate = if u.ratio(1, 4)? {
+            u.int_in_range(1..=33)?.min(32 * len)
+        } else {
+            0
+        };
+        Ok(Self {
+            encodings,
+            declared,
+            truncate,
+        })
+    }
+}
+
+/// The decoded keys with their canonical point encodings, or `None` if decoding failed.
+type DecodedKeys = Option<Vec<(VerifyingKey, [u8; 32])>>;
+
+fn decoded_keys<I: IntoIterator<Item = VerifyingKey>>(
+    keys: Result<I, commonware_codec::Error>,
+) -> DecodedKeys {
+    keys.ok().map(|keys| {
+        keys.into_iter()
+            .map(|key| {
+                let point = key.canonical_point();
+                (key, point)
+            })
+            .collect()
+    })
+}
+
+impl KeySequence {
+    /// Decodes `len` keys from `bytes` with repeated `read_cfg`.
+    fn read_each(bytes: &[u8], len: usize) -> DecodedKeys {
+        let mut buf = Copying(bytes);
+        decoded_keys(
+            (0..len)
+                .map(|_| VerifyingKey::read_cfg(&mut buf, &()))
+                .collect::<Result<Vec<_>, _>>(),
+        )
+    }
+
+    /// Checks that decoding a fixed-size array agrees with decoding its keys one at a time.
+    fn check_array<const N: usize>(bytes: &[u8]) {
+        assert_eq!(
+            decoded_keys(<[VerifyingKey; N]>::read_cfg(&mut Copying(bytes), &())),
+            Self::read_each(bytes, N),
+            "array of {N}"
+        );
+    }
+
+    /// Checks that decoding a vector or an array accepts exactly the inputs, and produces exactly
+    /// the keys and points, that decoding one key at a time does.
+    fn run(self) {
+        let mut bytes: Vec<u8> = self
+            .encodings
+            .iter()
+            .flat_map(|&KeyEncoding(e)| e)
+            .collect();
+        bytes.truncate(bytes.len() - self.truncate);
+
+        let mut encoded = self.declared.encode().to_vec();
+        encoded.extend_from_slice(&bytes);
+        let keys = Vec::<VerifyingKey>::read_cfg(&mut Copying(&encoded), &(RangeCfg::from(..), ()));
+        assert_eq!(
+            decoded_keys(keys),
+            Self::read_each(&bytes, self.declared),
+            "key sequence: {self:?}"
+        );
+
+        Self::check_array::<1>(&bytes);
+        Self::check_array::<7>(&bytes);
+        Self::check_array::<8>(&bytes);
+        Self::check_array::<9>(&bytes);
+        Self::check_array::<17>(&bytes);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Payload {
     namespace: Vec<u8>,
@@ -340,8 +526,7 @@ impl Item {
 
     fn low_order(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
         let Payload { namespace, message } = u.arbitrary()?;
-        let bytes = u.choose(&LOW_ORDER_ENCODINGS)?;
-        let verifying_key = VerifyingKey::decode(Copying(bytes)).unwrap();
+        let verifying_key = verifying_key(u.choose(&LOW_ORDER_ENCODINGS)?);
         let mut signature = [0; 64];
         signature[..32].copy_from_slice(u.choose(&LOW_ORDER_ENCODINGS)?);
         Ok(Self {
@@ -371,7 +556,7 @@ impl Item {
         Ok(Self {
             namespace,
             message,
-            verifying_key: VerifyingKey::decode(Copying(&verifying_key)).unwrap(),
+            verifying_key: self::verifying_key(&verifying_key),
             signature: Signature::decode(Copying(&signature)).unwrap(),
         })
     }
@@ -382,7 +567,7 @@ impl Item {
             1 => mutate_bytes(&mut self.message, u)?,
             2 => {
                 let EncodedPoint(bytes) = u.arbitrary()?;
-                self.verifying_key = VerifyingKey::decode(Copying(&bytes)).unwrap();
+                self.verifying_key = verifying_key(&bytes);
             }
             3 => {
                 let EncodedPoint(r) = u.arbitrary()?;
@@ -535,7 +720,7 @@ impl Batch {
 
 /// Fuzzing operations for public API invariants.
 pub mod fuzz {
-    use super::{Batch, Item, KeyExchange, Signing};
+    use super::{Batch, Item, KeyEncoding, KeyExchange, KeySequence, Signing};
     use arbitrary::{Arbitrary, Unstructured};
 
     /// A public API fuzzing operation.
@@ -547,6 +732,10 @@ pub mod fuzz {
         SigningMatchesConsensus,
         /// Check that verification agrees with `ed25519-consensus`.
         VerificationMatchesConsensus,
+        /// Check that verifying key decoding agrees with the in-tree Ed25519 public key.
+        KeyDecodingMatchesEd25519,
+        /// Check that decoding keys as a vector or an array agrees with decoding each key.
+        BatchDecodingMatchesIndividual,
         /// Check that key exchange agrees with `x25519-dalek`.
         KeyExchangeMatchesDalek,
     }
@@ -560,6 +749,8 @@ pub mod fuzz {
                 Self::VerificationMatchesConsensus => {
                     u.arbitrary::<Item>()?.verify();
                 }
+                Self::KeyDecodingMatchesEd25519 => u.arbitrary::<KeyEncoding>()?.run(),
+                Self::BatchDecodingMatchesIndividual => u.arbitrary::<KeySequence>()?.run(),
                 Self::KeyExchangeMatchesDalek => u.arbitrary::<KeyExchange>()?.run(),
             }
             Ok(())
@@ -591,6 +782,24 @@ pub mod fuzz {
             .with_seed(0)
             .with_search_limit(100)
             .test(|u| Plan::VerificationMatchesConsensus.run(u));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn minifuzz_key_decoding_matches_ed25519() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(1000)
+            .test(|u| Plan::KeyDecodingMatchesEd25519.run(u));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn minifuzz_batch_decoding_matches_individual() {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::BatchDecodingMatchesIndividual.run(u));
     }
 
     #[cfg(test)]
@@ -645,7 +854,15 @@ mod tests {
     #[test]
     fn wycheproof_ed25519_vectors() {
         for vector in WYCHEPROOF_ED25519 {
-            let verifying_key = VerifyingKey::decode(Copying(&vector.public_key)).unwrap();
+            // A key that is not a curve point fails to decode, and no vector with one is valid.
+            let Ok(verifying_key) = VerifyingKey::decode(Copying(&vector.public_key)) else {
+                assert!(
+                    !vector.valid_zip215,
+                    "Wycheproof Ed25519 test {} key",
+                    vector.tc_id,
+                );
+                continue;
+            };
             let valid = Signature::decode(Copying(vector.signature)).is_ok_and(|signature| {
                 let valid = verifying_key.verify_raw(vector.message, &signature);
                 assert_eq!(
