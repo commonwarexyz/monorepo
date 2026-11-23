@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = [ "base", "mocks", "twins" ]
+default = [ "base", "blame", "mocks", "twins" ]
 mocks = [
 	"commonware-consensus-fuzz-core/mocks",
 	"commonware-consensus/mocks",
@@ -20,6 +20,10 @@ mocks = [
 # `--no-default-features --features <partition>` builds only that group.
 base = [ "mocks" ]
 twins = [ "mocks" ]
+
+# The honest-blame scenario. No fuzz target uses it, so the build partitions
+# leave it out; only its test needs it.
+blame = [ "mocks" ]
 
 [package.metadata]
 cargo-fuzz = true
@@ -55,6 +59,11 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 commonware-invariants.workspace = true
+
+[[test]]
+name = "consensus_c7_acceptance"
+path = "tests/consensus_c7_acceptance.rs"
+required-features = ["blame"]
 
 [[bin]]
 name = "exp_simplex_cert_mock_shuffled_twins_mutator"
