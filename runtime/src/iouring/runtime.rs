@@ -2705,9 +2705,11 @@ impl Worker {
             } else {
                 // A future timer or re-look by itself uses a timed futex wait.
                 // Spinning is skipped when it could consume the remaining
-                // deadline.
-                let near_deadline = deadline
-                    .is_some_and(|deadline| deadline.saturating_duration_since(now) <= max_spin);
+                // deadline. The sample above predates the search and its
+                // re-look, so read the clock again.
+                let near_deadline = deadline.is_some_and(|deadline| {
+                    deadline.saturating_duration_since(Instant::now()) <= max_spin
+                });
 
                 // Spin unless it could outlast the deadline, then park against
                 // the same observation. A spin that saw the word move skips the
