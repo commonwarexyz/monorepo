@@ -1,9 +1,7 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
 use crate::stateful::{
-    Application,
-    actor::core::verifications::VerificationRequest,
-    db::ReadersOf,
+    Application, actor::core::verifications::VerificationRequest, db::ReadersOf,
 };
 use commonware_actor::{
     Feedback,

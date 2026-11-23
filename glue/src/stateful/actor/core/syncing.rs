@@ -869,8 +869,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (harness, mut artifact) =
                 TestHarness::new(context.child("harness"), anchor(7, 9)).await;
-            artifact.databases = Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))),
-            );
+            artifact.databases =
+                Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))));
 
             let (acknowledgement, waiter) = Exact::handle();
             let sync_done = harness.syncing.metrics.sync_done.clone();

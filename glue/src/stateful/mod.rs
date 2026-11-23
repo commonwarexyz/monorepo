@@ -98,9 +98,11 @@
 //! [`Finality::Candidate`] blocks. Each recovered state is retained once its processing
 //! completes, even if the request is later cancelled, and it answers the block's own verification.
 //!
-//! Recovery runs alongside other requests and processes one block at a time. Finalization can
-//! proceed while a request waits for ancestry, and the request then restarts its walk from the
-//! finalized state. Pruning waits for every active processing call before removing history.
+//! Recovery runs alongside other requests and processes one block at a time. Finalization and
+//! pruning never wait for it. Once a competing block is applied, a request's batch reads fail as
+//! [`ExecutionError::Stale`], and the request starts over from the finalized state. It is then
+//! answered from the canonical chain or processed on the new state. Pruning removes only history
+//! below a durable finalized target, which no descendant of the finalized tip reads.
 //!
 //! Once its parent's state is ready, a proposal forks batches from it and builds. Finalization
 //! waits until the build finishes or is cancelled.
@@ -147,7 +149,7 @@ mod tests;
 ///
 /// | Variant | [`process`](Application::process) | [`prepare`](Application::prepare) and [`propose`](Application::propose) |
 /// | --- | --- | --- |
-/// | [`Stale`](Self::Stale) | panics | panics |
+/// | [`Stale`](Self::Stale) | the request starts over against the new finalized tip | panics |
 /// | [`Invalid`](Self::Invalid) | same as [`None`] | declines |
 /// | [`Fatal`](Self::Fatal) | panics | panics |
 #[derive(Debug, Error)]
@@ -320,10 +322,11 @@ pub trait Application<E>: Clone + Send + 'static {
     /// still produce its state, and [`None`] or mismatched sync targets make [`Stateful`] panic.
     ///
     /// Processing must finish without waiting for a later finalization, including through
-    /// further ancestry reads, and may await other asynchronous I/O. Pruning, and finalization of
-    /// this block or of a competing block, wait for this call to end, and [`Stateful`] handles no
-    /// other message meanwhile. Data needed to produce finalized state must survive pruning and
-    /// state sync.
+    /// further ancestry reads, and may await other asynchronous I/O. Finalizing this block waits
+    /// for this call and reuses its result. Finalizing a competing block does not wait: the
+    /// batches' reads and merkleization then fail, and the error must reach [`Stateful`] as
+    /// [`ExecutionError::Stale`] (the [`From`] conversion from QMDB errors does this). Data needed
+    /// to produce finalized state must survive pruning and state sync.
     ///
     /// [`Stateful`] checks only [`sync_targets`](Self::sync_targets), so implementations must
     /// check any other block commitments, such as the canonical root of

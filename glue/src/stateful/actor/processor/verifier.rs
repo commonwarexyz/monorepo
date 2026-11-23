@@ -5,9 +5,9 @@
 //! touching the application, [`Verifier::next`] selects one block to process at a time, and
 //! [`Verifier::process`] processes that block once for all concurrent requests that need it.
 
-use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
+use super::{Application, Execution, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
-    Block, CertifiableBlock, Heightable, Roundable,
+    Block, Heightable,
     marshal::{
         Identifier,
         ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
@@ -22,8 +22,6 @@ use commonware_runtime::{
 use futures::StreamExt;
 use std::future::{Future, pending};
 use tracing::{Instrument as _, debug, info_span, warn};
-
-type PreparedStep<B> = (ExecutionStep<<B as Digestible>::Digest>, BoxedAncestry<B>);
 
 /// A request's acquired ancestry and the execution steps that remain before it completes.
 ///
@@ -206,7 +204,7 @@ where
         context: &E,
         provider: &P,
         prepared: &mut Prepared<A::Block>,
-    ) -> Option<PreparedStep<A::Block>>
+    ) -> Option<BoxedAncestry<A::Block>>
     where
         P: BlockProvider<Block = A::Block> + Clone,
     {
@@ -232,17 +230,7 @@ where
             }
         };
 
-        // The step identifies the block for admission decisions while the ancestry travels with
-        // the execution.
-        let block = ancestry
-            .peek()
-            .expect("prepared execution must have its block");
-        let step = ExecutionStep {
-            digest: block.digest(),
-            parent: block.parent(),
-            round: block.context().round(),
-        };
-        Some((step, ancestry))
+        Some(ancestry)
     }
 
     /// Processes one step from [`Self::next`] as a candidate, sharing the call with concurrent
