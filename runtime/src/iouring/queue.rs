@@ -120,20 +120,22 @@
 //!
 //! A steal takes half the unclaimed backlog, rounded up, so even a lone value
 //! can move to a thief. It claims the values with one exchange on the head,
-//! moves them into the thief's own queue, releases the claim, then publishes
-//! them with one tail store. It goes only into a queue with at least half its
-//! slots free, so the batch always fits. [`Queue::backlog`] is a hint
-//! about the source's backlog. The claim checks the source again, and the
-//! steal also checks the destination's room.
+//! hands the oldest to the thief, moves the rest into the thief's own queue,
+//! releases the claim, then publishes the rest with one tail store. The value
+//! it hands over is never published, so no other thief can take it first. A
+//! steal goes only into a queue with at least half its slots free, so the
+//! batch always fits. [`Queue::backlog`] is a hint about the source's backlog.
+//! The claim checks the source again, and the steal also checks the
+//! destination's room.
 //!
 //! The thief may refuse a lone value. It decides from the value's 55-bit head
 //! count inside the claim, on the head snapshot that the claim's exchange
 //! compares, so a lone claim takes exactly the value at the count it
 //! approved. A count names one queued value: every pop or claim moves `real`
 //! past it, and a push makes the backlog two, so a lone value seen twice at
-//! the same count has stayed queued in between, unless the count went round
-//! all `2^55` positions in between, the stall assumption below. The backlog
-//! hint reports that count as well.
+//! the same count stayed queued meanwhile, unless the count went round all
+//! `2^55` positions, the stall assumption below. The backlog hint reports
+//! that count as well.
 //!
 //! The owner can mark a value as it pushes it, and the queue keeps the 55-bit
 //! count of the newest marked value, stored before the tail store that
@@ -164,15 +166,15 @@
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
 //!           |<---------- claimed ---------->|popped |<-- queued --->|
 //!
-//!   2. the thief copies a b c d, releases (steal 0 -> 5), then publishes (its tail 0 -> 4)
+//!   2. the thief takes a, copies b c d, releases (steal 0 -> 5), then publishes (its tail 0 -> 3)
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
 //!   source  |       |       |       |       |       |   f   |   g   |       |
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
 //!                                                   |<-- queued --->|
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
-//!   thief   |   a   |   b   |   c   |   d   |       |       |       |       |
+//!   thief   |   b   |   c   |   d   |       |       |       |       |       |
 //!           +-------+-------+-------+-------+-------+-------+-------+-------+
-//!           |<----------- queued ---------->|
+//!           |<------- queued ------>|
 //! ```
 //!
 //! A steal assumes that a thief does not stall between its head load and its
@@ -233,7 +235,7 @@ const HALF: u32 = CAPACITY as u32 / 2;
 
 /// Fewest values an unclaimed queue holds for a steal to take any. A steal
 /// takes half rounded up, so one is enough.
-pub const STEALABLE: usize = 1;
+const STEALABLE: usize = 1;
 
 /// Mask that selects a position's slot.
 const MASK: usize = CAPACITY - 1;

@@ -109,13 +109,15 @@
 //! A worker with nothing to run, before it parks, scans every other worker's
 //! run queue once, starting at a random one, and takes half of the first
 //! unclaimed backlog it finds, rounded up, so it can take even a runnable
-//! queued alone behind a long poll. It queues what it took in its own run
-//! queue and runs again. A push offers its run queue to a parked worker only
-//! once [`KICK`] runnables are queued, so a lone runnable moves only to a
-//! worker that is already looking for work.
-//! [`super::queue`] describes how a thief claims and copies the runnables it
-//! takes. [`super::idle`] describes how many workers search at once and how a
-//! backlog wakes a parked worker to steal it.
+//! queued alone behind a long poll. It keeps the oldest runnable it took for
+//! its next poll, queues the rest in its own run queue, and runs again, so the
+//! runnable it keeps cannot be stolen back before that poll. A worker that
+//! must run callbacks, unwind or clean up first offers it to the global queue
+//! instead. A push offers its run queue to a parked worker only once [`KICK`]
+//! runnables are queued, so a lone runnable moves only to a worker that is
+//! already looking for work. [`super::queue`] describes how a thief claims and
+//! copies the runnables it takes. [`super::idle`] describes how many workers
+//! search at once and how a backlog wakes a parked worker to steal it.
 //!
 //! A lone runnable must also be ripe: it must have stayed alone at the same run
 //! queue position for the pool's [steal age] since a worker first looked at
@@ -180,8 +182,9 @@
 //! closed queue refuses belongs to a task that teardown clears or already has
 //! cleared, and so does a runnable a worker discards from its own run queue. A
 //! worker still driving may steal from the run queue of one that is cleaning
-//! up. It polls what it took, or discards it in its own cleanup, before it
-//! reaches the barrier.
+//! up. It polls what it took before it reaches the barrier, or, if it stops
+//! first, offers the runnable it kept for its next poll to the global queue
+//! and discards the rest of its run queue in its own cleanup.
 //!
 //! On the runner's normal path the pool stops after the supervision tree is
 //! aborted, so the other workers destroy only cancelled tasks and the runner's
@@ -258,17 +261,12 @@ pub const MAX_WORKERS: usize = 64;
 /// owner usually polls it next, sooner than a woken peer could.
 pub const KICK: usize = 2;
 
-/// Smallest nonzero steal age the runner accepts. A worker whose look refused
-/// a young lone runnable looks again once it ripens, and a wait that ends at
-/// once follows a lone runnable that stayed queued almost that long, so an
-/// idle worker looks again at most about once per steal age for each run
-/// queue it watches, and more often when it watches several whose lone
-/// runnables ripen at different times. Each look scans every other run queue,
-/// and the minimum bounds how often one watched run queue makes a worker
-/// look. A timed wait on a worker's futex, which a worker with no request in
-/// flight uses, can end up to the thread's timer slack late, 50 microseconds
-/// by default, so there a steal age below the slack is not met: the worker
-/// looks again up to the slack after the runnable ripens.
+/// Smallest nonzero steal age the runner accepts. A worker that refused a
+/// young lone runnable looks again when it ripens, and each look scans every
+/// other run queue, so this bounds how often one watched run queue makes an
+/// idle worker look: about once per steal age. A worker with no request in
+/// flight waits on its futex, which can end up to the thread's timer slack
+/// late (50 microseconds by default), so there a shorter steal age is not met.
 pub const MIN_STEAL_AGE: Duration = Duration::from_micros(10);
 
 /// Largest steal age the runner accepts.
@@ -318,11 +316,13 @@ impl Stamp {
     /// sample is taken after the key it is compared with was loaded.
     ///
     /// The age never exceeds the time since some look, sampling after it saw
-    /// `real` alone, started this observation, so a lone runnable never
-    /// ripens early, whatever looks race. A look whose count is already stale
-    /// can restart another count's observation, which delays that steal by at
-    /// most one more steal age. A stamp names the same count again only once
-    /// the head's count repeats.
+    /// `real` alone, started this observation, to the clock's microsecond
+    /// resolution, so a lone runnable never ripens early, whatever looks race.
+    /// A look whose count is already stale can restart another count's
+    /// observation, and each such look delays that steal by at most one more
+    /// steal age. Every other worker has at most one stale look per count,
+    /// since its next look reads the newer count. A stamp names the same count
+    /// again only once the head's count repeats.
     fn age<I>(&self, real: u64, mut clock: impl FnMut() -> (I, u64)) -> (I, u64) {
         // Acquire pairs with the release of the exchange that stored the key,
         // so a matching key shows the time raised before it, or a later one.
@@ -470,8 +470,8 @@ impl Pool {
             seen: (0..workers)
                 .map(|_| CachePadded::new(Stamp::new()))
                 .collect(),
-            // At most a second, so whole microseconds fit, rounded up so a
-            // nonzero age never means an immediate steal.
+            // At most a second, so whole microseconds fit. Rounded up, so the
+            // age counted is never shorter than the one configured.
             steal_age: if workers == 1 {
                 0
             } else {
@@ -762,6 +762,9 @@ impl Pool {
     fn queued(&self, push: Push<'_, Runnable>) {
         match push {
             Push::Pushed(len) => {
+                // The length comes from the push's head snapshot, so a steal
+                // that raced the push can leave it one too high and kick for a
+                // lone runnable. That costs one wake.
                 if len >= KICK && self.workers() > 1 {
                     self.kick();
                 }

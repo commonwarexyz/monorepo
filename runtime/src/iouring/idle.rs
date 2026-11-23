@@ -157,7 +157,8 @@
 //! to the claimed worker, and the worker's withdrawal acquires it, so the
 //! worker returns that count after the reservation. A worker leaving a
 //! successful search releases its count to publish the victim's claim release
-//! and its own run queue's tail, since no fence separates those updates from
+//! and, when the steal moved more than the runnable it keeps for its next
+//! poll, its own run queue's tail, since no fence separates those updates from
 //! the return. Every count modification is a read-modify-write, so each one
 //! extends the release sequences of earlier returns. The last return reads
 //! those sequences, so its following fence acquires the queue updates. Its
@@ -176,9 +177,9 @@
 //! soft. Workers that check at once can all pass it, and wakes reserve counts
 //! without this cap, so the search count can exceed half the worker count. A
 //! worker whose re-look of a young lone runnable has come due searches even at
-//! the cap, for two reasons. No count holder waits for that runnable to ripen,
-//! and a due re-look that the cap refused would stay recorded, so every wait
-//! it bounds would return at once until the counts drop.
+//! the cap. A held count does not cover a young lone runnable, and a due
+//! re-look that the cap refused would stay recorded, so every wait it bounds
+//! would return at once until the counts drop.
 //!
 //! A re-look that the cap refuses before it is due stays recorded, so the
 //! worker still waits no longer than that. Its deadline can pass after the
@@ -538,9 +539,9 @@ impl<'a> Searcher<'a> {
     fn begin(&mut self, due: bool) -> bool {
         // The cap only limits contention, so a soft check is harmless. Workers
         // that load the count at once can all pass it, and claimed workers
-        // inherit counts without it. A worker whose re-look came due passes it
-        // as well, since no other worker waits for that lone runnable to ripen
-        // and a due re-look left recorded would end every wait at once.
+        // inherit counts without it. A due re-look passes it too. Several
+        // workers can wait for the same runnable. Refusing a due re-look
+        // without updating it would end each subsequent wait immediately.
         // Nothing is published with the count. A kick that sees it relies on
         // the fence after its return.
         let searching = self.pool.idle().searching.load(Ordering::Relaxed);
@@ -1236,8 +1237,8 @@ pub mod tests {
     }
 
     /// A worker whose re-look of a young lone runnable has come due searches
-    /// even when the cap would refuse it, since no count holder waits for that
-    /// runnable to ripen. Worker one's look sees the lone runnable young and
+    /// even when the cap would refuse it, since a held count does not cover a
+    /// young lone runnable. Worker one's look sees the lone runnable young and
     /// records its re-look, and leaving the search keeps no count for it. By
     /// the time that re-look is due, two other counts are held, which reaches
     /// the cap of a pool of four, yet worker one's search takes a count and

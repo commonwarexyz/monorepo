@@ -13,11 +13,12 @@
 //!
 //! Each worker has a bounded run queue. A push into a full run queue sends its
 //! newest half and the new task to the global queue, or only the new task
-//! while another worker is stealing from it. Before parking, a worker with
-//! nothing to run can steal half of another worker's queued tasks, rounded
-//! up, so even a task queued alone behind a long poll can move to a worker
-//! looking for work, once it has waited [`Config::with_steal_age`], or at
-//! once if it was just spawned there. A lone task wakes no parked worker.
+//! while another worker is stealing from it. Before parking, a worker can
+//! steal half of another worker's queued tasks, rounded up. For a lone task,
+//! [`Config::with_steal_age`] starts at a peer's first sighting of its queue
+//! position. A task just spawned there is eligible on the first look. A push
+//! that sees only one task queued does not wake a parked peer. With no peer
+//! looking or due to look again, the task can wait for its owner.
 //!
 //! Dedicated and blocking tasks each receive a supervised thread and io_uring
 //! ring. Their ordinary descendants execute on the pool. Task factories run

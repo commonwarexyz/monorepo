@@ -118,16 +118,15 @@
 //! A pool worker takes a share of the global queue every
 //! [`Config::with_global_queue_interval`] takes and whenever its own run queue
 //! is empty. It also takes one ahead of its run queue when a push that woke no
-//! worker left an unserved hint that has aged. After a hinted take ahead of
-//! a nonempty run queue, the worker pops from that queue before acting on
-//! another hint. Taking a share returns one
-//! runnable to poll next and queues the rest in the run queue, no more than it
-//! has room for and no more than would fill it to half. A pool worker that
-//! finds both queues empty after a service pass tries to steal before parking,
-//! or relies on workers already holding search counts when the search cap
-//! refuses it. The cap does not refuse a worker whose re-look of a young lone
-//! runnable has come due, since no other worker waits for that runnable to
-//! ripen.
+//! worker left an unserved hint that has aged. After a hinted take ahead of a
+//! nonempty run queue, the worker pops from that queue before acting on
+//! another hint. Taking a share returns one runnable to poll next and queues
+//! the rest in the run queue, no more than it has room for and no more than
+//! would fill it to half. A pool worker that finds both queues empty after a
+//! service pass tries to steal before parking, or relies on workers already
+//! holding search counts when the search cap refuses it. A worker whose
+//! re-look is due can search past the cap and clear its expired deadline.
+//! Several workers can recheck the same queue.
 //!
 //! Before a synchronous [`commonware_parallel`] Rayon call blocks a pool
 //! worker's thread, the block hook the worker installs moves its queued
@@ -417,22 +416,20 @@ impl Config {
         self
     }
 
-    /// Set how long a task queued alone on a pool worker must wait before
-    /// another worker may steal it. Defaults to 100 microseconds.
+    /// Set when another pool worker may steal a task queued alone. Defaults
+    /// to 100 microseconds. Accepts zero or 10 microseconds to one second.
     ///
-    /// Must be zero or between 10 microseconds and one second. A worker with
-    /// nothing to run steals half of another worker's queued tasks, rounded
-    /// up, at once when two or more are queued. A task queued alone is usually
-    /// polled next by its own worker, and taking it would split tasks that work
-    /// together on that worker, so it is stolen only once it has stayed queued
-    /// this long since a worker looking for work first saw it, as behind a
-    /// long poll. That worker looks again when the task is old enough, unless
-    /// other work keeps it busy first, so the age is when a lone task may move,
-    /// not a bound on how long it waits. A worker with no I/O in flight waits
-    /// for that on its futex, which the thread's timer slack (50 microseconds
-    /// by default) can end late, so a shorter age is not met there. A newly
-    /// spawned task queued alone on its spawner's worker can be stolen at once
-    /// whatever this age. Zero steals every lone task at once.
+    /// A worker looking for work may take half of a queue, rounded up. If it
+    /// sees a lone task, its queue position must have been observed for the
+    /// configured age. The pool measures age in whole microseconds and rounds
+    /// the configured duration up. A task just spawned on its worker is
+    /// eligible on the first look. At zero, so is any lone task.
+    ///
+    /// A push that sees only one task queued does not wake a peer. If every
+    /// peer is parked and nothing else wakes one, the task can wait for its
+    /// owner even at age zero. A peer that sees a young task can set a timer
+    /// to look again. Other work, scheduling delays, and futex timer slack
+    /// can delay the next look. The age does not bound wake-to-poll time.
     pub const fn with_steal_age(mut self, age: Duration) -> Self {
         self.steal_age = age;
         self
