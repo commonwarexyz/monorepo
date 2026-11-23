@@ -2,14 +2,13 @@
 name = "commonware-estimator"
 edition.workspace = true
 rust-version.workspace = true
-publish = true
+publish = false
 version.workspace = true
 license.workspace = true
 description = "Simulate mechanism performance under realistic network conditions."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
-documentation = "https://docs.rs/commonware-estimator"
 
 [lints]
 workspace = true

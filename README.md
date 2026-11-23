@@ -71,7 +71,7 @@ All public primitives (and primitive dialects) in the Commonware Library are ann
 | **DELTA**    | 4     | Battle-tested. Bug bounty eligible.                                                      |
 | **EPSILON**  | 5     | Feature-frozen. Only bug fixes and performance improvements accepted.                    |
 
-_Stability is transitive in the Commonware Library; primitives only depend on primitives with equal or higher stability. All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future) but, like the rest of the monorepo, may use `WIP` primitives._
+_Stability is transitive in the Commonware Library; primitives only depend on primitives with equal or higher stability. All `examples` are considered to be at `WIP` stability: they may use `WIP` primitives, build only inside the monorepo, and are not published._
 
 Users employing the Commonware Library can compile with the `commonware_stability_<level>` configuration flag to both view scoped documentation and enforce their application only depends on primitives of a minimum stability:
 

@@ -2,14 +2,13 @@
 name = "commonware-chat"
 edition.workspace = true
 rust-version.workspace = true
-publish = true
+publish = false
 version.workspace = true
 license.workspace = true
 description = "Send encrypted messages to a group of friends using commonware-cryptography and commonware-p2p."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/chat"
-documentation = "https://docs.rs/commonware-chat"
 
 [lints]
 workspace = true

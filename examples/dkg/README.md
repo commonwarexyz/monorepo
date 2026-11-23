@@ -1,7 +1,5 @@
 # commonware-dkg
 
-[![Crates.io](https://img.shields.io/crates/v/commonware-dkg.svg)](https://crates.io/crates/commonware-dkg)
-
 Generate and reshare a threshold secret over an epoched log.
 
 Committees rotate deterministically: for epoch `E`, the committee starts at

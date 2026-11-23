@@ -1,7 +1,5 @@
 # commonware-log
 
-[![Crates.io](https://img.shields.io/crates/v/commonware-log.svg)](https://crates.io/crates/commonware-log)
-
 Commit to a secret log and agree to its hash.
 
 # Usage (Run at Least 3 to Make Progress)
