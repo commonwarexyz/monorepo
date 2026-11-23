@@ -322,7 +322,7 @@ impl Request {
                 // waiting still leaves the open's debt correct.
                 let result = r.file.wrote(
                     r.state != WriteAtState::Writing,
-                    matches!(r.state, WriteAtState::WritingSync | WriteAtState::Syncing),
+                    r.state == WriteAtState::Syncing,
                     result,
                 );
 
@@ -853,11 +853,9 @@ impl Cache {
 pub enum WriteAtState {
     /// Submit writes without per-write durability.
     Writing,
-    /// Submit writes with `RWF_DSYNC`.
-    WritingSync,
-    /// Submit plain writes, then issue one trailing data sync.
+    /// Submit plain writes, then issue one whole-file data sync.
     WritingBeforeSync,
-    /// Issue the trailing data sync.
+    /// Issue the whole-file data sync.
     Syncing,
 }
 
@@ -897,12 +895,12 @@ pub struct WriteAtRequest {
     pub state: WriteAtState,
     /// Page-cache policy for this request.
     pub cache: Cache,
-    /// Completed mutations that preceded this request, which a trailing sync covers.
+    /// Completed mutations that preceded this request, which its whole-file sync covers.
     seen: u64,
 }
 
 impl WriteAtRequest {
-    /// Record the mutation frontier a trailing sync can cover before ring submission.
+    /// Record the mutation frontier the whole-file sync can cover before ring submission.
     pub fn new(
         file: Arc<Shared>,
         offset: u64,
@@ -921,14 +919,10 @@ impl WriteAtRequest {
         }
     }
 
-    /// Use `RWF_DSYNC` because the write contract does not require timestamp-only metadata.
+    /// Flags for the next write SQE. Writes never carry `RWF_DSYNC`, since a durable write
+    /// is followed by a data sync of the whole file.
     fn rw_flags(&mut self) -> i32 {
-        let sync = if self.state == WriteAtState::WritingSync {
-            libc::RWF_DSYNC
-        } else {
-            0
-        };
-        sync | self.cache.rw_flag(&self.file.dont_cache_supported)
+        self.cache.rw_flag(&self.file.dont_cache_supported)
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
@@ -979,9 +973,6 @@ impl WriteAtRequest {
             {
                 None
             }
-            CqeResult::Error(code) if self.state == WriteAtState::WritingSync => Some(Err(
-                Error::Io(std::io::Error::from_raw_os_error(-code).into()),
-            )),
             CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
                 Some(Err(Error::WriteFailed))
             }
@@ -990,7 +981,7 @@ impl WriteAtRequest {
                 self.offset += n as u64;
                 if self.write.is_complete() {
                     if self.state == WriteAtState::WritingBeforeSync {
-                        // All batches must finish before the trailing sync starts.
+                        // All bytes must be written before the data sync starts.
                         self.state = WriteAtState::Syncing;
                         None
                     } else {
@@ -2182,11 +2173,7 @@ mod tests {
         // Simulated CQEs advance cursors without reading the large payload.
         let len = u32::MAX as usize + 1;
         let buf = IoBuf::from(vec![0; len]);
-        for state in [
-            WriteAtState::Writing,
-            WriteAtState::WritingSync,
-            WriteAtState::WritingBeforeSync,
-        ] {
+        for state in [WriteAtState::Writing, WriteAtState::WritingBeforeSync] {
             let trailing_sync = state == WriteAtState::WritingBeforeSync;
             let mut write = WriteAtRequest::new(
                 make_file(),
@@ -2252,57 +2239,58 @@ mod tests {
             ));
         }
 
-        let mut write = make_write_request(make_file(), Cache::Enabled);
-        write.state = WriteAtState::WritingBeforeSync;
-        assert!(matches!(
-            complete(Request::WriteAt(write), ACTIVE, -libc::EIO),
-            RequestOutput::WriteAt(Err(Error::WriteFailed))
-        ));
-
-        // A fused write retains the kernel errno through its durability failure.
-        let mut write = make_write_request(make_file(), Cache::Enabled);
-        write.state = WriteAtState::WritingSync;
-        assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
-        let file = write.file.clone();
-        assert!(matches!(
-            complete(Request::WriteAt(write), ACTIVE, -libc::EINVAL),
-            RequestOutput::WriteAt(Err(Error::Io(error)))
-                if error.raw_os_error() == Some(libc::EINVAL)
-        ));
-        assert!(matches!(
-            file.tracker.failure(),
-            Some(Error::BlobSyncFailed(_, _, error))
-                if error.raw_os_error() == Some(libc::EINVAL)
-        ));
-
+        // A durable write that fails before its sync leaves the open dirty, not poisoned, since
+        // no sync ran that could have consumed a writeback error.
         for (state, result) in [
+            (ACTIVE, -libc::EIO),
             (ACTIVE, 0),
             (WaiterState::CancelRequested, -libc::ECANCELED),
         ] {
             let mut write = make_write_request(make_file(), Cache::Enabled);
-            write.state = WriteAtState::WritingSync;
+            write.state = WriteAtState::WritingBeforeSync;
+            let file = write.file.clone();
             assert!(matches!(
                 complete(Request::WriteAt(write), state, result),
                 RequestOutput::WriteAt(Err(Error::WriteFailed))
+            ));
+            assert!(file.tracker.is_dirty());
+            assert!(file.tracker.failure().is_none());
+        }
+
+        // A failed sync retains the kernel errno and poisons the open.
+        for code in [libc::EINVAL, libc::ECANCELED] {
+            let mut write = make_write_request(make_file(), Cache::Enabled);
+            write.state = WriteAtState::Syncing;
+            let file = write.file.clone();
+            assert!(matches!(
+                complete(Request::WriteAt(write), ACTIVE, -code),
+                RequestOutput::WriteAt(Err(Error::Io(error)))
+                    if error.raw_os_error() == Some(code)
+            ));
+            assert!(file.tracker.is_dirty());
+            assert!(matches!(
+                file.tracker.failure(),
+                Some(Error::BlobSyncFailed(_, _, error))
+                    if error.raw_os_error() == Some(code)
             ));
         }
     }
 
     #[test]
-    fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
+    fn test_uncached_durable_write_retries_without_hint_when_unsupported() {
         let mut request = WriteAtRequest::new(
             make_file(),
             0,
             IoBufs::from(IoBuf::from(b"hello")).into(),
-            WriteAtState::WritingSync,
+            WriteAtState::WritingBeforeSync,
             Cache::Disabled,
         );
 
-        assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
+        assert_eq!(request.rw_flags(), libc::RWF_DONTCACHE);
         assert!(request.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(!request.file.dont_cache_supported.load(Ordering::Relaxed));
         request.cache = Cache::Disabled;
-        assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
+        assert_eq!(request.rw_flags(), 0);
         assert!(
             !request
                 .cache
@@ -2411,33 +2399,24 @@ mod tests {
 
     #[test]
     fn test_durability_completion_retains_failure() {
-        for state in [
-            None,
-            Some(WriteAtState::WritingSync),
-            Some(WriteAtState::Syncing),
-        ] {
+        for write in [false, true] {
             for failure_first in [false, true] {
                 let file = make_file();
                 file.tracker.write();
                 file.tracker.complete();
                 let mut failed = Request::Sync(SyncRequest::new(file.clone()));
-                let mut successful = state.as_ref().map_or_else(
-                    || Request::Sync(SyncRequest::new(file.clone())),
-                    |state| {
-                        Request::WriteAt(WriteAtRequest::new(
-                            file.clone(),
-                            0,
-                            IoBufs::from(IoBuf::from(b"hello")).into(),
-                            if *state == WriteAtState::Syncing {
-                                WriteAtState::WritingBeforeSync
-                            } else {
-                                WriteAtState::WritingSync
-                            },
-                            Cache::Enabled,
-                        ))
-                    },
-                );
-                if state == Some(WriteAtState::Syncing) {
+                let mut successful = if write {
+                    Request::WriteAt(WriteAtRequest::new(
+                        file.clone(),
+                        0,
+                        IoBufs::from(IoBuf::from(b"hello")).into(),
+                        WriteAtState::WritingBeforeSync,
+                        Cache::Enabled,
+                    ))
+                } else {
+                    Request::Sync(SyncRequest::new(file.clone()))
+                };
+                if write {
                     assert!(successful.on_cqe(ACTIVE, 5).is_none());
                 }
 
@@ -2455,16 +2434,7 @@ mod tests {
                     drop(retired);
                 };
                 let finish_success = || {
-                    let result = successful
-                        .on_cqe(
-                            ACTIVE,
-                            if state == Some(WriteAtState::WritingSync) {
-                                5
-                            } else {
-                                0
-                            },
-                        )
-                        .unwrap();
+                    let result = successful.on_cqe(ACTIVE, 0).unwrap();
                     let (output, retired) = successful.complete(result);
                     let result = match output {
                         RequestOutput::Sync(result) | RequestOutput::WriteAt(result) => result,
@@ -2480,12 +2450,8 @@ mod tests {
                     } else {
                         result.unwrap();
 
-                        // A trailing sync credits the write completed before the request. A
-                        // fused write covers only its own range.
-                        assert_eq!(
-                            file.tracker.is_dirty(),
-                            state == Some(WriteAtState::WritingSync)
-                        );
+                        // The whole-file sync credits the write completed before the request.
+                        assert!(!file.tracker.is_dirty());
                     }
                     drop(retired);
                 };
