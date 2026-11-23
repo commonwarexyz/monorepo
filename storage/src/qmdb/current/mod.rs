@@ -339,7 +339,6 @@ use crate::{
                 update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
             },
         },
-        bitmap::Shared,
         operation::Key,
         value::ValueEncoding,
     },
@@ -519,7 +518,6 @@ where
     // Pre-build the activity-status bitmap with the known pruned-chunk count from grafted metadata.
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
     // commit can be reconstructed. The underlying `any` database takes sole ownership of the
@@ -537,7 +535,7 @@ where
     // Rebuild the grafted tree, graft roots, and ops root witness from the persisted pins and
     // selected operation tree.
     let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
-        any.bitmap.as_ref(),
+        &any.bitmap,
         &pinned_nodes,
         &any.log,
         any.inactivity_floor_loc,
@@ -607,6 +605,7 @@ pub mod tests {
                 traits::{BatchableDb, DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             chain::Bounds,
+            current::batch::BitmapView,
             floor::{Bounded, Hold},
             store::tests::{TestKey, TestValue},
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
@@ -2296,100 +2295,178 @@ pub mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_current_unordered_merkleize_rejects_foreign_instance() {
+    fn current_unordered_merkleize_uses_supplied_bitmap<F: merkle::Graftable>() {
+        type TestDb<F> =
+            unordered::fixed::Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
         deterministic::Runner::default().start(|context| async move {
-            // Independent instances begin with the same committed state.
-            let db_a = UnorderedFixedDb::init(
+            let config_b = fixed_config::<OneCap>("supplied-bitmap-unordered-b");
+            let db_a = TestDb::<F>::init(
                 context.child("a"),
-                fixed_config::<OneCap>("foreign-instance-unordered-a"),
+                fixed_config::<OneCap>("supplied-bitmap-unordered-a"),
                 None,
             )
             .await
             .unwrap();
-            let db_b = UnorderedFixedDb::init(
-                context.child("b"),
-                fixed_config::<OneCap>("foreign-instance-unordered-b"),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(db_a.root(), db_b.root());
+            let db_b = TestDb::<F>::init(context.child("b"), config_b.clone(), None)
+                .await
+                .unwrap();
 
-            // The unmerkleized and staged batches retain A's bitmap.
-            let pending = db_a.new_batch().write(key(2), Some(val(2)));
+            // Identical committed states span complete and partial bitmap chunks.
+            let mut seed_a = db_a.new_batch();
+            let mut seed_b = db_b.new_batch();
+            for i in 0..300 {
+                seed_a = seed_a.write(key(i), Some(val(i)));
+                seed_b = seed_b.write(key(i), Some(val(i)));
+            }
+            let seed_a = seed_a.merkleize(&db_a).await.unwrap();
+            let seed_b = seed_b.merkleize(&db_b).await.unwrap();
+            let db_a = db_a.apply_batch(seed_a).await.unwrap();
+            let db_b = db_b.apply_batch(seed_b).await.unwrap();
+            assert_eq!(db_a.root(), db_b.root());
+            assert_eq!(db_a.ops_root(), db_b.ops_root());
+
+            let pending = db_a.new_batch().write(key(2), Some(val(302)));
             let staged_keys = [key(2)];
             let (staged, _) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
 
-            // Applying a sibling changes A's bitmap while B remains at the original commitment.
+            // A advances on a sibling while B keeps the batches' original commitment.
             let sibling = db_a
                 .new_batch()
-                .write(key(1), Some(val(1)))
+                .write(key(1), Some(val(301)))
                 .merkleize(&db_a)
                 .await
                 .unwrap();
-            let _db_a = db_a.apply_batch(sibling).await.unwrap();
+            let db_a = db_a.apply_batch(sibling).await.unwrap();
+            assert_ne!(db_a.root(), db_b.root());
 
-            // B matches the commitment the batches were created from, but is not their instance.
-            assert!(matches!(
-                pending.merkleize(&db_b).await,
-                Err(Error::StaleBatch)
-            ));
-            assert!(matches!(
-                staged
-                    .merkleize(vec![Slot::Put(val(3))], Vec::new(), &db_b)
-                    .await,
-                Err(Error::StaleBatch)
-            ));
+            // Merkleization must read B's bitmap, including chunks changed only by A's sibling.
+            let expected = db_b
+                .new_batch()
+                .write(key(2), Some(val(302)))
+                .merkleize(&db_b)
+                .await
+                .unwrap();
+            let pending = pending.merkleize(&db_b).await.unwrap();
+            let staged = staged
+                .merkleize(vec![Slot::Put(val(302))], Vec::new(), &db_b)
+                .await
+                .unwrap();
+            for actual in [&pending, &staged] {
+                assert_eq!(actual.root(), expected.root());
+                assert_eq!(actual.ops_root(), expected.ops_root());
+            }
+
+            // Reopening recomputes the root from persisted operations and bitmap state.
+            let db_b = db_b.apply_batch(staged).await.unwrap();
+            let db_b = db_b.commit().await.unwrap();
+            drop(db_b);
+            let reopened = TestDb::<F>::init(context.child("reopen"), config_b, None)
+                .await
+                .unwrap();
+            assert_eq!(reopened.root(), expected.root());
+            assert_eq!(reopened.ops_root(), expected.ops_root());
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), Some(val(302)));
+            reopened.destroy().await.unwrap();
+            db_a.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_current_ordered_merkleize_rejects_foreign_instance() {
-        deterministic::Runner::default().start(|context| async move {
-            // Independent instances begin with the same committed state.
-            let db_a = OrderedFixedDb::init(
-                context.child("a"),
-                fixed_config::<OneCap>("foreign-instance-ordered-a"),
-                None,
-            )
-            .await
-            .unwrap();
-            let db_b = OrderedFixedDb::init(
-                context.child("b"),
-                fixed_config::<OneCap>("foreign-instance-ordered-b"),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(db_a.root(), db_b.root());
+    fn test_current_unordered_merkleize_uses_supplied_bitmap_mmr() {
+        current_unordered_merkleize_uses_supplied_bitmap::<mmr::Family>();
+    }
 
-            // The unmerkleized and staged batches retain A's bitmap.
-            let pending = db_a.new_batch().write(key(2), Some(val(2)));
+    #[test_traced]
+    fn test_current_unordered_merkleize_uses_supplied_bitmap_mmb() {
+        current_unordered_merkleize_uses_supplied_bitmap::<mmb::Family>();
+    }
+
+    fn current_ordered_merkleize_uses_supplied_bitmap<F: merkle::Graftable>() {
+        type TestDb<F> =
+            ordered::fixed::Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+        deterministic::Runner::default().start(|context| async move {
+            let config_b = fixed_config::<OneCap>("supplied-bitmap-ordered-b");
+            let db_a = TestDb::<F>::init(
+                context.child("a"),
+                fixed_config::<OneCap>("supplied-bitmap-ordered-a"),
+                None,
+            )
+            .await
+            .unwrap();
+            let db_b = TestDb::<F>::init(context.child("b"), config_b.clone(), None)
+                .await
+                .unwrap();
+
+            // Identical committed states span complete and partial bitmap chunks.
+            let mut seed_a = db_a.new_batch();
+            let mut seed_b = db_b.new_batch();
+            for i in 0..300 {
+                seed_a = seed_a.write(key(i), Some(val(i)));
+                seed_b = seed_b.write(key(i), Some(val(i)));
+            }
+            let seed_a = seed_a.merkleize(&db_a).await.unwrap();
+            let seed_b = seed_b.merkleize(&db_b).await.unwrap();
+            let db_a = db_a.apply_batch(seed_a).await.unwrap();
+            let db_b = db_b.apply_batch(seed_b).await.unwrap();
+            assert_eq!(db_a.root(), db_b.root());
+            assert_eq!(db_a.ops_root(), db_b.ops_root());
+
+            let pending = db_a.new_batch().write(key(2), Some(val(302)));
             let staged_keys = [key(2)];
             let (staged, _) = db_a.new_batch().stage(&staged_keys, &db_a).await.unwrap();
 
-            // Applying a sibling changes A's bitmap while B remains at the original commitment.
+            // A advances on a sibling while B keeps the batches' original commitment.
             let sibling = db_a
                 .new_batch()
-                .write(key(1), Some(val(1)))
+                .write(key(1), Some(val(301)))
                 .merkleize(&db_a)
                 .await
                 .unwrap();
-            let _db_a = db_a.apply_batch(sibling).await.unwrap();
+            let db_a = db_a.apply_batch(sibling).await.unwrap();
+            assert_ne!(db_a.root(), db_b.root());
 
-            // B matches the commitment the batches were created from, but is not their instance.
-            assert!(matches!(
-                pending.merkleize(&db_b).await,
-                Err(Error::StaleBatch)
-            ));
-            assert!(matches!(
-                staged
-                    .merkleize(vec![Slot::Put(val(3))], Vec::new(), &db_b)
-                    .await,
-                Err(Error::StaleBatch)
-            ));
+            // Merkleization must read B's bitmap, including chunks changed only by A's sibling.
+            let expected = db_b
+                .new_batch()
+                .write(key(2), Some(val(302)))
+                .merkleize(&db_b)
+                .await
+                .unwrap();
+            let pending = pending.merkleize(&db_b).await.unwrap();
+            let staged = staged
+                .merkleize(vec![Slot::Put(val(302))], Vec::new(), &db_b)
+                .await
+                .unwrap();
+            for actual in [&pending, &staged] {
+                assert_eq!(actual.root(), expected.root());
+                assert_eq!(actual.ops_root(), expected.ops_root());
+            }
+
+            // Reopening recomputes the root from persisted operations and bitmap state.
+            let db_b = db_b.apply_batch(staged).await.unwrap();
+            let db_b = db_b.commit().await.unwrap();
+            drop(db_b);
+            let reopened = TestDb::<F>::init(context.child("reopen"), config_b, None)
+                .await
+                .unwrap();
+            assert_eq!(reopened.root(), expected.root());
+            assert_eq!(reopened.ops_root(), expected.ops_root());
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), Some(val(302)));
+            reopened.destroy().await.unwrap();
+            db_a.destroy().await.unwrap();
         });
+    }
+
+    #[test_traced]
+    fn test_current_ordered_merkleize_uses_supplied_bitmap_mmr() {
+        current_ordered_merkleize_uses_supplied_bitmap::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_current_ordered_merkleize_uses_supplied_bitmap_mmb() {
+        current_ordered_merkleize_uses_supplied_bitmap::<mmb::Family>();
     }
 
     #[test_traced]
@@ -4447,7 +4524,7 @@ pub mod tests {
     }
 
     /// A held batch built on the DB must remain readable and applicable after [`Db::prune`]
-    /// advances the shared bitmap's pruning boundary. Pruning only discards chunks for inactive
+    /// advances the DB bitmap's pruning boundary. Pruning only discards chunks for inactive
     /// bits (below the inactivity floor), and the batch's own chain and overlays operate at or
     /// above the floor, so no reads should land in the pruned region.
     #[test_traced("INFO")]
@@ -4489,7 +4566,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Prune with c still held. This advances pruned_chunks on the shared bitmap.
+            // Prune with c still held. This advances pruned_chunks on the DB's bitmap.
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
@@ -4509,10 +4586,10 @@ pub mod tests {
     /// Regression: extending a batch after it has been applied (building a child off the
     /// just-applied parent) must produce correct data.
     ///
-    /// With the shared-bitmap `RwLock` design, applying `A` mutates the DB's bitmap in place.
-    /// Reads through `A`'s chain after apply reach the DB's bitmap (which now reflects `A`'s
-    /// state), and `A`'s own overlays applied on top agree with it. So `A.new_batch()` followed
-    /// by merkleize + apply is the right-by-construction case, and this test locks it in.
+    /// Applying `A` mutates the DB's bitmap in place. Reads through `A`'s overlays after apply
+    /// resolve them over the DB's bitmap (which now reflects `A`'s state), and the two agree. So
+    /// `A.new_batch()` followed by merkleize + apply is the right-by-construction case, and this
+    /// test locks it in.
     #[test_traced("INFO")]
     fn test_current_extend_applied_batch() {
         let executor = deterministic::Runner::default();
@@ -4535,15 +4612,15 @@ pub mod tests {
                 .unwrap();
             let db = db.apply_batch(Arc::clone(&a)).await.unwrap();
 
-            // Build B off A after A was applied. B's chain walks through A's layer and falls
-            // through to the DB's bitmap (now post-A). B's merkleize must read matching state
-            // from both sources.
+            // Build B off A after A was applied. Merkleizing B trims A's now-applied overlay, so
+            // B's bitmap is its own overlay directly over the DB's bitmap (now post-A).
             let b = a
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db)
                 .await
                 .unwrap();
+            assert_eq!(b.bitmap.len(), 1);
             let db = db.apply_batch(b).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4567,11 +4644,10 @@ pub mod tests {
     }
 
     /// Build a child batch from a held parent whose apply was followed by a prune, then
-    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the DB's
-    /// shared bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the
-    /// child is constructed via `parent.new_batch()`, the internal `trim_committed` call must
-    /// observe the advanced boundary and produce a correct child chain, and merkleize and apply
-    /// must then produce correct state for keys at and beyond the advanced floor.
+    /// merkleize and apply the child. The parent's overlays are read over the DB's bitmap, and
+    /// `prune` mutates that bitmap's pruning boundary in place. The child's view must reflect the
+    /// advanced boundary, merkleize and apply must then produce correct state for keys at and
+    /// beyond the advanced floor, and a reopen must rebuild the same root.
     #[test_traced("INFO")]
     fn test_current_live_batch_child_after_prune() {
         let executor = deterministic::Runner::default();
@@ -4603,27 +4679,113 @@ pub mod tests {
             let db = db.apply_batch(Arc::clone(&a)).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // Prune while `a` is still held. Mutates the shared bitmap's pruning boundary in place.
+            // Prune while `a` is still held. Mutates the DB bitmap's pruning boundary in place.
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
-            // Extend `a` into `b` AFTER the prune. Building `b` off `a` triggers
-            // `trim_committed` on `a`'s chain, which must correctly see the advanced pruning
-            // boundary on the shared bitmap.
+            // Extend `a` into `b` AFTER the prune. `b`'s view over the DB's bitmap must see the
+            // advanced pruning boundary.
             let b = a
                 .new_batch::<Sha256>()
                 .write(key(300), Some(val(300)))
                 .merkleize(&db)
                 .await
                 .unwrap();
+            let b_root = b.root();
 
             let db = db.apply_batch(b).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(249)).await.unwrap(), Some(val(10_249)));
             assert_eq!(db.get(&key(300)).await.unwrap(), Some(val(300)));
 
+            // `apply_batch` installs the batch's root unverified. A reopen recomputes it.
+            let db = db.commit().await.unwrap();
+            drop(db);
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.child("reopen"),
+                variable_config::<OneCap>("child-after-prune"),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), b_root);
+            assert_eq!(reopened.get(&key(300)).await.unwrap(), Some(val(300)));
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Reopening at an ancestor state keeps a held descendant on its chain, but its overlays were
+    /// built on the later DB bitmap. Merkleizing a child must return `StaleBatch` rather than read
+    /// those overlays over the recovered bitmap.
+    fn child_merkleize_after_bounded_reopen_is_stale<F: merkle::Graftable>() {
+        type TestDb<F> =
+            unordered::variable::Db<F, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let config = variable_config::<OneCap>("reopen-onto-ancestor");
+            let db = TestDb::<F>::init(ctx.child("storage"), config.clone(), None)
+                .await
+                .unwrap();
+
+            // S0 <- A1 <- A2, both durable. `a1` stays held so `p`'s chain records it.
+            let a1 = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            let db = db.apply_batch(Arc::clone(&a1)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let a1_size = db.bounds().end;
+            let a2 = a1
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            let db = db.apply_batch(Arc::clone(&a2)).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // `p` is merkleized at A2, so its overlay was built on the post-A2 bitmap.
+            let p = a2
+                .new_batch::<Sha256>()
+                .write(key(2), Some(val(2)))
+                .merkleize(&db)
+                .await
+                .unwrap();
+
+            // Reopen at A1: still one of `p`'s chain states, but not the one its overlay was
+            // built on.
+            drop(db);
+            let db = TestDb::<F>::init(ctx.child("reopen"), config, Some(a1_size))
+                .await
+                .unwrap();
+            assert_eq!(db.bounds().end, a1_size);
+            assert_eq!(db.root(), a1.root());
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), None);
+            let err = p
+                .new_batch::<Sha256>()
+                .write(key(3), Some(val(3)))
+                .merkleize(&db)
+                .await
+                .err();
+            assert!(matches!(err, Some(Error::StaleBatch)));
+
             db.destroy().await.unwrap();
         });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_child_merkleize_after_bounded_reopen_is_stale_mmr() {
+        child_merkleize_after_bounded_reopen_is_stale::<mmr::Family>();
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_child_merkleize_after_bounded_reopen_is_stale_mmb() {
+        child_merkleize_after_bounded_reopen_is_stale::<mmb::Family>();
     }
 
     /// Regression: applying a batch after its ancestor Arc is dropped (without
@@ -5011,7 +5173,7 @@ pub mod tests {
         });
     }
 
-    /// Regression: the bitmap chunks produced by the speculative `BitmapBatch` chain during
+    /// Regression: the bitmap chunks produced by the speculative bitmap overlays during
     /// merkleize must equal the bytes that `any::Db::apply_batch` writes via diff-driven
     /// updates. `current::Db::apply_batch` relies on this equivalence to install the precomputed
     /// `batch.grafted` against the now-current bitmap.
@@ -5046,7 +5208,7 @@ pub mod tests {
 
             // Setup sanity: the DB's bitmap spans at least two chunks.
             assert!(
-                Readable::<N>::len(db.any.bitmap.as_ref()) > CHUNK_SIZE_BITS,
+                Readable::<N>::len(&db.any.bitmap) > CHUNK_SIZE_BITS,
                 "setup must cross a chunk boundary",
             );
 
@@ -5076,12 +5238,13 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Snapshot every chunk in the speculative `BitmapBatch` chain (read through child).
+            // Snapshot every chunk of the speculative bitmap (read through child).
             let speculative_chunks: Vec<[u8; N]> = {
-                let len = Readable::<N>::len(&child.bitmap);
+                let bitmap = BitmapView::over(child.bitmap.clone(), &db.any.bitmap);
+                let len = Readable::<N>::len(&bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| Readable::<N>::get_chunk(&child.bitmap, idx))
+                    .map(|idx| Readable::<N>::get_chunk(&bitmap, idx))
                     .collect()
             };
             // Setup sanity: speculative state spans at least two chunks.
@@ -5092,10 +5255,10 @@ pub mod tests {
             // `batch.canonical_root` is no longer valid against the post-apply state.
             let db = db.apply_batch(child).await.unwrap();
             let committed_chunks: Vec<[u8; N]> = {
-                let len = Readable::<N>::len(db.any.bitmap.as_ref());
+                let len = Readable::<N>::len(&db.any.bitmap);
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
                 (0..chunk_count)
-                    .map(|idx| Readable::<N>::get_chunk(db.any.bitmap.as_ref(), idx))
+                    .map(|idx| Readable::<N>::get_chunk(&db.any.bitmap, idx))
                     .collect()
             };
 
@@ -5639,8 +5802,9 @@ pub mod tests {
                     let (start, ops) = child.operations();
                     replay(&mut live, start, &ops);
                     assert!(live.keys().eq(model.keys()));
-                    assert_eq!(Readable::<32>::len(&child.bitmap), *child.bounds().tip.size);
-                    assert_bits(&child.bitmap, &live);
+                    let bitmap = BitmapView::over(child.bitmap.clone(), &db.any.bitmap);
+                    assert_eq!(Readable::<32>::len(&bitmap), *child.bounds().tip.size);
+                    assert_bits(&bitmap, &live);
                     for key in values.keys() {
                         assert_eq!(db.read(&child, key).await, model.get(key).copied());
                     }
@@ -5658,7 +5822,10 @@ pub mod tests {
                     assert_eq!(twin.operations(), child.operations());
                     assert_eq!(twin.bounds().inactivity_floor, tip);
                     assert_eq!(twin.root(), root);
-                    assert_bits(&twin.bitmap, &live);
+                    assert_bits(
+                        &BitmapView::over(twin.bitmap.clone(), &db.any.bitmap),
+                        &live,
+                    );
                     drop(twin);
 
                     // After apply, the database's bitmap matches the same state, active keys prove

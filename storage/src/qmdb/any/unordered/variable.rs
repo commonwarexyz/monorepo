@@ -769,7 +769,7 @@ pub(crate) mod test {
                     FnCandidates(|floor, tip, limit, out: &mut Vec<_>| {
                         // Release the caller's handles at the start of prefetch.
                         drop(caller_ancestors.take());
-                        db.bitmap.as_ref().fill(floor, tip, limit, out)
+                        (&db.bitmap).fill(floor, tip, limit, out)
                     }),
                 )
                 .await
@@ -779,7 +779,7 @@ pub(crate) mod test {
 
             // The finished batch must retain inherited values without retaining ancestor handles.
             let batch = prepared
-                .walk_floor_and_merkleize(updates, db.bitmap.as_ref(), &mut Proportional)
+                .walk_floor_and_merkleize(updates, &db.bitmap, &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);

@@ -1,62 +1,10 @@
-//! Activity-status bitmap. Owned by [`any::Db`](super::any::Db) and shared with
-//! [`MerkleizedBatch`](super::current::batch::MerkleizedBatch)es via `Arc<Shared<N>>`.
+//! Floor-raise candidate sources over the activity-status bitmap.
 //!
-//! `any::Db` mutates the inner [`bitmap::Prunable`] under a [`RwLock`] during `apply_batch` /
-//! `prune` while held batches read concurrently. Locking (not snapshotting) keeps memory at
-//! O(bitmap size). Snapshots would couple memory to the number of held batches and their lifetimes.
-//!
-//! Reads through a stale `MerkleizedBatch` (see its "Batch validity" docs) return `StaleRead`
-//! before they reach this bitmap, because database reads require a `Compatible` witness from
-//! [`crate::qmdb::chain`].
+//! `any::Db` owns its bitmap as a plain [`bitmap::Prunable`]. Readers borrow it through the
+//! database, so a write (which needs the database by value or `&mut`) never overlaps a read.
 
 use crate::merkle::{Family, Location};
-#[cfg(test)]
-use commonware_utils::bitmap::Readable as _;
-use commonware_utils::{
-    bitmap,
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
-};
-
-pub(crate) struct Shared<const N: usize> {
-    inner: RwLock<bitmap::Prunable<N>>,
-}
-
-impl<const N: usize> Shared<N> {
-    pub(crate) const fn new(bitmap: bitmap::Prunable<N>) -> Self {
-        Self {
-            inner: RwLock::new(bitmap),
-        }
-    }
-
-    /// Acquire a shared read guard over the DB's bitmap. Kept private so external callers
-    /// go through [`bitmap::Readable`] (which doesn't expose a guard across `.await`).
-    fn read(&self) -> RwLockReadGuard<'_, bitmap::Prunable<N>> {
-        self.inner.read()
-    }
-
-    /// Acquire an exclusive write guard. By convention only the inner-`any` mutators
-    /// (`apply_batch`, `prune_bitmap`) hold the write lock.
-    pub(crate) fn write(&self) -> RwLockWriteGuard<'_, bitmap::Prunable<N>> {
-        self.inner.write()
-    }
-
-    /// Single-lock alternative to `bitmap::Readable::ones_iter_from(from).next()`.
-    #[cfg(test)]
-    pub(crate) fn next_one_from(&self, from: u64) -> Option<u64> {
-        self.read().ones_iter_from(from).next()
-    }
-
-    /// Return the number of pruned bits. Acquires the read lock briefly.
-    pub(crate) fn pruned_bits(&self) -> u64 {
-        self.read().pruned_bits()
-    }
-
-    /// Return the value of the bit at `loc`. Acquires the read lock briefly.
-    #[cfg(any(test, feature = "test-traits"))]
-    pub(crate) fn get_bit(&self, loc: u64) -> bool {
-        self.read().get_bit(loc)
-    }
-}
+use commonware_utils::bitmap;
 
 /// Floor candidates in ascending location order, within and across successive fills. A source
 /// yields every location that may hold an active update in the batch chain. Below the database's
@@ -74,7 +22,7 @@ pub(crate) trait Candidates<F: Family> {
     ) -> Location<F>;
 }
 
-impl<F: Family, const N: usize> Candidates<F> for &Shared<N> {
+impl<F: Family, const N: usize> Candidates<F> for &bitmap::Prunable<N> {
     fn fill(
         &mut self,
         floor: Location<F>,
@@ -82,7 +30,7 @@ impl<F: Family, const N: usize> Candidates<F> for &Shared<N> {
         limit: usize,
         out: &mut Vec<Location<F>>,
     ) -> Location<F> {
-        Location::new(fill_from(&*self.read(), *floor, tip, limit, out))
+        Location::new(fill_from(*self, *floor, tip, limit, out))
     }
 }
 
@@ -110,9 +58,6 @@ where
 /// `[scan_from, min(len, tip))` ascending via one `ones_iter_range`, then locations in
 /// `[max(scan_from, len), tip)` sequentially. Fills `out` with up to `limit` candidates and
 /// returns the next `scan_from`.
-///
-/// The bitmap is read once per chunk (through the iterator), so a `B` whose reads go through
-/// interior mutability must not be mutated for the duration of the call.
 pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
     bitmap: &B,
     scan_from: u64,
@@ -148,37 +93,4 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
         scan = candidate + 1;
     }
     scan
-}
-
-impl<const N: usize> std::fmt::Debug for Shared<N> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Shared")
-            .field("bitmap_len", &bitmap::Readable::<N>::len(&*self.read()))
-            .finish()
-    }
-}
-
-/// [`bitmap::Readable`] over the DB's bitmap. Each call acquires the read lock briefly.
-impl<const N: usize> bitmap::Readable<N> for Shared<N> {
-    fn complete_chunks(&self) -> usize {
-        self.read().complete_chunks()
-    }
-
-    fn get_chunk(&self, idx: usize) -> [u8; N] {
-        *self.read().get_chunk(idx)
-    }
-
-    fn last_chunk(&self) -> ([u8; N], u64) {
-        let guard = self.read();
-        let (chunk, bits) = guard.last_chunk();
-        (*chunk, bits)
-    }
-
-    fn pruned_chunks(&self) -> usize {
-        self.read().pruned_chunks()
-    }
-
-    fn len(&self) -> u64 {
-        bitmap::Readable::<N>::len(&*self.read())
-    }
 }

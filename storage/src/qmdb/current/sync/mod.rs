@@ -36,7 +36,6 @@ use crate::{
             Db as AnyDb,
             operation::{Operation, update::Update},
         },
-        bitmap::Shared,
         current::{db, grafting},
         metrics::Metrics as AnyMetrics,
         sync::{Database, DatabaseConfig as Config, Hooks, Request, source},
@@ -117,7 +116,6 @@ where
     let pruned_chunks = (*range.start() / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
     let bitmap = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
         .map_err(|_| qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
-    let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
@@ -162,7 +160,7 @@ where
     // resulting canonical root is deterministic because the engine authenticates the ops and the
     // bitmap is derived from them.
     let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
-        any.bitmap.as_ref(),
+        &any.bitmap,
         &grafted_pinned_nodes,
         &any.log,
         any.inactivity_floor_loc,

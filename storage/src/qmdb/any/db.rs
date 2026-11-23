@@ -11,7 +11,7 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics},
+    qmdb::{Error, chain::Commitment, metrics::Metrics},
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -263,7 +263,7 @@ pub struct Db<
     /// - `bitmap.len() == log.size()`.
     /// - For every unpruned location `i`, `bitmap[i] == 1` if and only if `index` maps a
     ///   key to `i` or `i` is the last commit.
-    pub(crate) bitmap: Arc<Shared<N>>,
+    pub(crate) bitmap: bitmap::Prunable<N>,
 
     /// Metrics for this database.
     pub(crate) metrics: Metrics<E>,
@@ -455,7 +455,7 @@ where
     /// Prune the bitmap to `prune_loc`, rounded down to a chunk boundary. Skips the
     /// inactivity-floor check.
     pub(crate) fn prune_bitmap(&mut self, prune_loc: Location<F>) {
-        self.bitmap.write().prune_to_bit(*prune_loc);
+        self.bitmap.prune_to_bit(*prune_loc);
     }
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
@@ -569,7 +569,7 @@ where
             .await
     }
 
-    /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
+    /// Returns a [Db] initialized from `log`. `bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
     /// from grafted metadata). `init_concurrency` is the index build's task budget (see
     /// [crate::qmdb::any::Config::init_concurrency]).
@@ -583,7 +583,7 @@ where
         context: E,
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
-        shared_bitmap: Option<Arc<Shared<N>>>,
+        bitmap: Option<bitmap::Prunable<N>>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
@@ -628,7 +628,7 @@ where
             inactivity_floor_loc,
             active_keys,
             &activity,
-            shared_bitmap,
+            bitmap,
             metrics,
         )
     }
@@ -642,37 +642,34 @@ where
         inactivity_floor_loc: Location<F>,
         active_keys: usize,
         activity: &bitmap::BitMap,
-        shared_bitmap: Option<Arc<Shared<N>>>,
+        bitmap: Option<bitmap::Prunable<N>>,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
         // [pruned_bits, bounds.start) correspond to pruned operations and remain 0.
-        let bitmap = shared_bitmap.unwrap_or_else(|| {
+        let mut bitmap = bitmap.unwrap_or_else(|| {
             let pruned_chunks =
                 (log.bounds().start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
-            let bm = bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
-                .expect("pruned chunk count fits in u64 bits");
-            Arc::new(Shared::new(bm))
+            bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
+                .expect("pruned chunk count fits in u64 bits")
         });
 
+        // A caller-supplied bitmap must be pruned to a chunk boundary at or below the inactivity
+        // floor. Anything past it would make `extend_to` silently leave gaps.
+        assert!(
+            bitmap.pruned_bits() <= *inactivity_floor_loc,
+            "bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
+            bitmap.pruned_bits(),
+            *inactivity_floor_loc,
+        );
+
         // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
-        // suffix, all under a single lock acquisition.
-        {
-            // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
-            // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
-            let mut guard = bitmap.write();
-            assert!(
-                guard.pruned_bits() <= *inactivity_floor_loc,
-                "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
-                guard.pruned_bits(),
-                *inactivity_floor_loc,
-            );
-            guard.extend_to(*inactivity_floor_loc);
-            guard.extend_from_bitmap(activity);
-        }
+        // suffix.
+        bitmap.extend_to(*inactivity_floor_loc);
+        bitmap.extend_from_bitmap(activity);
 
         // The bitmap must have exactly one bit per retained log location.
-        if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {
+        if bitmap.len() != log.size() {
             return Err(crate::qmdb::Error::DataCorrupted(
                 "bitmap length diverged from log size during init",
             ));

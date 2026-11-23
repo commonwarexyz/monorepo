@@ -129,7 +129,6 @@ use crate::{
             Operation, Update,
             update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
         },
-        bitmap::Shared,
         metrics::Metrics,
         operation::{Committable as _, Key},
         single_operation_root,
@@ -142,8 +141,8 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
+use commonware_utils::bitmap;
 use core::num::NonZeroUsize;
-use std::sync::Arc;
 use tracing::warn;
 
 pub mod batch;
@@ -263,7 +262,7 @@ where
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
     cfg: Config<I::Translator, J::Config, S>,
-    bitmap: Option<Arc<Shared<N>>>,
+    bitmap: Option<bitmap::Prunable<N>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
 ) -> Result<db::Db<F, E, J, I, H, U, S, N>, QmdbError<F>>
@@ -394,15 +393,12 @@ pub(crate) mod test {
     use commonware_codec::{Codec, CodecShared, Encode as _};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic::Context};
-    use commonware_utils::{
-        NZU16, NZU64, NZUsize, Widen,
-        bitmap::{Prunable, Readable as _},
-    };
+    use commonware_utils::{NZU16, NZU64, NZUsize, Widen, bitmap::Prunable};
     use core::{fmt::Debug, future::Future, ops::RangeInclusive, pin::Pin};
     use std::{
         collections::{BTreeMap, BTreeSet, HashMap},
         num::{NonZeroU16, NonZeroUsize},
-        sync::Weak,
+        sync::{Arc, Weak},
     };
 
     pub(crate) fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
@@ -1597,7 +1593,7 @@ pub(crate) mod test {
             "a live update lies below the inactivity floor",
         );
         assert_eq!(db.bitmap.len(), size, "bitmap length diverged from the log");
-        assert_bits(db.bitmap.as_ref(), &live);
+        assert_bits(&db.bitmap, &live);
         assert_eq!(
             db.active_keys,
             live.len(),
@@ -7514,7 +7510,7 @@ mod bitmap_tests {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::bitmap::{Prunable, Readable as _};
+    use commonware_utils::bitmap::Prunable;
 
     /// Bits per chunk of the test database's activity bitmap.
     const CHUNK_BITS: u64 = Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
