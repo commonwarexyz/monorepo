@@ -512,11 +512,9 @@ impl Parker {
 
         // SAFETY: `word` is an aligned atomic futex word that outlives the
         // call. `timeout_ptr` is null or references the initialized local
-        // timespec, which remains alive and unchanged until return. On the
-        // 64-bit targets the runtime supports, `libc::timespec` has the layout
-        // of the kernel's `__kernel_timespec`. The value and mask are passed as
-        // `unsigned long`, as the kernel reads them, without bits above the
-        // word size, which it rejects.
+        // timespec, which remains alive and unchanged until return. The value
+        // and mask are passed as `unsigned long`, as the kernel reads them,
+        // without bits above the word size, which it rejects.
         let ret = unsafe {
             libc::syscall(
                 SYS_FUTEX_WAIT,
