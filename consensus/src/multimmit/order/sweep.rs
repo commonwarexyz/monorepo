@@ -434,12 +434,14 @@ mod tests {
         },
         types::View,
     };
+    use arbitrary::Unstructured;
     use commonware_cryptography::{
         Hasher as _, Sha256, bls12381::primitives::variant::MinPk, sha256::Digest as Sha256Digest,
     };
+    use commonware_invariants::minifuzz;
     use commonware_parallel::Sequential;
     use commonware_utils::{Participant, test_rng};
-    use proptest::{collection::vec, prelude::*};
+    use std::ops::RangeInclusive;
 
     fn heights(heights: &[u64]) -> Vec<Height> {
         heights.iter().map(|height| Height::new(*height)).collect()
@@ -1225,73 +1227,138 @@ mod tests {
         assert_eq!(ordinary, reference);
     }
 
-    proptest! {
-        #[test]
-        fn streams_match_materialized_reference(
-            base in vec(0u64..20, 1..5),
-            deltas in vec(0u64..6, 1..5),
-            proposed in vec(0u64..8, 1..5),
-            settled in vec(any::<bool>(), 1..5),
-            payments in any::<bool>(),
-            mask in vec(any::<bool>(), 4),
-        ) {
-            let chains = base.len().min(deltas.len()).min(proposed.len()).min(settled.len());
-            let base = &base[..chains];
-            let deltas = &deltas[..chains];
-            let settled = &settled[..chains];
-            // Half the cases run without payment chains.
-            let payment = (0..chains).map(|chain| payments && mask[chain]).collect::<Vec<_>>();
-            let lanes = Lanes::new(payment.iter().copied());
-            let target_heights = base.iter().zip(deltas).map(|(base, delta)| base + delta).collect::<Vec<_>>();
-            let proposed_heights = base.iter().zip(&proposed[..chains]).map(|(base, delta)| base + delta).collect::<Vec<_>>();
-            let boundary = target_heights.iter().zip(&proposed_heights).map(|(target, proposed)| *target.min(proposed)).collect::<Vec<_>>();
-            // A payment chain's slots are all in the payment pass, none in the ordinary ones.
-            let ordinary = |chain: usize, delta: u64| if payment[chain] { 0 } else { delta };
-            let paid = (0..chains).map(|chain| if payment[chain] { deltas[chain] } else { 0 }).collect::<Vec<_>>();
-            let positional = (0..chains).map(|chain| ordinary(chain, boundary[chain] - base[chain])).collect::<Vec<_>>();
-            let extension = (0..chains).map(|chain| ordinary(chain, target_heights[chain] - boundary[chain])).collect::<Vec<_>>();
-            let base_tips = frontier(base);
-            let target_tips = frontier(&target_heights);
-            let proposed = heights(&proposed_heights);
+    /// Generates a vector whose length is in `len`, drawing each element with `value`.
+    fn generate<T>(
+        u: &mut Unstructured<'_>,
+        len: RangeInclusive<usize>,
+        mut value: impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<T>,
+    ) -> arbitrary::Result<Vec<T>> {
+        let len = u.int_in_range(len)?;
+        (0..len).map(|_| value(u)).collect()
+    }
 
-            let never = vec![false; chains];
-            let mut expected_horizontal = reference_pass(base, &paid, &never).0;
-            expected_horizontal.extend(reference_pass(base, &positional, &never).0);
-            expected_horizontal.extend(reference_pass(&boundary, &extension, &never).0);
-            let horizontal_stream = SlotStream::new(&base_tips, &target_tips, &proposed, &lanes).unwrap();
-            assert_remaining_maxima(horizontal_stream, chains, &expected_horizontal);
+    #[test]
+    fn streams_match_materialized_reference() {
+        minifuzz::Builder::default()
+            .with_search_limit(256)
+            .test(|u| {
+                let base = generate(u, 1..=4, |u| u.int_in_range(0u64..=19))?;
+                let deltas = generate(u, 1..=4, |u| u.int_in_range(0u64..=5))?;
+                let proposed = generate(u, 1..=4, |u| u.int_in_range(0u64..=7))?;
+                let settled = generate(u, 1..=4, |u| u.arbitrary::<bool>())?;
+                let payments: bool = u.arbitrary()?;
+                let mask: [bool; 4] = u.arbitrary()?;
+                let chains = base
+                    .len()
+                    .min(deltas.len())
+                    .min(proposed.len())
+                    .min(settled.len());
+                let base = &base[..chains];
+                let deltas = &deltas[..chains];
+                let settled = &settled[..chains];
+                // Half the cases run without payment chains.
+                let payment = (0..chains)
+                    .map(|chain| payments && mask[chain])
+                    .collect::<Vec<_>>();
+                let lanes = Lanes::new(payment.iter().copied());
+                let target_heights = base
+                    .iter()
+                    .zip(deltas)
+                    .map(|(base, delta)| base + delta)
+                    .collect::<Vec<_>>();
+                let proposed_heights = base
+                    .iter()
+                    .zip(&proposed[..chains])
+                    .map(|(base, delta)| base + delta)
+                    .collect::<Vec<_>>();
+                let boundary = target_heights
+                    .iter()
+                    .zip(&proposed_heights)
+                    .map(|(target, proposed)| *target.min(proposed))
+                    .collect::<Vec<_>>();
+                // A payment chain's slots are all in the payment pass, none in the ordinary ones.
+                let ordinary = |chain: usize, delta: u64| if payment[chain] { 0 } else { delta };
+                let paid = (0..chains)
+                    .map(|chain| if payment[chain] { deltas[chain] } else { 0 })
+                    .collect::<Vec<_>>();
+                let positional = (0..chains)
+                    .map(|chain| ordinary(chain, boundary[chain] - base[chain]))
+                    .collect::<Vec<_>>();
+                let extension = (0..chains)
+                    .map(|chain| ordinary(chain, target_heights[chain] - boundary[chain]))
+                    .collect::<Vec<_>>();
+                let base_tips = frontier(base);
+                let target_tips = frontier(&target_heights);
+                let proposed = heights(&proposed_heights);
 
-            let short = (0..chains).map(|chain| !payment[chain] && boundary[chain] < proposed_heights[chain]).collect::<Vec<_>>();
-            let mut expected_sweep = reference_pass(base, &paid, &never).0;
-            let (positional_sweep, halted) = reference_pass(base, &positional, &short);
-            expected_sweep.extend(positional_sweep);
-            if !halted {
-                let unsettled = (0..chains).map(|chain| !payment[chain] && !settled[chain]).collect::<Vec<_>>();
-                expected_sweep.extend(reference_pass(&boundary, &extension, &unsettled).0);
-            }
-            let total = paid.iter().chain(&positional).chain(&extension).sum::<u64>();
-            let sweep_stream =
-                FinalSweep::new(&base_tips, target_tips, &proposed, settled.to_vec(), &lanes).unwrap();
-            prop_assert_eq!(sweep_stream.planned(), expected_sweep.len() as u64);
-            prop_assert_eq!(sweep_stream.halted(), (expected_sweep.len() as u64) < total);
-            assert_remaining_maxima(sweep_stream.into_stream(), chains, &expected_sweep);
-        }
+                let never = vec![false; chains];
+                let mut expected_horizontal = reference_pass(base, &paid, &never).0;
+                expected_horizontal.extend(reference_pass(base, &positional, &never).0);
+                expected_horizontal.extend(reference_pass(&boundary, &extension, &never).0);
+                let horizontal_stream =
+                    SlotStream::new(&base_tips, &target_tips, &proposed, &lanes).unwrap();
+                assert_remaining_maxima(horizontal_stream, chains, &expected_horizontal);
 
-        #[test]
-        fn payment_chains_never_interfere_with_ordinary_chains(
-            base in vec(0u64..20, 1..6),
-            deltas in vec(0u64..6, 1..6),
-            proposed in vec(0u64..8, 1..6),
-            settled in vec(any::<bool>(), 1..6),
-            mask in vec(any::<bool>(), 6),
-        ) {
-            let chains = base.len().min(deltas.len()).min(proposed.len()).min(settled.len());
-            let base = &base[..chains];
-            let target = (0..chains).map(|chain| base[chain] + deltas[chain]).collect::<Vec<_>>();
-            let proposed = (0..chains).map(|chain| base[chain] + proposed[chain]).collect::<Vec<_>>();
-            for sweep in [false, true] {
-                assert_non_interference(base, &target, &proposed, &settled[..chains], &mask[..chains], sweep);
-            }
-        }
+                let short = (0..chains)
+                    .map(|chain| !payment[chain] && boundary[chain] < proposed_heights[chain])
+                    .collect::<Vec<_>>();
+                let mut expected_sweep = reference_pass(base, &paid, &never).0;
+                let (positional_sweep, halted) = reference_pass(base, &positional, &short);
+                expected_sweep.extend(positional_sweep);
+                if !halted {
+                    let unsettled = (0..chains)
+                        .map(|chain| !payment[chain] && !settled[chain])
+                        .collect::<Vec<_>>();
+                    expected_sweep.extend(reference_pass(&boundary, &extension, &unsettled).0);
+                }
+                let total = paid
+                    .iter()
+                    .chain(&positional)
+                    .chain(&extension)
+                    .sum::<u64>();
+                let sweep_stream =
+                    FinalSweep::new(&base_tips, target_tips, &proposed, settled.to_vec(), &lanes)
+                        .unwrap();
+                assert_eq!(sweep_stream.planned(), expected_sweep.len() as u64);
+                assert_eq!(sweep_stream.halted(), (expected_sweep.len() as u64) < total);
+                assert_remaining_maxima(sweep_stream.into_stream(), chains, &expected_sweep);
+                Ok(())
+            });
+    }
+
+    #[test]
+    fn payment_chains_never_interfere_with_ordinary_chains() {
+        minifuzz::Builder::default()
+            .with_search_limit(256)
+            .test(|u| {
+                let base = generate(u, 1..=5, |u| u.int_in_range(0u64..=19))?;
+                let deltas = generate(u, 1..=5, |u| u.int_in_range(0u64..=5))?;
+                let proposed = generate(u, 1..=5, |u| u.int_in_range(0u64..=7))?;
+                let settled = generate(u, 1..=5, |u| u.arbitrary::<bool>())?;
+                let mask: [bool; 6] = u.arbitrary()?;
+                let chains = base
+                    .len()
+                    .min(deltas.len())
+                    .min(proposed.len())
+                    .min(settled.len());
+                let base = &base[..chains];
+                let target = (0..chains)
+                    .map(|chain| base[chain] + deltas[chain])
+                    .collect::<Vec<_>>();
+                let proposed = (0..chains)
+                    .map(|chain| base[chain] + proposed[chain])
+                    .collect::<Vec<_>>();
+                for sweep in [false, true] {
+                    assert_non_interference(
+                        base,
+                        &target,
+                        &proposed,
+                        &settled[..chains],
+                        &mask[..chains],
+                        sweep,
+                    );
+                }
+                Ok(())
+            });
     }
 }

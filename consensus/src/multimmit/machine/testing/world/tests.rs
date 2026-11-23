@@ -6,7 +6,7 @@ use super::{
     *,
 };
 use crate::multimmit::machine::testing::{VerifyJobExt as _, fixtures::unsigned_da_certificate};
-use proptest::prelude::*;
+use commonware_invariants::minifuzz;
 
 fn prefix_crash_plan() -> ReplayPlan {
     let (plan, _) = Scenario::new(
@@ -722,56 +722,58 @@ fn canonical_fault_schedule_drains_all_locally_answerable_work() {
     exercise(&[]);
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(16))]
+#[test]
+fn honest_replicas_keep_compatible_finality_under_replayable_faults() {
+    minifuzz::Builder::default()
+        .with_search_limit(16)
+        .test(|u| {
+            let blocks = u.int_in_range(2usize..=6)?;
+            let proposal_first: [bool; REPLICAS] = u.arbitrary()?;
+            let newest_verification: [bool; REPLICAS] = u.arbitrary()?;
+            let reverse_votes: [bool; REPLICAS] = u.arbitrary()?;
+            let byzantine_full: [bool; REPLICAS] = u.arbitrary()?;
+            let reverse_blocks: [bool; REPLICAS] = u.arbitrary()?;
+            let malformed_bits: u8 = u.arbitrary()?;
+            let crash_bits: u8 = u.arbitrary()?;
+            let (plan, durable) = Scenario::new(
+                blocks,
+                from_fn(|replica| ReplicaKnobs {
+                    proposal_first: proposal_first[replica],
+                    newest_verification: newest_verification[replica],
+                    reverse_votes: reverse_votes[replica],
+                    byzantine_full: byzantine_full[replica],
+                    reverse_blocks: reverse_blocks[replica],
+                    malformed: malformed_completion(malformed_bits, replica),
+                    crash: crash_cut(crash_bits, replica),
+                }),
+            )
+            .run();
 
-    #[test]
-    fn honest_replicas_keep_compatible_finality_under_replayable_faults(
-        blocks in 2usize..=6,
-        proposal_first in any::<[bool; REPLICAS]>(),
-        newest_verification in any::<[bool; REPLICAS]>(),
-        reverse_votes in any::<[bool; REPLICAS]>(),
-        byzantine_full in any::<[bool; REPLICAS]>(),
-        reverse_blocks in any::<[bool; REPLICAS]>(),
-        malformed_bits in any::<u8>(),
-        crash_bits in any::<u8>(),
-    ) {
-        let (plan, durable) = Scenario::new(
-            blocks,
-            from_fn(|replica| ReplicaKnobs {
-                proposal_first: proposal_first[replica],
-                newest_verification: newest_verification[replica],
-                reverse_votes: reverse_votes[replica],
-                byzantine_full: byzantine_full[replica],
-                reverse_blocks: reverse_blocks[replica],
-                malformed: malformed_completion(malformed_bits, replica),
-                crash: crash_cut(crash_bits, replica),
-            }),
-        ).run();
+            let (_, canonical) = Scenario::new(
+                blocks,
+                from_fn(|replica| ReplicaKnobs {
+                    proposal_first: proposal_first[replica],
+                    newest_verification: [false; REPLICAS][replica],
+                    reverse_votes: reverse_votes[replica],
+                    byzantine_full: byzantine_full[replica],
+                    reverse_blocks: reverse_blocks[replica],
+                    malformed: malformed_completion(malformed_bits, replica),
+                    crash: [None; REPLICAS][replica],
+                }),
+            )
+            .run();
+            assert_eq!(&durable.finality, &canonical.finality);
+            assert_eq!(
+                durable.inspections[0].finality_floor(),
+                canonical.inspections[0].finality_floor(),
+            );
 
-        let (_, canonical) = Scenario::new(
-            blocks,
-            from_fn(|replica| ReplicaKnobs {
-                proposal_first: proposal_first[replica],
-                newest_verification: [false; REPLICAS][replica],
-                reverse_votes: reverse_votes[replica],
-                byzantine_full: byzantine_full[replica],
-                reverse_blocks: reverse_blocks[replica],
-                malformed: malformed_completion(malformed_bits, replica),
-                crash: [None; REPLICAS][replica],
-            }),
-        ).run();
-        prop_assert_eq!(&durable.finality, &canonical.finality);
-        prop_assert_eq!(
-            durable.inspections[0].finality_floor(),
-            canonical.inspections[0].finality_floor(),
-        );
-
-        let replay_fixture = Fixture::new(plan.blocks);
-        let replayed = World::replay(&replay_fixture, &plan.actions);
-        for replica in 0..REPLICAS {
-            replayed.assert_locally_drained(replica);
-        }
-        prop_assert_eq!(replayed.durable_outcome(), durable);
-    }
+            let replay_fixture = Fixture::new(plan.blocks);
+            let replayed = World::replay(&replay_fixture, &plan.actions);
+            for replica in 0..REPLICAS {
+                replayed.assert_locally_drained(replica);
+            }
+            assert_eq!(replayed.durable_outcome(), durable);
+            Ok(())
+        });
 }
