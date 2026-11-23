@@ -30,11 +30,11 @@ use crate::{
     },
     metadata::{Config as MConfig, Metadata},
 };
-use commonware_codec::{Copying, DecodeExt, Write};
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
-use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
+use commonware_utils::{futures::try_join_all, range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
@@ -65,17 +65,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     pub fn add_leaf_digest(self, digest: D) -> Self {
         Self {
             inner: self.inner.add_leaf_digest(digest),
-        }
-    }
-
-    /// Add `items` as leaves in order, encoding and hashing them across the strategy.
-    pub(crate) fn add_many<Item: Write + Sync>(
-        self,
-        hasher: &impl Hasher<F, Digest = D>,
-        items: &[Item],
-    ) -> Self {
-        Self {
-            inner: self.inner.add_many(hasher, items),
         }
     }
 
@@ -158,11 +147,8 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
     ///
-    /// Held in an [`Arc`] so [`Merkle::view`] can hand a zero-copy, immutable view to jobs
-    /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
-    /// while no view or snapshot is alive and copy-on-write otherwise, so neither observes later
-    /// mutations.
-    mem: Arc<Mem<F, D>>,
+    /// Stored on the heap to keep this by-value handle small.
+    mem: Box<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
@@ -189,9 +175,6 @@ pub(crate) enum Retain<F: Family> {
     All,
     /// At most this many leaves. The persisted pruning boundary must not exceed it.
     AtMost(Location<F>),
-    /// No leaf. The caller keeps no item of its leaf source, so the persisted pruning boundary
-    /// and pins are cleared first.
-    Nothing,
 }
 
 /// A validated Merkle prefix whose storage has not yet been deliberately truncated.
@@ -214,11 +197,6 @@ pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
-    /// Number of leaves available before operation replay.
-    pub(crate) fn leaves(&self) -> Location<F> {
-        self.mem.leaves()
-    }
-
     /// Finalize a validated prefix and publish its Merkle handle.
     pub(crate) async fn finish(mut self) -> Result<Merkle<F, E, D, S>, Error<F>> {
         // Reconcile the journal with the validated complete size and durable metadata boundary.
@@ -231,7 +209,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
         // any reconstructed nodes.
         let journal = (*self.journal).finish(*self.retained_size).await?;
         Merkle {
-            mem: Arc::new(self.mem),
+            mem: Box::new(self.mem),
             pruned_to_pos: self.effective_prune_pos,
             journal,
             metadata: self.metadata,
@@ -309,7 +287,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// A persisted pruning boundary beyond the recovered journal fails with [Error::MissingNode].
     /// An interrupted [Self::init_sync] can leave this state until its retry completes the reset.
-    /// A pruned journal with no persisted boundary has lost its pins. A discard or an interrupted
+    /// A pruned journal with no persisted boundary has lost its pins. An interrupted
     /// [Self::destroy] leaves one, and it is cleared before any leaf cap applies, so the store
     /// reopens empty.
     pub(crate) async fn prepare(
@@ -318,12 +296,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         cfg: Config<S>,
         retain: Retain<F>,
     ) -> Result<Recovery<F, E, D, S>, Error<F>> {
-        let (max_leaves, discard) = match retain {
-            Retain::All => (None, false),
-            Retain::AtMost(leaves) => (Some(leaves), false),
-            Retain::Nothing => (Some(Location::new(0)), true),
+        let max_leaves = match retain {
+            Retain::All => None,
+            Retain::AtMost(leaves) => Some(leaves),
         };
-        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
             context.child("metadata"),
             MConfig {
                 partition: cfg.metadata_partition,
@@ -331,13 +308,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             },
         )
         .await?;
-
-        // One metadata commit drops the boundary together with its pins.
-        if discard && metadata.keys().next().is_some() {
-            warn!("discarding Merkle metadata without a leaf source");
-            metadata.clear();
-            metadata = metadata.sync().await?;
-        }
 
         // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
         // opening the node journal.
@@ -371,9 +341,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             replay_buffer: cfg.replay_buffer,
         };
 
-        // A pruned journal with no persisted boundary lost its pins with the metadata. The
-        // discard above leaves one, and so does a destroy interrupted after removing the
-        // metadata. Prune and init_sync make the boundary durable first. Clear the journal before
+        // A pruned journal with no persisted boundary lost its pins with the metadata. A destroy
+        // interrupted after removing the metadata leaves one. Prune and init_sync make the
+        // boundary durable first. Clear the journal before
         // a leaf cap could reject its start.
         let orphaned = persisted_pruned_to.is_none()
             && Journal::<E, D>::span(context.child("span"), &journal_cfg)
@@ -613,7 +583,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let journal = (*journal).finish(*journal_size).await?;
 
         Ok(Self {
-            mem: Arc::new(mem),
+            mem: Box::new(mem),
             pruned_to_pos: prune_pos,
             journal,
             metadata,
@@ -715,6 +685,17 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             .collect())
     }
 
+    /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<D>, Error<F>> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        let futs = F::nodes_to_pin(loc)
+            .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
+            .collect::<Vec<_>>();
+        try_join_all(futs).await
+    }
+
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
     /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
     /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
@@ -790,7 +771,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
         // the mem. We prune to the previously captured leaf count.
-        let mem = Arc::make_mut(&mut self.mem);
+        let mem = &mut self.mem;
         mem.prune(sync_target_leaves)
             .expect("captured leaves is in bounds");
         mem.add_pinned_nodes(pinned_nodes);
@@ -823,7 +804,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         (self, pinned_nodes) = self.update_metadata(pos).await?;
 
         (self.journal, _) = self.journal.prune(*pos).await?;
-        Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
+        self.mem.add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok(self)
@@ -929,30 +910,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, Error<F>> {
-        Arc::make_mut(&mut self.mem).apply_batch(batch)?;
+        self.mem.apply_batch(batch)?;
         Ok(self)
-    }
-
-    /// Create an owned [`batch::MerkleizedBatch`] representing the current committed state.
-    ///
-    /// The batch has no data (the committed items are on disk, not in memory).
-    /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
     }
 
     /// The committed [`Mem`].
     pub fn mem(&self) -> &Mem<F, D> {
         &self.mem
-    }
-
-    /// Return a zero-copy, immutable view of the committed Mem.
-    ///
-    /// The view never observes later mutations: mutators copy-on-write while a view is alive.
-    /// Use this to move committed node fallback into a job running off the calling task; prefer
-    /// [`Merkle::mem()`] when a borrow suffices.
-    pub(crate) fn view(&self) -> Arc<Mem<F, D>> {
-        Arc::clone(&self.mem)
     }
 
     /// Create a new speculative batch with this structure as its parent.
@@ -965,24 +929,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Return a reference to the merkleization strategy.
     pub const fn strategy(&self) -> &S {
         &self.strategy
-    }
-
-    /// Capture an owned immutable [Snapshot] of the structure, sharing its in-memory nodes and
-    /// freezing its flushed journal.
-    ///
-    /// Capture writes the node journal's buffered data and keeps its blobs open while the
-    /// snapshot is alive, as [`Snapshottable`](crate::journal::contiguous::Snapshottable)
-    /// describes. Nodes still in memory are shared rather than written, so the next mutation of
-    /// the live structure copies them.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the journal capture fails, which consumes the structure.
-    pub async fn snapshot(mut self) -> Result<(Self, Snapshot<F, E, D>), Error<F>> {
-        let flushed;
-        (self.journal, flushed) = self.journal.snapshot().await?;
-        let mem = Arc::clone(&self.mem);
-        Ok((self, Snapshot { mem, flushed }))
     }
 
     /// Return an inclusion proof for the element at the location `loc` against a historical
@@ -1112,10 +1058,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D,
     }
 }
 
-impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage
+impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
     for Merkle<F, E, D, S>
 {
-    type Family = F;
     type Digest = D;
 
     fn size(&self) -> Position<F> {
@@ -1131,76 +1076,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Stor
     }
 }
 
-/// Owned immutable snapshot of a [Merkle] structure, frozen at capture.
-pub struct Snapshot<F: Family, E: Context, D: Digest> {
-    /// Nodes resident in memory at capture.
-    mem: Arc<Mem<F, D>>,
-
-    /// Owned node-journal snapshot covering nodes flushed before capture.
-    flushed: crate::journal::contiguous::fixed::Reader<'static, E, D>,
-}
-
-impl<F: Family, E: Context, D: Digest> crate::merkle::storage::Storage for Snapshot<F, E, D> {
-    type Family = F;
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.mem.size()
-    }
-
-    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
-        if let Some(node) = self.mem.get_node(position) {
-            return Ok(Some(node));
-        }
-
-        match self.flushed.read(*position).await {
-            Ok(item) => Ok(Some(item)),
-            Err(JError::ItemPruned(_)) => Ok(None),
-            Err(e) => Err(Error::Journal(e)),
-        }
-    }
-
-    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
-        assert!(
-            positions.is_sorted_by(|a, b| a < b),
-            "positions must be strictly increasing"
-        );
-        // Serve memory-resident nodes directly and batch the rest through the
-        // captured journal, mirroring the live structure's override.
-        let bounds = self.flushed.bounds();
-        let mut nodes = vec![None; positions.len()];
-        let mut journal_positions = Vec::with_capacity(positions.len());
-        for (slot, &position) in nodes.iter_mut().zip(positions) {
-            if let Some(node) = self.mem.get_node(position) {
-                *slot = Some(node);
-            } else if *position >= bounds.start {
-                // In-subsequence order is preserved, so this stays strictly increasing.
-                journal_positions.push(*position);
-            } else {
-                return Err(Error::ElementPruned(position));
-            }
-        }
-
-        // Within-bounds reads are guaranteed not to return `ItemPruned` (see
-        // [`crate::journal::contiguous::Contiguous::read`]).
-        let items = if journal_positions.is_empty() {
-            Vec::new()
-        } else {
-            self.flushed
-                .read_many(&journal_positions)
-                .await
-                .map_err(Error::Journal)?
-        };
-
-        // The unfilled slots are exactly the journal subsequence, in the order it was built.
-        let mut items = items.into_iter();
-        Ok(nodes
-            .into_iter()
-            .map(|node| node.unwrap_or_else(|| items.next().expect("one item per journal read")))
-            .collect())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,7 +1083,7 @@ mod tests {
         journal::contiguous::fixed::{Config as JConfig, Journal},
         merkle::{
             Bagging::ForwardFold, Location, LocationRangeExt as _, Position, Proof,
-            hasher::Standard, mmb, mmr, storage::Storage as _,
+            hasher::Standard, mmb, mmr,
         },
         metadata::{Config as MConfig, Metadata},
     };
@@ -2227,6 +2102,8 @@ mod tests {
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent
     /// nodes, and confirms we appropriately recover to a valid state.
     async fn full_recovery_inner<F: Family>(context: deterministic::Context) {
+        use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
+
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
@@ -4161,7 +4038,7 @@ mod tests {
 
             // The newest node blob starts at or past `end_pos`, so the open bounded at the range
             // end discards it without opening it.
-            let newest = (*merkle.size() - 1) / cfg.items_per_blob.get();
+            let newest = (*merkle.size() - 1) / cfg.items_per_blob;
             assert!(newest * cfg.items_per_blob.get() >= *end_pos);
             drop(merkle);
 
@@ -4279,7 +4156,7 @@ mod tests {
             let merkle = merkle.prune(Location::new(30)).await.unwrap();
             let merkle = merkle.sync().await.unwrap();
             assert!(merkle.bounds().start > end);
-            let newest = (*merkle.size() - 1) / cfg.items_per_blob.get();
+            let newest = (*merkle.size() - 1) / cfg.items_per_blob;
             drop(merkle);
             if torn {
                 tear_node_blob(&context, &cfg, newest).await;
@@ -5998,7 +5875,7 @@ mod tests {
         // Attempt to update leaf 0 which has been synced out of memory.
         // Use the inner batch type directly since the full wrapper
         // intentionally hides update_leaf.
-        let batch = mmr.to_batch().new_batch();
+        let batch = mmr.mem().new_batch();
         let result = batch.update_leaf(&hasher, Location::<F>::new(0), b"updated");
         assert!(matches!(result, Err(Error::ElementPruned(_))));
 
@@ -6015,196 +5892,6 @@ mod tests {
     fn test_update_leaf_after_sync_returns_pruned_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_update_leaf_after_sync_returns_pruned_inner::<mmb::Family>);
-    }
-
-    /// Every position of a structure with `size` nodes, in order.
-    fn all_positions<F: Family>(size: Position<F>) -> Vec<Position<F>> {
-        (0..*size).map(Position::new).collect()
-    }
-
-    /// A [Snapshot] keeps serving the nodes captured from both memory and the flushed journal
-    /// after the live structure appends, flushes, and prunes past them.
-    async fn full_snapshot_frozen_across_flush_and_prune_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
-        let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("storage"),
-            &hasher,
-            test_config(),
-        )
-        .await
-        .unwrap();
-        let add = |mmr: Merkle<F, _, Digest, Sequential>, leaves: std::ops::Range<usize>| {
-            let mut batch = mmr.new_batch();
-            for i in leaves {
-                batch = batch.add(&hasher, &test_digest(i));
-            }
-            let batch = batch.merkleize(mmr.mem(), &hasher);
-            mmr.apply_batch(&batch).unwrap()
-        };
-
-        // Flush 40 leaves, then keep 10 more only in memory, so the capture spans both.
-        mmr = add(mmr, 0..40);
-        mmr = mmr.sync().await.unwrap();
-        mmr = add(mmr, 40..50);
-        let size = mmr.size();
-        let positions = all_positions(size);
-        let nodes = mmr.get_nodes(&positions).await.unwrap();
-        let root = mmr.root(&hasher, 0).unwrap();
-
-        let snapshot;
-        (mmr, snapshot) = mmr.snapshot().await.unwrap();
-
-        // Grow, flush, and prune the live structure past every captured leaf.
-        mmr = add(mmr, 50..80);
-        mmr = mmr.sync().await.unwrap();
-        mmr = mmr.prune(Location::new(60)).await.unwrap();
-        assert!(mmr.bounds().start > Location::new(50));
-        assert_ne!(mmr.root(&hasher, 0).unwrap(), root);
-
-        assert_eq!(snapshot.size(), size);
-        assert_eq!(snapshot.get_nodes(&positions).await.unwrap(), nodes);
-        for (&position, node) in positions.iter().zip(&nodes) {
-            assert_eq!(snapshot.get_node(position).await.unwrap(), Some(*node));
-        }
-
-        // A boundary past the leaf count is out of range for the snapshot, the live structure, and
-        // its in-memory nodes alike.
-        let past = Location::try_from(size).unwrap() + 1;
-        assert!(matches!(
-            snapshot.pinned_nodes_at(past).await,
-            Err(Error::RangeOutOfBounds(loc)) if loc == past
-        ));
-        let live_past = Location::try_from(mmr.size()).unwrap() + 1;
-        assert!(matches!(
-            mmr.pinned_nodes_at(live_past).await,
-            Err(Error::RangeOutOfBounds(loc)) if loc == live_past
-        ));
-        let mem_past =
-            Location::try_from(crate::merkle::storage::Storage::size(mmr.mem())).unwrap() + 1;
-        assert!(matches!(
-            crate::merkle::storage::Storage::pinned_nodes_at(mmr.mem(), mem_past).await,
-            Err(Error::RangeOutOfBounds(loc)) if loc == mem_past
-        ));
-
-        drop(snapshot);
-        mmr.destroy().await.unwrap();
-    }
-
-    #[test_traced]
-    fn test_snapshot_frozen_across_flush_and_prune_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(full_snapshot_frozen_across_flush_and_prune_inner::<mmr::Family>);
-    }
-
-    #[test_traced]
-    fn test_snapshot_frozen_across_flush_and_prune_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(full_snapshot_frozen_across_flush_and_prune_inner::<mmb::Family>);
-    }
-
-    /// Nodes still resident in memory, which a held [Snapshot] forces mutators to clone.
-    fn retained_nodes<F: Family>(
-        mmr: &Merkle<F, deterministic::Context, Digest, Sequential>,
-    ) -> u64 {
-        let boundary =
-            Position::<F>::try_from(mmr.mem.bounds().start).expect("valid pruning boundary");
-        *mmr.mem.size() - *boundary
-    }
-
-    /// Commit `commits` batches of `LEAVES_PER_COMMIT`, holding the snapshot captured after each
-    /// one so every mutation copies, then leave a final batch un-synced. Returns the retained
-    /// node count and the total leaf count.
-    async fn commit_holding_snapshots<F: Family>(
-        context: deterministic::Context,
-        partition: &str,
-        commits: usize,
-    ) -> (u64, u64) {
-        const LEAVES_PER_COMMIT: usize = 8;
-
-        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-        let config = Config {
-            journal_partition: format!("{partition}-journal"),
-            metadata_partition: format!("{partition}-metadata"),
-            ..test_config()
-        };
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, config)
-            .await
-            .unwrap();
-
-        let mut snapshots = Vec::new();
-        let mut leaf = 0usize;
-        let commit = |mmr: Merkle<F, _, Digest, Sequential>, leaf: &mut usize| {
-            let mut batch = mmr.new_batch();
-            for _ in 0..LEAVES_PER_COMMIT {
-                batch = batch.add(&hasher, &test_digest(*leaf));
-                *leaf += 1;
-            }
-            let batch = batch.merkleize(mmr.mem(), &hasher);
-            mmr.apply_batch(&batch).unwrap()
-        };
-
-        for _ in 0..commits {
-            mmr = commit(mmr, &mut leaf);
-            let positions = all_positions(mmr.size());
-            let nodes = mmr.get_nodes(&positions).await.unwrap();
-            let snapshot;
-            (mmr, snapshot) = mmr.snapshot().await.unwrap();
-            snapshots.push((snapshot, positions, nodes));
-            mmr = mmr.sync().await.unwrap();
-        }
-
-        // A final un-synced batch, the state a mid-block snapshot sees, and what keeps the
-        // measurement from reading zero either way.
-        mmr = commit(mmr, &mut leaf);
-
-        // Each snapshot still serves exactly the nodes the structure held at its capture.
-        for (snapshot, positions, nodes) in &snapshots {
-            assert_eq!(snapshot.size(), Position::new(positions.len() as u64));
-            assert_eq!(&snapshot.get_nodes(positions).await.unwrap(), nodes);
-        }
-
-        let measured = (retained_nodes(&mmr), *mmr.leaves());
-        drop(snapshots);
-        mmr.destroy().await.unwrap();
-        measured
-    }
-
-    /// A held [Snapshot] makes the next mutation clone `mem`, which stays affordable only
-    /// because [Merkle::flush_internal] prunes nodes out of memory once the journal holds
-    /// them. If that pruning moved or disappeared, every clone would scale with the structure
-    /// instead of the commit.
-    async fn full_retained_nodes_track_commit_delta_inner<F: Family>(
-        context: deterministic::Context,
-    ) {
-        let (small, small_leaves) =
-            commit_holding_snapshots::<F>(context.child("small"), "small", 4).await;
-        let (large, large_leaves) =
-            commit_holding_snapshots::<F>(context.child("large"), "large", 32).await;
-
-        assert!(small > 0, "no nodes retained: measurement is vacuous");
-        assert!(
-            large_leaves > small_leaves,
-            "scales must differ: {small_leaves} vs {large_leaves} leaves"
-        );
-        assert_eq!(
-            large, small,
-            "retained nodes must track the commit delta, not the structure: \
-             {small} at {small_leaves} leaves, {large} at {large_leaves}"
-        );
-    }
-
-    #[test_traced]
-    fn test_retained_nodes_track_commit_delta_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(full_retained_nodes_track_commit_delta_inner::<mmr::Family>);
-    }
-
-    #[test_traced]
-    fn test_retained_nodes_track_commit_delta_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(full_retained_nodes_track_commit_delta_inner::<mmb::Family>);
     }
 
     // A genesis sync onto a node journal that is empty at zero must drop the pins an interrupted

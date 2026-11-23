@@ -53,13 +53,12 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
-    mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::unordered::fixed,
-        immutable,
-        sync::{CompactTarget, Target},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
     },
+    mmr::{self, Location},
+    qmdb::{any::unordered::fixed, immutable, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
@@ -92,14 +91,11 @@ pub(super) fn qmdb_config(
     immutable::fixed::CompactConfig<Sequential>,
 ) {
     let db_a = fixed::Config {
-        merkle: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
-            metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
-            items_per_blob: NZU64!(11),
-            write_buffer: IO_BUFFER_SIZE,
+        merkle: MerkleConfig {
+            partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: Default::default(),
         },
         log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),
@@ -111,7 +107,7 @@ pub(super) fn qmdb_config(
         translator: TwoCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     };
 
     // One witness entry per section so periodic pruning drops entries.
@@ -322,14 +318,13 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
-        let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             root_a: merkleized_a.root(),
-            range_a: non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size),
+            range_a: merkleized_a.target().range,
             root_b: merkleized_b.root(),
             range_b: non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size),
         };
@@ -350,8 +345,8 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         let (height, range_b) = (block.height(), block.range_b.clone());
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
 
-        // Database B's sync target covers its root and size but not its inactivity floor, so the
-        // floor is checked here.
+        // Database B's sync target covers its root and last commit but not its inactivity floor, so
+        // the floor is checked here.
         let bounds_b = merkleized_b.bounds();
         if non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) != range_b {
             return None;
@@ -383,9 +378,10 @@ impl<E: Spawner + StorageContext> Application<E> for App {
                 root: block.root_a,
                 range: block.range_a.clone(),
             },
-            CompactTarget {
+            // Database B is compact, so its target covers only the last commit.
+            Target {
                 root: block.root_b,
-                size: block.range_b.end(),
+                range: non_empty_range!(block.range_b.end() - 1, block.range_b.end()),
             },
         )
     }
@@ -399,6 +395,7 @@ pub(crate) struct MultiDbEngine {
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
     retained_marshal_blocks: usize,
+    elector: RoundRobin,
 }
 
 impl MultiDbEngine {
@@ -420,6 +417,7 @@ impl MultiDbEngine {
                 max_outstanding_requests: NZUsize!(8),
             },
             retained_marshal_blocks: 10,
+            elector: RoundRobin::default(),
         }
     }
 
@@ -436,6 +434,19 @@ impl MultiDbEngine {
             max_outstanding_requests: NZUsize!(1),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Retains enough marshal blocks for a validator restarted without state sync to fetch those
+    /// it missed while down.
+    pub(crate) fn with_restart_retention(mut self) -> Self {
+        self.retained_marshal_blocks = RESTART_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Sets the leader election. The default rotates the leader every view.
+    pub(crate) fn with_elector(mut self, elector: RoundRobin) -> Self {
+        self.elector = elector;
         self
     }
 }
@@ -576,7 +587,7 @@ impl EngineDefinition for MultiDbEngine {
             initial_a.root,
             initial_a.range,
             initial_b.root,
-            non_empty_range!(Location::new(0), initial_b.size),
+            non_empty_range!(Location::new(0), initial_b.range.end()),
         );
 
         let stateful_startup_context = context.child("stateful_startup");
@@ -745,7 +756,7 @@ impl EngineDefinition for MultiDbEngine {
         // Simplex engine
         let simplex_config = simplex::Config {
             scheme,
-            elector: RoundRobin::<Sha256>::default(),
+            elector: self.elector.clone(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
             relay: deferred.clone(),

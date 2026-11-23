@@ -1,6 +1,7 @@
 [package]
 name = "commonware-consensus"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -44,8 +45,10 @@ rand_distr = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-consensus = { path = ".", features = ["mocks"] }
+commonware-invariants.workspace = true
 commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
@@ -62,6 +65,7 @@ development = ["commonware-consensus"]
 bench = false
 
 [features]
+fuzz = [ "dep:arbitrary", "mocks" ]
 mocks = [
 	"commonware-cryptography/mocks",
 	"commonware-p2p/mocks",

@@ -2,7 +2,6 @@ use crate::common::{SAMPLE_SIZE, StandardHasher, n_leaves, single_samples};
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{Bagging::ForwardFold, Family};
 use criterion::{BatchSize, Criterion, criterion_group};
-use futures::executor::block_on;
 use std::hint::black_box;
 
 /// Times single-leaf proof generation without verification.
@@ -18,12 +17,10 @@ fn bench_proof_family<F: Family>(c: &mut Criterion, family: &str) {
                 b.iter_batched_ref(
                     || single_samples::<F>(n),
                     |(mem, _, samples)| {
-                        block_on(async {
-                            let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-                            for (loc, _) in samples.iter() {
-                                black_box(mem.proof(&hasher, *loc, 0).unwrap());
-                            }
-                        });
+                        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                        for (loc, _) in samples.iter() {
+                            black_box(mem.proof(&hasher, *loc, 0).unwrap());
+                        }
                     },
                     BatchSize::LargeInput,
                 )

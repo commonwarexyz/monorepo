@@ -807,6 +807,45 @@ mod tests {
     }
 
     #[test]
+    fn fetch_if_permitted_applies_both_floors_to_untrusted_requests() {
+        let floor = floor();
+        let mut resolver = TestResolver::default();
+        let mut fetch = |height, bound| {
+            floor.fetch_if_permitted(
+                &mut resolver,
+                Request::untrusted(digest(1), Height::new(height), bound),
+            )
+        };
+
+        // Either floor denies the request, whatever the other bound says.
+        for (height, bound) in [(6, Some(round(5))), (5, Some(round(6))), (5, None)] {
+            assert!(matches!(fetch(height, bound), FetchAdmission::Denied));
+        }
+
+        // A request above the height floor is issued when its round is above the round floor or
+        // it carries none.
+        for bound in [Some(round(6)), None] {
+            assert!(matches!(fetch(6, bound), FetchAdmission::Issued));
+        }
+        let issued: Vec<_> = resolver
+            .fetches()
+            .into_iter()
+            .map(|fetch| (fetch.key, fetch.subscriber))
+            .collect();
+        let annotation = |bound| Annotation::Untrusted {
+            height: Height::new(6),
+            round: bound,
+        };
+        assert_eq!(
+            issued,
+            [
+                (Key::Block(digest(1)), annotation(Some(round(6)))),
+                (Key::Block(digest(1)), annotation(None)),
+            ]
+        );
+    }
+
+    #[test]
     fn fetch_targeted_if_permitted_returns_denied_without_fetching() {
         let floor = floor();
         let mut resolver = TestResolver::default();

@@ -50,14 +50,12 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, Location, full::Config as MmrJournalConfig},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
+    mmr::{self, Location},
     qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
-use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
-};
+use commonware_utils::{NZDuration, NZU64, NZUsize, range::NonEmptyRange, test_rng};
 use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 
@@ -70,14 +68,11 @@ pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 /// Builds the QMDB configuration used by single-database tests.
 pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
     fixed::Config {
-        merkle: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-mmr-journal"),
-            metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
-            items_per_blob: NZU64!(11),
-            write_buffer: IO_BUFFER_SIZE,
+        merkle: MerkleConfig {
+            partition: format!("{prefix}-qmdb-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: Default::default(),
         },
         log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
@@ -89,7 +84,7 @@ pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<T
         translator: TwoCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -246,13 +241,12 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
         };
         Some(Proposed { block, merkleized })
     }
@@ -302,6 +296,7 @@ pub(crate) struct SingleDbEngine {
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
     retained_marshal_blocks: usize,
+    elector: RoundRobin,
 }
 
 impl SingleDbEngine {
@@ -323,6 +318,7 @@ impl SingleDbEngine {
                 max_outstanding_requests: NZUsize!(8),
             },
             retained_marshal_blocks: 10,
+            elector: RoundRobin::default(),
         }
     }
 
@@ -339,6 +335,19 @@ impl SingleDbEngine {
             max_outstanding_requests: NZUsize!(1),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Retains enough marshal blocks for a validator restarted without state sync to fetch those
+    /// it missed while down.
+    pub(crate) fn with_restart_retention(mut self) -> Self {
+        self.retained_marshal_blocks = RESTART_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Sets the leader election. The default rotates the leader every view.
+    pub(crate) fn with_elector(mut self, elector: RoundRobin) -> Self {
+        self.elector = elector;
         self
     }
 }
@@ -614,7 +623,7 @@ impl EngineDefinition for SingleDbEngine {
         // Simplex engine
         let simplex_config = simplex::Config {
             scheme,
-            elector: RoundRobin::<Sha256>::default(),
+            elector: self.elector.clone(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
             relay: deferred.clone(),

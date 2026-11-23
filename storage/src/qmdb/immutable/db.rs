@@ -4,17 +4,23 @@ use crate::{
     index::immutable::Index,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Snapshottable},
+        contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{Error, chain, metrics::Metrics, operation::Key, sync::source, value::ValueEncoding},
+    qmdb::{
+        Error, chain,
+        metrics::Metrics,
+        operation::{Committable as _, Key},
+        sync::source,
+        value::ValueEncoding,
+    },
     translator::Translator,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Spawner};
 use core::{
     borrow::Borrow,
     num::{NonZeroU64, NonZeroUsize},
@@ -67,7 +73,7 @@ where
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
             if let Operation::Set(key, _) = op {
-                index.insert(&key, loc);
+                index.insert(key.as_ref(), loc);
             }
         }
     }
@@ -155,52 +161,45 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>>
     where
-        C: authenticated::Backing<E>,
+        E: Spawner,
+        C: authenticated::Backing<E> + 'static,
     {
         // Index reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
             max_size,
-            true,
         )
         .await?;
+        let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, true)
+            .await?
+            .unwrap_or(Location::new(0));
+
+        // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
+        // digests. Its inactivity floor is where the index replay starts, so keys set before
+        // the floor are not loaded.
+        let (index_context, translator, buffer) =
+            (context.child("index"), cfg.translator, cfg.init_buffer);
+        let (mut journal, index) = pending
+            .finish_with(cfg.init_concurrency, |journal| async move {
+                build_index(
+                    index_context,
+                    translator,
+                    inactivity_floor_loc,
+                    &*journal,
+                    buffer,
+                )
+                .await
+            })
+            .await?;
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
-
-        // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
-        // the index replay starts, so keys set before the floor are not loaded.
-        let (last_commit_loc, inactivity_floor_loc, index) = {
-            let bounds = journal.journal.bounds();
-            let last_commit_loc =
-                Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
-
-            // Read the floor from the last commit operation.
-            let last_op = journal.journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .inactivity_floor()
-                .expect("last operation should be a commit with floor");
-
-            // Replay the log from the inactivity floor to build the index.
-            let index = build_index(
-                context.child("index"),
-                cfg.translator,
-                inactivity_floor_loc,
-                &journal.journal,
-                cfg.init_buffer,
-            )
-            .await?;
-
-            (last_commit_loc, inactivity_floor_loc, index)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -221,8 +220,6 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -246,16 +243,17 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
-    /// has been pruned.
+    /// Get the value of `key` in the db, or None if no operation at or above the inactivity floor
+    /// sets it.
     ///
-    /// Unlike batch reads, this may return a value written below the inactivity floor, until the
-    /// database prunes that operation or rebuilds its index from the floor on restart or sync.
+    /// Every database at the same commitment answers alike, however far it has pruned and
+    /// whether or not it has been reopened. None does not mean `key` may be set: a key the floor
+    /// has retired was still set once.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        self.get_from(key, Location::new(0)).await
+        self.get_from(key, self.inactivity_floor_loc).await
     }
 
-    /// Like [`Self::get`], but also ignores operations below `floor`.
+    /// Get the value of `key` in the db, ignoring operations below `floor`.
     pub(crate) async fn get_from(
         &self,
         key: &K,
@@ -264,7 +262,7 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        for loc in self.index.get(key) {
+        for loc in self.index.get(key.as_ref()) {
             let loc = Location::new(loc);
             if loc < floor {
                 continue;
@@ -278,16 +276,15 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys. Like [`Self::get`], this may return
-    /// values written below the inactivity floor.
+    /// Returns results in the same order as the input keys, matching [`Self::get`] for each key.
     pub async fn get_many(
         &self,
         keys: &[impl Borrow<K> + Sync],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        self.get_many_from(keys, Location::new(0)).await
+        self.get_many_from(keys, self.inactivity_floor_loc).await
     }
 
-    /// Like [`Self::get_many`], but also ignores operations below `floor`.
+    /// Batch read multiple keys, ignoring operations below `floor`.
     pub(crate) async fn get_many_from(
         &self,
         keys: &[impl Borrow<K> + Sync],
@@ -307,7 +304,7 @@ where
         // candidate for it, including collisions. They are read in one batch below, each location
         // once, and resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
-            for loc in self.index.get(key.borrow()) {
+            for loc in self.index.get(key.borrow().as_ref()) {
                 if loc < *floor {
                     continue;
                 }
@@ -402,13 +399,12 @@ where
     /// # Errors
     ///
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `historical_size` > number of
-    /// operations, or if `start_loc` >= `historical_size`.
+    /// operations, or if `start_loc` is at or beyond the requested commit boundary.
     /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     /// been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `historical_size - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `historical_size` or
-    /// because pruning removed the commit that would have governed `historical_size`.
+    /// Returns [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation
+    /// is retained and is not a commit.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",
@@ -426,7 +422,17 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        crate::qmdb::historical_proof(&self.journal, historical_size, start_loc, max_ops).await
+        if historical_size > self.journal.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(historical_size).into());
+        }
+
+        let inactive_peaks =
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, historical_size).await?;
+
+        Ok(self
+            .journal
+            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
+            .await?)
     }
 
     /// Generate and return:
@@ -452,8 +458,9 @@ where
             .await
     }
 
-    /// Prune operations prior to `prune_loc` without changing the db's root. Keys whose operations
-    /// are no longer retained cannot be retrieved.
+    /// Prune operations prior to `prune_loc` without changing the db's root. Pruning leaves
+    /// [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location still require
+    /// the requested operations and Merkle nodes to be retained.
     ///
     /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
     ///
@@ -491,11 +498,6 @@ where
     }
 
     /// Return the pinned Merkle nodes at the given location.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
@@ -519,8 +521,7 @@ where
     /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed recovery-watermark sync is not observed by
-    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
-    /// [Self::sync].
+    /// [Self::commit]. It resurfaces on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.immutable.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();
@@ -587,14 +588,14 @@ where
         // Journal writes and index inserts are independent until batch publication.
         let apply_index = async {
             for (key, entry) in batch.diff.iter() {
-                self.index.insert(key, *entry.loc);
+                self.index.insert(key.as_ref(), *entry.loc);
             }
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
                 if batch.bounds.ancestors[i].size <= db_size {
                     continue;
                 }
                 for (key, entry) in ancestor_diff.iter() {
-                    self.index.insert(key, *entry.loc);
+                    self.index.insert(key.as_ref(), *entry.loc);
                 }
             }
         };
@@ -635,13 +636,15 @@ where
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<F, E, K, V, C, H, T, S> Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Snapshottable<Item = Operation<F, K, V>>,
+    C: Mutable<Item = Operation<F, K, V>>
+        + crate::journal::contiguous::Snapshottable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
     H: Hasher,
     T: Translator,
@@ -651,7 +654,8 @@ where
     /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
     ///
     /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
-    /// [`Snapshottable::snapshot`] describes.
+    /// [`Snapshottable::snapshot`](crate::journal::contiguous::Snapshottable::snapshot) describes.
+    /// The in-memory Merkle state is shared with the database rather than copied.
     ///
     /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
     /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
@@ -662,7 +666,13 @@ where
     /// Returns an error if the capture fails, which consumes the database.
     pub async fn snapshot(
         mut self,
-    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
+    ) -> Result<
+        (
+            Self,
+            crate::journal::authenticated::Snapshot<F, C::Reader, H, S>,
+        ),
+        Error<F>,
+    > {
         let log;
         (self.journal, log) = self.journal.snapshot().await?;
         Ok((self, log))

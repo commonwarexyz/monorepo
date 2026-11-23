@@ -62,18 +62,17 @@ type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 
 /// A durable, at-least-once delivery queue with per-item acknowledgment.
 ///
-/// Items are durably stored in a journal and survive crashes. [Queue::init] returns the queue,
-/// which writes items, and its [Reader], which delivers them. The reader must acknowledge each
-/// item individually after processing. Items can be acknowledged out of order, enabling parallel
-/// processing.
+/// [Queue::init] returns the queue, which writes items, and its [Reader], which delivers them.
+/// The reader must acknowledge each item after processing. It can acknowledge items out of order
+/// to support parallel processing.
 ///
 /// # Operations
 ///
 /// - [append](Self::append) / [commit](Self::commit): Write items to the journal, then persist
-///   them and publish them to the reader. Appended items are lost on restart if not committed.
+///   them and publish them to the reader.
 /// - [enqueue](Self::enqueue): Append + commit in one step. The item is durable before return.
 /// - [sync](Self::sync): Commit, then prune completed sections below the reader's ack floor.
-/// - [Reader::recv] / [Reader::try_recv]: Return the next unacked committed item in FIFO order.
+/// - [Reader::recv] / [Reader::try_recv]: Return the next unacked published item in FIFO order.
 /// - [Reader::ack] / [Reader::ack_up_to]: Mark items as processed (in-memory only).
 ///
 /// # Acknowledgment
@@ -83,13 +82,14 @@ type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 /// contiguously from the floor, the floor advances automatically.
 ///
 /// Acks are **not** persisted. The durable equivalent is the journal's pruning
-/// boundary, advanced by [sync](Self::sync). On restart, all non-pruned
-/// items are re-delivered regardless of prior ack state.
+/// boundary, advanced by [sync](Self::sync). On restart, the reader delivers recovered
+/// items regardless of prior ack state.
 ///
 /// # Crash Recovery
 ///
 /// On restart, `ack_floor` is set to the journal's pruning boundary.
-/// Items that were pruned are gone. Everything else is re-delivered.
+/// Committed items survive unless pruned. The journal may also recover a prefix of later
+/// appends, even if the writer never called commit. The reader delivers those items too.
 /// Applications must handle duplicates (idempotent processing).
 ///
 /// Storage-mutating functions consume the queue and return it only on success: an error (or a
@@ -116,7 +116,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     /// Initialize a queue from storage, returning it with its [Reader].
     ///
     /// On first initialization, creates an empty queue. On restart, the reader begins from the
-    /// journal's pruning boundary (providing at-least-once delivery for all non-pruned items).
+    /// journal's pruning boundary and delivers all recovered items.
     /// Both handles must be dropped before the queue is reopened.
     ///
     /// # Errors
@@ -185,7 +185,8 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     }
 
     /// Append a batch of items with a single commit, returning positions `[start, end)`. The
-    /// reader can receive the items once this returns.
+    /// reader can receive the items once this returns. If the operation fails or is interrupted, a new
+    /// reader may receive none, some, or all of the batch after restart, in order from the start.
     ///
     /// # Errors
     ///
@@ -210,7 +211,8 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     }
 
     /// Append an item without committing, returning its position. The reader can receive the
-    /// item after the next [Self::commit] or [Self::sync].
+    /// item after the next [Self::commit] or [Self::sync]. Dropping the queue does not roll back
+    /// the append: if the journal recovers the item on restart, the new reader can receive it.
     ///
     /// # Errors
     ///
@@ -284,7 +286,7 @@ impl<E: Context, V: CodecShared> std::fmt::Debug for Queue<E, V> {
     }
 }
 
-/// Delivers a [Queue]'s committed items and tracks their acknowledgement.
+/// Delivers a [Queue]'s published items and tracks their acknowledgement.
 ///
 /// Acknowledgements are in-memory, and [Queue::sync] prunes items below the ack floor.
 pub struct Reader<E: Context, V: CodecShared> {
@@ -1513,7 +1515,7 @@ mod tests {
             let mut received = Vec::new();
             for _ in 0..10 {
                 let (pos, item) = reader.recv().await.unwrap().unwrap();
-                received.push((pos, item.clone()));
+                received.push((pos, item));
                 reader.ack(pos).unwrap();
             }
 

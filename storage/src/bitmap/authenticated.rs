@@ -581,8 +581,9 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
     }
 }
 
-impl<E: Context, D: Digest, const N: usize, S: Strategy> Storage for MerkleizedBitMap<E, D, N, S> {
-    type Family = mmr::Family;
+impl<E: Context, D: Digest, const N: usize, S: Strategy> Storage<mmr::Family>
+    for MerkleizedBitMap<E, D, N, S>
+{
     type Digest = D;
 
     fn size(&self) -> Position {

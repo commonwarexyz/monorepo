@@ -149,10 +149,82 @@ impl N5f1 {
     }
 }
 
+commonware_macros::stability_scope!(ALPHA, cfg(any(test, feature = "fuzz")) {
+    #[derive(Debug)]
+    pub(crate) struct N5f1QuorumPlan(u32);
+
+    impl arbitrary::Arbitrary<'_> for N5f1QuorumPlan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let n = u.int_in_range(6u32..=9_999)?;
+            Ok(Self(n))
+        }
+    }
+
+    impl N5f1QuorumPlan {
+        pub(crate) fn run(self) {
+            let Self(n) = self;
+            let m = N5f1::m_quorum(n);
+            let l = N5f1::l_quorum(n);
+
+            // M-quorum must be strictly less than L-quorum
+            assert!(
+                m < l,
+                "M-quorum ({}) should be less than L-quorum ({}) for n={}",
+                m,
+                l,
+                n
+            );
+
+            // Both quorums must be achievable
+            assert!(m <= n, "M-quorum ({}) should be <= n ({})", m, n);
+            assert!(l <= n, "L-quorum ({}) should be <= n ({})", l, n);
+        }
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct QuorumSafetyPlan(u32);
+
+    impl arbitrary::Arbitrary<'_> for QuorumSafetyPlan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let n = u.int_in_range(1u32..=9_999)?;
+            Ok(Self(n))
+        }
+    }
+
+    impl QuorumSafetyPlan {
+        pub(crate) fn run(self) {
+            let Self(n) = self;
+            // N3f1 safety
+            let f_3f1 = N3f1::max_faults(n);
+            let q_3f1 = N3f1::quorum(n);
+            assert!(
+                2 * q_3f1 > n + f_3f1,
+                "N3f1 safety violated for n={}: 2*{} <= {} + {}",
+                n,
+                q_3f1,
+                n,
+                f_3f1
+            );
+
+            // N5f1 safety
+            let f_5f1 = N5f1::max_faults(n);
+            let q_5f1 = N5f1::quorum(n);
+            assert!(
+                2 * q_5f1 > n + f_5f1,
+                "N5f1 safety violated for n={}: 2*{} <= {} + {}",
+                n,
+                q_5f1,
+                n,
+                f_5f1
+            );
+        }
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use commonware_invariants::minifuzz;
     use rstest::rstest;
 
     #[test]
@@ -315,54 +387,34 @@ mod tests {
         N3f1::quorum(u64::MAX);
     }
 
-    proptest! {
-        /// N5f1 quorum relationships must hold for all valid participant counts.
-        ///
-        /// For n >= 6 (where f >= 1):
-        /// - M-quorum (2f+1) < L-quorum (n-f)
-        /// - Both quorums must be achievable (<= n)
-        #[test]
-        fn test_n5f1_quorum_relationships(n in 6u32..10_000) {
-            let m = N5f1::m_quorum(n);
-            let l = N5f1::l_quorum(n);
+    /// N5f1 quorum relationships must hold for all valid participant counts.
+    ///
+    /// For n >= 6 (where f >= 1):
+    /// - M-quorum (2f+1) < L-quorum (n-f)
+    /// - Both quorums must be achievable (<= n)
+    #[test]
+    fn test_n5f1_quorum_relationships() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                u.arbitrary::<N5f1QuorumPlan>()?.run();
+                Ok(())
+            });
+    }
 
-            // M-quorum must be strictly less than L-quorum
-            prop_assert!(
-                m < l,
-                "M-quorum ({}) should be less than L-quorum ({}) for n={}",
-                m, l, n
-            );
-
-            // Both quorums must be achievable
-            prop_assert!(m <= n, "M-quorum ({}) should be <= n ({})", m, n);
-            prop_assert!(l <= n, "L-quorum ({}) should be <= n ({})", l, n);
-        }
-
-        /// BFT safety property: two quorums must intersect in at least one honest node.
-        ///
-        /// Mathematically: 2q - n > f, or equivalently: 2q > n + f
-        ///
-        /// This ensures that any two quorums share at least one honest participant,
-        /// which is fundamental for BFT consensus safety.
-        #[test]
-        fn test_bft_model_safety_property(n in 1u32..10_000) {
-            // N3f1 safety
-            let f_3f1 = N3f1::max_faults(n);
-            let q_3f1 = N3f1::quorum(n);
-            prop_assert!(
-                2 * q_3f1 > n + f_3f1,
-                "N3f1 safety violated for n={}: 2*{} <= {} + {}",
-                n, q_3f1, n, f_3f1
-            );
-
-            // N5f1 safety
-            let f_5f1 = N5f1::max_faults(n);
-            let q_5f1 = N5f1::quorum(n);
-            prop_assert!(
-                2 * q_5f1 > n + f_5f1,
-                "N5f1 safety violated for n={}: 2*{} <= {} + {}",
-                n, q_5f1, n, f_5f1
-            );
-        }
+    /// BFT safety property: two quorums must intersect in at least one honest node.
+    ///
+    /// Mathematically: 2q - n > f, or equivalently: 2q > n + f
+    ///
+    /// This ensures that any two quorums share at least one honest participant,
+    /// which is fundamental for BFT consensus safety.
+    #[test]
+    fn test_bft_model_safety_property() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                u.arbitrary::<QuorumSafetyPlan>()?.run();
+                Ok(())
+            });
     }
 }

@@ -32,7 +32,7 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 pub type Config<T, S> = current::Config<T, JournalConfig, S>;
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned key index, dividing the key space
+    //! A variant of [super] that uses a partitioned index for the index, dividing the key space
     //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
     //!
     //! See [Db] for the generic type, or use the convenience aliases:
@@ -46,9 +46,8 @@ pub mod partitioned {
     //! [Any's counterpart]: crate::qmdb::any::ordered::fixed::partitioned
 
     use super::*;
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::index::partitioned::ordered::Index;
-    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -68,9 +67,6 @@ pub mod partitioned {
             N,
             S,
         >;
-
-    /// Configuration for a [Db].
-    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {

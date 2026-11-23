@@ -4,14 +4,14 @@ use crate::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
     qmdb::{
         self,
-        operation::Floored,
+        operation::Committable,
         sync::{ServeError, source},
     },
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
-    ReadRangeExt as _, Write, util::max_items_size,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
+    ReadExt as _, ReadRangeExt as _, Write, util::max_items_size,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -26,7 +26,8 @@ use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
 pub enum Request<F: Family> {
     /// Fetch the operations in `[start, start + max_ops)`.
     Operations {
-        /// Prove against the root the database had at this size.
+        /// The number of operations in the log immediately after a commit.
+        /// Use the database root at that size to verify the proof.
         size: Location<F>,
         /// First operation to return.
         start: Location<F>,
@@ -37,7 +38,8 @@ pub enum Request<F: Family> {
     /// location the client will retain. The proof in the response authenticates the pinned nodes,
     /// so there is no way to request them on their own.
     Boundary {
-        /// Prove against the root the database had at this size.
+        /// The number of operations in the log immediately after a commit.
+        /// Use the database root at that size to verify the proof.
         size: Location<F>,
         /// The operation to return, which is also the location of the returned pinned nodes.
         start: Location<F>,
@@ -45,7 +47,8 @@ pub enum Request<F: Family> {
 }
 
 impl<F: Family> Request<F> {
-    /// The size whose root the response's proof must verify against.
+    /// The number of operations in the log immediately after a commit.
+    /// Use the database root at that size to verify the proof.
     pub const fn size(&self) -> Location<F> {
         match self {
             Self::Operations { size, .. } | Self::Boundary { size, .. } => *size,
@@ -529,12 +532,13 @@ macro_rules! impl_locked_source {
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
 
-impl<F, C, M, H> Source for authenticated::Authenticated<C, M, H>
+impl<F, E, C, H, S> Source for authenticated::Journal<F, E, C, H, S>
 where
     F: Family,
-    C: Contiguous<Item: Floored<F>>,
-    M: crate::merkle::storage::Storage<Family = F, Digest = H::Digest>,
+    E: Context,
+    C: Contiguous<Item: EncodeShared + Committable<F>>,
     H: Hasher,
+    S: Strategy,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -552,7 +556,12 @@ where
         ),
     )]
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
-        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(&self.journal, request.size()).await?;
+        // Reject before the floor lookup so the error carries the requested size and the
+        // floor read never touches out-of-range locations.
+        if request.size() > self.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(request.size()).into());
+        }
+        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size()).await?;
         let response = match request {
             Request::Operations {
                 size,
@@ -583,7 +592,68 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Source for crate::qmdb::any::Db<F, E, C, I, H, U, N, S>
+/// Serves the journal as it was at capture, exactly as [authenticated::Journal] serves it.
+#[commonware_macros::stability(ALPHA)]
+impl<F, C, H, S> Source for authenticated::Snapshot<F, C, H, S>
+where
+    F: Family,
+    C: Contiguous<Item: EncodeShared + Committable<F>>,
+    H: Hasher,
+    S: Strategy,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = C::Item;
+    type Error = qmdb::Error<F>;
+
+    #[tracing::instrument(
+        name = "qmdb.sync.serve",
+        level = "info",
+        skip_all,
+        fields(
+            size = *request.size(),
+            start = *request.start(),
+            max_ops = request.max_ops().get(),
+        ),
+    )]
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        // Reject before the floor lookup so the error carries the requested size and the
+        // floor read never touches out-of-range locations.
+        if request.size() > self.size() {
+            return Err(crate::merkle::Error::RangeOutOfBounds(request.size()).into());
+        }
+        let inactive_peaks = qmdb::inactive_peaks_at::<F, _>(self, request.size()).await?;
+        let response = match request {
+            Request::Operations {
+                size,
+                start,
+                max_ops,
+            } => {
+                let (proof, operations) = self
+                    .historical_proof(size, start, max_ops, inactive_peaks)
+                    .await?;
+                Response::Operations { proof, operations }
+            }
+            Request::Boundary { size, start } => {
+                let (proof, mut operations) = self
+                    .historical_proof(size, start, NonZeroU64::MIN, inactive_peaks)
+                    .await?;
+                let op = operations
+                    .pop()
+                    .ok_or(crate::merkle::Error::RangeOutOfBounds(start))?;
+                let pinned_nodes = self.pinned_nodes_at(start).await?;
+                Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                }
+            }
+        };
+        Ok((response, None))
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Source for crate::qmdb::any::Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,
@@ -609,6 +679,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         merkle::mmr,
+        qmdb::any::ordered::fixed::test as ordered_fixed,
         translator::{OneCap, TwoCap},
     };
     use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _};
@@ -802,12 +873,12 @@ pub(crate) mod tests {
     /// Fetch `target`'s final commit operation and pinned nodes from `source`.
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
-        target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
+        target: crate::qmdb::sync::Target<R::Family, R::Digest>,
     ) -> Result<Response<R::Family, R::Op, R::Digest>, R::Error> {
         let (response, _feedback) = source
             .serve(Request::Boundary {
-                size: target.size,
-                start: target.size - 1,
+                size: target.range.end(),
+                start: target.range.start(),
             })
             .await?;
         Ok(response)
@@ -1001,29 +1072,6 @@ pub(crate) mod tests {
         assert_source_variants!(KeylessVariableCompactDb);
         assert_source_variants!(ImmutableFixedCompactDb);
         assert_source_variants!(ImmutableVariableCompactDb);
-
-        type AnyUnorderedFixedOp =
-            crate::qmdb::any::unordered::fixed::Operation<mmr::Family, ShaDigest, ShaDigest>;
-        type SnapshotReader = crate::journal::contiguous::fixed::Reader<
-            'static,
-            deterministic::Context,
-            AnyUnorderedFixedOp,
-        >;
-        type AnyUnorderedFixedSnapshot = crate::journal::authenticated::Snapshot<
-            mmr::Family,
-            deterministic::Context,
-            SnapshotReader,
-            Sha256,
-        >;
-        assert_serves::<AnyUnorderedFixedSnapshot>();
-        assert_serves::<Arc<AnyUnorderedFixedSnapshot>>();
-
-        type KeylessCompactSnapshot = crate::qmdb::compact::Snapshot<
-            mmr::Family,
-            crate::qmdb::keyless::fixed::Operation<mmr::Family, ShaDigest>,
-            ShaDigest,
-        >;
-        assert_serves::<KeylessCompactSnapshot>();
     }
 
     /// The request codec refuses frames whose start reaches their size, and unknown tags.
@@ -1144,6 +1192,33 @@ pub(crate) mod tests {
         assert!(R::decode_cfg(Copying(&[9u8]), &(1, ())).is_err());
     }
 
+    #[test]
+    fn test_serve_rejects_non_commit_sizes() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = ordered_fixed::create_test_db(context).await;
+            let db = ordered_fixed::apply_ops(db, ordered_fixed::create_test_ops(1)).await;
+
+            // The initial commit is at 0 and the write is at 1.
+            let start = Location::new(0);
+            for size in [Location::new(0), Location::new(2)] {
+                for request in [
+                    Request::Operations {
+                        size,
+                        start,
+                        max_ops: NZU64!(1),
+                    },
+                    Request::Boundary { size, start },
+                ] {
+                    let result = db.serve(request).await.map(|_| ());
+                    assert!(
+                        matches!(result, Err(qmdb::Error::NotCommitBoundary(s)) if s == size),
+                        "{request:?} returned {result:?}"
+                    );
+                }
+            }
+        });
+    }
+
     /// A source behind a lock reaches the source and reports its error.
     #[test]
     fn test_locked_source_reaches_source() {
@@ -1175,9 +1250,9 @@ pub(crate) mod tests {
             };
             let expected = response.encode();
             let source = SequenceSource::new(vec![response]);
-            let target = crate::qmdb::sync::CompactTarget {
+            let target = crate::qmdb::sync::Target {
                 root: ShaDigest::from([7u8; 32]),
-                size,
+                range: commonware_utils::non_empty_range!(size - 1, size),
             };
 
             let response = fetch_compact_state(&source, target).await.unwrap();

@@ -8,7 +8,9 @@ use crate::{
         },
         orchestrator, probe as dkg_probe,
         reshare::{self, Input as ReshareInput},
-        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+        state_sync::{
+            Config as StateSyncConfig, Plan as StateSyncPlan, StateSync, recovered_epoch,
+        },
         tests::{
             max_supported_mode,
             mocks::{FilteredReceiver, MemorySecretStore},
@@ -21,7 +23,7 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
@@ -49,7 +51,7 @@ use commonware_consensus::{
         elector::RoundRobin,
         types::{Context, Finalization},
     },
-    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
@@ -77,8 +79,8 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     archive::prunable,
-    journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, Location, full::Config as MmrJournalConfig},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
+    mmr::{self, Location},
     qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
@@ -456,13 +458,12 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
         let merkleized = Self::execute(height, batches).await;
-        let bounds = merkleized.bounds();
         let block = Block {
             context: context.1,
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
             payload,
         };
         Some(Proposed { block, merkleized })
@@ -668,14 +669,64 @@ pub(super) struct ReshareEngine {
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
     stale: Option<Height>,
+    pruned: Option<ed25519::PublicKey>,
+    pub(super) pruned_restarts: Arc<Mutex<Vec<PrunedRestart>>>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
+    elector: RoundRobin,
 }
 
 pub(super) struct ValidatorEngine {
     context: DeterministicContext,
     handles: [Handle<()>; 6],
+}
+
+/// Observations from one restart of the participant passed to
+/// [`ReshareEngine::with_marshal_pruning`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PrunedRestart {
+    /// The epoch recovered from marshal's processed height at the restart.
+    pub(super) epoch: Epoch,
+    /// Whether marshal still held the boundary block that introduced `epoch`.
+    pub(super) boundary_held: bool,
+    /// Whether marshal still held the node's state-sync floor block, or `None` if
+    /// the node had not state synced.
+    pub(super) floor_held: Option<bool>,
+    /// Whether the reshare actor's phase gauge showed it following the epoch once
+    /// marshal processed a block after the restart, or `None` until then.
+    pub(super) following: Option<bool>,
+}
+
+/// The reshare actor's phase gauge value while it follows an epoch without
+/// participating.
+const FOLLOWING_PHASE: &str = "0";
+
+/// Returns the reshare actor phase that validator `index`'s latest start reports in
+/// the encoded `metrics`.
+///
+/// Each start of a validator labels its metrics with a `restart` count, so the series
+/// with the highest count belongs to the running actor.
+fn reshare_phase(metrics: &str, index: usize) -> Option<&str> {
+    let label = format!("index=\"{index}\"");
+    metrics
+        .lines()
+        .filter_map(|line| {
+            let (labels, value) = line
+                .strip_prefix("validator_reshare_phase{")?
+                .split_once("} ")?;
+            let mut labels = labels.split(',');
+            labels.clone().any(|pair| pair == label).then_some(())?;
+            let restart = labels.find_map(|pair| {
+                pair.strip_prefix("restart=\"")?
+                    .strip_suffix('"')?
+                    .parse::<u64>()
+                    .ok()
+            })?;
+            Some((restart, value.trim()))
+        })
+        .max_by_key(|(restart, _)| *restart)
+        .map(|(_, value)| value)
 }
 
 #[derive(Clone)]
@@ -780,14 +831,23 @@ impl ReshareEngine {
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
             stale: None,
+            pruned: None,
+            pruned_restarts: Arc::new(Mutex::new(Vec::new())),
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
+            elector: RoundRobin::default(),
         }
     }
 
     pub(super) fn with_failures(mut self, failures: impl IntoIterator<Item = u64>) -> Self {
         self.failures = Arc::new(failures.into_iter().collect());
+        self
+    }
+
+    /// Sets the leader election. The default rotates the leader every view.
+    pub(super) fn with_elector(mut self, elector: RoundRobin) -> Self {
+        self.elector = elector;
         self
     }
 
@@ -827,6 +887,15 @@ impl ReshareEngine {
     /// node's marshal.
     pub(super) const fn with_stale(mut self, height: Height) -> Self {
         self.stale = Some(height);
+        self
+    }
+
+    /// Prunes `participant`'s marshal after every block with stateful pruning and no
+    /// extra marshal retention.
+    ///
+    /// Each restart of `participant` appends a [`PrunedRestart`] to `pruned_restarts`.
+    pub(super) fn with_marshal_pruning(mut self, participant: ed25519::PublicKey) -> Self {
+        self.pruned = Some(participant);
         self
     }
 
@@ -1092,17 +1161,26 @@ impl EngineDefinition for ReshareEngine {
         if should_state_sync {
             let finalization = match self.state_sync_floor {
                 Some(height) => {
-                    let source = self
-                        .marshals
-                        .lock()
-                        .values()
-                        .next()
-                        .cloned()
-                        .expect("state-sync floor source must be available");
-                    source
-                        .get_finalization(height)
-                        .await
-                        .expect("configured state-sync floor must be finalized")
+                    // The simulator releases delayed validators by round. Skipped views can
+                    // put that round ahead of the height whose proof the test needs.
+                    let sources: Vec<_> = self.marshals.lock().values().cloned().collect();
+                    assert!(
+                        !sources.is_empty(),
+                        "state-sync floor source must be available"
+                    );
+                    let deadline = context.current() + Duration::from_secs(30);
+                    'wait: loop {
+                        for source in &sources {
+                            if let Some(proof) = source.get_finalization(height).await {
+                                break 'wait proof;
+                            }
+                        }
+                        assert!(
+                            context.current() < deadline,
+                            "no source finalized configured floor {height}"
+                        );
+                        context.sleep(Duration::from_millis(50)).await;
+                    }
                 }
                 None => probe_artifact
                     .as_ref()
@@ -1141,16 +1219,66 @@ impl EngineDefinition for ReshareEngine {
         self.marshals
             .lock()
             .insert(public_key.clone(), marshal.clone());
+        let pruned = self.pruned.as_ref() == Some(public_key);
+
+        // Report the epoch this restart recovers, whether marshal still holds the
+        // epoch's boundary block and the node's state-sync floor block, and whether the
+        // reshare actor follows the epoch.
+        if pruned && restarted {
+            let marshal = marshal.clone();
+            let pruned_restarts = self.pruned_restarts.clone();
+            let floor = self.state_syncs.lock().get(public_key).copied();
+            context
+                .child("pruned_restart_probe")
+                .spawn(move |context| async move {
+                    let processed = marshal
+                        .get_processed()
+                        .await
+                        .expect("restarted marshal must have processed a block");
+                    let epoch = recovered_epoch(processed, &FixedEpocher::new(EPOCH_LENGTH));
+                    let boundary = epoch
+                        .previous()
+                        .map_or(Height::zero(), |previous| final_height(previous.get()));
+                    let boundary_held = marshal.get_block(boundary).await.is_some();
+                    let floor_held = match floor {
+                        Some(floor) => Some(marshal.get_block(Height::new(floor)).await.is_some()),
+                        None => None,
+                    };
+                    let restart = {
+                        let mut pruned_restarts = pruned_restarts.lock();
+                        pruned_restarts.push(PrunedRestart {
+                            epoch,
+                            boundary_held,
+                            floor_held,
+                            following: None,
+                        });
+                        pruned_restarts.len() - 1
+                    };
+
+                    // Marshal processes a block only after every reporter, including
+                    // the reshare actor, acknowledges it. Once marshal passes the
+                    // restart position, the actor has finished setup and its phase
+                    // gauge shows its role.
+                    while marshal
+                        .get_processed()
+                        .await
+                        .is_none_or(|current| current.height() <= processed.height())
+                    {
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                    let metrics = context.encode();
+                    let phase = reshare_phase(&metrics, index)
+                        .expect("restarted reshare actor must report its phase");
+                    pruned_restarts.lock()[restart].following = Some(phase == FOLLOWING_PHASE);
+                });
+        }
 
         let db_config = fixed::Config {
-            merkle: MmrJournalConfig {
-                journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
-                metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
+            merkle: MerkleConfig {
+                partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
             log: FixedLogConfig {
                 partition: format!("{partition_prefix}-qmdb-log-journal"),
@@ -1162,7 +1290,7 @@ impl EngineDefinition for ReshareEngine {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         };
 
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
@@ -1211,10 +1339,12 @@ impl EngineDefinition for ReshareEngine {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
                 max_supported_mode: max_supported_mode(),
+                block_codec_config: (),
             },
             state_sync,
         )
         .await;
+        let probe_plan = state_sync.clone();
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
             context.child("reshare"),
             reshare::Config {
@@ -1270,7 +1400,11 @@ impl EngineDefinition for ReshareEngine {
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                 },
-                prune_config: None,
+                prune_config: pruned.then_some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
                 strategy: Sequential,
             },
         );
@@ -1297,7 +1431,7 @@ impl EngineDefinition for ReshareEngine {
                 application: deferred,
                 strategy: Sequential,
                 simplex: orchestrator::SimplexConfig {
-                    elector: RoundRobin::<Sha256>::default(),
+                    elector: self.elector.clone(),
                     mailbox_size: NZUsize!(3),
                     replay_buffer: IO_BUFFER_SIZE,
                     write_buffer: IO_BUFFER_SIZE,
@@ -1334,7 +1468,7 @@ impl EngineDefinition for ReshareEngine {
             buffer,
             resolver,
         );
-        probe_mailbox.attach(marshal.clone());
+        probe_mailbox.attach(marshal.clone(), probe_plan);
         // Record the synced height without blocking init: awaiting the floor
         // block here would stall the simulator's restart arm (and with it the
         // crash monitor) until the block is fetched.
@@ -1590,7 +1724,7 @@ fn archive_config<C>(
 
 fn empty_db_root() -> sha256::Digest {
     Sha256Digest::from(hex!(
-        "6ad9ddc8527623b1a70e7efbae964ddd694565f038f8579f2d94057f4782b108"
+        "88ea517d06e70f58e0df79803dd54aeccb7337ac4ae5aa24fe79bb1e4029e755"
     ))
 }
 
@@ -1611,4 +1745,22 @@ pub(super) fn height_round(height: Height) -> Round {
         .containing(height)
         .expect("test height should be supported");
     Round::new(info.epoch(), View::new(info.relative().get()))
+}
+
+/// Stable leaders with optimistic validation.
+///
+/// A dealer's log can only be carried by a block that dealer proposes, and in this harness's
+/// epochs only by the 15 blocks from the midpoint up to but not including the final block. A
+/// ceremony needs logs from a quorum of dealers. With no skipped views, those 15 blocks span 8
+/// consecutive terms of two views. Round-robin election gives those terms to 8 consecutive
+/// leaders, and the largest committee these tests use has 7 dealers, so every dealer gets a term.
+///
+/// Two optimistic views let validators vote on a term's second view before its first is
+/// certified. The stall timeout exceeds the engine's leader and certification timeouts.
+pub(super) fn stable_leaders() -> RoundRobin {
+    RoundRobin::default().with_term(
+        TermLength::new(NZU32!(2)),
+        Duration::from_secs(5),
+        ViewDelta::new(2),
+    )
 }

@@ -2114,7 +2114,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
             F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
         {
-            let count = self.parallelism.min(len / minimum_batch_len.get());
+            let count = self.parallelism.min(len / minimum_batch_len);
             if count < 2 {
                 return run(Batches::whole(self, len));
             }
@@ -2128,7 +2128,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         // Plan the batches with the parallelism of the placement, so a group of a
                         // grouped strategy gets no more batches than it has workers.
                         let placed = self.placed(placement);
-                        let count = placed.parallelism.min(len / minimum_batch_len.get());
+                        let count = placed.parallelism.min(len / minimum_batch_len);
                         run(Batches::balanced(&placed, len, count))
                     }
                 },
@@ -2354,20 +2354,29 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
     pub mod mocks;
 });
 
+commonware_macros::stability_scope!(ALPHA {
+    #[cfg(any(test, feature = "fuzz"))]
+    mod fold_plan;
+
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz;
+});
+
 #[cfg(test)]
 mod test {
     use crate::{
         Grid, MAX_UNITS, Rayon, Sequential, Strategy,
+        fold_plan::{Plan, parallel_strategy},
         mocks::Explorer,
         rayon::{self, Placement, ThreadPoolBuilder},
     };
+    use commonware_invariants::minifuzz;
     use commonware_utils::{
         NZUsize, Widen,
         sync::{Condvar, Mutex},
     };
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
-    use proptest::prelude::*;
     use std::{
         panic::{self, AssertUnwindSafe, Location},
         rc::Rc,
@@ -2377,10 +2386,6 @@ mod test {
         },
         time::{Duration, Instant},
     };
-
-    fn parallel_strategy() -> Rayon {
-        Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap()
-    }
 
     /// Builds a strategy with group `widths` whose groups tests can home through fake domains.
     /// Worker `j` of group `i` is named `g{i}-{j}`. All groups must have the first group's width,
@@ -5277,163 +5282,58 @@ mod test {
         let _: () = futures::executor::block_on(Sequential.spawn(1, |_| panic!("boom")));
     }
 
-    proptest! {
-        #[test]
-        fn parallel_fold_init_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let sequential = Sequential;
-            let parallel = parallel_strategy();
-
-            let seq_result: Vec<i32> = sequential.fold_init(
-                &data,
-                || (),
-                Vec::new,
-                |mut acc, _, &x| { acc.push(x.wrapping_mul(2)); acc },
-                |mut a, b| { a.extend(b); a },
-            );
-
-            let par_result: Vec<i32> = parallel.fold_init(
-                &data,
-                || (),
-                Vec::new,
-                |mut acc, _, &x| { acc.push(x.wrapping_mul(2)); acc },
-                |mut a, b| { a.extend(b); a },
-            );
-
-            prop_assert_eq!(seq_result, par_result);
+    fn check_fold_inputs(mut check: impl FnMut(&Plan)) {
+        for plan in Plan::regressions() {
+            check(&plan);
         }
 
-        #[test]
-        fn fold_equals_fold_init(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let s = Sequential;
+        minifuzz::Builder::default()
+            .with_search_limit(256)
+            .test(|u| {
+                let plan = u.arbitrary()?;
+                check(&plan);
+                Ok(())
+            });
+    }
 
-            let via_fold: Vec<i32> = s.fold(
-                &data,
-                Vec::new,
-                |mut acc, &x| { acc.push(x); acc },
-                |mut a, b| { a.extend(b); a },
-            );
+    #[test]
+    fn parallel_fold_init_matches_sequential() {
+        check_fold_inputs(|plan| plan.parallel_fold_init_matches_sequential(&parallel_strategy()));
+    }
 
-            let via_fold_init: Vec<i32> = s.fold_init(
-                &data,
-                || (),
-                Vec::new,
-                |mut acc, _, &x| { acc.push(x); acc },
-                |mut a, b| { a.extend(b); a },
-            );
+    #[test]
+    fn fold_equals_fold_init() {
+        check_fold_inputs(Plan::fold_equals_fold_init);
+    }
 
-            prop_assert_eq!(via_fold, via_fold_init);
-        }
+    #[test]
+    fn parallel_try_fold_matches_sequential() {
+        check_fold_inputs(|plan| plan.parallel_try_fold_matches_sequential(&parallel_strategy()));
+    }
 
-        #[test]
-        fn parallel_try_fold_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let sequential: Result<i32, ()> = Sequential.try_fold(
-                &data,
-                || 0i32,
-                |acc, &x| Ok(acc.wrapping_add(x)),
-                |a, b| a.wrapping_add(b),
-            );
-            let parallel: Result<i32, ()> = parallel_strategy().try_fold(
-                &data,
-                || 0i32,
-                |acc, &x| Ok(acc.wrapping_add(x)),
-                |a, b| a.wrapping_add(b),
-            );
+    #[test]
+    fn map_collect_vec_equals_fold() {
+        check_fold_inputs(Plan::map_collect_vec_equals_fold);
+    }
 
-            prop_assert_eq!(sequential, parallel);
-        }
+    #[test]
+    fn try_map_collect_vec_collects_successes() {
+        check_fold_inputs(|plan| plan.try_map_collect_vec_collects_successes(&parallel_strategy()));
+    }
 
-        #[test]
-        fn map_collect_vec_equals_fold(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let s = Sequential;
-            let map_op = |&x: &i32| x.wrapping_mul(3);
+    #[test]
+    fn try_map_collect_vec_returns_first_error() {
+        check_fold_inputs(Plan::try_map_collect_vec_returns_first_error);
+    }
 
-            let via_map: Vec<i32> = s.map_collect_vec(&data, map_op);
+    #[test]
+    fn map_init_collect_vec_equals_fold_init() {
+        check_fold_inputs(Plan::map_init_collect_vec_equals_fold_init);
+    }
 
-            let via_fold: Vec<i32> = s.fold(
-                &data,
-                Vec::new,
-                |mut acc, item| { acc.push(map_op(item)); acc },
-                |mut a, b| { a.extend(b); a },
-            );
-
-            prop_assert_eq!(via_map, via_fold);
-        }
-
-        #[test]
-        fn try_map_collect_vec_collects_successes(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let expected: Vec<i32> = data.iter().map(|x| x.wrapping_mul(5)).collect();
-
-            let sequential: Result<Vec<i32>, ()> =
-                Sequential.try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
-            prop_assert_eq!(sequential, Ok(expected.clone()));
-
-            let parallel: Result<Vec<i32>, ()> =
-                parallel_strategy().try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
-            prop_assert_eq!(parallel, Ok(expected));
-        }
-
-        #[test]
-        fn try_map_collect_vec_returns_first_error(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let expected_error = data.iter().position(|x| x % 7 == 0);
-            let result: Result<Vec<i32>, usize> =
-                Sequential.try_map_collect_vec(data.iter().enumerate(), |(i, &x)| {
-                    if x % 7 == 0 {
-                        Err(i)
-                    } else {
-                        Ok(x)
-                    }
-                });
-
-            match expected_error {
-                Some(i) => prop_assert_eq!(result, Err(i)),
-                None => prop_assert_eq!(result, Ok(data)),
-            }
-        }
-
-        #[test]
-        fn map_init_collect_vec_equals_fold_init(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let s = Sequential;
-
-            let via_map: Vec<i32> = s.map_init_collect_vec(
-                &data,
-                || 0i32,
-                |counter, &x| { *counter += 1; x.wrapping_add(*counter) },
-            );
-
-            let via_fold_init: Vec<i32> = s.fold_init(
-                &data,
-                || 0i32,
-                Vec::new,
-                |mut acc, counter, &x| {
-                    *counter += 1;
-                    acc.push(x.wrapping_add(*counter));
-                    acc
-                },
-                |mut a, b| { a.extend(b); a },
-            );
-
-            prop_assert_eq!(via_map, via_fold_init);
-        }
-
-        #[test]
-        fn map_partition_collect_vec_returns_valid_results(data in prop::collection::vec(any::<i32>(), 0..500)) {
-            let s = Sequential;
-
-            let map_op = |&x: &i32| {
-                let value = if x % 2 == 0 { Some(x.wrapping_mul(2)) } else { None };
-                (x, value)
-            };
-
-            let (results, filtered) = s.map_partition_collect_vec(data.iter(), map_op);
-
-            // Verify results contains doubled even numbers
-            let expected_results: Vec<i32> = data.iter().filter(|&&x| x % 2 == 0).map(|&x| x.wrapping_mul(2)).collect();
-            prop_assert_eq!(results, expected_results);
-
-            // Verify filtered contains odd numbers
-            let expected_filtered: Vec<i32> = data.iter().filter(|&&x| x % 2 != 0).copied().collect();
-            prop_assert_eq!(filtered, expected_filtered);
-        }
+    #[test]
+    fn map_partition_collect_vec_returns_valid_results() {
+        check_fold_inputs(Plan::map_partition_collect_vec_returns_valid_results);
     }
 
     #[test]

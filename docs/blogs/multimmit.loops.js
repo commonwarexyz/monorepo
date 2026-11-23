@@ -1,7 +1,5 @@
-// Looping message-sequence diagrams for the Multimmit launch post. Each
-// figure is an SVG timeline: rows are participants, the x-axis is time in
-// units of the message delay δ, and arrows draw in as the playhead advances.
-// Figures share one px-per-δ scale so finality gaps compare across figures.
+// Looping message-sequence diagrams for the Multimmit posts. Rows are
+// participants; the horizontal axis measures message delays or consensus rounds.
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DESIGN_W = 1024;
@@ -53,6 +51,16 @@ const ROWS_PRODUCER = ROWS_CONSENSUS.map(row =>
   row.id === 'api' ? { id: 'api', label: 'API / Producer' } : row
 );
 const VALIDATORS = ['leader', 'v2', 'v3', 'v4'];
+
+// The producer is also a validator: it receives the leader's proposal and votes.
+const ROWS_PAYMENT = [
+  { id: 'prod', label: 'Producer' },
+  { id: 'leader', label: 'Leader' },
+  { id: 'v2', label: 'Validator' },
+  { id: 'v3', label: 'Validator' },
+  { id: 'v4', label: 'Validator' },
+];
+const VOTERS_PAYMENT = ['prod', ...VALIDATORS];
 
 const FIGURES = {
   'multimmit-fig-simplex': {
@@ -598,6 +606,67 @@ const FIGURES = {
       token: [],
     }],
   },
+
+  // Both timelines start at the producer's broadcast and use the same scale
+  // to compare the payment receipt with placement on either kind of chain.
+  'multimmit-pay-receipt': {
+    height: 408,
+    rows: ROWS_PAYMENT,
+    rowTop: 96,
+    rowGap: 57,
+    axis: { min: -0.4, max: 5.6, origin: null },
+    variants: [{
+      end: 5,
+      phases: [
+        { t: 0, d: 1, label: 'tx block' },
+        { t: 1, d: 1, label: 'DA-votes' },
+        { t: 2, d: 1, label: 'DA cert' },
+        { t: 3, d: 1, label: 'proposal' },
+        { t: 4, d: 1, label: 'votes' },
+      ],
+      events: [
+        { k: 'emit', row: 'prod', t: 0, color: GREEN, label: 'payment block b', labelSide: 'right' },
+        { k: 'fan', from: 'prod', to: VALIDATORS, t: 0, d: 1, style: 'bat' },
+        { k: 'fan', from: VALIDATORS, to: 'prod', t: 1, d: 1, style: 'ctl' },
+        { k: 'emit', row: 'prod', t: 2, color: BLUE },
+        { k: 'mark', t: 2, sub: 'receipt', color: BLUE },
+        { k: 'fan', from: 'prod', to: VALIDATORS, t: 2, d: 1, style: 'ctl' },
+        { k: 'emit', row: 'leader', t: 3, color: RED },
+        { k: 'fan', from: 'leader', to: VOTERS_PAYMENT, t: 3, d: 1, style: 'prop' },
+        { k: 'mesh', among: VOTERS_PAYMENT, t: 4, d: 1 },
+        { k: 'mark', t: 5, sub: 'placed' },
+      ],
+      token: [],
+    }],
+  },
+
+  'multimmit-pay-order': {
+    height: 408,
+    rows: ROWS_PAYMENT,
+    rowTop: 96,
+    rowGap: 57,
+    axis: { min: -0.4, max: 5.6, origin: null },
+    variants: [{
+      end: 3,
+      phases: [
+        { t: 0, d: 1, label: 'tx block' },
+        { t: 1, d: 1, label: 'proposal' },
+        { t: 2, d: 1, label: 'votes' },
+      ],
+      events: [
+        { k: 'emit', row: 'prod', t: 0, color: GREEN, label: 'tx block b', labelSide: 'right' },
+        { k: 'fan', from: 'prod', to: VALIDATORS, t: 0, d: 1, style: 'bat' },
+        // DA-votes return in the background; the leader block's leg to the
+        // producer is drawn over the leader's DA-vote on the same path.
+        { k: 'fan', from: VALIDATORS, to: 'prod', t: 1, d: 1, style: 'bg' },
+        { k: 'emit', row: 'leader', t: 1, color: RED },
+        { k: 'fan', from: 'leader', to: VOTERS_PAYMENT, t: 1, d: 1, style: 'prop' },
+        { k: 'mesh', among: VOTERS_PAYMENT, t: 2, d: 1 },
+        { k: 'mark', t: 3, sub: 'placed' },
+      ],
+      token: [],
+    }],
+  },
 };
 
 const STYLE_ID = 'multimmit-loops-style';
@@ -862,25 +931,26 @@ function buildFigure(mount, cfg) {
     },
     mark(ev) {
       const x = xOf(ev.t);
+      const color = ev.ghost ? GRAY : (ev.color ?? GOLD);
       const group = svgEl('g', { opacity: 0 });
       const lineEl = svgEl('line', {
         x1: x, y1: 54, x2: x, y2: H - 46,
-        stroke: ev.ghost ? GRAY : GOLD, 'stroke-width': ev.ghost ? 1.5 : 2.5,
+        stroke: color, 'stroke-width': ev.ghost ? 1.5 : 2.5,
         'stroke-dasharray': ev.ghost ? '5 4' : 'none',
       });
       group.append(lineEl);
       if (ev.label) {
         group.appendChild(text(x, 46, ev.label, {
           'text-anchor': 'middle', 'font-size': ev.ghost ? 14 : 17,
-          fill: ev.ghost ? GRAY : GOLD, 'font-weight': ev.ghost ? 400 : 700,
+          fill: color, 'font-weight': ev.ghost ? 400 : 700,
         }));
       }
       if (ev.sub) {
-        // Labels sit beside the line, never on it: gold finality on the
+        // Labels sit beside the line, never on it: event markers on the
         // left, ghost references on the right.
         group.appendChild(text(ev.ghost ? x + 7 : x - 7, H - 58, ev.sub, {
           'text-anchor': ev.ghost ? 'start' : 'end', 'font-size': ev.ghost ? 14 : 15,
-          fill: ev.ghost ? GRAY : GOLD, 'font-weight': ev.ghost ? 400 : 700,
+          fill: color, 'font-weight': ev.ghost ? 400 : 700,
         }));
       }
       (ev.ghost ? ghostLayer : dyn).appendChild(group);
