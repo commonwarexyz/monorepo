@@ -1,14 +1,14 @@
 //! Utilities for linear ranges and cyclic spans.
 
 use bytes::BufMut;
-use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, Read, Write};
-use commonware_macros::stability;
-#[stability(ALPHA)]
-use core::ops::{
-    Bound::{Excluded, Included, Unbounded},
-    RangeBounds,
+use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, MaxEncodeSize, Read, Write};
+use core::{
+    fmt,
+    ops::{
+        Bound::{Excluded, Included, Unbounded},
+        Range, RangeBounds,
+    },
 };
-use core::{fmt, ops::Range};
 
 /// Whether `key` is in the cyclic span described by the current bounds of `span`.
 ///
@@ -28,7 +28,6 @@ use core::{fmt, ops::Range};
 /// assert!(contains_cyclic(6..2, &0));
 /// assert!(contains_cyclic(3..3, &9));
 /// ```
-#[stability(ALPHA)]
 pub fn contains_cyclic<K: Ord + ?Sized>(span: impl RangeBounds<K>, key: &K) -> bool {
     let start = span.start_bound();
     let end = span.end_bound();
@@ -136,6 +135,10 @@ impl<Idx: EncodeSize> EncodeSize for NonEmptyRange<Idx> {
     fn encode_inline_size(&self) -> usize {
         self.0.start.encode_inline_size() + self.0.end.encode_inline_size()
     }
+}
+
+impl<Idx: MaxEncodeSize> MaxEncodeSize for NonEmptyRange<Idx> {
+    const MAX_ENCODE_SIZE: usize = 2 * Idx::MAX_ENCODE_SIZE;
 }
 
 impl<Idx: Read + PartialOrd> Read for NonEmptyRange<Idx> {

@@ -10,7 +10,7 @@ use crate::{
     },
     simulate::{reporter::MonitorReporter, tracker::ProgressTracker},
 };
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use commonware_actor::Feedback;
 use commonware_codec::{
     Buf, Codec, Decode, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
@@ -33,7 +33,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest, Digested, Digestible, Hasher, PublicKey as CryptoPublicKey, Signer,
     bls12381::{
-        dkg::feldman_desmedt::DealerPrivMsg,
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
         primitives::{
             group::Share,
             variant::{MinPk, Variant},
@@ -45,17 +45,17 @@ use commonware_cryptography::{
     transcript::Summary,
 };
 use commonware_p2p::{
-    Message as P2pMessage, Provider, Receiver, TrackedPeers,
+    Address, Ingress, Message as P2pMessage, Provider, Receiver, TrackedPeers,
     simulated::{Control, Manager as SimManager},
     utils::mux,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Clock, Metrics, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{
-    Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
+    Acknowledgement, Hostname, NZDuration, NZU16, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
     ordered::Set,
@@ -65,10 +65,35 @@ use commonware_utils::{
 use std::{
     collections::{BTreeMap, HashSet},
     marker::PhantomData,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
+
+/// Returns a directory that maps every peer to the widest address: a maximum-length DNS ingress
+/// with an IPv6 egress.
+pub(crate) fn widest_addresses(peers: &Set<PublicKey>) -> Addresses<PublicKey> {
+    let host = [
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61),
+    ]
+    .join(".");
+    let address = Address::Asymmetric {
+        ingress: Ingress::Dns {
+            host: Hostname::new(host).unwrap(),
+            port: u16::MAX,
+        },
+        egress: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX),
+    };
+    peers
+        .iter()
+        .cloned()
+        .map(|peer| (peer, address.clone()))
+        .collect()
+}
 
 pub(crate) type TestDigest = Sha256Digest;
 pub(crate) type TestPublicKey = PublicKey;
@@ -178,7 +203,6 @@ pub(crate) type TestActor = orchestrator::Actor<
     TestProvider,
     TestMarshalVariant,
     TestBlsVariant,
-    TestSigner,
     MockApplication,
     TestElector,
     TestStrategy,
@@ -274,6 +298,10 @@ impl<R: Receiver> Receiver for FilteredReceiver<R> {
             }
         }
     }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -296,11 +324,11 @@ pub(crate) struct EncodedPayload {
 }
 
 impl EncodedPayload {
-    pub(crate) fn new<V, S, Dir>(max_participants: NonZeroU32, payload: Payload<V, S, Dir>) -> Self
+    pub(crate) fn new<V, P, Dir>(max_participants: NonZeroU32, payload: Payload<V, P, Dir>) -> Self
     where
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Self {
             max_participants,
@@ -308,11 +336,11 @@ impl EncodedPayload {
         }
     }
 
-    fn decode<V, S, Dir>(&self) -> Option<Payload<V, S, Dir>>
+    fn decode<V, P, Dir>(&self) -> Option<Payload<V, P, Dir>>
     where
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Payload::decode_cfg(
             commonware_codec::Copying(&self.bytes),
@@ -363,16 +391,16 @@ impl<D: Digest, C: Codec, Dir> MockBlock<D, C, Dir> {
         Self::from_parts::<H>(context, parent, height, timestamp, None)
     }
 
-    pub(crate) fn with_payload<H, V, S>(
+    pub(crate) fn with_payload<H, V, P>(
         self,
         max_participants: NonZeroU32,
-        payload: Payload<V, S, Dir>,
+        payload: Payload<V, P, Dir>,
     ) -> Self
     where
         H: Hasher<Digest = D>,
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Self::from_parts::<H>(
             self.context,
@@ -507,10 +535,10 @@ where
     Dir: DkgDirectory<TestPublicKey>,
 {
     type Variant = TestBlsVariant;
-    type Signer = TestSigner;
+    type PublicKey = TestPublicKey;
     type Directory = Dir;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.as_ref()?.decode()
     }
 }
@@ -668,8 +696,8 @@ pub(crate) fn child(parent: &TestBlock) -> TestBlock {
 pub(crate) const IO_BUFFER: NonZeroUsize = NZUsize!(2048);
 
 /// Returns a one-page cache for a reshare recovery journal in unit tests.
-pub(crate) fn page_cache(context: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(1))
+pub(crate) fn page_cache() -> CacheRef {
+    CacheRef::new(NZU16!(1024), NZUsize!(1))
 }
 
 /// Opens a reshare recovery store under `partition`.
@@ -679,12 +707,12 @@ pub(crate) async fn store<E, SS, V, P>(
     secret_store: SS,
 ) -> Store<E, SS, V, P>
 where
-    E: BufferPooler + Clock + Storage + Metrics,
+    E: Clock + Storage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: CryptoPublicKey,
 {
-    let page_cache = page_cache(&context);
+    let page_cache = page_cache();
     Store::init(
         context,
         partition,
@@ -709,7 +737,7 @@ pub(crate) async fn closed_marshal_mailbox(
     partition_prefix: &str,
     blocks_per_epoch: NonZeroU64,
 ) -> TestMarshalMailbox {
-    let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+    let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let finalizations_by_height =
         immutable::Archive::init(context.child("finalizations_by_height"), {
             let _: () = TestScheme::certificate_codec_config_unbounded();
@@ -780,19 +808,18 @@ fn archive_config<C>(
     }
 }
 
-pub(crate) fn simplex_config(
-    context: &impl BufferPooler,
-) -> orchestrator::SimplexConfig<TestElector> {
+pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
     orchestrator::SimplexConfig {
         elector: TestElector::default(),
         mailbox_size: NZUsize!(16),
         replay_buffer: NZUsize!(1024),
         write_buffer: NZUsize!(1024),
-        page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
+        page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
         leader_timeout: Duration::from_millis(100),
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),
-        fetch_timeout: Duration::from_millis(100),
+        fetch_timeout: NZDuration!(Duration::from_millis(100)),
+        fetch_retry_delay: Duration::from_millis(100),
         view_retention: ViewDelta::new(8),
         skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(1),
@@ -805,8 +832,12 @@ pub(crate) fn simplex_config(
 
 /// In-memory [`SecretStore`] for tests.
 ///
-/// Dealings are keyed by the encoded dealer key so the store works with any
-/// [`PublicKey`](CryptoPublicKey). Pruned epochs are recorded for assertions.
+/// Dealings are keyed by the encoded dealer key and public message so the store
+/// works with any [`PublicKey`](CryptoPublicKey) and [`Variant`]. Pruned epochs
+/// are recorded for assertions.
+///
+/// Storing a different private dealing for a dealing that is already stored
+/// panics.
 #[derive(Clone, Default)]
 pub(crate) struct MemorySecretStore {
     inner: Arc<Mutex<MemorySecretStoreInner>>,
@@ -816,9 +847,10 @@ pub(crate) struct MemorySecretStore {
 struct MemorySecretStoreInner {
     shares: BTreeMap<Epoch, Share>,
     seeds: BTreeMap<Epoch, Summary>,
-    dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
+    dealings: BTreeMap<(Epoch, Vec<u8>, Bytes), DealerPrivMsg>,
     prunes: Vec<Epoch>,
     stall: bool,
+    park_dealings: bool,
 }
 
 impl MemorySecretStore {
@@ -842,6 +874,12 @@ impl MemorySecretStore {
     /// never return.
     pub(crate) fn stall(&self) {
         self.inner.lock().stall = true;
+    }
+
+    /// Sets whether [`SecretStore::put_dealing`] stops before it stores its
+    /// dealing and never returns.
+    pub(crate) fn park_dealings(&self, park: bool) {
+        self.inner.lock().park_dealings = park;
     }
 }
 
@@ -869,27 +907,35 @@ impl SecretStore for MemorySecretStore {
         self.inner.lock().seeds.get(&epoch).cloned()
     }
 
-    async fn put_dealing<P: CryptoPublicKey>(
+    async fn put_dealing<V: Variant, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
+        public: &DealerPubMsg<V>,
         private: DealerPrivMsg,
     ) {
-        self.inner
-            .lock()
-            .dealings
-            .insert((epoch, dealer.encode().to_vec()), private);
+        let park = self.inner.lock().park_dealings;
+        if park {
+            std::future::pending::<()>().await;
+        }
+        let key = (epoch, dealer.encode().to_vec(), public.encode());
+        let replaced = self.inner.lock().dealings.insert(key, private.clone());
+        assert!(
+            replaced.is_none_or(|replaced| replaced == private),
+            "stored private dealing must not change"
+        );
     }
 
-    async fn get_dealing<P: CryptoPublicKey>(
+    async fn get_dealing<V: Variant, P: CryptoPublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
+        public: &DealerPubMsg<V>,
     ) -> Option<DealerPrivMsg> {
         self.inner
             .lock()
             .dealings
-            .get(&(epoch, dealer.encode().to_vec()))
+            .get(&(epoch, dealer.encode().to_vec(), public.encode()))
             .cloned()
     }
 
@@ -898,7 +944,7 @@ impl SecretStore for MemorySecretStore {
         inner.prunes.push(min);
         inner.shares.retain(|epoch, _| *epoch >= min);
         inner.seeds.retain(|epoch, _| *epoch >= min);
-        inner.dealings.retain(|(epoch, _), _| *epoch >= min);
+        inner.dealings.retain(|(epoch, _, _), _| *epoch >= min);
     }
 }
 

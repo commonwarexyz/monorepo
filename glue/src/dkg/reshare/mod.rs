@@ -12,8 +12,8 @@
 //! reshare their shares to the epoch's _players_. A participating node in
 //! neither role _observes_ the ceremony and derives the same public outcome.
 //!
-//! - [`Actor`]: Runs the protocol for one node and registers each epoch's signer
-//!   or verifier scheme through the application's
+//! - [`Actor`]: Runs the protocol for one node and registers each epoch's signer,
+//!   member, or verifier scheme through the application's
 //!   [`Registrar`](crate::dkg::Registrar).
 //! - [`Mailbox`]: Supplies reshare payloads for proposals and verification, and
 //!   receives finalized blocks from marshal.
@@ -83,8 +83,8 @@
 //!   excludes non-dealers and unusable logs.
 //! - Upon the finalized final block of an epoch, commit its
 //!   [`EpochInfo`](crate::dkg::types::EpochInfo) and register the next epoch's
-//!   signer or verifier scheme. A participating node keeps the share it derived
-//!   only if its locally derived artifact matches the finalized one.
+//!   signer, member, or verifier scheme. A participating node keeps the share it
+//!   derived only if its locally derived artifact matches the finalized one.
 //!
 //! # Application Contract
 //!
@@ -105,14 +105,16 @@
 //! - At the final block, proposers call [`Mailbox::epoch_info`], include the
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
-//!   payload differs. [`Application`] also rejects on
-//!   [`EpochInfoResponse::Unavailable`] and leaves verification unresolved on
-//!   [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`].
+//!   payload differs. [`Application`] rejects a mismatched payload and leaves
+//!   verification unresolved on [`EpochInfoResponse::Unavailable`].
 //!
-//! The final-block call receives the unfinalized ancestry between the finalized
-//! tip and the block under construction or verification. Dealer logs in that
-//! ancestry count toward the derived [`EpochInfo`](crate::dkg::types::EpochInfo),
-//! but they become durable only when their blocks finalize.
+//! The final-block call receives the blocks between the last finalized block the
+//! actor has applied and the block under construction or verification. Dealer
+//! logs in those blocks count toward the derived
+//! [`EpochInfo`](crate::dkg::types::EpochInfo), but they become durable only
+//! when their blocks finalize. A participating actor answers once it has applied
+//! every block before the midpoint, so a call from a node still replaying the
+//! dealing window waits for that point.
 //!
 //! Marshal must report finalized blocks to [`Mailbox`], which implements
 //! [`Reporter`](commonware_consensus::Reporter). The actor acknowledges a
@@ -184,12 +186,35 @@
 //! follows the reshare ceremony for the remainder of the epoch and resumes at
 //! the next boundary.
 //!
+//! ```text
+//!   epoch f:  |-------- dealing --------|--- dealer log inclusion ---|
+//!           first                   midpoint                       final
+//!                   ^                       ^
+//!                   floor here: every dealer log is delivered,
+//!                   so the actor participates
+//!                                           floor here: logs before it
+//!                                           were skipped, so the actor follows
+//! ```
+//!
 //! State-sync startup registers the certified current-epoch consensus scheme
 //! before entering follower mode. A follower with a recovered share may sign
 //! ordinary non-boundary blocks, but cannot locally derive the next
 //! [`EpochInfo`](crate::dkg::types::EpochInfo) needed to propose or complete
 //! verification of the final block. It learns that outcome from external
 //! finalization instead.
+//!
+//! A validator that holds a share for the current epoch takes part in its
+//! ceremony and must stay online for the whole epoch. If it follows the epoch,
+//! it counts as a faulty validator at the final block until the block finalizes
+//! without it. The actor logs a warning when state sync makes such a validator
+//! follow the epoch.
+//!
+//! Startup from state-sync material records the floor block's height with the
+//! material once marshal yields that block. A later restart in the synced epoch
+//! that is not given the material again takes the height from the plan, so it
+//! makes the same choice to participate or follow even once marshal has pruned
+//! the floor block. [Marshal Retention](crate::dkg#marshal-retention) describes
+//! when a restart still reads the floor block.
 //!
 //! A `player` that missed private dealings may need public reveals to reconstruct
 //! its share, but a revealed share is no longer private. Announcing a node as a
@@ -198,13 +223,16 @@
 //!
 //! # Persistence and Recovery
 //!
-//! Public protocol messages (dealer public messages, player acknowledgements,
-//! and finalized dealer logs) are journaled under [`Config::partition_prefix`].
+//! Public protocol messages (dealer public messages, player acknowledgements, and
+//! finalized dealer logs) are journaled under [`Config::partition_prefix`].
 //! Secret material is held only in the [`SecretStore`](crate::dkg::SecretStore).
 //! The current epoch's [`EpochInfo`](crate::dkg::types::EpochInfo) is not
-//! journaled: after a restart it is read from the finalized boundary block, or
-//! from the [`state_sync::Plan`](crate::dkg::state_sync::Plan) after state sync.
-//! If neither is available locally, the actor follows that epoch.
+//! journaled. After a restart, the actor reads it from the first available of
+//! state-sync material in the [`state_sync::Plan`](crate::dkg::state_sync::Plan),
+//! the boundary block in the epoch's checkpoint there, and that block in marshal.
+//! If none is available locally, the actor follows that epoch.
+//! [Marshal Retention](crate::dkg#marshal-retention) describes when each source
+//! applies.
 //!
 //! A player records a dealing before acknowledging it. Before acknowledging a
 //! finalized inclusion-window block, a participating actor records any dealer log
@@ -249,7 +277,7 @@
 //! block of a reshare-enabled chain. Once it reports the ceremony's outcome,
 //! the actor acknowledges each further finalized block of that chain without
 //! effects or checks and answers each final-block request with
-//! [`EpochInfoResponse::Following`].
+//! [`EpochInfoResponse::Unavailable`].
 
 mod mailbox;
 pub use mailbox::{EpochInfoResponse, LogReservation, Mailbox, Message};

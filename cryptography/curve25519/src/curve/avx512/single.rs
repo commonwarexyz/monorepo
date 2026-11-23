@@ -153,10 +153,6 @@ const _: () = {
 // SAFETY (every unsafe block in this impl): `self` is a `Backend`, which is only constructed
 // after detecting AVX-512F, AVX-512VL, and AVX-512 IFMA, the features of every intrinsic and
 // helper used here.
-#[allow(
-    clippy::multiple_inherent_impl,
-    reason = "Keep the packed point kernels together in this module."
-)]
 impl Backend {
     /// Splats each limb into every lane.
     #[inline(always)]

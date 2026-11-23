@@ -14,7 +14,7 @@ use super::scalar::Scalar;
 use crate::curve::{G, GAffine, LANES, msm::Backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::{Grid, Sequential, Strategy};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 
@@ -278,9 +278,11 @@ const fn tile_cost<B: Backend>(width: u32) -> NonZeroUsize {
     NZUsize!(num_buckets(width) * (B::STRIPES + 1))
 }
 
-/// The window at tile row `slot`. Low and high windows alternate: short scalars leave the high
-/// windows sparse, and a worker starts on a share of consecutive rows, so each share should mix
-/// cheap and expensive windows.
+/// The window at tile row `slot`.
+///
+/// Short scalars leave the high windows sparse, so windows differ in cost. A parallel run claims
+/// whole rows in order or gives each worker a share of cells over consecutive rows, so low and
+/// high windows alternate to mix cheap and expensive rows.
 const fn interleaved_window(slot: usize, windows: usize) -> usize {
     if slot.is_multiple_of(2) {
         slot / 2
@@ -295,7 +297,11 @@ const fn interleaved_window(slot: usize, windows: usize) -> usize {
 fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &impl Strategy) -> G {
     let windows = num_windows(width);
     let total = total_terms(chunks);
-    strategy.run_tiles(windows, total, tile_cost::<B>(width), 1, |tiles| {
+    let grid = Grid {
+        rows: windows,
+        tile_cost: tile_cost::<B>(width),
+    };
+    strategy.run_tiles(total, &[grid], 1, |tiles| {
         // Rows are windows in interleaved order, and columns are terms. Each worker reuses one set
         // of bucket stripes across its tiles, and each tile yields a partial for its window.
         let partials = tiles.fill_collect_vec(
@@ -372,7 +378,10 @@ mod tests {
     use alloc::vec;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz::Builder;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{
+        Sequential,
+        mocks::{Explorer, pooled},
+    };
     use core::any::type_name;
     use rand_core::Rng as _;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -779,14 +788,11 @@ mod tests {
         impl crate::curve::WithBackend for Check {
             type Output = ();
             fn call<B: Backend>(self, backend: B) {
-                // `Manual` disables the adaptive serial/parallel policy, forcing every call
-                // through Rayon dispatch. Planning parallelism above the pool size makes more
-                // shares than threads, so shares straddle windows and threads that finish take
-                // halves of the shares still pending, cutting windows at arbitrary terms.
-                let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                    .unwrap()
-                    .with_parallelism(commonware_utils::NZUsize!(32))
-                    .manual();
+                // Every call takes its most parallel shape. Planning parallelism above the pool
+                // size runs more tasks than threads, so threads that finish claim pending rows.
+                // Where the grid is shared as cells, they take the back halves of pending shares,
+                // and each stolen half can cut a window at an arbitrary term.
+                let strategy = Explorer::parallel(&pooled(NZUsize!(4), NZUsize!(32)));
 
                 Builder::default()
                     .with_seed(0)

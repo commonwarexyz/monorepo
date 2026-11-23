@@ -633,7 +633,7 @@ where
         }
         b.truncate(mid);
 
-        let u_u_inv = [u.clone(), u_inv.clone()];
+        let u_u_inv = [u, u_inv];
         let (new_g, new_h) = strategy.join(
             || {
                 strategy.map_collect_vec(g_lo.iter().zip(g_hi), |(g_lo_i, g_hi_i)| {

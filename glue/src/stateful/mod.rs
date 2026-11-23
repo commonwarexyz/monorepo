@@ -11,21 +11,27 @@
 //!
 //! * Fork batches from the pending state of `p`, or from the databases if `p` is the applied tip.
 //!   Recover missing parent state through [lazy recovery](#lazy-recovery).
-//! * Call [`Application::prepare`], [`Application::propose`], or [`Application::verify`] with
-//!   those batches.
+//! * Call [`Application::prepare`] or [`Application::propose`] with those batches, or verify the
+//!   block by processing it on them with [`Application::process`].
 //! * Keep the result as pending state if it matches the block's
-//!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
-//!   verification votes `false`.
+//!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics. A verification
+//!   votes `false` if [`Application::process`] rejects the block or its result does not match.
+//!
+//! Requests that reach the same block while it is being processed share one call to
+//! [`Application::process`], so a build on an uncertified parent and the parent's own verification
+//! can process the parent once. The call runs until it finishes or every request that joined it is
+//! cancelled. A successful result is kept as pending state and answers every later verification of
+//! its block. A failed call is not remembered, so a later request processes the block again.
 //!
 //! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
-//! called, even when it keeps its default decline. An uncached parent can be replayed while its
-//! own verification is still pending, and the replayed state does not replace that verification.
+//! called, even when it keeps its default decline.
 //!
 //! Upon finalization of block `b`:
 //!
-//! * Leave verifications running. A verification on a competing branch is refused at its next
-//!   batch operation ([`ExecutionError::Stale`]) and answered from the canonical chain.
-//! * Take the pending state of `b`, or reconstruct it with [`Application::apply`].
+//! * Wait for processing of `b` and of competing blocks to finish, and reject requests on
+//!   competing branches. Processing of descendants of `b` continues.
+//! * Take the pending state of `b`, or reconstruct it with [`Application::process`] as a
+//!   [`Finality::Finalized`] block.
 //! * Discard pending state that does not descend from `b`.
 //! * Call [`Application::capture`], apply the state to the databases, and call
 //!   [`Application::finalized`]. Acknowledge `b` once the hook resolves and the state is durable.
@@ -63,10 +69,10 @@
 //!
 //! Upon convergence at anchor `a`:
 //!
-//! * Publish a snapshot of the converged state for serving peers.
 //! * Acknowledge retained blocks at or below `a` without running application hooks.
 //! * Apply retained blocks above `a` in height order and acknowledge them once durable.
-//! * Record completion once all applied state is durable, then start processing.
+//! * Publish the converged state for serving, before its applied blocks are durable, and record
+//!   completion once all applied state is durable.
 //!
 //! The persisted floor lets an interrupted sync resume after a crash, even when state sync is
 //! not requested on restart. A newer selection may advance the floor but cannot move it backward.
@@ -88,21 +94,27 @@
 //!
 //! When a parent has no pending or applied state, [`Stateful`] walks its ancestry through a
 //! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider) to the nearest known
-//! state, then replays forward with [`Application::apply`]. Each rebuilt state is retained even
-//! if the request is cancelled.
+//! state, then processes the missing blocks forward with [`Application::process`] as
+//! [`Finality::Candidate`] blocks. Each recovered state is retained once its processing
+//! completes, even if the request is later cancelled, and it answers the block's own verification.
 //!
-//! An ancestor may not yet be certified, so replay must tolerate invalid blocks. Replayed state
-//! can serve as parent state but never as a verification verdict: verifying the block still
-//! calls [`Application::verify`].
+//! Recovery runs alongside other requests and processes one block at a time. Finalization can
+//! proceed while a request waits for ancestry, and the request then restarts its walk from the
+//! finalized state. Pruning waits for every active processing call before removing history.
+//!
+//! Once its parent's state is ready, a proposal forks batches from it and builds. Finalization
+//! waits until the build finishes or is cancelled.
+//!
+//! [`Application::process`] may receive uncertified ancestors and must reject any that are
+//! permanently invalid.
 //!
 //! # Failures
 //!
-//! [`Stateful`] panics on invalid proposal state or a proposed block whose parent or round
-//! differs from the request, on a finalized block that cannot be executed or reproduced, on
-//! skipped heights, on a successor whose parent is not the applied tip, or on a conflicting block
-//! at the tip's height. It also panics on state sync, storage, or metadata failures, or if marshal
-//! cannot return a block needed for startup. See [database failures](db#failures) for the storage
-//! contract.
+//! [`Stateful`] panics on invalid proposal state, on a finalized block that cannot be processed
+//! or reproduced, on skipped heights, on a successor whose parent is not the applied tip, or on
+//! a conflicting block at the tip's height. It also panics on state sync, storage, or metadata
+//! failures, or if marshal cannot return a block needed for startup. See [database
+//! failures](db#failures) for the storage contract.
 //!
 //! # Compatibility
 //!
@@ -117,12 +129,8 @@ use commonware_consensus::{
     CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{Clock, Metrics, Spawner};
-use commonware_storage::{merkle::Family, qmdb};
-use db::{DatabaseSet, MerkleizedOf, ReadersOf, UnmerkleizedOf};
-use rand_core::Rng;
+use db::DatabaseSet;
 use std::future::Future;
-use thiserror::Error;
 
 mod actor;
 pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
@@ -133,54 +141,22 @@ pub mod probe;
 #[cfg(test)]
 mod tests;
 
-/// Why a block execution failed.
-///
-/// | Variant | [`verify`](Application::verify) | [`prepare`](Application::prepare) and [`propose`](Application::propose) | [`apply`](Application::apply) of an ancestor | [`apply`](Application::apply) of a finalized block |
-/// | --- | --- | --- | --- | --- |
-/// | [`Stale`](Self::Stale) | re-checked once the anchor moves | declines (debug-asserted unreachable) | re-checked once the anchor moves | panics |
-/// | [`Invalid`](Self::Invalid) | answers `false`, nothing cached | declines | the ancestry is invalid | panics |
-/// | [`Fatal`](Self::Fatal) | panics | panics | panics | panics |
-///
-/// Once shutdown has fired, a failure that would panic is logged instead and its operation never
-/// completes, since a stopping runtime can fail storage mid-operation.
-#[derive(Debug, Error)]
-pub enum ExecutionError {
-    /// A finalized block that is not an ancestor of the batch invalidated its reads or
-    /// merkleization.
-    #[error("stale execution: a non-ancestor block was finalized")]
-    Stale,
-    /// The block's execution is invalid for its inputs, for example because it declares an
-    /// inactivity floor that regresses or passes its commit, or reads below its chain's floor.
-    #[error("invalid execution: {0}")]
-    Invalid(String),
-    /// Any other storage failure.
-    #[error("storage failure: {0}")]
-    Fatal(String),
-}
-
-impl<F: Family> From<qmdb::Error<F>> for ExecutionError {
-    fn from(err: qmdb::Error<F>) -> Self {
-        match err {
-            // `Stale` waits for the anchor to move, so a `StaleBatch` not caused by an anchor move
-            // would wait forever. Its two other sources, a batch from another database instance
-            // and an unapplied ancestor dropped while the database is unchanged, cannot occur
-            // here: [`Stateful`] owns one instance per database and keeps every pending ancestor.
-            qmdb::Error::StaleRead | qmdb::Error::StaleBatch => Self::Stale,
-            qmdb::Error::FloorRegressed(..)
-            | qmdb::Error::FloorBeyondSize(..)
-            | qmdb::Error::BelowInactivityFloor(_) => Self::Invalid(err.to_string()),
-            err => Self::Fatal(err.to_string()),
-        }
-    }
-}
-
 /// The output of a successful [`Application::prepare`] or [`Application::propose`] call.
-pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
+pub struct Proposed<A: Application<E>, E> {
     /// The block built by the application.
     pub block: A::Block,
 
     /// The merkleized database batches produced during execution.
     pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
+}
+
+/// Whether [`Application::process`] may rely on the block's finalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Finality {
+    /// The block is not known to be finalized, so it must pass every validity check.
+    Candidate,
+    /// The network finalized the block, so honest voters already accepted it as a candidate.
+    Finalized,
 }
 
 /// Per-proposal input passed to [`Application::prepare`] and [`Application::propose`].
@@ -195,20 +171,14 @@ pub struct Input<Upstream, Provider> {
 /// A deterministic state machine whose storage is managed by [`Stateful`].
 ///
 /// Implementors execute blocks against [`DatabaseSet::Unmerkleized`] batches and return
-/// [`DatabaseSet::Merkleized`] batches (see the [module docs](crate::stateful)). Every execution
-/// method reads through `batches`, the only database access execution is given (`capture` and
-/// `finalized` also receive readers, for observation only). A batch overlays speculative ancestor
-/// state and falls back to applied state for anything it does not cover, so it is always the
-/// complete view for its branch.
+/// [`DatabaseSet::Merkleized`] batches (see the [module docs](crate::stateful)).
 ///
 /// Methods may run concurrently on different clones. Given the same inputs and database state,
 /// every clone must produce the same state transition. Mutable state that affects execution
 /// must live in the supplied database batches.
-pub trait Application<E>: Clone + Send + 'static
-where
-    E: Rng + Spawner + Metrics + Clock,
-{
-    /// The signing scheme used by the application.
+pub trait Application<E>: Clone + Send + 'static {
+    /// The signing scheme used by the application and by the marshal supplied through
+    /// [`Config::marshal`](crate::stateful::Config::marshal).
     type SigningScheme: Scheme;
 
     /// Consensus metadata for a block (for example its proposer, epoch, and view).
@@ -248,20 +218,19 @@ where
     /// Builds a block on top of the provided parent ancestry before the parent certifies, or
     /// declines with [`Handoff::Wait`].
     ///
-    /// Like [`propose`](Self::propose), including its requirements on the merkleized state, on
-    /// cancellation, and on errors (an error declines like `Ok(Handoff::Wait)`, except
-    /// [`Fatal`](ExecutionError::Fatal), which panics). With [`Handoff::Vote`] or
-    /// [`Handoff::Stage`], the block's state is cached as verified and the block reaches consensus
-    /// under that decision. See [`commonware_consensus::Application::prepare`] for the contract,
-    /// including the trust an early vote places in the outgoing leader. The default declines.
+    /// Like [`propose`](Self::propose), including its requirements on the merkleized state and
+    /// on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state is cached
+    /// and the block reaches consensus under that decision. See
+    /// [`commonware_consensus::Application::prepare`] for the contract, including the trust an
+    /// early vote places in the outgoing leader. The default declines.
     fn prepare(
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: UnmerkleizedOf<Self::Databases, E>,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> impl Future<Output = Result<Handoff<Proposed<Self, E>>, ExecutionError>> + Send {
-        async { Ok(Handoff::Wait) }
+    ) -> impl Future<Output = Handoff<Proposed<Self, E>>> + Send {
+        async { Handoff::Wait }
     }
 
     /// Builds a block on top of the provided parent ancestry.
@@ -270,91 +239,69 @@ where
     ///
     /// The merkleized state must match [`sync_targets`](Self::sync_targets) for the returned block:
     /// [`Stateful`] panics otherwise. Applications using
-    /// [`qmdb::current`] must also ensure the block commits to
+    /// [`qmdb::current`](commonware_storage::qmdb::current) must also ensure the block commits to
     /// the merkleized batch's canonical root, because the sync targets cover only the ops root and
     /// operation range.
     ///
-    /// The caller may cancel this future. Cancellation and retry must preserve invariants and
-    /// durable progress.
-    ///
-    /// Storage errors from batch operations are propagated as [`ExecutionError`].
-    /// The wrapper declines the proposal on `Ok(None)` or [`Invalid`](ExecutionError::Invalid)
-    /// and panics on [`Fatal`](ExecutionError::Fatal). Unlike [`verify`](Self::verify) and
-    /// [`apply`](Self::apply), a proposal cannot observe
-    /// [`Stale`](ExecutionError::Stale). The wrapper never interleaves a
-    /// finalization with an active proposal, so its batch reads cannot be
-    /// invalidated mid-execution.
+    /// The caller may cancel this future before it completes, so implementations must be
+    /// cancellation-safe. A dropped call must leave the application's own state consistent.
     fn propose(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> impl Future<Output = Result<Option<Proposed<Self, E>>, ExecutionError>> + Send;
+    ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
-    /// Verifies a block received from a peer against its ancestry.
+    /// Processes an existing block on its parent's state and returns the merkleized result, or
+    /// [`None`] if the block is invalid.
     ///
-    /// Called before this node votes to finalize the block (its notarize vote may already have
-    /// been cast). The implementation should execute the block against `batches` and return the
-    /// merkleized result.
+    /// [`Stateful`] calls this to verify a peer's block, to build on an uncertified parent, to
+    /// recover missing ancestry, and to finalize a block without pending state. Concurrent
+    /// requests for the same block share one call, and a pending state answers every later
+    /// verification of its block. `ancestry` starts with the block, followed by its parent and
+    /// earlier ancestors fetched on demand, and [`Ancestry::peek`] returns the block without
+    /// fetching its parent. `context` pairs the block's consensus context with a runtime context
+    /// that [`Stateful`] owns, since one call can serve several requests.
     ///
-    /// Return [`None`] only for permanent invalidity under the supplied context, ancestry, and
-    /// batches. To abstain, keep the future pending until validity is decided or the request is
-    /// cancelled. Later finalization of a competing branch does not change a completed verdict.
-    /// [`Stateful`] may discard the verified state instead of caching it, but the answer is
-    /// unchanged.
+    /// For a [`Finality::Candidate`], check every rule a vote depends on: signatures, the
+    /// context, the ancestry, and the parent's state. Return [`None`] only for permanent
+    /// invalidity under the supplied context, ancestry, and batches. [`Stateful`] then rejects
+    /// the block and every block built on it.
     ///
-    /// Reject execution results that differ from the block's commitments. [`Stateful`] checks
-    /// [`sync_targets`](Self::sync_targets), so implementations need not repeat that check.
-    /// Applications using [`qmdb::current`] must reject blocks whose
-    /// committed canonical root differs from the merkleized batch root, because the sync targets
-    /// cover only the ops root and operation range.
+    /// A rule fixed by the block and its ancestry can establish permanent invalidity. A rule
+    /// that depends on the local clock or on local readiness cannot, so such a condition may
+    /// only delay the result. Bound any delay that block data controls with a permanent rule.
+    /// For example, reject a timestamp more than a fixed interval after the parent's before
+    /// waiting for the local clock to reach it. Builds and recovery wait for the full result.
     ///
-    /// This future is scoped to its caller. Dropping the response cancels only this request.
-    /// [`Stateful`] never cancels it while the actor runs, so a batch operation running when a
-    /// finalized block is applied waits for that apply and then continues. Actor shutdown drops
-    /// it with everything else.
+    /// For a [`Finality::Finalized`] block, honest voters already accepted the block as a
+    /// candidate, so checks that do not affect the resulting state may be skipped. The block must
+    /// still produce its state, and [`None`] or mismatched sync targets make [`Stateful`] panic.
     ///
-    /// Once a block that is not an ancestor of `batches` is finalized, every batch read and
-    /// merkleization refuses with [`ExecutionError::Stale`] (writes never refuse). That block may
-    /// be a competitor or the candidate itself, finalized from a separate replay. [`Stateful`] then
-    /// re-checks the block against the new canonical state and retries or answers from it.
-    fn verify(
+    /// Processing must finish without waiting for a later finalization, including through
+    /// further ancestry reads, and may await other asynchronous I/O. Pruning, and finalization of
+    /// this block or of a competing block, wait for this call to end, and [`Stateful`] handles no
+    /// other message meanwhile. Data needed to produce finalized state must survive pruning and
+    /// state sync.
+    ///
+    /// [`Stateful`] checks only [`sync_targets`](Self::sync_targets), so implementations must
+    /// check any other block commitments, such as the canonical root of
+    /// [`qmdb::current`](commonware_storage::qmdb::current).
+    ///
+    /// [`Stateful`] drops this future before it completes when every request waiting on it is
+    /// cancelled or the actor stops, so implementations must be cancellation-safe. A dropped call
+    /// must leave the application's own state consistent.
+    ///
+    /// Processing may overlap finalization. Read through the provided batches without holding
+    /// database locks (see [`db::Shared::read`]).
+    fn process(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> impl Future<Output = Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError>> + Send;
-
-    /// Re-executes `block` to reconstruct its merkleized state.
-    ///
-    /// Used for [lazy recovery](crate::stateful#lazy-recovery) and for finalized blocks without
-    /// pending state.
-    ///
-    /// The returned state must match what [`verify`](Self::verify) accepts for `block`.
-    /// It may become parent state or be committed at finalization, but never substitutes for
-    /// [`verify`](Self::verify). [`Stateful`] checks only [`sync_targets`](Self::sync_targets),
-    /// so implementations must check any other block commitments.
-    ///
-    /// A replayed ancestor may be invalid. Return `Ok(None)` or [`ExecutionError::Invalid`] if it
-    /// cannot be executed, rejecting ancestry that depends on it. For a finalized block,
-    /// `Ok(None)`, mismatched sync targets, or any [`ExecutionError`] cause [`Stateful`] to panic
-    /// (see the table on [`ExecutionError`]).
-    ///
-    /// Dropping the originating request, or actor shutdown, drops this future. [`Stateful`]
-    /// never drops it otherwise, and dropping it must not violate invariants or lose durable
-    /// progress.
-    ///
-    /// Storage errors from batch operations are propagated as [`ExecutionError`],
-    /// never interpreted (see [`verify`](Self::verify)). The wrapper re-checks
-    /// canonical state when a verification replay goes stale and panics when the
-    /// failure is impossible on a correct node (the finalize path).
-    fn apply(
-        &mut self,
-        context: (E, Self::Context),
-        block: &Self::Block,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> impl Future<Output = Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError>> + Send;
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        finality: Finality,
+    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
     /// Captures data from a finalized block's state before it is applied.
     ///
@@ -364,15 +311,11 @@ where
     ///
     /// Only reads completed through `readers` during this call are guaranteed to observe
     /// pre-apply state. Capture owned values for [`finalized`](Self::finalized), which receives
-    /// the returned value after the batches are applied. `readers` follow the same rules as in
-    /// [`finalized`](Self::finalized).
+    /// the returned value after the batches are applied.
     ///
     /// [`Stateful`] handles no other message while this future or [`finalized`](Self::finalized) is
-    /// pending (verifications already running continue). Keep this capture cheap, and spawn
-    /// expensive follow-on work from [`finalized`](Self::finalized) instead of awaiting it.
-    ///
-    /// A graceful stop may drop this future. The block is then unacknowledged, and marshal
-    /// redelivers it after a restart.
+    /// pending (processing of the block's descendants may continue). Keep this capture cheap, and
+    /// spawn expensive follow-on work from [`finalized`](Self::finalized) instead of awaiting it.
     ///
     /// # Panics
     ///
@@ -381,8 +324,8 @@ where
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        batches: &MerkleizedOf<Self::Databases, E>,
-        readers: ReadersOf<Self::Databases, E>,
+        batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = Self::Captured> + Send;
 
     /// Observes a finalized block after its state is applied.
@@ -395,18 +338,11 @@ where
     /// Blocks already reflected in the databases skip this hook (see [`capture`](Self::capture)),
     /// so consecutive calls may skip heights after state sync.
     ///
-    /// `readers` are readers over the database set. They may be used concurrently with descendant
-    /// verification. Each [`ReadGuard`](db::ReadGuard) must cover one storage call, never an
-    /// application await. Never hold two at once, since a waiting apply blocks new guards.
-    /// Mutations that affect execution results must go through normal block execution.
+    /// The read-only handles may be used concurrently with descendant processing. Mutations
+    /// that affect execution results must go through normal block execution.
     ///
-    /// Readers kept past this hook see later applies. The databases of a set apply
-    /// concurrently, so reads of different databases may then observe different blocks. Reads
-    /// park forever once the actor stops.
-    ///
-    /// Capture, application, and this hook may repeat after a crash or a graceful stop, which may
-    /// drop this future, until both the block's state and marshal's processed position are
-    /// durable.
+    /// Capture, application, and this hook may repeat after a crash until both the block's state
+    /// and marshal's processed position are durable.
     ///
     /// # Panics
     ///
@@ -416,6 +352,6 @@ where
         context: (E, Self::Context),
         block: &Self::Block,
         captured: Self::Captured,
-        readers: ReadersOf<Self::Databases, E>,
+        readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) -> impl Future<Output = ()> + Send;
 }

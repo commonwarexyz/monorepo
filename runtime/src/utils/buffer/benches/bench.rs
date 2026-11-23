@@ -2,9 +2,8 @@
 //!
 //! Includes both deterministic in-memory runs to isolate buffer/page-cache work
 //! and Tokio-backed runs to exercise real storage I/O paths.
-//!
-//! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
+use commonware_allocator::mimalloc;
 use commonware_runtime::{
     BLOB_PAGE_SIZE, Storage,
     buffer::paged::{CacheRef, Writer, page_size},
@@ -15,6 +14,9 @@ use std::num::NonZeroU16;
 mod append;
 mod read;
 mod sync;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;

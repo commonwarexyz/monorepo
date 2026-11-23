@@ -14,15 +14,13 @@ use commonware_consensus::{
     types::Height,
 };
 use commonware_cryptography::{Digest, Digested, certificate::Scheme};
-use commonware_runtime::{BufMut, Clock, Metrics, Spawner};
-use commonware_storage::Context;
-use rand_core::Rng;
+use commonware_runtime::BufMut;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};
 
 pub(crate) mod mailbox;
-pub(crate) use mailbox::{Mailbox, UpdateOutcome};
+pub(crate) use mailbox::Mailbox;
 
 mod plan;
 pub use plan::SyncPlan;
@@ -108,13 +106,24 @@ where
 /// Databases and the anchor they reflect.
 pub struct Artifact<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// The owned database set produced by sync.
+    /// The database handle set.
     pub databases: A::Databases,
     /// Anchor of the block reflected by `databases`.
     pub anchor: Anchor<BlockDigest<A, E>>,
+}
+
+impl<E, A> Clone for Artifact<E, A>
+where
+    A: Application<E>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            databases: self.databases.clone(),
+            anchor: self.anchor,
+        }
+    }
 }
 
 /// Returns the block state sync starts from.
@@ -132,10 +141,10 @@ where
     S: Scheme,
     V: Variant,
 {
-    // Marshal skips a startup floor at or below its durable round floor, and that floor block may
-    // be pruned, so a local wait for it could hang. Resolve from marshal's current position, since
-    // a live floor may also have pruned the startup snapshot's anchor.
-    if floor.processed().is_some() && floor.round() >= finalization.round() {
+    // Marshal skips a startup floor whose round its durable round floor covers. That floor's
+    // block may be pruned, so a local wait for it could hang. Resolve from marshal's current
+    // position, since a live floor may also have pruned the startup snapshot's anchor.
+    if floor.processed().is_some() && floor.cutoff().covers(finalization.round()) {
         let (processed, anchor) = marshal
             .get_anchor()
             .await
@@ -180,16 +189,14 @@ where
 /// opened at the targets of that block, discarding any suffix beyond them, and the set is returned
 /// with that block as its anchor. Panics if marshal cannot return that block or a database cannot
 /// be opened at its target (for example, because corruption or excessive pruning lost it).
-pub(crate) async fn open<E, A, S, V>(
+pub(crate) async fn open<E, A, V>(
     context: E,
-    marshal: &MarshalMailbox<S, V>,
+    marshal: &MarshalMailbox<A::SigningScheme, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     completed: Option<Height>,
 ) -> Artifact<E, A>
 where
-    E: Rng + Spawner + Context,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
     let anchor = marshal.get_anchor().await;

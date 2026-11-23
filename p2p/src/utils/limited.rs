@@ -391,7 +391,7 @@ mod tests {
             let checked = limited.check(Recipients::One(peer1.clone())).unwrap();
             checked.send(IoBuf::from(b"limit"), false);
 
-            // Now check with all three peers - peer1 should be filtered out
+            // Check all three peers and expect peer1 to be filtered out
             let expected = vec![peer2.clone(), peer3.clone()];
             let checked = limited
                 .check(Recipients::Some(vec![peer1, peer2, peer3]))
@@ -422,7 +422,7 @@ mod tests {
                 .unwrap()
                 .send(IoBuf::from(b"limit2"), false);
 
-            // Now both are rate limited - should return error with retry time
+            // With both peers rate limited, check should return an error with a retry time
             assert!(limited.check(Recipients::Some(vec![peer1, peer2])).is_err());
         });
     }

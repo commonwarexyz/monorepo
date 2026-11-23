@@ -7,7 +7,8 @@
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write, util::at_least_items,
+    Buf, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    util::at_least_items,
 };
 use core::{
     fmt::{self, Formatter, Write as _},
@@ -156,6 +157,20 @@ impl<const N: usize> BitMap<N> {
         self.chunks.len()
     }
 
+    /// Returns the largest encoded size of a bitmap of at most `bits` bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of chunks does not fit in a `usize`.
+    pub fn max_encode_size(bits: u64) -> usize {
+        #[allow(path_statements)]
+        Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
+
+        let chunks = usize::try_from(bits.div_ceil(Self::CHUNK_SIZE_BITS))
+            .expect("chunk count must fit in usize");
+        chunks * N + u64::SIZE
+    }
+
     /* Getters */
 
     /// Get the value of the bit at the given index.
@@ -254,7 +269,8 @@ impl<const N: usize> BitMap<N> {
             let chunk_byte = Self::chunk_byte_offset(self.len);
             last_chunk[chunk_byte] |= Self::chunk_byte_bitmask(self.len);
         }
-        // If bit is false, just advance len -- the bit is already 0
+
+        // If bit is false, just advance len, since the bit is already 0
         self.len += 1;
     }
 
@@ -480,7 +496,7 @@ impl<const N: usize> BitMap<N> {
 
         let pos_in_chunk = self.len % Self::CHUNK_SIZE_BITS;
         if pos_in_chunk == 0 {
-            // Chunk is full -- there are no trailing bits to clear.
+            // Chunk is full, so there are no trailing bits to clear.
             return false;
         }
 
@@ -742,8 +758,8 @@ impl<const N: usize> BitMap<N> {
 
         // All of these chunks require all of their bits to be checked.
         // If first_chunk == last_chunk, we skip the loop.
-        for full_chunk in (first_chunk + 1)..last_chunk {
-            if self.chunks[full_chunk] != Self::EMPTY_CHUNK {
+        for full_chunk in self.chunks.iter().take(last_chunk).skip(first_chunk + 1) {
+            if *full_chunk != Self::EMPTY_CHUNK {
                 return false;
             }
         }
@@ -1170,6 +1186,35 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
     }
 }
 
+commonware_macros::stability_scope!(ALPHA, cfg(any(test, feature = "fuzz")) {
+    #[derive(Debug)]
+    pub(crate) struct IsUnsetPlan {
+        bits: Vec<bool>,
+        start: u64,
+        end: u64,
+    }
+
+    impl arbitrary::Arbitrary<'_> for IsUnsetPlan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+            let (start, end) = u.arbitrary::<(u64, u64)>()?;
+            let range = u.len() as u64 + 1;
+            let start = start % range;
+            let end = (end % range).max(start);
+            let bits = u.bytes(u.len())?.iter().map(|byte| byte & 1 == 1).collect();
+            Ok(Self { bits, start, end })
+        }
+    }
+
+    impl IsUnsetPlan {
+        pub(crate) fn run(self) {
+            let Self { bits, start, end } = self;
+            let bitmap: BitMap = BitMap::from(bits.as_slice());
+            let expected = bits[start as usize..end as usize].iter().all(|bit| !bit);
+            assert_eq!(bitmap.is_unset(start..end), expected);
+        }
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1177,6 +1222,7 @@ mod tests {
     use bytes::BytesMut;
     use commonware_codec::{Decode, Encode};
     use commonware_formatting::hex;
+    use commonware_invariants::minifuzz;
     use rand::RngExt as _;
 
     #[test]
@@ -2186,11 +2232,11 @@ mod tests {
         bv.set(40, true);
         bv.set(60, true);
 
-        // Start from position 20 -- should skip bit 5.
+        // Starting from position 20 should skip bit 5.
         let ones: Vec<u64> = Readable::ones_iter_from(&bv, 20).collect();
         assert_eq!(ones, vec![20, 40, 60]);
 
-        // Start from position 21 -- should skip bits 5 and 20.
+        // Starting from position 21 should skip bits 5 and 20.
         let ones: Vec<u64> = Readable::ones_iter_from(&bv, 21).collect();
         assert_eq!(ones, vec![40, 60]);
 
@@ -2405,6 +2451,22 @@ mod tests {
         }
         let encoded = large_bv.encode();
         assert_eq!(large_bv.encode_size(), encoded.len());
+    }
+
+    #[test]
+    fn test_max_encode_size() {
+        fn check<const N: usize>() {
+            // The bound matches an encoded bitmap on both sides of each chunk boundary.
+            for bits in [0, 1, 7, 8, 9, 64, 65] {
+                assert_eq!(
+                    BitMap::<N>::max_encode_size(bits),
+                    BitMap::<N>::zeroes(bits).encode_size(),
+                    "N={N} bits={bits}"
+                );
+            }
+        }
+        check::<1>();
+        check::<8>();
     }
 
     #[test]
@@ -2668,7 +2730,7 @@ mod tests {
         let bv: BitMap<4> = [false].as_ref().into();
         assert_eq!(format!("{bv:?}"), "BitMap[0]");
 
-        // Test exactly at boundary (65 bits - should show ellipsis)
+        // One bit past the 64-bit display limit, the output should show an ellipsis
         let pattern: Vec<bool> = (0..65).map(|i| i == 0 || i == 64).collect(); // First and last bits are true
         let bv: BitMap<16> = pattern.into();
         let debug_str = format!("{bv:?}");
@@ -2870,28 +2932,14 @@ mod tests {
         assert_eq!(prunable.get_chunk_containing(0), &chunk);
     }
 
-    mod proptests {
-        use super::*;
-        use proptest::prelude::*;
-
-        proptest! {
-            #[test]
-            fn is_unset_matches_naive(
-                bits in prop::collection::vec(any::<bool>(), 1..=512usize),
-                start in 0u64..=512,
-                end in 0u64..=512,
-            ) {
-                let bitmap: BitMap = BitMap::from(bits.as_slice());
-                let len = bitmap.len();
-                let start = start.min(len);
-                let end = end.max(start).min(len);
-                let range = start..end;
-
-                let expected = range.clone().all(|i| !bitmap.get(i));
-
-                prop_assert_eq!(bitmap.is_unset(range), expected);
-            }
-        }
+    #[test]
+    fn is_unset_matches_naive() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                u.arbitrary::<IsUnsetPlan>()?.run();
+                Ok(())
+            });
     }
 
     #[test]

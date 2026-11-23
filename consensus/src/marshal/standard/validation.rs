@@ -1,23 +1,22 @@
 use crate::{
     Application, Block, Epochable, Heightable,
     marshal::{
-        ancestry::has_contiguous_height,
+        ancestry::{AncestorStream, has_contiguous_height},
         application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
         core::Mailbox,
         standard::Standard,
     },
     simplex::types::Context,
-    types::Epocher,
+    types::{Epocher, Round},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
-    Clock, Metrics, Spawner,
+    Clock, Supervisor,
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
 };
 use commonware_utils::channel::oneshot;
-use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
 
@@ -178,6 +177,27 @@ where
     Some(ParentCheck::Valid(parent))
 }
 
+impl<S, B> Mailbox<S, Standard<B>>
+where
+    S: Scheme,
+    B: Block + Codec,
+{
+    /// Returns a stream over the ancestry of `initial` (see [`AncestorStream::new`]).
+    ///
+    /// The stream passes `bound`, the round of the consensus request it serves, to limit how long
+    /// the provider fetches each missing parent. The round is needed because the only other limit
+    /// is the height the parent's child claims, and an unchecked child can claim any height.
+    pub(super) fn bounded_ancestry<C: Clock>(
+        &self,
+        clock: Arc<C>,
+        initial: impl IntoIterator<Item = Digested<B>>,
+        bound: Round,
+        fetch_duration: Timed,
+    ) -> AncestorStream<Self, C> {
+        AncestorStream::new(clock, self.clone(), initial, Some(bound), fetch_duration)
+    }
+}
+
 /// Runs application verification over the two-block ancestry prefix.
 ///
 /// The block must already have passed [`await_and_validate_parent`]. Returns `None` when
@@ -196,15 +216,16 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     ancestor_fetch_duration: Timed,
 ) -> Option<bool>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     S: Scheme,
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let ancestry_stream = marshal.ancestor_stream(
+    let ancestry_stream = marshal.bounded_ancestry(
         Arc::new(runtime_context.child("ancestor_stream")),
         [block.clone(), parent],
+        context.round,
         ancestor_fetch_duration,
     );
     let validity_request = application

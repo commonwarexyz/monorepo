@@ -1,9 +1,6 @@
 use crate::stateful::{
-    Application, ExecutionError, Input, Proposed,
-    db::{
-        DatabaseSet, InitError, ManagedDb, Merkleized, MerkleizedOf, Reader, ReadersOf, Single,
-        Unmerkleized, UnmerkleizedOf, Writer,
-    },
+    Application, Finality, Input, Proposed,
+    db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -15,18 +12,21 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{BufMut, Error as RuntimeError, Handle, deterministic};
+use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
+use futures::task::AtomicWaker;
 use std::{
     cell::RefCell,
     convert::Infallible,
+    future::poll_fn,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    task::Poll,
 };
 
-pub(crate) type TestDatabases = Single<TestDb>;
+pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -59,23 +59,7 @@ impl Merkleized for TestMerkleized {
 }
 
 /// Completes one parked flush when released by the test.
-///
-/// Sending or dropping it also settles the flush for the database's next capture, which waits
-/// for an in-flight flush as real storage does.
-pub(crate) struct FlushRelease {
-    release: oneshot::Sender<Result<(), RuntimeError>>,
-    _settled: oneshot::Sender<()>,
-}
-
-impl FlushRelease {
-    /// Completes the flush with `result`.
-    pub(crate) fn send(
-        self,
-        result: Result<(), RuntimeError>,
-    ) -> Result<(), Result<(), RuntimeError>> {
-        self.release.send(result)
-    }
-}
+pub(crate) type FlushRelease = oneshot::Sender<Result<(), RuntimeError>>;
 
 /// Signals that pruning has started, then blocks it until the test releases it.
 struct PruneGate {
@@ -83,66 +67,62 @@ struct PruneGate {
     release: oneshot::Receiver<()>,
 }
 
-/// Signals that a gated [`TestDb`] call has started, then blocks it until the test releases it.
-struct CallGate {
+/// Signals that a snapshot capture has started, then blocks it until the test releases it.
+struct SnapshotGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
-}
-
-impl CallGate {
-    /// Installs a gate in `slot`, returning its entry signal and release sender.
-    fn install(
-        slot: &'static std::thread::LocalKey<RefCell<Option<Self>>>,
-    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
-        slot.with(|gate| {
-            assert!(
-                gate.borrow_mut()
-                    .replace(Self {
-                        started,
-                        release: release_rx,
-                    })
-                    .is_none(),
-                "gate already installed",
-            );
-        });
-        (started_rx, release)
-    }
-
-    /// Parks on the gate in `slot`, if one is installed, consuming it.
-    async fn pass(slot: &'static std::thread::LocalKey<RefCell<Option<Self>>>) {
-        if let Some(mut gate) = slot.with(|gate| gate.borrow_mut().take()) {
-            gate.started.send(()).expect("test must await the gate");
-            let _ = (&mut gate.release).await;
-        }
-    }
 }
 
 thread_local! {
     /// Single-use gate consumed by the next [`TestDb`] snapshot capture. Parks an actor's
     /// startup publish between database recovery and mailbox polling.
-    static SNAPSHOT_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
-    /// Single-use gate consumed by the next [`TestDb`] batch fork, which holds no read guard.
-    static NEW_BATCH_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
-    /// Single-use gate consumed by the next finalized hook of any test application that calls
-    /// [`pass_finalized_gate`] (such as [`TestApp`]), which runs inside the finalizing window.
-    static FINALIZED_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
-    /// Single-use gate consumed by the next [`TestDb`] finalize, before it starts its flush.
-    static FINALIZE_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
+    static SNAPSHOT_GATE: RefCell<Option<SnapshotGate>> = const { RefCell::new(None) };
 }
 
-/// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
-/// prune targets.
+/// Shared observer for a gated [`TestDb`]: parked flush releases, applied batches, and recorded
+/// prune targets. The waiters below resolve once the database reports the matching progress.
+/// They share one wakeup registration, so only one task may await them at a time.
 #[derive(Clone, Default)]
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
     pub(crate) applied: Arc<AtomicUsize>,
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
+    progress: Arc<AtomicWaker>,
 }
 
 impl FlushControl {
+    /// Waits for the next flush the database starts and returns its release.
+    pub(crate) async fn next_flush(&self) -> FlushRelease {
+        self.wait_for(|| {
+            let mut flushes = self.flushes.lock();
+            (!flushes.is_empty()).then(|| flushes.remove(0))
+        })
+        .await
+    }
+
+    /// Waits until the database has applied at least `count` batches.
+    pub(crate) async fn applied_at_least(&self, count: usize) {
+        self.wait_for(|| (self.applied.load(Ordering::Relaxed) >= count).then_some(()))
+            .await
+    }
+
+    /// Waits until the database has recorded at least `count` prunes.
+    pub(crate) async fn pruned_at_least(&self, count: usize) {
+        self.wait_for(|| (self.pruned.lock().len() >= count).then_some(()))
+            .await
+    }
+
+    /// Resolves once `ready` returns a value, re-checking after each database operation.
+    async fn wait_for<T>(&self, ready: impl Fn() -> Option<T>) -> T {
+        poll_fn(|cx| {
+            // Registering before checking guarantees a wake for progress made in between.
+            self.progress.register(cx.waker());
+            ready().map_or(Poll::Pending, Poll::Ready)
+        })
+        .await
+    }
+
     /// Gates the next prune. The receiver reports entry, and sending on the
     /// returned sender lets pruning continue. Only one gate may be active.
     pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -167,46 +147,42 @@ pub(crate) struct TestDb {
     sync: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
     finalized: u64,
-    /// Resolves once the latest gated flush is released or dropped.
-    flushing: Option<oneshot::Receiver<()>>,
 }
 
 impl TestDb {
     pub(crate) fn with_sync(handle: Handle<()>) -> Self {
         Self {
             sync: Mutex::new(Some(handle)),
-            ..Self::default()
+            control: None,
+            finalized: 0,
         }
     }
 
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
+            sync: Mutex::new(None),
             control: Some(control),
-            ..Self::default()
-        }
-    }
-
-    /// Waits for the latest gated flush to settle, as real storage does before a capture.
-    async fn settle(&mut self) {
-        if let Some(settled) = self.flushing.take() {
-            let _ = settled.await;
+            finalized: 0,
         }
     }
 
     /// Gates the next snapshot capture on this thread. The receiver reports entry, and
     /// sending on the returned sender lets the capture continue.
     pub(crate) fn gate_next_snapshot() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        CallGate::install(&SNAPSHOT_GATE)
-    }
-
-    /// Gates the next batch fork on this thread, like [`Self::gate_next_snapshot`].
-    pub(crate) fn gate_next_new_batch() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        CallGate::install(&NEW_BATCH_GATE)
-    }
-
-    /// Gates the next finalize on this thread, like [`Self::gate_next_snapshot`].
-    pub(crate) fn gate_next_finalize() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        CallGate::install(&FINALIZE_GATE)
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        SNAPSHOT_GATE.with(|gate| {
+            assert!(
+                gate.borrow_mut()
+                    .replace(SnapshotGate {
+                        started,
+                        release: release_rx,
+                    })
+                    .is_none(),
+                "snapshot gate already installed",
+            );
+        });
+        (started_rx, release)
     }
 }
 
@@ -218,9 +194,13 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type SyncTarget = u64;
     type Snapshot = u64;
 
-    async fn snapshot(mut self) -> Result<(Self, Self::Snapshot), Self::Error> {
-        self.settle().await;
-        CallGate::pass(&SNAPSHOT_GATE).await;
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+        if let Some(mut gate) = SNAPSHOT_GATE.with(|gate| gate.borrow_mut().take()) {
+            gate.started
+                .send(())
+                .expect("test must await the snapshot gate");
+            let _ = (&mut gate.release).await;
+        }
         let snapshot = self.finalized;
         Ok((self, snapshot))
     }
@@ -237,8 +217,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
-        CallGate::pass(&NEW_BATCH_GATE).await;
+    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -250,22 +229,17 @@ impl<E: Send> ManagedDb<E> for TestDb {
         self.finalized += 1;
         if let Some(control) = &self.control {
             control.applied.fetch_add(1, Ordering::Relaxed);
+            control.progress.wake();
         }
         Ok(self)
     }
 
-    async fn finalize(mut self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
-        self.settle().await;
-        CallGate::pass(&FINALIZE_GATE).await;
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Self::Error> {
         let snapshot = self.finalized;
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
-            let (settled_tx, settled) = oneshot::channel();
-            control.flushes.lock().push(FlushRelease {
-                release,
-                _settled: settled_tx,
-            });
-            self.flushing = Some(settled);
+            control.flushes.lock().push(release);
+            control.progress.wake();
             return Ok((self, snapshot, Handle::from_receiver(released)));
         }
         let handle = self
@@ -284,6 +258,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
                 let _ = (&mut gate.release).await;
             }
             control.pruned.lock().push(*target);
+            control.progress.wake();
         }
         Ok(self)
     }
@@ -327,6 +302,12 @@ impl TestBlock {
             height,
             digest: Sha256Digest::from([digest_byte; 32]),
         }
+    }
+
+    pub(crate) fn with_view(mut self, view: u64) -> Self {
+        self.context.round =
+            commonware_consensus::types::Round::new(self.context.round.epoch(), View::new(view));
+        self
     }
 }
 
@@ -406,11 +387,6 @@ impl Default for TestApp {
 }
 
 impl TestApp {
-    /// Gates the next finalized hook on this thread, like [`TestDb::gate_next_snapshot`].
-    pub(crate) fn gate_next_finalized() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        CallGate::install(&FINALIZED_GATE)
-    }
-
     pub(crate) fn observe_finalization() -> (Self, Arc<AtomicUsize>) {
         let hooks: Arc<AtomicUsize> = Arc::default();
         (
@@ -436,13 +412,7 @@ impl TestApp {
     }
 }
 
-impl<
-    E: rand_core::Rng
-        + commonware_runtime::Spawner
-        + commonware_runtime::Metrics
-        + commonware_runtime::Clock,
-> Application<E> for TestApp
-{
+impl<E: Send + Sync> Application<E> for TestApp {
     type SigningScheme = TestScheme;
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
@@ -465,54 +435,49 @@ impl<
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Result<Handoff<Proposed<Self, E>>, ExecutionError> {
+    ) -> Handoff<Proposed<Self, E>> {
         let decision = self.handoff;
         if decision.is_wait() {
-            return Ok(Handoff::Wait);
+            return Handoff::Wait;
         }
-        Ok(self
-            .propose(context, ancestry, batches, input)
-            .await?
-            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed)))
+        self.propose(context, ancestry, batches, input)
+            .await
+            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
     }
 
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: UnmerkleizedOf<Self::Databases, E>,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
-        Ok(self.proposal.clone().map(|block| Proposed {
+    ) -> Option<Proposed<Self, E>> {
+        self.proposal.clone().map(|block| Proposed {
             block,
             merkleized: TestMerkleized,
-        }))
+        })
     }
 
-    async fn verify(
+    /// Rejects every candidate and produces state for every finalized block.
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
-        Ok(None)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        _block: &Self::Block,
-        _batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
-        Ok(Some(TestMerkleized))
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        finality: Finality,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        match finality {
+            Finality::Candidate => None,
+            Finality::Finalized => Some(TestMerkleized),
+        }
     }
 
     async fn capture(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: &MerkleizedOf<Self::Databases, E>,
-        _readers: ReadersOf<Self::Databases, E>,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         if let Some(hooks) = &self.finalization_hooks {
             hooks.fetch_add(1, Ordering::SeqCst);
@@ -524,42 +489,16 @@ impl<
         _context: (E, Self::Context),
         _block: &Self::Block,
         _captured: Self::Captured,
-        _readers: ReadersOf<Self::Databases, E>,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
-        pass_finalized_gate().await;
         if let Some(hooks) = &self.finalization_hooks {
             hooks.fetch_add(1, Ordering::SeqCst);
         }
     }
 }
 
-/// Parks on the gate [`TestApp::gate_next_finalized`] installed on this thread, if any. Test
-/// applications call it from their finalized hooks.
-pub(crate) async fn pass_finalized_gate() {
-    CallGate::pass(&FINALIZED_GATE).await;
-}
-
 pub(crate) fn test_databases() -> TestDatabases {
-    TestDb::default().into()
-}
-
-/// Finalize `batch` through the cell, returning the snapshot and flush handle.
-pub(crate) async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
-    writer: Writer<D>,
-    batch: D::Merkleized,
-) -> (Writer<D>, D::Snapshot, Handle<()>) {
-    let (writer, (snapshot, handle)) = writer
-        .mutate(|db| async move {
-            let db = D::apply(db, batch)
-                .await
-                .unwrap_or_else(|err| panic!("apply failed: {err:?}"));
-            let (db, snapshot, handle) = D::finalize(db)
-                .await
-                .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
-            (db, (snapshot, handle))
-        })
-        .await;
-    (writer, snapshot, handle)
+    Shared::new("test", TestDb::default())
 }
 
 /// Pairs a test block with its digest.

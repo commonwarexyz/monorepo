@@ -1,4 +1,5 @@
 use super::utils::{append_random, init};
+use commonware_bench::Inputs;
 use commonware_runtime::{
     Supervisor as _,
     benchmarks::{context, tokio},
@@ -6,14 +7,16 @@ use commonware_runtime::{
 use criterion::{Criterion, criterion_group};
 use std::time::{Duration, Instant};
 
-#[cfg(not(full_bench))]
-const ITEMS: [u64; 1] = [10_000];
-#[cfg(full_bench)]
-const ITEMS: [u64; 4] = [10_000, 50_000, 100_000, 250_000];
+fn n_items() -> &'static [u64] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 50_000, 100_000, 250_000],
+        _ => &[10_000],
+    }
+}
 
 fn bench_put(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    for items in ITEMS {
+    for &items in n_items() {
         let label = format!("{}/items={}", module_path!(), items);
         c.bench_function(&label, |b| {
             b.to_async(&runner).iter_custom(move |iters| async move {

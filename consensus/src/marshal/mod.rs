@@ -39,15 +39,133 @@
 //! ## Backfill
 //!
 //! The actor provides a backfill mechanism for missing blocks. If the actor notices a gap in its
-//! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
-//! that the actor can catch up to the rest of the network if it falls behind.
+//! knowledge of finalized blocks, it will request the missing blocks from its peers. This lets
+//! the actor catch up to the rest of the network if it falls behind.
+//!
+//! ## Message Sizes
+//!
+//! Marshal sends requests, responses, and errors through its resolver on the backfill network, and
+//! its buffer ([`commonware_broadcast::buffered`] or [`coding::shards::Engine`]) disseminates
+//! blocks or their shards. `V` and `S` are the variant and certificate scheme given to
+//! [`max_payload_size`]:
+//!
+//! ```text
+//! Any payload on a muxer subchannel:
+//!
+//! +---------------------------+---------+
+//! | subchannel (varint, 1-10) | payload |
+//! +---------------------------+---------+
+//!
+//! Request for Key::Block (tag 0, subject 0):
+//!
+//! +--------+---------+-------------+----------------------------------+
+//! | id (8) | tag (1) | subject (1) | commitment (V::Commitment::SIZE) |
+//! +--------+---------+-------------+----------------------------------+
+//!
+//! Request for Key::Finalized (tag 0, subject 1):
+//!
+//! +--------+---------+-------------+-----------------------+
+//! | id (8) | tag (1) | subject (1) | height (varint, 1-10) |
+//! +--------+---------+-------------+-----------------------+
+//!
+//! Request for Key::Notarized (tag 0, subject 2):
+//!
+//! +--------+---------+-------------+----------------------+---------------------+
+//! | id (8) | tag (1) | subject (1) | epoch (varint, 1-10) | view (varint, 1-10) |
+//! +--------+---------+-------------+----------------------+---------------------+
+//!
+//! Response for Key::Block (tag 1):
+//!
+//! +--------+---------+----------------------+----------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | backfill block |
+//! +--------+---------+----------------------+----------------+
+//!
+//! Response for Key::Finalized (tag 1):
+//!
+//! +--------+---------+----------------------+--------------+-------------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | finalization | application block |
+//! +--------+---------+----------------------+--------------+-------------------+
+//!
+//! Response for Key::Notarized (tag 1):
+//!
+//! +--------+---------+----------------------+--------------+----------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | notarization | backfill block |
+//! +--------+---------+----------------------+--------------+----------------+
+//!
+//! Error (tag 2):
+//!
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//!
+//! Notarization or finalization:
+//!
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10)             |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
+//! +----------------------------------+---------------------------------------------+
+//!
+//! Backfill block under standard, and each buffered broadcast message:
+//!
+//! +---------------------------------------------------------+
+//! | application block (up to the application block bound)   |
+//! +---------------------------------------------------------+
+//!
+//! Backfill block under coding:
+//!
+//! +---------------------------------------------------------+-------------------+
+//! | application block (up to the application block bound)   | coding config (4) |
+//! +---------------------------------------------------------+-------------------+
+//!
+//! Shard:
+//!
+//! +------------------+-----------+-------+
+//! | commitment (100) | index (2) | chunk |
+//! +------------------+-----------+-------+
+//!
+//! Chunk (Reed-Solomon):
+//!
+//! +----------------------------+---------------------+-----------------------+
+//! | shard length (varint, 1-5) | shard (shard width) | index (2)             |
+//! +----------------+-----------+---------------------+-----------------------+
+//! | leaf count (4) | sibling count (varint, 1-5)     | siblings (n x digest) |
+//! +----------------+---------------------------------+-----------------------+
+//! ```
+//!
+//! [`max_payload_size`] sizes every varint at its widest, every certificate at
+//! `S::max_certificate_size` for committees of at most the given size, and every backfill block at
+//! its bound. It returns the larger of the backfill and buffer bounds.
+//!
+//! The buffer bound is the application block bound under [`standard`]. Under [`coding`], it is
+//! the largest shard bound for the backfill block bound across committees of 4 to the given size.
+//!
+//! The application block bound is what
+//! [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size) reports for
+//! [`Config::block_codec_config`]. Every application block marshal holds must fit within it: the
+//! blocks [`Application::prepare`](crate::Application::prepare) and
+//! [`Application::propose`](crate::Application::propose) return, the genesis anchor, and every
+//! block passed to [`core::Mailbox`].
+//!
+//! Every network that carries backfill or the buffer must admit [`max_payload_size`], or its
+//! [`prefixed`] size when marshal runs on a muxer subchannel. [`coding::shards::Engine`] also
+//! relays the shards it receives, so its receiver must yield no payload larger than its sender's
+//! network admits.
+//!
+//! Every node that runs marshal on one network must give marshal and its buffer the same block
+//! codec configuration and limits. Across restarts, neither the application block bound nor the
+//! `max_message_size` of a network that carries backfill or the buffer may decrease while stored
+//! blocks remain.
+//!
+//! [`prefixed`]: commonware_p2p::utils::mux::prefixed
 //!
 //! ## Storage
 //!
-//! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
-//! to store blocks and finalizations. Internal storage (in-memory caches) is used for data that is only
-//! needed for a short period of time, such as unverified blocks or notarizations. External storage
-//! (archive backends) is used to persist finalized blocks and certificates.
+//! The actor uses a combination of internal and external ([`store::Certificates`],
+//! [`store::Blocks`]) storage to store blocks and finalizations. Internal storage (prunable
+//! on-disk caches) is used for data that is only needed for a short period of time, such as
+//! unverified blocks or notarizations. External storage (archive backends) is used to persist
+//! finalized blocks and certificates.
 //!
 //! Marshal stores finalized blocks from a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. The floor
@@ -59,6 +177,42 @@
 //! _History below the starting height may be unavailable to peers. This feature is only
 //! recommended for applications that support state sync and do not require full block history to
 //! participate in consensus._
+//!
+//! ## Durability
+//!
+//! Marshal stores finalized blocks in [`store::Blocks`] and their finalizations in
+//! [`store::Certificates`]. After it writes a block and its finalization, it syncs both stores
+//! before it delivers the block in an [`Update::Block`].
+//!
+//! The two syncs run concurrently, so a process that stops between them can leave one store
+//! holding a height that the other lacks. A restart can then find either of two states:
+//!
+//! - A finalization without its block. Marshal tries to recover the block from local data or
+//!   peers, and it does not deliver that height until it has the block.
+//! - A block without its finalization. Marshal can still deliver the block, because only
+//!   finalized blocks are written to [`store::Blocks`]. If consensus reports the finalization
+//!   again, marshal stores it unless that height has been pruned.
+//!
+//! [`Identifier::Latest`] identifies the block named by the highest finalization in
+//! [`store::Certificates`]. In the second state, the [processed height](core::Processed) can rise
+//! above that block's height and stay there until a finalization at or above the processed height
+//! is stored.
+//!
+//! After a restart that follows an interrupted sync:
+//!
+//! | Height | [`store::Blocks`] | [`store::Certificates`] |
+//! |--------|-------------------|-------------------------|
+//! | H-2    | stored            | stored                  |
+//! | H-1    | stored            | stored                  |
+//! | H      | stored            | missing                 |
+//!
+//! [`Identifier::Latest`] is the block at H-1. Once the application acknowledges H, the processed
+//! height becomes H.
+//!
+//! A block can also be stored without a finalization while marshal fills a gap. Marshal can reach
+//! an ancestor of a finalized block by following parent links, and a block stored this way may
+//! never receive a finalization of its own. [`core::Mailbox::get_finalization`] can return `None`
+//! for such a block even after marshal delivers it.
 //!
 //! ## Limitations and Future Work
 //!
@@ -77,8 +231,12 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 
 mod config;
 pub use config::{Config, Start};
+mod limits;
+pub use limits::max_payload_size;
 
 pub mod ancestry;
+pub(crate) mod application;
+pub mod coding;
 pub mod core;
 pub mod resolver;
 pub mod standard;
@@ -86,11 +244,6 @@ pub mod store;
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
-
-commonware_macros::stability_scope!(ALPHA {
-    pub(crate) mod application;
-    pub mod coding;
-});
 
 #[cfg(test)]
 pub mod mocks;
@@ -101,8 +254,9 @@ pub enum Identifier<D: Digest> {
     Height(Height),
     /// The digest of the block to retrieve.
     Digest(D),
-    /// The highest finalized block. It may be the case that marshal does not have some of the
-    /// blocks below this height.
+    /// The block named by the highest finalization in [`store::Certificates`]. Marshal may lack
+    /// this block and some of the blocks below it. The Durability section of the
+    /// [module docs](self) describes when the processed height can be above this block's height.
     Latest,
 }
 
@@ -142,7 +296,7 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     ///
     /// This update can be reported before the finalized block and finalization archives complete
     /// a durable sync. Applications must not use this update as a storage durability signal.
-    /// [`Update::Block`] provides that guarantee.
+    /// [`Update::Block`] signals that its block is durable.
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///

@@ -58,6 +58,11 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 
     /// Computes a root using `inactive_peaks` and the bagging policy carried by `self`.
     ///
+    /// The root commits [`Family::DOMAIN`] and [`Bagging::domain`], so a verifier for another
+    /// family or bagging policy cannot reproduce it without a hash collision. This holds even for
+    /// proofs built from this structure's digests, such as an internal node of one family presented
+    /// as a leaf of the other.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInactivePeaks`] if `inactive_peaks` exceeds the number of
@@ -84,12 +89,17 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     /// Computes a root from a peak list that may already contain a forward-folded prefix
     /// accumulator. The bagging policy is read from `self.root_bagging()`.
     ///
+    /// The root is `Hash(family || bagging || leaves [|| inactive] || folded_peaks)`, where
+    /// `family` is [`Family::DOMAIN`], `bagging` is [`Bagging::domain`], and `leaves` and
+    /// `inactive` are big-endian `u64`s. `inactive` is `committed_inactive_peaks` and appears only
+    /// when nonzero. An empty tree's root is `Hash(family || bagging || leaves)`.
+    ///
     /// `inactive_peaks_to_fold` is how many leading entries of `peak_digests` to fold before the
     /// root bagging step. `committed_inactive_peaks` is the boundary committed into the root. They
-    /// coincide when the caller passes raw peak digests, but diverge when the caller has already
-    /// pre-folded part of the inactive prefix: e.g. a proof commits 5 inactive peaks, an outer
-    /// transform collapses the first 3 into a leading accumulator, so the hasher gets `to_fold = 5
-    /// - 3 + 1 = 3` while `committed = 5`.
+    /// are equal when the caller passes raw peak digests. They differ when the caller has already
+    /// folded part of the inactive prefix into one leading accumulator. The accumulator counts as a
+    /// single entry, so a caller that commits 5 inactive peaks and pre-folds the first 3 passes
+    /// `inactive_peaks_to_fold = 5 - 3 + 1 = 3` and `committed_inactive_peaks = 5`.
     ///
     /// Returns `None` if `inactive_peaks_to_fold` exceeds the number of provided peak digests, or
     /// if a nonzero inactive boundary is requested for an empty tree.
@@ -104,10 +114,12 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         I: IntoIterator<Item = &'a Self::Digest>,
         I::IntoIter: DoubleEndedIterator,
     {
+        let bagging = self.root_bagging();
+        let domain = [F::DOMAIN, bagging.domain()];
         let mut peak_digests = peak_digests.into_iter();
         let Some(first) = peak_digests.next() else {
             return (inactive_peaks_to_fold == 0 && committed_inactive_peaks == 0)
-                .then(|| self.digest(&(*leaves).to_be_bytes()));
+                .then(|| self.hash(&[&domain, &(*leaves).to_be_bytes()]));
         };
 
         let mut acc = *first;
@@ -116,7 +128,7 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
             acc = self.fold(&acc, peak);
         }
 
-        let folded_peaks = match self.root_bagging() {
+        let folded_peaks = match bagging {
             Bagging::ForwardFold => {
                 for peak in peak_digests {
                     acc = self.fold(&acc, peak);
@@ -131,9 +143,10 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         };
 
         if committed_inactive_peaks == 0 {
-            Some(self.hash(&[&(*leaves).to_be_bytes(), &folded_peaks]))
+            Some(self.hash(&[&domain, &(*leaves).to_be_bytes(), &folded_peaks]))
         } else {
             Some(self.hash(&[
+                &domain,
                 &(*leaves).to_be_bytes(),
                 &(committed_inactive_peaks as u64).to_be_bytes(),
                 &folded_peaks,

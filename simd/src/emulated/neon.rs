@@ -43,8 +43,8 @@ impl Neon for EmulatedNeon {
     type U16 = [u16; 8];
 
     #[inline]
-    fn u8_table_lookup(self, table: Self::U8, indices: Self::U8) -> Self::U8 {
-        indices.map(|index| table.get(usize::from(index)).copied().unwrap_or(0))
+    fn u8_table(self, table: Self::U8) -> Self::U8Table {
+        table
     }
 
     #[inline]

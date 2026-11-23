@@ -53,7 +53,7 @@ library LibQMDBKeylessMMB {
     /// @notice Verify a sparse selection of encoded operations against a trusted keyless MMB root.
     /// @param root Authenticated keyless QMDB MMB root.
     /// @param operations Exact Commonware operation encodings corresponding to `proof.locations`.
-    /// @param proof Sparse proof with witnesses in increasing physical position order.
+    /// @param proof Sparse proof with strictly ascending locations and witnesses in increasing physical position order.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the selected operations reconstruct `root` and consume every witness.
     function verifyMulti(

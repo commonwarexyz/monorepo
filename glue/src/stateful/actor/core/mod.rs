@@ -7,7 +7,7 @@
 use crate::stateful::{
     Application,
     actor::{
-        BlockDigest, SyncTargets,
+        SyncTargets,
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
         processor::{Processor, Pruning},
@@ -23,8 +23,6 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
-use commonware_cryptography::certificate::Scheme;
-use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
@@ -32,11 +30,10 @@ use commonware_utils::channel::oneshot;
 use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
-use tracing::debug;
 
 mod mailbox;
 pub use mailbox::Mailbox;
-pub(super) use mailbox::{Proposal, Verification};
+pub(super) use mailbox::Proposal;
 
 mod processing;
 mod syncing;
@@ -83,13 +80,11 @@ impl PruneConfig {
 }
 
 /// Configuration for constructing a [`Stateful`] application.
-pub struct Config<E, A, S, V, R, T>
+pub struct Config<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
-    T: Strategy,
+    V: Variant,
 {
     /// The inner application that drives state transitions.
     pub application: A,
@@ -101,7 +96,7 @@ where
     pub provider: A::Provider,
 
     /// Marshal mailbox and the durable floor returned with it during initialization.
-    pub marshal: (MarshalMailbox<S, V>, Floor),
+    pub marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
 
     /// Capacity of the actor's mailbox.
     pub mailbox_size: NonZeroUsize,
@@ -110,7 +105,7 @@ where
     /// selected).
     ///
     /// Marshal must start from [`SyncPlan::marshal_start`] of the same plan.
-    pub plan: SyncPlan<E, S, V>,
+    pub plan: SyncPlan<E, A::SigningScheme, V>,
 
     /// Resolvers that fetch state sync data from peers.
     pub resolvers: R,
@@ -142,13 +137,11 @@ where
 ///
 /// Consensus and marshal reach it through its [`Mailbox`]. See the [module docs](crate::stateful)
 /// for the protocol.
-pub struct Stateful<E, A, S, V, R, T>
+pub struct Stateful<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
-    T: Strategy,
+    V: Variant,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -159,11 +152,11 @@ where
     /// Provider cloned into each proposal.
     provider: A::Provider,
     /// Marshal mailbox and the durable floor returned during initialization.
-    marshal: (MarshalMailbox<S, V>, Floor),
+    marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     /// Startup plan carrying the metadata handle and floor decision.
-    plan: SyncPlan<E, S, V>,
+    plan: SyncPlan<E, A::SigningScheme, V>,
     /// Resolvers for state sync fetches.
     resolvers: R,
     /// Publishes the latest snapshots.
@@ -176,15 +169,14 @@ where
     strategy: T,
 }
 
-impl<E, A, S, V, R, T> Stateful<E, A, S, V, R, T>
+impl<E, A, V, R, T> Stateful<E, A, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
-    S: Scheme,
+    A::Databases: StateSyncSet<E, R>,
     V: Variant<ApplicationBlock = A::Block>,
     R: Send + Sync + 'static,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
     /// Creates a [`Stateful`] actor and its [`Mailbox`].
@@ -194,7 +186,7 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(mut context: E, config: Config<E, A, S, V, R, T>) -> (Self, Mailbox<E, A>) {
+    pub fn new(mut context: E, config: Config<E, A, V, R, T>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -241,7 +233,7 @@ where
     }
 
     /// Runs state sync toward `finalization`, then processing.
-    async fn sync(self, finalization: Finalization<S, V::Commitment>) {
+    async fn sync(self, finalization: Finalization<A::SigningScheme, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
         let (sender, receiver) = oneshot::channel();
@@ -263,6 +255,7 @@ where
             plan: self.plan,
             syncer: syncer_mailbox,
             deferred_verifications: Vec::new(),
+            database_subscribers: Vec::new(),
             snapshot_publisher: self.snapshot_publisher,
             completion: receiver,
             pending_finalizations: Default::default(),
@@ -276,7 +269,7 @@ where
     /// Opens the database set from marshal, records completion, then runs processing.
     async fn recover(self) {
         let (marshal, _) = self.marshal;
-        let Artifact { databases, anchor } = syncer::open::<E, A, S, V>(
+        let Artifact { databases, anchor } = syncer::open::<E, A, V>(
             self.context.child("databases"),
             &marshal,
             self.db_config,
@@ -288,7 +281,7 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(
+        let mut processor = Processor::new(
             self.application,
             databases,
             anchor,
@@ -300,20 +293,16 @@ where
 
         // The recovered state alone must publish before the loop starts, so
         // serving begins before the next finalization.
-        let processor = select! {
-            _ = self.context.stopped() => {
-                debug!("shutdown signal received before processing started");
-                return;
-            },
-            processor = processor.publish_snapshot() => processor,
-        };
+        processor.publish_snapshot().await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,
             marshal,
+            processor,
+            deferred_verifications: Vec::new(),
         }
-        .run(processor, Vec::new())
+        .run()
         .await
     }
 }
@@ -326,25 +315,22 @@ mod tests {
         db::{Publisher, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant, digested},
+            mocks::{TestApp, TestBlock, TestDb, digested},
         },
     };
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Handoff, Reporter as _,
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
-        types::Height,
     };
     use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        Clock, Handle, Runner as _, Spawner as _, Supervisor as _, deterministic,
-    };
+    use commonware_runtime::{Clock, Handle, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
-        channel::{mpsc, oneshot, ring},
+        channel::{mpsc, ring},
     };
     use futures::poll;
     use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -515,15 +501,7 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            // Recovery records its anchor as completed before serving.
             handle.abort();
-            let _ = handle.await;
-            let reopened = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("reopened_plan"),
-                "startup-serve-stateful".to_string(),
-            )
-            .await;
-            assert_eq!(reopened.completed(), Some(Height::zero()));
         });
     }
 
@@ -585,82 +563,51 @@ mod tests {
         });
     }
 
-    /// Starts a recovering actor whose startup publish parks on a snapshot gate. Returns the
-    /// actor, its mailbox, the marshal fixture, and the gate's release once startup reaches it.
-    async fn start_gated_recovery(
-        context: &mut deterministic::Context,
-        prefix: &str,
-    ) -> (
-        Handle<()>,
-        Mailbox<deterministic::Context, TestApp>,
-        fixtures::MarshalFixture,
-        oneshot::Sender<()>,
-    ) {
-        let scheme = scheme_mocks::fixture(context, prefix.as_bytes(), 1);
-        let marshal = fixtures::marshal_fixture(
-            context.child("marshal"),
-            prefix,
-            scheme.schemes[0].clone(),
-            None,
-            NZUsize!(8),
-            true,
-        )
-        .await;
-
-        let (startup_started, startup_release) = TestDb::gate_next_snapshot();
-        let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
-        let publication_context = context.child("publication");
-        let (stateful, mailbox) = Stateful::new(
-            context.child("stateful"),
-            Config {
-                application: TestApp::default(),
-                db_config: (),
-                provider: (),
-                marshal: (marshal.mailbox.clone(), marshal.floor),
-                mailbox_size: NZUsize!(1),
-                plan,
-                resolvers: NoopResolver,
-                snapshot_publisher: Publisher::new(&publication_context).0,
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(1),
-                    apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: NZUsize!(1),
-                },
-                prune_config: None,
-                strategy: Sequential,
-            },
-        );
-        let actor = stateful.start();
-        startup_started
-            .await
-            .expect("startup should reach the snapshot publish before processing");
-        (actor, mailbox, marshal, startup_release)
-    }
-
-    /// A stop while startup's first publish is parked exits before processing starts.
-    #[test]
-    fn shutdown_interrupts_startup_publish() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
-            let (actor, _mailbox, marshal, _startup_release) =
-                start_gated_recovery(&mut context, "startup-publish-shutdown").await;
-            let stopper = context.child("stopper");
-            context
-                .child("stop")
-                .spawn(|_| async move { stopper.stop(0, None).await });
-            actor.await.expect("the actor should exit cleanly");
-            drop(marshal.guards);
-        });
-    }
-
     #[test]
     fn startup_recovery_releases_cancelled_verify_ancestries() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|mut context| async move {
             // Hold startup after database recovery but before processing polls the mailbox.
+            let prefix = "startup-recovery-cancelled-verifications";
+            let scheme = scheme_mocks::fixture(&mut context, prefix.as_bytes(), 1);
             let genesis = TestBlock::new(0, 0);
             let finalized = TestBlock::child(&genesis, 1);
-            let (actor, mut mailbox, marshal, startup_release) =
-                start_gated_recovery(&mut context, "startup-recovery-cancelled-verifications")
-                    .await;
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                prefix,
+                scheme.schemes[0].clone(),
+                None,
+                NZUsize!(8),
+                true,
+            )
+            .await;
+
+            let (startup_started, startup_release) = TestDb::gate_next_snapshot();
+            let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
+            let publication_context = context.child("publication");
+            let (stateful, mut mailbox) = Stateful::new(
+                context.child("stateful"),
+                Config {
+                    application: TestApp::default(),
+                    db_config: (),
+                    provider: (),
+                    marshal: (marshal.mailbox.clone(), marshal.floor),
+                    mailbox_size: NZUsize!(1),
+                    plan,
+                    resolvers: NoopResolver,
+                    snapshot_publisher: Publisher::new(&publication_context).0,
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: NZUsize!(1),
+                    },
+                    prune_config: None,
+                    strategy: Sequential,
+                },
+            );
+            let actor = stateful.start();
+            startup_started
+                .await
+                .expect("startup should reach the snapshot publish before processing");
 
             // Fill the single ready slot and reliable overflow with independently owned ancestries.
             let owners = [

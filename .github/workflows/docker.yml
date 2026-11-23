@@ -81,7 +81,7 @@ jobs:
 
   build:
     name: Build Image (${{ needs.prepare.outputs.target }} - ${{ matrix.platform }})
-    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'ubuntu-22.04-arm' }}
+    runs-on: ${{ matrix.platform == 'linux/amd64' && 'ubuntu-latest' || 'ubuntu-26.04-arm' }}
     permissions:
       contents: read
       packages: write

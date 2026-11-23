@@ -1,6 +1,7 @@
 [package]
 name = "commonware-formatting"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -18,6 +19,7 @@ commonware-macros = { workspace = true, default-features = false }
 const-hex = { workspace = true, default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 criterion.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }
 

@@ -10,18 +10,19 @@ use crate::common::{Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, writ
 use commonware_cryptography::Sha256;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BLOB_PAGE_SIZE, BufferPooler, Strategizer, Supervisor as _,
+    BLOB_PAGE_SIZE, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{self, full, mmb::Family as Mmb},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
+    merkle::{self, mmb::Family as Mmb},
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-        current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
-        floor::Proportional,
+        current::{
+            Config as CurrentConfig, ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed,
+        },
     },
     translator::EightCap,
 };
@@ -51,15 +52,12 @@ type CurUFix256Mmb =
 type CurOFix256Mmb =
     OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
-    full::Config {
-        journal_partition: format!("journal-{PARTITION}"),
-        metadata_partition: format!("metadata-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
-        write_buffer: WRITE_BUFFER_SIZE,
+fn merkle_cfg(ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
+    MerkleConfig {
+        partition: format!("metadata-{PARTITION}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
-        page_cache: pc,
+        resident_height: Default::default(),
     }
 }
 
@@ -73,22 +71,20 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
+fn pc() -> CacheRef {
+    CacheRef::new(PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
 }
 
-fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + Strategizer),
-) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    let pc = pc(ctx);
-    commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
+fn cur_fix_cfg(ctx: &impl Strategizer) -> CurrentConfig<EightCap, FConfig, Rayon> {
+    let pc = pc();
+    CurrentConfig {
+        merkle: merkle_cfg(ctx),
+        log: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
         init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: THREADS,
     }
 }
 
@@ -159,7 +155,7 @@ macro_rules! with_current_db {
 /// batch.
 async fn run_chained_growth<
     F: merkle::Family,
-    C: DbAny<F, Key = Digest, Value = Digest>,
+    C: DbAny<Family = F, Key = Digest, Value = Digest>,
     Fork: Fn(&C::Merkleized) -> C::Batch,
 >(
     db: C,
@@ -172,18 +168,12 @@ async fn run_chained_growth<
 
     // Pre-build a deep chain (untimed).
     let initial = write_random_updates(db.new_batch(), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-    let mut parent = initial
-        .merkleize(&db, None, &mut Proportional)
-        .await
-        .unwrap();
+    let mut parent = initial.merkleize(&db).await.unwrap();
     for _ in 0..PREBUILT_CHAIN {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        (db, _) = db.apply_batch(parent).await.unwrap();
+        let child = child_batch.merkleize(&db).await.unwrap();
+        db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
 
@@ -196,15 +186,12 @@ async fn run_chained_growth<
     for _ in 0..grow {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let child = child_batch.merkleize(&db).await.unwrap();
         black_box(child.root());
-        (db, _) = db.apply_batch(parent).await.unwrap();
+        db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
-    let (db, _) = db.apply_batch(parent).await.unwrap();
+    let db = db.apply_batch(parent).await.unwrap();
     let total = start.elapsed();
 
     db.destroy().await.unwrap();

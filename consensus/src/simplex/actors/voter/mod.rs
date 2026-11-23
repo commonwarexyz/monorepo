@@ -93,7 +93,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock, Error, Handle, Metrics, Quota, ReadOptions, Runner, Spawner, Storage,
+        Clock, Error, Handle, Metrics, Quota, ReadOptions, Runner, Spawner, Storage,
         Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
         reschedule,
@@ -129,6 +129,7 @@ mod tests {
         >,
     >;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
+    type VerificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
 
     fn labeled_metric_snapshot(
         metrics: &str,
@@ -306,6 +307,8 @@ mod tests {
         actor_handle: Option<Arc<Mutex<Option<Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
+        /// Verification response senders held by the test instead of answered.
+        held_verifications: Option<VerificationRequests>,
         /// Whether every mock application verification should fail.
         fail_verification: bool,
         certifier: mocks::application::Certifier<Sha256Digest>,
@@ -330,10 +333,21 @@ mod tests {
                 handoff: Handoff::Wait,
                 actor_handle: None,
                 verify_requests: None,
+                held_verifications: None,
                 fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
             }
         }
+    }
+
+    /// Expect the replay marker before any live certificate.
+    async fn expect_replayed<S: Scheme<Sha256Digest>>(
+        receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+    ) {
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            resolver::MailboxMessage::Replayed { .. }
+        ));
     }
 
     /// Helper to set up a voter actor for tests.
@@ -352,7 +366,7 @@ mod tests {
         mocks::reporter::Reporter<E, S, L, Sha256Digest>,
     )
     where
-        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         L: elector::Config<S>,
     {
@@ -399,6 +413,11 @@ mod tests {
                 verify_requests.lock().push(context.view());
             }));
         }
+        if let Some(held) = options.held_verifications {
+            actor.set_verify_holder(Box::new(move |context, response| {
+                held.lock().push((context.view(), response));
+            }));
+        }
         actor.start();
 
         let voter_cfg = Config {
@@ -419,7 +438,7 @@ mod tests {
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
-            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         let (voter, mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -671,7 +690,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest>,
     {
-        let mut journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+        let mut replay = Journal::<_, Artifact<S, Sha256Digest>>::init(
             context.child("journal"),
             JConfig {
                 partition,
@@ -679,10 +698,16 @@ mod tests {
                 codec_config: scheme.certificate_codec_config(),
                 page_cache,
                 write_buffer: NZUsize!(1024 * 1024),
+                replay_buffer: NZUsize!(1024 * 1024),
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("unable to initialize voter journal");
+        while let Some(artifact) = replay.next().await {
+            artifact.expect("unable to replay voter journal");
+        }
+        let mut journal = replay.finish().expect("unable to replay voter journal");
         for artifact in artifacts {
             assert_eq!(artifact.view(), view);
             (journal, _, _) = journal
@@ -705,9 +730,9 @@ mod tests {
         floor: Floor<S, Sha256Digest>,
         skip_budget: u64,
         page_cache: CacheRef,
+        certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
-    #[allow(clippy::type_complexity)]
     async fn start_voter_with_floor<S, L>(
         context: &mut deterministic::Context,
         oracle: &Oracle<S::PublicKey, deterministic::Context>,
@@ -733,6 +758,7 @@ mod tests {
             floor,
             skip_budget,
             page_cache,
+            certifier,
         } = start;
         let me = participants[0].clone();
         let reporter_cfg = mocks::reporter::Config {
@@ -749,7 +775,7 @@ mod tests {
             propose_latency: (1.0, 0.0),
             verify_latency: (1.0, 0.0),
             certify_latency: (1.0, 0.0),
-            should_certify: mocks::application::Certifier::Always,
+            should_certify: certifier,
         };
         let (app_actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
@@ -868,7 +894,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_restart_newer_floor".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist a stale finalization that should be ignored once the
             // configured floor is applied before replay.
@@ -909,6 +935,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -983,7 +1010,7 @@ mod tests {
             };
             let floor_view = View::new(8);
             let floor_finalization = finalization(floor_view);
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let (
                 mut mailbox,
                 mut batcher_receiver,
@@ -1003,6 +1030,7 @@ mod tests {
                     floor: Floor::Finalized(floor_finalization.clone()),
                     skip_budget: u64::MAX,
                     page_cache,
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -1075,7 +1103,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_restart_older_floor".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist a newer finalization so replay can advance past the
             // configured floor.
@@ -1116,6 +1144,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -1156,7 +1185,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_replay_floor_static".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             let floor_view = View::new(3);
             let floor_proposal = Proposal::new(
@@ -1205,6 +1234,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -1333,7 +1363,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
@@ -1408,6 +1438,7 @@ mod tests {
             }
 
             // Wait for resolver to be notified
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver
                 .recv()
                 .await
@@ -1575,7 +1606,7 @@ mod tests {
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), voter_config);
 
@@ -1661,6 +1692,8 @@ mod tests {
                     }
                 }
             }
+
+            expect_replayed(&mut resolver_receiver).await;
 
             // Wait for resolver to be notified
             let msg = resolver_receiver
@@ -1998,6 +2031,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_b.clone()));
 
             // Verify the certificate was accepted
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver
                 .recv()
                 .await
@@ -2127,6 +2161,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_a.clone()));
 
             // Verify the certificate was accepted
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
                 MailboxMessage::Updated {
@@ -2260,7 +2295,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -2314,6 +2349,7 @@ mod tests {
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Notarization(notarization.clone()));
 
+            expect_replayed(&mut resolver_receiver).await;
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
@@ -2462,7 +2498,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -2657,7 +2693,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
@@ -2705,6 +2741,8 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
+            expect_replayed(&mut resolver_receiver).await;
+
             // Build finalization certificate for view 2
             let view = View::new(2);
             let proposal = Proposal::new(
@@ -2751,7 +2789,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
@@ -2811,6 +2849,242 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
         });
+    }
+
+    /// A replayed certificate can precede the floor that covers it, such as a
+    /// later finalization or its own successful certification. A failed
+    /// certification likewise precedes the nullification that covers its view.
+    /// Restart must not request nullifications that the recovered floor or a
+    /// journaled nullification covers, but must still request the gaps above
+    /// the floor.
+    #[test_traced("WARN")]
+    fn test_restart_replay_fetches_only_above_recovered_floor() {
+        // (term length, notarized view, journal notarization with its certification verdict,
+        // journal finalization, nullified view, expected fetches)
+        let cases = [
+            (
+                TermLength::ONE,
+                10_000,
+                Some(true),
+                true,
+                10_004,
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
+                Some(true),
+                false,
+                10_003,
+                vec![10_001, 10_002],
+            ),
+            (TermLength::ONE, 10_000, None, false, 3, vec![1, 2]),
+            (TermLength::ONE, 3, Some(false), false, 3, vec![1, 2]),
+            (
+                TermLength::new(NZU32!(5)),
+                10_001,
+                Some(true),
+                true,
+                10_004,
+                vec![10_003],
+            ),
+            (TermLength::ONE, 10_000, None, true, 10_000, vec![]),
+        ];
+        for (term_length, notarized, verdict, with_finalization, nullified, expected) in cases {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let n = 5;
+                let quorum = quorum(n);
+                let epoch = Epoch::new(333);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = ed25519::fixture(&mut context, b"replay_floor_catchup", n);
+                let elector = if term_length == TermLength::ONE {
+                    RoundRobin::<Sha256>::default()
+                } else {
+                    RoundRobin::<Sha256>::default().with_term(
+                        term_length,
+                        Duration::from_secs(20),
+                        ViewDelta::new(0),
+                    )
+                };
+                let notarized = View::new(notarized);
+                let nullified = View::new(nullified);
+                let mut certificates = Vec::new();
+                if verdict.is_some() {
+                    let proposal = Proposal::new(
+                        Round::new(epoch, notarized),
+                        notarized.previous().unwrap(),
+                        Sha256::hash(&[b"replay-notarized"]),
+                    );
+                    let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Notarization(notarization));
+                }
+                let mut finalized = View::zero();
+                if with_finalization {
+                    finalized = notarized.next();
+                    let proposal = Proposal::new(
+                        Round::new(epoch, finalized),
+                        notarized,
+                        Sha256::hash(&[b"replay-finalized"]),
+                    );
+                    let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Finalization(finalization));
+                }
+                let (_, nullification) =
+                    build_nullification(&schemes, Round::new(epoch, nullified), quorum);
+                certificates.push(Certificate::Nullification(nullification));
+                certificates.sort_by_key(|certificate| certificate.view());
+                let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+                let partition = "replay_floor_catchup".to_string();
+                let start = |partition: String| VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    skip_budget: u64::MAX,
+                    page_cache: page_cache.clone(),
+                    certifier: mocks::application::Certifier::Custom(Box::new(move |_, _| {
+                        verdict.unwrap_or(true)
+                    })),
+                };
+
+                // Journal each certificate through a live voter. Wait for the
+                // view advance that follows its sync and, for a notarization, the
+                // durable certification verdict before aborting. A notarization
+                // that fails certification does not advance the view, so only its
+                // verdict is awaited.
+                let mut initial = context.child("initial");
+                let oracle = start_test_network_with_peers(
+                    initial.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (mut mailbox, mut batcher, mut resolver, _, _, handle) =
+                    start_voter_with_floor(
+                        &mut initial,
+                        &oracle,
+                        &participants,
+                        &schemes,
+                        elector.clone(),
+                        start(partition.clone()),
+                    )
+                    .await;
+                for certificate in &certificates {
+                    mailbox.recovered(certificate.clone());
+                    let advanced_to = match certificate {
+                        Certificate::Nullification(_) => {
+                            certificate.view().term_end(term_length).next()
+                        }
+                        _ => certificate.view().next(),
+                    };
+                    let expected_verdict = match certificate {
+                        Certificate::Notarization(_) => verdict,
+                        _ => None,
+                    };
+                    let mut advanced = expected_verdict == Some(false);
+                    let mut certified = expected_verdict.is_none();
+                    while !(advanced && certified) {
+                        select! {
+                            message = batcher.recv() => {
+                                advanced |= matches!(
+                                    message.unwrap(),
+                                    batcher::Message::Update { current, .. }
+                                        if current == advanced_to
+                                );
+                            },
+                            message = resolver.recv() => {
+                                certified |= matches!(
+                                    message.unwrap(),
+                                    MailboxMessage::Certified { notarization, success, .. }
+                                        if notarization.view() == certificate.view()
+                                            && Some(success) == expected_verdict
+                                );
+                            },
+                        }
+                    }
+                }
+                handle.abort();
+                assert!(handle.await.is_err());
+
+                // Apply the restarted voter's resolver messages to resolver state
+                // until every journaled certificate the floor leaves usable has
+                // been forwarded.
+                let mut restarted = context.child("restarted");
+                let oracle = start_test_network_with_peers(
+                    restarted.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (_mailbox, mut batcher, mut resolver, _, _, handle) = start_voter_with_floor(
+                    &mut restarted,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    start(partition),
+                )
+                .await;
+                // Queue the whole recovered sequence through a full mailbox first,
+                // so the end-of-replay marker must survive the overflow policy.
+                let (sender, mut receiver) =
+                    mailbox::new(context.child("replay_overflow"), NZUsize!(1));
+                let mut state = resolver::State::new(term_length);
+                let mut fetches = Vec::new();
+                let mut record = |effects: Vec<resolver::Effect>| {
+                    fetches.extend(effects.into_iter().filter_map(|effect| match effect {
+                        resolver::Effect::Fetch { view, .. } => Some(view.get()),
+                        _ => None,
+                    }));
+                };
+                let mut remaining: Vec<_> = certificates
+                    .iter()
+                    .filter(|certificate| certificate.view() >= finalized)
+                    .map(Encode::encode)
+                    .collect();
+                loop {
+                    let message = resolver.recv().await.unwrap();
+                    if let MailboxMessage::Updated { certificate, .. } = &message {
+                        let encoded = certificate.encode();
+                        remaining.retain(|expected| *expected != encoded);
+                    }
+                    let replayed = matches!(message, MailboxMessage::Replayed { .. });
+                    assert!(sender.enqueue(message).accepted());
+                    if replayed {
+                        break;
+                    }
+                }
+                assert!(remaining.is_empty());
+                while let Ok(message) = receiver.try_recv() {
+                    match message {
+                        MailboxMessage::Updated { certificate, .. } => {
+                            record(state.updated(&certificate))
+                        }
+                        MailboxMessage::Certified {
+                            notarization,
+                            success,
+                            ..
+                        } => {
+                            record(state.certified(notarization, success));
+                        }
+                        MailboxMessage::Resolve { .. } => {}
+                        MailboxMessage::Replayed { .. } => record(state.replayed()),
+                    }
+                }
+                assert_eq!(fetches, expected);
+                let entered = nullified.term_end(term_length).next().max(finalized.next());
+                assert!(matches!(
+                    batcher.recv().await.unwrap(),
+                    batcher::Message::Update { current, finalized: found, .. }
+                        if current == entered && found == finalized
+                ));
+                handle.abort();
+                assert!(handle.await.is_err());
+            });
+        }
     }
 
     #[test_traced]
@@ -2912,7 +3186,7 @@ mod tests {
             };
 
             // First run: persist progress to a later view.
-            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = make_cfg(CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.child("voter_initial"), cfg);
 
             let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -2952,7 +3226,7 @@ mod tests {
             handle.abort();
 
             // Restart and inject startup timeout hint from first update.
-            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = make_cfg(CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.child("voter_restarted"), cfg);
 
             let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -3048,7 +3322,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_replay_skip_budget".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist the artifacts produced when view 1 is skipped. Replaying the
             // nullification enters view 2 without advancing the finalized floor.
@@ -3083,6 +3357,7 @@ mod tests {
                         floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                         skip_budget: 1,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -6856,7 +7131,8 @@ mod tests {
                         }
                         MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     message = batcher_receiver.recv() => {
                         if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
@@ -6957,7 +7233,7 @@ mod tests {
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -7176,7 +7452,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -7385,7 +7661,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -7549,7 +7825,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -7789,6 +8065,212 @@ mod tests {
         });
     }
 
+    /// A notarization for a conflicting proposal of the same view drops the in-flight
+    /// verification of the leader's proposal.
+    ///
+    /// The leader sends us proposal A and we request its verification. Before the application
+    /// answers, a notarization for a different proposal B of the same view arrives. Nothing uses
+    /// a verdict for A once B is notarized, so the request is dropped while B's certification is
+    /// still pending and the view has not advanced.
+    #[test_traced]
+    fn test_conflicting_notarization_cancels_inflight_verification() {
+        let n = 4;
+        let quorum = quorum(n);
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"conflicting_notarization_cancels_verify", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let leader_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
+            let local_index = (leader_index + 1) % schemes.len();
+            let held: VerificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    local_index,
+                    held_verifications: Some(held.clone()),
+                    // Certification of B never completes, so the view does not advance.
+                    certifier: Certifier::Pending,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // The voter starts in view 1.
+            let target_view = match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { current, .. } => current,
+                _ => panic!("the voter must first send an update"),
+            };
+            assert_eq!(target_view, View::new(1));
+
+            // The leader's proposal A reaches us and verification is requested.
+            let parent = target_view.previous().unwrap_or(View::zero());
+            let a = Proposal::new(
+                Round::new(epoch, target_view),
+                parent,
+                Sha256::hash(&[b"proposal_a"]),
+            );
+            mailbox.proposal(a);
+            context.sleep(Duration::from_millis(10)).await;
+            assert_eq!(held.lock().len(), 1, "verification of A must be in flight");
+            assert!(!held.lock()[0].1.is_closed());
+
+            // A notarization for the leader's conflicting proposal B arrives.
+            let b = Proposal::new(
+                Round::new(epoch, target_view),
+                parent,
+                Sha256::hash(&[b"proposal_b"]),
+            );
+            let (_, notarization) = build_notarization(&schemes, &b, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization));
+            context.sleep(Duration::from_millis(100)).await;
+
+            // A cannot be notarized once B is, so its verification is dropped.
+            assert!(
+                held.lock()[0].1.is_closed(),
+                "a conflicting notarization must drop the in-flight verification of A"
+            );
+        });
+    }
+
+    /// Verification of a view is not requested once its certification is.
+    ///
+    /// View 2 starts a term, so its certification is requested as soon as its notarization
+    /// arrives in view 1. Its proposal becomes verifiable only after view 1 certifies, so it is
+    /// never sent for verification, and certification alone leads to a finalize vote without a
+    /// notarize vote.
+    #[test_traced]
+    fn test_certification_precludes_verification() {
+        let n = 4;
+        let quorum = quorum(n);
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"certification_precludes_verification", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let leaders: Vec<_> = (1..=3)
+                .map(|view| {
+                    usize::from(built_elector.elect(Round::new(epoch, View::new(view)), ()))
+                })
+                .collect();
+            let local_index = (0..schemes.len())
+                .find(|index| !leaders.contains(index))
+                .expect("one validator must lead none of views 1 to 3");
+            let verify_requests = Arc::new(Mutex::new(Vec::new()));
+            let certifications: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(5),
+                    certification_timeout: Duration::from_secs(5),
+                    local_index,
+                    verify_requests: Some(verify_requests.clone()),
+                    certifier: hold(View::new(2), certifications.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // The voter starts in view 1.
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { current, .. } => assert_eq!(current, View::new(1)),
+                _ => panic!("the voter must first send an update"),
+            }
+
+            // View 2's notarization arrives first, and its certification is requested. Its
+            // payload is relayed, so verifying it would succeed and produce a notarize vote.
+            let signers = peers(&schemes, local_index);
+            let proposal_1 = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"proposal_1"]),
+            );
+            let proposal_2 = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256::hash(&[b"proposal_2"]),
+            );
+            relay.broadcast(
+                &participants[leaders[1]],
+                Recipients::All,
+                (
+                    proposal_2.payload,
+                    (proposal_2.round, proposal_1.payload, 0u64).encode(),
+                ),
+            );
+            let (_, notarization_2) = build_notarization(&signers, &proposal_2, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization_2));
+            let certified_2 =
+                take_certification_request(&context, &certifications, View::new(2)).await;
+            assert!(verify_requests.lock().is_empty());
+
+            // View 1's notarization arrives and certifies, so we enter view 2.
+            let (_, notarization_1) = build_notarization(&signers, &proposal_1, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization_1));
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { current, .. } if current == View::new(2) => break,
+                    _ => {}
+                }
+            }
+
+            // View 1 was verifiable when its notarization arrived, so it was sent for
+            // verification ahead of its certification. View 2 became verifiable only after its
+            // certification was requested, so it is not sent.
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(*verify_requests.lock(), vec![View::new(1)]);
+            assert!(!certified_2.is_closed());
+
+            // Certification alone carries view 2 to a finalize vote.
+            certified_2.send(true).unwrap();
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(notarize)) => {
+                        panic!(
+                            "the voter must not vote to notarize view {}",
+                            notarize.view()
+                        );
+                    }
+                    batcher::Message::Constructed(Vote::Finalize(finalize)) => {
+                        assert_eq!(finalize.proposal, proposal_2);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(*verify_requests.lock(), vec![View::new(1)]);
+        });
+    }
+
     /// Tests that permanently invalid proposal ancestry fast-paths `nullify`
     /// instead of waiting for the local timeout.
     fn invalid_ancestry_emits_nullify_immediately<S, F, L>(mut fixture: F, elector: L)
@@ -8006,7 +8488,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -8287,7 +8769,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
@@ -8411,7 +8893,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
@@ -8562,7 +9044,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -8722,7 +9204,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -8823,7 +9305,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
@@ -8993,7 +9475,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9103,7 +9585,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9269,7 +9751,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9383,7 +9865,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
@@ -9550,7 +10032,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9724,7 +10206,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9824,7 +10306,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
@@ -10000,7 +10482,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -10179,7 +10661,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
@@ -10256,7 +10738,7 @@ mod tests {
                         break;
                     }
                     MailboxMessage::Updated { .. } => continue,
-                    MailboxMessage::Resolve { .. } => continue,
+                    MailboxMessage::Resolve { .. } | MailboxMessage::Replayed { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
                     }
@@ -10394,7 +10876,8 @@ mod tests {
                         }
                         MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     _ = context.sleep(Duration::from_secs(3)) => {
                         panic!("replacement proposal did not finish certification");
@@ -10475,7 +10958,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
@@ -10537,7 +11020,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -10658,7 +11142,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -11447,7 +11932,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter_cancel"), voter_cfg);
 
@@ -11560,7 +12045,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
@@ -11601,7 +12086,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
@@ -12838,11 +13324,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &voter_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13122,7 +13604,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13282,7 +13764,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13399,7 +13881,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13551,7 +14033,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
             let (resolver_sender, _resolver_receiver) =
@@ -13693,7 +14175,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13832,7 +14314,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -13978,6 +14460,7 @@ mod tests {
                     floor: Floor::Finalized(floor),
                     skip_budget: u64::MAX,
                     page_cache: page_cache.clone(),
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -14008,6 +14491,7 @@ mod tests {
                     floor: restart,
                     skip_budget: u64::MAX,
                     page_cache,
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -14035,7 +14519,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest>,
     {
-        let journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+        let mut replay = Journal::<_, Artifact<S, Sha256Digest>>::init(
             context.child("journal"),
             JConfig {
                 partition,
@@ -14043,14 +14527,12 @@ mod tests {
                 codec_config: scheme.certificate_codec_config(),
                 page_cache,
                 write_buffer: NZUsize!(1024 * 1024),
+                replay_buffer: NZUsize!(1024 * 1024),
             },
+            ReadOptions::DONT_CACHE,
         )
         .await
         .expect("unable to initialize voter journal");
-        let mut replay = journal
-            .replay(0, 0, NZUsize!(1024 * 1024), ReadOptions::DONT_CACHE)
-            .await
-            .expect("unable to replay voter journal");
         let mut finalizations = 0;
         while let Some(artifact) = replay.next().await {
             let (_, _, _, artifact) = artifact.expect("unable to replay voter journal");
@@ -14075,7 +14557,7 @@ mod tests {
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Start from a finalized floor over an empty journal
             let floor_view = View::new(5);
@@ -14114,7 +14596,7 @@ mod tests {
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
             let partition = "voter_restart_same_floor".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Start twice from the same finalized floor
             let floor_view = View::new(5);
@@ -14166,7 +14648,7 @@ mod tests {
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
             let partition = "voter_floor_journaled_votes".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist only our own notarize above the floor
             let voted_view = View::new(7);

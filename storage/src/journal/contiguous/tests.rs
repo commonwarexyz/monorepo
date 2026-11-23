@@ -4,7 +4,7 @@ use super::{Batch, Contiguous, Many, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    ReadOptions, Runner as _, Spawner as _, Supervisor as _,
+    Blob as _, ReadOptions, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs, RecordingContext},
@@ -36,6 +36,38 @@ pub(crate) async fn replay_items<J: Contiguous>(
         };
         stream::iter(entries)
     }))
+}
+
+/// Zero one byte of the physical page `page` in the blob at `name`, `offset` bytes into its
+/// logical contents, which must lie beyond the page's last durable length. Models the crash image
+/// of a torn page rewrite, where an unsynced flush that extended a durable partial page lost one
+/// of its new bytes and left the zero padding the durable page carried there, so only the page's
+/// shorter durable checksum slot still validates while the pages written after it survive.
+pub(crate) async fn tear_page_rewrite(
+    context: &deterministic::Context,
+    partition: &str,
+    name: &[u8],
+    page: u64,
+    offset: u64,
+    logical_page_size: u64,
+) {
+    let physical_page_size = logical_page_size + commonware_runtime::buffer::paged::CHECKSUM_SIZE;
+    let position = page * physical_page_size + offset;
+    let (blob, _) = context.open(partition, name).await.unwrap();
+    let byte = blob
+        .read_at(position, 1, ReadOptions::default())
+        .await
+        .unwrap()
+        .coalesce();
+    assert_ne!(
+        byte.as_ref()[0],
+        0,
+        "the rewrite must have changed the byte"
+    );
+    blob.write_at(position, vec![0u8], WriteOptions::default())
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
 }
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.
@@ -81,6 +113,7 @@ where
     test_replay_at_exact_size(&indexed_factory).await;
     test_multiple_prunes(&indexed_factory).await;
     test_prune_beyond_size(&indexed_factory).await;
+    test_prune_target_matches_prune(&indexed_factory).await;
     test_persistence_basic(&indexed_factory).await;
     test_persistence_after_prune(&indexed_factory).await;
     test_read_by_position(&indexed_factory).await;
@@ -481,6 +514,50 @@ where
         .map(|_| ());
     assert!(matches!(res, Err(Error::ItemPruned(5))));
 
+    journal.destroy().await.unwrap();
+}
+
+/// Check the predicted and actual retained start for each prune request.
+pub(super) async fn assert_prune_target<J: Mutable>(mut journal: J, cases: &[(u64, u64)]) -> J {
+    for &(request, expected) in cases {
+        let start = journal.bounds().start;
+        assert_eq!(
+            journal.prune_target(request),
+            expected,
+            "prune_target({request})"
+        );
+        let advanced;
+        (journal, advanced) = journal.prune(request).await.unwrap();
+        assert_eq!(journal.bounds().start, expected, "prune({request})");
+        assert_eq!(advanced, expected > start);
+    }
+    journal
+}
+
+/// Test that [Mutable::prune_target] predicts the retained start [Mutable::prune] leaves.
+async fn test_prune_target_matches_prune<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = factory("prune-target".into()).await.unwrap();
+    for i in 0..45u64 {
+        (journal, _) = journal.append(&i).await.unwrap();
+    }
+    let journal = assert_prune_target(
+        journal,
+        &[
+            (0, 0),
+            (5, 0),
+            (10, 10),
+            (19, 10),
+            (20, 20),
+            (33, 30),
+            (u64::MAX, 40),
+            (45, 40),
+        ],
+    )
+    .await;
     journal.destroy().await.unwrap();
 }
 
@@ -1545,7 +1622,7 @@ fn test_fixed_start_sync_durability() {
         let cfg = fixed::Config {
             partition: "fixed-start-sync".into(),
             items_per_blob: NZU64!(3),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -1566,7 +1643,7 @@ fn test_variable_start_sync_durability() {
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -1791,23 +1868,23 @@ async fn test_start_sync_failure_propagates<F, Fut, J>(
     );
 }
 
-fn fixed_overlap_cfg(context: &deterministic::Context, partition: &str) -> fixed::Config {
+fn fixed_overlap_cfg(partition: &str) -> fixed::Config {
     fixed::Config {
         partition: partition.into(),
         items_per_blob: NZU64!(10),
-        page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
+        page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
         write_buffer: NZUsize!(2048),
         replay_buffer: NZUsize!(2048),
     }
 }
 
-fn variable_overlap_cfg(context: &deterministic::Context, partition: &str) -> variable::Config<()> {
+fn variable_overlap_cfg(partition: &str) -> variable::Config<()> {
     variable::Config {
         partition: partition.into(),
         items_per_section: NZU64!(10),
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::from_pooler(context, NZU16!(44), NZUsize!(8)),
+        page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
         write_buffer: NZUsize!(2048),
         replay_buffer: NZUsize!(2048),
     }
@@ -1821,7 +1898,7 @@ fn test_fixed_start_sync_overlaps_predecessor_and_tail() {
         let cfg = fixed::Config {
             partition: "fixed-start-sync-predecessor".into(),
             items_per_blob: NZU64!(3),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -1842,7 +1919,7 @@ fn test_variable_start_sync_overlaps_predecessor_and_tail() {
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -1858,7 +1935,7 @@ fn test_fixed_start_sync_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-overlap");
+        let cfg = fixed_overlap_cfg("fixed-start-sync-overlap");
         test_start_sync_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             fixed::Journal::<_, u64>::init(ctx, cfg)
@@ -1872,7 +1949,7 @@ fn test_variable_start_sync_overlaps_work() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-start-sync-overlap");
+        let cfg = variable_overlap_cfg("variable-start-sync-overlap");
         test_start_sync_overlaps_work(context, pending, move |ctx| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(ctx, cfg)
@@ -1886,7 +1963,7 @@ fn test_fixed_start_sync_waits_for_prior() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-waits");
+        let cfg = fixed_overlap_cfg("fixed-start-sync-waits");
         test_start_sync_waits_for_prior(context, pending, move |ctx| {
             let cfg = cfg.clone();
             fixed::Journal::<_, u64>::init(ctx, cfg)
@@ -1900,7 +1977,7 @@ fn test_variable_start_sync_waits_for_prior() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-start-sync-waits");
+        let cfg = variable_overlap_cfg("variable-start-sync-waits");
         test_start_sync_waits_for_prior(context, pending, move |ctx| {
             let cfg = cfg.clone();
             variable::Journal::<_, u64>::init(ctx, cfg)
@@ -1914,7 +1991,7 @@ fn test_fixed_start_sync_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = fixed_overlap_cfg(&context, "fixed-start-sync-fail");
+        let cfg = fixed_overlap_cfg("fixed-start-sync-fail");
         test_start_sync_failure_propagates(context, pending, move |ctx| {
             fixed::Journal::<_, u64>::init(ctx, cfg)
         })
@@ -1927,7 +2004,7 @@ fn test_variable_start_sync_failure_propagates() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
-        let cfg = variable_overlap_cfg(&context, "variable-start-sync-fail");
+        let cfg = variable_overlap_cfg("variable-start-sync-fail");
         test_start_sync_failure_propagates(context, pending, move |ctx| {
             variable::Journal::<_, u64>::init(ctx, cfg)
         })
@@ -2009,7 +2086,7 @@ fn test_fixed_prune_waits_for_pending_sync() {
         let cfg = fixed::Config {
             partition: "fixed-prune-pending".into(),
             items_per_blob: NZU64!(3),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -2030,7 +2107,7 @@ fn test_variable_prune_waits_for_pending_sync() {
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -2049,7 +2126,7 @@ fn test_fixed_prune_surfaces_failed_sync() {
         let cfg = fixed::Config {
             partition: "fixed-prune-fail".into(),
             items_per_blob: NZU64!(3),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -2070,7 +2147,7 @@ fn test_variable_prune_surfaces_failed_sync() {
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         };
@@ -2084,7 +2161,7 @@ fn test_variable_prune_surfaces_failed_sync() {
 #[test]
 fn test_fresh_sync_avoids_reset_writes() {
     deterministic::Runner::default().start(|context| async move {
-        let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4));
+        let cache = CacheRef::new(NZU16!(64), NZUsize!(4));
         let fixed_cfg = |partition: &str| fixed::Config {
             partition: partition.into(),
             items_per_blob: NZU64!(5),

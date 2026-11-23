@@ -210,12 +210,12 @@ fn generate<F: Family, H: Hasher>(
         .map_err(|error| format!("failed to generate proof: {error}"))?;
     let elements: Vec<_> = (start..end).map(|index| leaf(seed, index)).collect();
 
-    if !proof.verify_range_inclusion(&hasher, &elements, Location::new(start), &root) {
+    if !proof.verify_range_inclusion(&hasher, Location::new(start), &elements, &root) {
         return Err("Commonware rejected its generated proof".to_owned());
     }
 
     if check_mutated {
-        check_rejections::<F, H>(&hasher, &proof, &elements, start, root)?;
+        check_rejections::<F, H>(&hasher, &proof, start, &elements, root)?;
     }
 
     Ok(Output {
@@ -254,20 +254,20 @@ fn materialize<F: Family, H: Hasher>(
 fn check_rejections<F: Family, H: Hasher>(
     hasher: &MerkleHasher<H>,
     proof: &Proof<F, H::Digest>,
-    elements: &[[u8; 32]],
     start: u64,
+    elements: &[[u8; 32]],
     root: H::Digest,
 ) -> Result<(), String> {
     let mut bytes = root.as_ref().to_vec();
     bytes[0] ^= 1;
     let bad_root = H::Digest::decode(Copying(bytes.as_slice())).unwrap();
-    if proof.verify_range_inclusion(hasher, elements, Location::new(start), &bad_root) {
+    if proof.verify_range_inclusion(hasher, Location::new(start), elements, &bad_root) {
         return Err("proof unexpectedly accepted a mutated root".to_owned());
     }
 
     let mut bad_elements = elements.to_vec();
     bad_elements[0][0] ^= 1;
-    if proof.verify_range_inclusion(hasher, &bad_elements, Location::new(start), &root) {
+    if proof.verify_range_inclusion(hasher, Location::new(start), &bad_elements, &root) {
         return Err("proof unexpectedly accepted a mutated element".to_owned());
     }
 
@@ -276,7 +276,7 @@ fn check_rejections<F: Family, H: Hasher>(
         let mut bytes = bad_proof.digests[0].as_ref().to_vec();
         bytes[0] ^= 1;
         bad_proof.digests[0] = H::Digest::decode(Copying(bytes.as_slice())).unwrap();
-        if bad_proof.verify_range_inclusion(hasher, elements, Location::new(start), &root) {
+        if bad_proof.verify_range_inclusion(hasher, Location::new(start), elements, &root) {
             return Err("proof unexpectedly accepted a mutated proof digest".to_owned());
         }
     }
@@ -307,11 +307,11 @@ fn synthetic<F: Family, H: Hasher>(
     // Reconstruction enforces Commonware's canonical proof length. A contiguous range has
     // at most two boundary paths plus the peaks outside it, each bounded by 64 levels.
     for count in 0..=192 {
-        if let Ok(root) = proof.reconstruct_root(&hasher, &elements, Location::new(start)) {
-            if !proof.verify_range_inclusion(&hasher, &elements, Location::new(start), &root) {
+        if let Ok(root) = proof.reconstruct_root(&hasher, Location::new(start), &elements) {
+            if !proof.verify_range_inclusion(&hasher, Location::new(start), &elements, &root) {
                 return Err("Commonware rejected reconstructed proof".into());
             }
-            check_rejections::<F, H>(&hasher, &proof, &elements, start, root)?;
+            check_rejections::<F, H>(&hasher, &proof, start, &elements, root)?;
             return Ok(Output {
                 root: root.as_ref().try_into().unwrap(),
                 elements,
@@ -371,8 +371,8 @@ fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
     };
     proof.verify_range_inclusion(
         &policy.hasher::<H>(),
-        &payload.elements,
         Location::new(start),
+        &payload.elements,
         &H::Digest::decode(Copying(payload.root.as_slice())).unwrap(),
     )
 }
@@ -483,6 +483,10 @@ mod tests {
 
     const FORWARD_ACTIVE: Policy = Policy {
         bagging: Fold::Forward,
+        inactive_peaks: 0,
+    };
+    const BACKWARD_ACTIVE: Policy = Policy {
+        bagging: Fold::Backward,
         inactive_peaks: 0,
     };
 
@@ -752,15 +756,28 @@ mod tests {
         submitted_mutations::<mmb::Family, H>();
     }
 
-    fn empty_tree<F: Family, H: Hasher>() {
+    /// Checks that the forward-folded empty root of family `F` verifies only under `F` with forward
+    /// bagging, and that malformed or mismatched empty proofs fail.
+    fn empty_tree<F: Family, G: Family, H: Hasher>() {
+        let tags = [F::DOMAIN, Bagging::ForwardFold.domain()];
         let mut output = Output {
-            root: H::hash(&[&0u64.to_be_bytes()]).as_ref().try_into().unwrap(),
+            root: H::hash(&[&tags, &0u64.to_be_bytes()])
+                .as_ref()
+                .try_into()
+                .unwrap(),
             elements: Vec::new(),
             proof: Vec::new(),
             leaves: 0,
         };
         let encoded = check_input(&output, 0);
+
+        // The root commits `F` and forward bagging, so it verifies only under that pair.
         assert!(check::<F, H>(&encoded, FORWARD_ACTIVE));
+        assert!(!check::<F, H>(&encoded, BACKWARD_ACTIVE));
+        assert!(!check::<G, H>(&encoded, FORWARD_ACTIVE));
+        assert!(!check::<G, H>(&encoded, BACKWARD_ACTIVE));
+
+        // Malformed encodings and mismatched inputs fail even under `F` and forward bagging.
         let mut trailing = encoded.clone();
         trailing.extend_from_slice(&[0; 32]);
         let mut overlapping = encoded;
@@ -786,8 +803,8 @@ mod tests {
     }
 
     fn checks_empty_tree_and_rejects_invalid_empty_proofs_with<H: Hasher>() {
-        empty_tree::<mmr::Family, H>();
-        empty_tree::<mmb::Family, H>();
+        empty_tree::<mmr::Family, mmb::Family, H>();
+        empty_tree::<mmb::Family, mmr::Family, H>();
     }
 
     fn high_sizes<F: Family, H: Hasher>() {

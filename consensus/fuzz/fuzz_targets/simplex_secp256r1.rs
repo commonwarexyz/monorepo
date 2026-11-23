@@ -1,8 +1,8 @@
 #![no_main]
 
-use commonware_consensus_fuzz::{FuzzInput, SimplexSecp256r1, Standard, fuzz};
+use commonware_consensus::fuzz::simplex::{FuzzInput, Mode, Scheme};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz::<SimplexSecp256r1, Standard>(input);
+    Scheme::Secp256r1.run(input, Mode::Standard);
 });

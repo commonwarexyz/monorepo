@@ -21,17 +21,17 @@ use crate::{
         tracker::ProgressTracker,
     },
     stateful::{
-        Application, Config as StatefulConfig, ExecutionError, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            Anchor, Barrier, DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single,
-            SnapshotsOf, StateSyncSet, Subscriber, SyncEngineConfig, TipUpdate, Unmerkleized as _,
-            UnmerkleizedOf, p2p as qmdb_resolver,
+            Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, SnapshotsOf, StateSyncSet,
+            Subscriber, SyncEngineConfig, TipUpdate, Unmerkleized as _, p2p as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
+        probe::{self, Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
+use commonware_codec::FixedSize as _;
 use commonware_consensus::{
     Heightable,
     marshal::{
@@ -56,7 +56,10 @@ use commonware_cryptography::{
     ed25519, sha256,
 };
 use commonware_macros::test_group;
-use commonware_p2p::utils::mux::Muxer;
+use commonware_p2p::{
+    max_message_size,
+    utils::mux::{Muxer, prefixed},
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, Error as RuntimeError, Handle, Quota, Supervisor as _, buffer::paged::CacheRef,
@@ -65,10 +68,11 @@ use commonware_runtime::{
 use commonware_storage::{
     archive::prunable,
     journal::contiguous::variable::Config as VariableLogConfig,
-    mmr::Location,
+    mmr::{self, Location},
     qmdb::{
+        any::unordered::fixed,
         immutable,
-        sync::{CompactTarget, Request, Source as QmdbSource, Target, source},
+        sync::{Request, Source as QmdbSource, Target, source},
     },
 };
 use commonware_utils::{
@@ -153,8 +157,8 @@ pub(super) trait Layout: Clone + Send + Sync + 'static {
 
     fn execute(
         height: Height,
-        batches: UnmerkleizedOf<Self::Set, Ctx>,
-    ) -> impl Future<Output = Result<MerkleizedOf<Self::Set, Ctx>, ExecutionError>> + Send;
+        batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
+    ) -> impl Future<Output = <Self::Set as DatabaseSet<Ctx>>::Merkleized> + Send;
 
     /// The block fields committing to `merkleized`: (root A, range A, root B, range B).
     fn header(merkleized: &<Self::Set as DatabaseSet<Ctx>>::Merkleized) -> Header;
@@ -189,14 +193,14 @@ impl Layout for Mixed {
             a.root,
             a.range,
             b.root,
-            non_empty_range!(Location::new(0), b.size),
+            non_empty_range!(Location::new(0), b.range.end()),
         )
     }
 
     async fn execute(
         height: Height,
-        batches: UnmerkleizedOf<Self::Set, Ctx>,
-    ) -> Result<MerkleizedOf<Self::Set, Ctx>, ExecutionError> {
+        batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
+    ) -> <Self::Set as DatabaseSet<Ctx>>::Merkleized {
         multi_db_app::App::execute::<Ctx>(height, batches).await
     }
 
@@ -213,11 +217,11 @@ impl Layout for Mixed {
 
     fn targets(block: &Block) -> <Self::Set as DatabaseSet<Ctx>>::SyncTargets {
         (
-            Target::new(block.root_a, block.range_a.clone()),
-            CompactTarget {
-                root: block.root_b,
-                size: block.range_b.end(),
+            Target {
+                root: block.root_a,
+                range: block.range_a.clone(),
             },
+            compact_target(block.root_b, &block.range_b),
         )
     }
 
@@ -230,7 +234,7 @@ impl Layout for Mixed {
 #[derive(Clone)]
 pub(super) struct AllCompact;
 
-type CompactPair = (Single<QmdbB<Ctx>>, Single<QmdbB<Ctx>>);
+type CompactPair = (Shared<QmdbB<Ctx>>, Shared<QmdbB<Ctx>>);
 
 fn compact_config(
     prefix: &str,
@@ -248,7 +252,17 @@ fn compact_config(
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
         },
-        commit_codec_config: (),
+    }
+}
+
+/// The target of a compact member whose block header records `range`: its root and last commit.
+fn compact_target(
+    root: sha256::Digest,
+    range: &NonEmptyRange<Location>,
+) -> Target<commonware_storage::mmr::Family, sha256::Digest> {
+    Target {
+        root,
+        range: non_empty_range!(range.end() - 1, range.end()),
     }
 }
 
@@ -266,21 +280,24 @@ impl Layout for AllCompact {
         let (a, b) = <Self::Set as DatabaseSet<Ctx>>::initial_sync_targets();
         Block::genesis(
             a.root,
-            non_empty_range!(Location::new(0), a.size),
+            non_empty_range!(Location::new(0), a.range.end()),
             b.root,
-            non_empty_range!(Location::new(0), b.size),
+            non_empty_range!(Location::new(0), b.range.end()),
         )
     }
 
     async fn execute(
         height: Height,
-        batches: UnmerkleizedOf<Self::Set, Ctx>,
-    ) -> Result<MerkleizedOf<Self::Set, Ctx>, ExecutionError> {
+        batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
+    ) -> <Self::Set as DatabaseSet<Ctx>>::Merkleized {
         let (batch_a, batch_b) = batches;
         let key = Sha256::hash(&[&height.get().to_be_bytes()]);
         let batch_a = batch_a.set(key, u64_to_digest(height.get()));
         let batch_b = batch_b.set(key, u64_to_digest(height.get()));
-        Ok((batch_a.merkleize().await?, batch_b.merkleize().await?))
+        (
+            batch_a.merkleize().await.unwrap(),
+            batch_b.merkleize().await.unwrap(),
+        )
     }
 
     fn header(merkleized: &<Self::Set as DatabaseSet<Ctx>>::Merkleized) -> Header {
@@ -296,14 +313,8 @@ impl Layout for AllCompact {
 
     fn targets(block: &Block) -> <Self::Set as DatabaseSet<Ctx>>::SyncTargets {
         (
-            CompactTarget {
-                root: block.root_a,
-                size: block.range_a.end(),
-            },
-            CompactTarget {
-                root: block.root_b,
-                size: block.range_b.end(),
-            },
+            compact_target(block.root_a, &block.range_a),
+            compact_target(block.root_b, &block.range_b),
         )
     }
 
@@ -317,6 +328,16 @@ pub(super) struct SlowSet<L: Layout> {
     inner: L::Set,
     clock: Arc<Ctx>,
     slow: Slow,
+}
+
+impl<L: Layout> Clone for SlowSet<L> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            clock: self.clock.clone(),
+            slow: self.slow.clone(),
+        }
+    }
 }
 
 impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
@@ -343,12 +364,8 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
         L::Set::initial_sync_targets()
     }
 
-    fn readers(&self) -> Self::Readers {
-        self.inner.readers()
-    }
-
-    fn new_batches(readers: &Self::Readers) -> impl Future<Output = Self::Unmerkleized> + Send {
-        L::Set::new_batches(readers)
+    fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send {
+        self.inner.new_batches()
     }
 
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -359,25 +376,21 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
         L::Set::matches_sync_targets(batches, targets)
     }
 
-    fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send {
-        self.inner.committed_targets()
+    fn readers(&self) -> Self::Readers {
+        self.inner.readers()
     }
 
-    async fn apply(self, batches: Self::Merkleized) -> Self {
-        let Self { inner, clock, slow } = self;
-        let inner = inner.apply(batches).await;
-        Self { inner, clock, slow }
+    fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send {
+        self.inner.apply(batches)
     }
 
-    async fn finalize(self) -> (Self, Self::Snapshots, Barrier) {
-        let Self { inner, clock, slow } = self;
-        let (inner, snapshots, barrier) = inner.finalize().await;
-        let set = Self { inner, clock, slow };
-        if set.slow.delay.is_zero() {
-            return (set, snapshots, barrier);
+    async fn finalize(&self) -> (Self::Snapshots, Barrier) {
+        let (snapshots, barrier) = self.inner.finalize().await;
+        if self.slow.delay.is_zero() {
+            return (snapshots, barrier);
         }
-        let clock = set.clock.clone();
-        let delay = set.slow.delay;
+        let clock = self.clock.clone();
+        let delay = self.slow.delay;
         let slowed = Handle::from_future(async move {
             clock.sleep(delay).await;
             if !barrier.durable().await {
@@ -385,49 +398,50 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
             }
             Ok(())
         });
-        (set, snapshots, Barrier::from_handles::<Self>([slowed]))
+        (snapshots, Barrier::from_handles::<Self>([slowed]))
     }
 
-    async fn snapshot(self) -> (Self, Self::Snapshots) {
-        let Self { inner, clock, slow } = self;
-        let (inner, snapshots) = inner.snapshot().await;
-        (Self { inner, clock, slow }, snapshots)
+    fn snapshot(&self) -> impl Future<Output = Self::Snapshots> + Send {
+        self.inner.snapshot()
     }
 
-    async fn refresh_cheap(self, served: &Self::Snapshots) -> (Self, Self::Snapshots) {
-        let Self { inner, clock, slow } = self;
-        let (inner, snapshots) = inner.refresh_cheap(served).await;
-        (Self { inner, clock, slow }, snapshots)
+    fn refresh_cheap(
+        &self,
+        served: &Self::Snapshots,
+    ) -> impl Future<Output = Self::Snapshots> + Send {
+        self.inner.refresh_cheap(served)
     }
 
     fn merge_snapshots(served: &Self::Snapshots, fresh: Self::Snapshots) -> Self::Snapshots {
         L::Set::merge_snapshots(served, fresh)
     }
 
-    async fn prune(self, targets: &Self::SyncTargets) -> Self {
-        let Self { inner, clock, slow } = self;
-        let inner = inner.prune(targets).await;
-        Self { inner, clock, slow }
+    fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send {
+        self.inner.prune(targets)
+    }
+
+    fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send {
+        self.inner.committed_targets()
     }
 }
 
-impl<L, R> StateSyncSet<Ctx, R, sha256::Digest> for SlowSet<L>
+impl<L, R> StateSyncSet<Ctx, R> for SlowSet<L>
 where
     L: Layout,
-    L::Set: StateSyncSet<Ctx, R, sha256::Digest>,
+    L::Set: StateSyncSet<Ctx, R>,
     R: Send,
 {
-    type Error = <L::Set as StateSyncSet<Ctx, R, sha256::Digest>>::Error;
+    type Error = <L::Set as StateSyncSet<Ctx, R>>::Error;
 
-    async fn sync(
+    async fn sync<D: commonware_cryptography::Digest>(
         context: Ctx,
         (config, slow): Self::Config,
         sources: R,
-        anchor: Anchor<sha256::Digest>,
+        anchor: Anchor<D>,
         targets: Self::SyncTargets,
-        tip_updates: ring::Receiver<TipUpdate<sha256::Digest, Self::SyncTargets>>,
+        tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
-    ) -> Result<(Self, Anchor<sha256::Digest>), Self::Error> {
+    ) -> Result<(Self, Anchor<D>), Self::Error> {
         let clock = Arc::new(context.child("slow_set"));
         slow.log.0.lock().sync_start = Some(anchor.height.get());
         let (inner, anchor) = L::Set::sync(
@@ -498,15 +512,13 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
         &mut self,
         context: (Ctx, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, Ctx>,
+        batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Result<Option<Proposed<Self, Ctx>>, ExecutionError> {
+    ) -> Option<Proposed<Self, Ctx>> {
         let mut ancestry = Box::pin(ancestry);
-        let Some(parent) = ancestry.next().await else {
-            return Ok(None);
-        };
+        let parent = ancestry.next().await?;
         let height = parent.height().next();
-        let merkleized = L::execute(height, batches).await?;
+        let merkleized = L::execute(height, batches).await;
         let (root_a, range_a, root_b, range_b) = L::header(&merkleized);
         let block = Block {
             context: context.1.clone(),
@@ -517,44 +529,33 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
             root_b,
             range_b,
         };
-        Ok(Some(Proposed { block, merkleized }))
+        Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (Ctx, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, Ctx>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, Ctx>>, ExecutionError> {
-        let mut ancestry = Box::pin(ancestry);
-        let Some(tip) = ancestry.next().await else {
-            return Ok(None);
-        };
-        let merkleized = L::execute(tip.height(), batches).await?;
+        batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
+        _finality: Finality,
+    ) -> Option<<Self::Databases as DatabaseSet<Ctx>>::Merkleized> {
+        let block = ancestry.peek()?.inner();
         let header = (
-            tip.inner().root_a,
-            tip.inner().range_a.clone(),
-            tip.inner().root_b,
-            tip.inner().range_b.clone(),
+            block.root_a,
+            block.range_a.clone(),
+            block.root_b,
+            block.range_b.clone(),
         );
-        Ok((L::header(&merkleized) == header).then_some(merkleized))
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (Ctx, Self::Context),
-        block: &Self::Block,
-        batches: UnmerkleizedOf<Self::Databases, Ctx>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, Ctx>>, ExecutionError> {
-        L::execute(block.height(), batches).await.map(Some)
+        let merkleized = L::execute(block.height(), batches).await;
+        (L::header(&merkleized) == header).then_some(merkleized)
     }
 
     async fn capture(
         &mut self,
         _context: (Ctx, Self::Context),
         block: &Self::Block,
-        _batches: &MerkleizedOf<Self::Databases, Ctx>,
-        _readers: ReadersOf<Self::Databases, Ctx>,
+        _batches: &<Self::Databases as DatabaseSet<Ctx>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<Ctx>>::Readers,
     ) {
         let height = block.height().get();
         let mut events = self.log.0.lock();
@@ -568,7 +569,7 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
         _context: (Ctx, Self::Context),
         block: &Self::Block,
         _captured: Self::Captured,
-        _readers: ReadersOf<Self::Databases, Ctx>,
+        _readers: <Self::Databases as DatabaseSet<Ctx>>::Readers,
     ) {
         // Every block before this one was published before this block applied.
         let Some(snapshots) = self.served.latest() else {
@@ -643,6 +644,32 @@ macro_rules! serving_engine {
                 (0..7).map(|channel| (channel, TEST_QUOTA)).collect()
             }
 
+            fn max_message_size(&self) -> u32 {
+                let participants = u32::try_from(self.schemes.len()).unwrap();
+                // Both QMDB sync actors share one muxed channel, so its payload bound is the sync
+                // bound for the wider of the two operations plus the subchannel prefix.
+                let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE.max(
+                    immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
+                );
+                let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
+                    SYNC_BATCH_SIZE,
+                    op,
+                );
+                max_message_size([
+                    simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
+                        participants,
+                    ),
+                    marshal::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                        participants,
+                        &(),
+                    ),
+                    probe::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                        participants,
+                    ),
+                    prefixed(qmdb),
+                ])
+            }
+
             async fn init(
                 &self,
                 ctx: InitContext<'_, Self::PublicKey>,
@@ -659,7 +686,7 @@ macro_rules! serving_engine {
                 } = ctx;
                 let scheme = self.schemes[index].clone();
                 let partition_prefix = format!("validator-{index}");
-                let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
                 let slow = Slow {
                     delay: self.delay,
                     log: self.log.clone(),
@@ -682,7 +709,6 @@ macro_rules! serving_engine {
                     context.child("qmdb_mux"),
                     qmdb_resolver_network.0,
                     qmdb_resolver_network.1,
-                    100,
                 );
                 mux.start();
                 let qmdb_a_network = mux_handle.register(0).await.unwrap();
@@ -695,8 +721,8 @@ macro_rules! serving_engine {
                         peer_provider: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         mailbox_size: NZUsize!(100),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(100),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         priority_requests: false,
                         priority_responses: false,
                     },
@@ -711,6 +737,7 @@ macro_rules! serving_engine {
                         priority: false,
                         codec_config: (),
                         peer_provider: oracle.manager(),
+                        blocker: oracle.control(public_key.clone()),
                         strategy: Sequential,
                     },
                 );
@@ -786,9 +813,9 @@ macro_rules! serving_engine {
                     blocker: oracle.control(public_key.clone()),
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     serve_timeout: Duration::from_secs(2),
                     priority_requests: false,
                     priority_responses: false,
@@ -897,7 +924,8 @@ macro_rules! serving_engine {
                             timeout: Duration::from_secs(5),
                             budget: simplex::SkipBudget::Participants,
                         },
-                        fetch_timeout: Duration::from_secs(2),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     },

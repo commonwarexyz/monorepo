@@ -51,9 +51,10 @@ pub struct Config<U: Upgrader> {
     ///
     /// The largest supported value is [`crate::authenticated::max_size::<U>()`].
     ///
-    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
-    /// part of the payload and counts toward this limit. A peer that sends a larger payload is
-    /// disconnected.
+    /// [`crate::max_message_size`] computes this value from the largest payload of each component
+    /// that sends on the network. Output from wrappers such as codecs and multiplexers is part of
+    /// the payload and counts toward this limit. Sending a larger payload panics, and a peer that
+    /// sends a larger payload is disconnected.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
@@ -140,6 +141,7 @@ impl<U: Upgrader> Config<U> {
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
+        mailbox_size: NonZeroUsize,
     ) -> Self {
         Self {
             handshake,
@@ -151,7 +153,7 @@ impl<U: Upgrader> Config<U> {
             bypass_ip_check: false,
             max_message_size,
             max_peers_per_set,
-            mailbox_size: NZUsize!(1_000),
+            mailbox_size,
             send_batch_size: NZUsize!(8),
             handshake_timeout: Duration::from_secs(5),
             dial_timeout: Duration::from_secs(15),
@@ -178,6 +180,7 @@ impl<U: Upgrader> Config<U> {
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
+        mailbox_size: NonZeroUsize,
     ) -> Self {
         Self {
             handshake,
@@ -189,7 +192,7 @@ impl<U: Upgrader> Config<U> {
             bypass_ip_check: false,
             max_message_size,
             max_peers_per_set,
-            mailbox_size: NZUsize!(1_000),
+            mailbox_size,
             send_batch_size: NZUsize!(8),
             handshake_timeout: Duration::from_secs(5),
             dial_timeout: Duration::from_secs(15),
@@ -222,6 +225,7 @@ impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
             listen,
             NZUsize!(32),
             max_message_size,
+            NZUsize!(1_000),
         );
         config.peer_connection_cooldown = Duration::from_millis(250);
         config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(128));

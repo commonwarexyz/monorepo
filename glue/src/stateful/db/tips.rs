@@ -29,11 +29,11 @@ pub const RETAINED_TIPS: usize = 128;
 /// As a [`Source`], it serves each request from the tip whose size matches, and otherwise from
 /// the latest tip, which refuses it (a smaller size the way a pruned log would, a larger one as
 /// out of range).
-pub struct CompactTips<F: Family, Op, D: Digest> {
+pub struct CompactTips<F: Family, Op: compact::Operation<F>, D: Digest> {
     tips: Arc<VecDeque<compact::Snapshot<F, Op, D>>>,
 }
 
-impl<F: Family, Op, D: Digest> CompactTips<F, Op, D> {
+impl<F: Family, Op: compact::Operation<F>, D: Digest> CompactTips<F, Op, D> {
     /// Serve only `tip`.
     pub fn new(tip: compact::Snapshot<F, Op, D>) -> Self {
         Self {
@@ -69,7 +69,7 @@ impl<F: Family, Op, D: Digest> CompactTips<F, Op, D> {
     }
 }
 
-impl<F: Family, Op, D: Digest> Clone for CompactTips<F, Op, D> {
+impl<F: Family, Op: compact::Operation<F>, D: Digest> Clone for CompactTips<F, Op, D> {
     fn clone(&self) -> Self {
         Self {
             tips: self.tips.clone(),
@@ -80,13 +80,13 @@ impl<F: Family, Op, D: Digest> Clone for CompactTips<F, Op, D> {
 impl<F, Op, D> Source for CompactTips<F, Op, D>
 where
     F: Family,
-    Op: Clone + Send + Sync,
+    Op: compact::Operation<F>,
     D: Digest,
 {
     type Family = F;
     type Digest = D;
     type Op = Op;
-    type Error = <compact::Tip<F, Op, D> as Source>::Error;
+    type Error = <compact::VerifiedWitness<F, D, Op> as Source>::Error;
 
     fn serve(&self, request: Request<F>) -> impl Future<Output = source::Result<Self>> + Send {
         let tip = self
@@ -117,7 +117,7 @@ mod tests {
     type Db = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
     type Tips = CompactTips<mmr::Family, fixed::Operation<mmr::Family, U64>, sha256::Digest>;
 
-    fn config(context: &deterministic::Context) -> fixed::CompactConfig<Sequential> {
+    fn config() -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
             strategy: Sequential,
             witness: VariableJournalConfig {
@@ -125,23 +125,21 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
+                page_cache: CacheRef::new(NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         }
     }
 
     async fn commit(db: Db, value: u64) -> Db {
-        let floor = db.inactivity_floor_loc();
         let batch = db
             .new_batch()
             .append(U64::new(value))
-            .merkleize(&db, None, floor)
+            .merkleize(&db)
             .await
             .unwrap();
-        db.apply_batch(batch).await.unwrap().0
+        db.apply_batch(batch).await.unwrap()
     }
 
     fn boundary(size: Location<mmr::Family>) -> Request<mmr::Family> {
@@ -156,9 +154,7 @@ mod tests {
     #[test]
     fn serves_every_retained_tip() {
         deterministic::Runner::default().start(|context| async move {
-            let mut db = Db::init(context.child("db"), config(&context), None)
-                .await
-                .unwrap();
+            let mut db = Db::init(context.child("db"), config(), None).await.unwrap();
             let mut tips = Tips::new(db.snapshot());
             let first = tips.latest().size();
             for value in 0..RETAINED_TIPS as u64 {

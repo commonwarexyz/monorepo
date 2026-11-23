@@ -5,19 +5,19 @@ use super::{
 use crate::sha256::{DIGEST_LENGTH, Digest, IV};
 
 /// Shuffle mask converting between byte and word endianness.
-static BYTE_SWAP_MASK: Align16<[u8; 16]> =
+pub(super) static BYTE_SWAP_MASK: Align16<[u8; 16]> =
     Align16([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
 
-/// The `0x80` terminator following the 8-byte message tail in the MMR node's
-/// padding block (message ends 8 bytes into the second block).
-static FINAL_72_PAD: Align16<[u32; 4]> = Align16([0, 0, 0x80000000, 0]);
+/// The `0x80` terminator following the message's last 8 bytes in a vector.
+pub(super) static TAIL_8_PAD: Align16<[u32; 4]> = Align16([0, 0, 0x80000000, 0]);
 
 /// The message bit length in the final words of the MMR node's padding block.
-static FINAL_72_LENGTH: Align16<[u32; 4]> = Align16([0, 0, 0, (MMR_NODE_LEN * 8) as u32]);
+pub(super) static FINAL_72_LENGTH: Align16<[u32; 4]> =
+    Align16([0, 0, 0, (MMR_NODE_LEN * 8) as u32]);
 
 /// The SHA-256 schedule words plus round constants for the fixed padding
 /// block after a 64-byte BMT node.
-static FINAL_64_WK: Align16<[u32; 64]> = Align16({
+pub(super) static FINAL_64_WK: Align16<[u32; 64]> = Align16({
     let mut schedule = [0u32; 64];
     schedule[0] = 0x80000000;
     schedule[15] = (BMT_NODE_LEN * 8) as u32;
@@ -72,6 +72,21 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_72(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
+            // Clear the upper halves of the vector registers. This is only for
+            // speed: the kernel gives the same result if they are dirty.
+            //
+            // The SHA instructions have only a legacy SSE encoding, and the
+            // rounds alternate them with VEX instructions. While an upper half
+            // is dirty, some Intel and AMD CPUs trap into microcode at every
+            // switch between the two encodings. One call makes 256 switches.
+            //
+            // The compiler adds `vzeroupper` before a call but not before
+            // inline asm. The upper halves are thus dirty if the compiler
+            // inlines this function into code that uses 256-bit registers.
+            // This is possible when the target features are enabled at
+            // compile time. `vzeroupper` writes only registers that are
+            // declared as outputs below.
+            "vzeroupper",
             include_str!("sha256_pair_block1_72.asm"),
             include_str!("sha256_pair_tail8.asm"),
             include_str!("sha256_pair_finish.asm"),
@@ -86,7 +101,7 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_72(
             state = in(reg) IV.as_ptr(),
             k = in(reg) K.0.as_ptr(),
             mask = in(reg) BYTE_SWAP_MASK.0.as_ptr(),
-            pad = in(reg) FINAL_72_PAD.0.as_ptr(),
+            pad = in(reg) TAIL_8_PAD.0.as_ptr(),
             len = in(reg) FINAL_72_LENGTH.0.as_ptr(),
             out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
             out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
@@ -125,6 +140,8 @@ pub(in crate::sha256::simd) unsafe fn hash_pair_64(
     unsafe {
         core::arch::asm!(
             include_str!("sha256_pair_macros.asm"),
+            // See `hash_pair_72` for why the upper halves are cleared.
+            "vzeroupper",
             include_str!("sha256_pair_block1_64.asm"),
             include_str!("sha256_pair_tail0.asm"),
             left_a = in(reg) left_a.as_ptr(),

@@ -9,8 +9,8 @@ use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
-    SinkOf, Spawner, StreamOf, spawn_cell,
+    Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota, SinkOf,
+    Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_stream::Upgrader;
@@ -68,7 +68,7 @@ pub struct Config<U: Upgrader> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
+pub struct Actor<E: Spawner + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -86,7 +86,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
+impl<E: Spawner + Clock + Network + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
 where
     U::PublicKey: PublicKey,
 {

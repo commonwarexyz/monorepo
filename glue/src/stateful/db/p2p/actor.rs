@@ -9,14 +9,14 @@ use commonware_macros::{select, select_loop};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Delivery, Fetch, Resolver, p2p};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::metrics::status,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::metrics::status,
 };
 use commonware_storage::{
     merkle::Family,
     qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::{
+    NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
     futures::Pool as FuturesPool,
 };
@@ -54,10 +54,11 @@ where
     pub me: Option<P>,
 
     /// Request timeout.
-    pub timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
-    /// Retry cadence for pending fetches.
-    pub fetch_retry_timeout: Duration,
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
+    pub fetch_retry_delay: Duration,
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests get an error
     /// response.
@@ -70,7 +71,7 @@ where
     /// Longest a peer's request may be served for. A serve holds a published snapshot, and so
     /// the storage it pins, until it finishes, so this bounds how long a slow serve can pin it.
     /// A request not served in time gets an error response. Keep it at or below the requesters'
-    /// [`Self::timeout`], since a longer serve pins the snapshot for an answer nobody awaits.
+    /// [`Self::fetch_timeout`], since a longer serve pins the snapshot for an answer nobody awaits.
     pub serve_timeout: Duration,
 
     /// Whether fetch requests are sent with network priority.
@@ -85,7 +86,7 @@ where
 /// See the [module docs](super) for the fetch and serve contract.
 pub struct Actor<E, P, D, B, F, S, M>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -108,7 +109,7 @@ where
 
 impl<E, P, D, B, F, S, M> Actor<E, P, D, B, F, S, M>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -153,8 +154,10 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
+        // Every handler entry is one message the network admitted on the channel, and peer
+        // requests are dropped once the ready queue is full, so hold as many as the channel.
         let (handler_tx, mut handler_rx) =
-            actor_mailbox::new(self.context.child("handler"), self.config.mailbox_size);
+            actor_mailbox::new(self.context.child("handler"), receiver.capacity());
         let handler = handler::Handler::new(handler_tx);
         let (engine, mut resolver_mailbox) = p2p::Engine::new(
             self.context.as_present().child("resolver"),
@@ -165,8 +168,8 @@ where
                 producer: handler,
                 mailbox_size: self.config.mailbox_size,
                 me: self.config.me.clone(),
-                timeout: self.config.timeout,
-                fetch_retry_timeout: self.config.fetch_retry_timeout,
+                fetch_timeout: self.config.fetch_timeout,
+                fetch_retry_delay: self.config.fetch_retry_delay,
                 priority_requests: self.config.priority_requests,
                 priority_responses: self.config.priority_responses,
             },
@@ -369,7 +372,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::Publisher;
+    use crate::stateful::db::{Publisher, Shared};
     use bytes::Bytes;
     use commonware_actor::Feedback;
     use commonware_consensus::types::Height;
@@ -381,24 +384,23 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-        reschedule, telemetry::metrics::count_running_tasks,
+        Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic, reschedule,
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
-        journal::contiguous::{Contiguous as _, fixed::Config as FixedLogConfig},
-        mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
-        qmdb::{
-            any::{FixedConfig, unordered::fixed},
-            floor::Proportional,
-            sync,
+        journal::{
+            authenticated::Config as MerkleConfig,
+            contiguous::{Contiguous as _, fixed::Config as FixedLogConfig},
         },
+        mmr::{self, Location, Proof},
+        qmdb::{any::unordered::fixed, sync},
         translator::TwoCap,
     };
     use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize,
+        NZDuration, NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
         probability,
-        sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, Mutex, TracedAsyncRwLock},
+        sync::Mutex,
     };
     use futures::FutureExt as _;
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -445,46 +447,7 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    /// Controllable source whose storage calls can be held pending independently of the actor.
-    #[derive(Clone)]
-    struct GatedSource(Arc<TracedAsyncRwLock<Option<TestDb>>>);
-
-    impl GatedSource {
-        fn new(label: &'static str, db: TestDb) -> Self {
-            Self(Arc::new(TracedAsyncRwLock::new(label, Some(db))))
-        }
-
-        async fn read(&self) -> AsyncRwLockReadGuard<'_, TestDb> {
-            AsyncRwLockReadGuard::map(self.0.read().await, |db| db.as_ref().unwrap())
-        }
-
-        async fn write(&self) -> (SourceSlot<'_>, TestDb) {
-            let mut guard = self.0.write().await;
-            let db = guard.take().unwrap();
-            (SourceSlot(guard), db)
-        }
-    }
-
-    struct SourceSlot<'a>(AsyncRwLockWriteGuard<'a, Option<TestDb>>);
-
-    impl SourceSlot<'_> {
-        fn put(mut self, db: TestDb) {
-            *self.0 = Some(db);
-        }
-    }
-
-    impl Source for GatedSource {
-        type Family = mmr::Family;
-        type Digest = sha256::Digest;
-        type Op = <TestDb as Source>::Op;
-        type Error = <Arc<TracedAsyncRwLock<Option<TestDb>>> as Source>::Error;
-
-        async fn serve(&self, request: Request<mmr::Family>) -> sync::source::Result<Self> {
-            self.0.serve(request).await
-        }
-    }
-
-    type TestOp = <GatedSource as Source>::Op;
+    type TestOp = <Shared<TestDb> as Source>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -492,8 +455,8 @@ mod tests {
         DummyProvider,
         DummyBlocker,
         mmr::Family,
-        GatedSource,
-        GatedSource,
+        Shared<TestDb>,
+        Shared<TestDb>,
     >;
 
     type TestResponse = Response<mmr::Family, TestOp, sha256::Digest>;
@@ -547,7 +510,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<T>(&mut self, fetches: Vec<T>) -> Feedback
+        fn fetch_all<T>(&mut self, fetches: impl IntoIterator<Item = T>) -> Feedback
         where
             T: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
@@ -605,8 +568,8 @@ mod tests {
             blocker: DummyBlocker,
             mailbox_size: NZUsize!(16),
             me: None,
-            timeout: Duration::from_millis(10),
-            fetch_retry_timeout: Duration::from_millis(10),
+            fetch_timeout: NZDuration!(Duration::from_millis(10)),
+            fetch_retry_delay: Duration::from_millis(10),
             max_serve_ops: NZU64!(16),
             serve_timeout: Duration::from_secs(10),
             priority_requests: false,
@@ -616,9 +579,9 @@ mod tests {
 
     fn test_actor(
         context: deterministic::Context,
-        database: Option<GatedSource>,
+        database: Option<Shared<TestDb>>,
         config: Config<ed25519::PublicKey, DummyProvider, DummyBlocker>,
-    ) -> (Publisher<GatedSource>, TestActor, LiveMailbox) {
+    ) -> (Publisher<Shared<TestDb>>, TestActor, LiveMailbox) {
         let publication_context = context.child("publication");
         let (mut publisher, subscriber) = Publisher::new(&publication_context);
         if let Some(database) = database {
@@ -636,19 +599,16 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
-        FixedConfig {
-            merkle_config: MmrJournalConfig {
-                journal_partition: format!("{suffix}-mmr-journal"),
-                metadata_partition: format!("{suffix}-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+    fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
+        fixed::Config {
+            merkle: MerkleConfig {
+                partition: format!("{suffix}-mmr-metadata"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -658,20 +618,20 @@ mod tests {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         }
     }
 
-    async fn init_db(context: deterministic::Context, suffix: &str) -> GatedSource {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
+    async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
+        let db = TestDb::init(context.child("db"), db_config(suffix), None)
             .await
             .expect("db init should succeed");
-        GatedSource::new("test", db)
+        Shared::new("test", db)
     }
 
     /// Create a database with one applied update.
-    async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> GatedSource {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
+    async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
+        let db = TestDb::init(context.child("db"), db_config(suffix), None)
             .await
             .expect("db init should succeed");
         let key = Sha256::hash(&[suffix.as_bytes(), b"-key"]);
@@ -679,20 +639,20 @@ mod tests {
         let batch = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .expect("batch should merkleize");
-        let (db, _) = db.apply_batch(batch).await.expect("batch should apply");
-        GatedSource::new("test", db)
+        let db = db.apply_batch(batch).await.expect("batch should apply");
+        Shared::new("test", db)
     }
 
-    type LiveMailbox = SyncMailbox<mmr::Family, GatedSource>;
+    type LiveMailbox = SyncMailbox<mmr::Family, Shared<TestDb>>;
 
     /// Two connected resolver services with distinct databases, indexed by peer.
     struct LivePair {
         /// Databases served by each peer.
-        databases: [GatedSource; 2],
-        publishers: [Publisher<GatedSource>; 2],
+        databases: [Shared<TestDb>; 2],
+        publishers: [Publisher<Shared<TestDb>>; 2],
         /// Mailboxes for requesting data from peers.
         mailboxes: [LiveMailbox; 2],
         /// Actor counters used to observe admission and cancellation.
@@ -770,8 +730,8 @@ mod tests {
                     blocker: control,
                     mailbox_size: NZUsize!(16),
                     me: Some(peer.clone()),
-                    timeout: Duration::from_secs(5),
-                    fetch_retry_timeout: Duration::from_millis(10),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
+                    fetch_retry_delay: Duration::from_millis(10),
                     max_serve_ops: NZU64!(16),
                     serve_timeout: Duration::from_secs(5),
                     priority_requests: false,
@@ -857,7 +817,7 @@ mod tests {
     }
 
     /// Obtain the response directly from its database for comparison with the P2P result.
-    async fn expected_payload(db: &GatedSource, request: Request<mmr::Family>) -> Bytes {
+    async fn expected_payload(db: &Shared<TestDb>, request: Request<mmr::Family>) -> Bytes {
         db.serve(request).await.unwrap().0.encode()
     }
 
@@ -894,7 +854,7 @@ mod tests {
     #[test]
     fn captured_snapshot_survives_recovery_append_prune_and_publisher_close() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = db_config("captured_snapshot", &context);
+            let cfg = db_config("captured_snapshot");
             let mut db = TestDb::init(context.child("initial"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -902,20 +862,20 @@ mod tests {
             let first = db
                 .new_batch()
                 .write(key, Some(Sha256::hash(&[b"first"])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(first).await.unwrap();
+            db = db.apply_batch(first).await.unwrap();
             db = db.commit().await.unwrap();
             let recovered_size = db.bounds().end;
             let recovered_root = db.root();
             let second = db
                 .new_batch()
                 .write(key, Some(Sha256::hash(&[b"second"])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(second).await.unwrap();
+            db = db.apply_batch(second).await.unwrap();
             db = db.commit().await.unwrap();
             drop(db);
             let mut db = TestDb::init(context.child("recovered"), cfg, Some(recovered_size))
@@ -930,10 +890,10 @@ mod tests {
             let batch = db
                 .new_batch()
                 .write(key, Some(Sha256::hash(&[b"applied"])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
             let (next, snapshot) = db.snapshot().await.unwrap();
             db = next;
             let snapshot = Arc::new(snapshot);
@@ -968,10 +928,10 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .write(key, Some(Sha256::hash(&[&value.to_be_bytes()])))
-                    .merkleize(&db, None, &mut Proportional)
+                    .merkleize(&db)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
             }
             db = db.commit().await.unwrap();
             let boundary = db.sync_boundary();
@@ -1269,8 +1229,8 @@ mod tests {
                     producer: handler,
                     mailbox_size: NZUsize!(8),
                     me: Some(peer),
-                    timeout: Duration::from_secs(5),
-                    fetch_retry_timeout: Duration::from_millis(10),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
+                    fetch_retry_delay: Duration::from_millis(10),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1913,26 +1873,26 @@ mod tests {
                 let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let batch = batch
-                .merkleize(&database, None, &mut Proportional)
-                .await
-                .unwrap();
-            let (database, _) = database.apply_batch(batch).await.unwrap();
+            let batch = batch.merkleize(&database).await.unwrap();
+            let database = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
-            let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
+            let target = sync::Target {
+                root: database.root(),
+                range: bounds.clone().try_into().unwrap(),
+            };
             slot.put(database);
 
             // Small fetch and apply batches exercise repeated source polling between journal
             // writes, with several candidate responses allowed to wait in parallel.
             let synced: TestDb = select! {
-                result = sync::sync(sync::engine::Config {
+                result = sync::sync(sync::Config {
                     context: pair_context.child("destination"),
                     source: pair.mailboxes[0].clone(),
                     target: target.clone(),
                     max_outstanding_requests: NZUsize!(4),
                     fetch_batch_size: NZU64!(2),
                     apply_batch_size: NZU64!(1),
-                    db_config: db_config("multiple-batches-destination", &pair_context),
+                    db_config: db_config("multiple-batches-destination"),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
@@ -1994,7 +1954,10 @@ mod tests {
                 let good_db = good_db.read().await;
                 assert_eq!(bad_db.bounds(), good_db.bounds());
                 assert_ne!(bad_db.root(), good_db.root());
-                sync::Target::new(good_db.root(), good_db.bounds().try_into().unwrap())
+                sync::Target {
+                    root: good_db.root(),
+                    range: good_db.bounds().try_into().unwrap(),
+                }
             };
 
             let manager = oracle.manager();
@@ -2020,8 +1983,8 @@ mod tests {
                         blocker: control,
                         mailbox_size: NZUsize!(16),
                         me: Some(peer),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(50),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(50),
                         max_serve_ops: NZU64!(16),
                         serve_timeout: Duration::from_secs(2),
                         priority_requests: false,
@@ -2038,7 +2001,7 @@ mod tests {
                 .await
                 .unwrap();
             let publication_context = test_context.child("client_publication");
-            let (_publisher, subscriber) = Publisher::<GatedSource>::new(&publication_context);
+            let (_publisher, subscriber) = Publisher::<Shared<TestDb>>::new(&publication_context);
             let (actor, mailbox) = Actor::<_, _, _, _, mmr::Family, _, _>::new(
                 test_context.child("actor_2"),
                 Config {
@@ -2046,8 +2009,8 @@ mod tests {
                     blocker: control,
                     mailbox_size: NZUsize!(16),
                     me: Some(client.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(50),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(50),
                     max_serve_ops: NZU64!(16),
                     serve_timeout: Duration::from_secs(2),
                     priority_requests: false,
@@ -2059,14 +2022,14 @@ mod tests {
             handles.push(actor.start(net));
 
             let synced: TestDb = select! {
-                result = sync::sync(sync::engine::Config {
+                result = sync::sync(sync::Config {
                     context: test_context.child("destination"),
                     source: mailbox,
                     target: target.clone(),
                     max_outstanding_requests: NZUsize!(1),
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(16),
-                    db_config: db_config("f7-destination", &test_context),
+                    db_config: db_config("f7-destination"),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,

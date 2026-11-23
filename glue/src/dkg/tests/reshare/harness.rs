@@ -2,12 +2,15 @@ use crate::{
     dkg::{
         ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
         fence::Fence,
+        max_payload_size as dkg_payload_size,
         network::{
             AddressableManager, Addresses, Directory, Manager as DkgManager, MissingAddress,
         },
         orchestrator, probe as dkg_probe,
         reshare::{self, Input as ReshareInput},
-        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+        state_sync::{
+            Config as StateSyncConfig, Plan as StateSyncPlan, StateSync, recovered_epoch,
+        },
         tests::{
             max_supported_mode,
             mocks::{FilteredReceiver, MemorySecretStore},
@@ -20,20 +23,21 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, ExecutionError, Input, Proposed,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single, SyncEngineConfig,
-            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            p2p as qmdb_resolver,
         },
     },
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read,
+    ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -47,7 +51,7 @@ use commonware_consensus::{
         elector::RoundRobin,
         types::{Context, Finalization},
     },
-    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, TermLength, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
@@ -55,37 +59,39 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
-    certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
+    certificate::{
+        ConstantProvider, Membership, Provider as CertificateProvider, Scheme as _, Scoped,
+    },
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
 use commonware_formatting::hex;
+use commonware_macros::{test_group, test_traced};
 use commonware_math::algebra::Random;
-use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
+use commonware_p2p::{
+    Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, max_message_size, simulated,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
-    buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
+    BufMut, Clock, Handle, IoBuf, Metrics, Quota, Runner as _, Spawner, Storage, Supervisor as _,
+    buffer::paged::CacheRef,
+    deterministic::{self, Context as DeterministicContext},
 };
 use commonware_storage::{
     archive::prunable,
-    journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
-    },
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
+    mmr::{self, Location},
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
 use commonware_utils::{
     N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
-    ordered::{Map, Set},
+    ordered::{Map, Quorum as _, Set},
     range::NonEmptyRange,
     sequence::Unit,
     sync::Mutex,
     test_rng,
 };
-use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -96,7 +102,7 @@ use std::{
 
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-type Database<E> = Single<Qmdb<E>>;
+type Database<E> = Shared<Qmdb<E>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
@@ -109,8 +115,11 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_E2E";
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
-const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
+
+/// Operations served per QMDB sync request and fetched per batch.
+const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
 
 const VOTE_CHANNEL: u64 = 0;
 const CERTIFICATE_CHANNEL: u64 = 1;
@@ -150,10 +159,17 @@ impl Network {
         }
     }
 
-    fn manager(self, oracle: &simulated::Oracle<PublicKey, DeterministicContext>) -> TestManager {
+    fn manager(
+        self,
+        oracle: &simulated::Oracle<PublicKey, DeterministicContext>,
+        public_key: &PublicKey,
+    ) -> TestManager {
+        // A node starts with empty peer sets, including after a restart
+        let control = oracle.control(public_key.clone());
+        control.reset_peer_sets();
         match self {
-            Self::Discovery => TestManager::Discovery(oracle.manager()),
-            Self::Lookup => TestManager::Lookup(AddressableManager::new(oracle.socket_manager())),
+            Self::Discovery => TestManager::Discovery(control.manager()),
+            Self::Lookup => TestManager::Lookup(AddressableManager::new(control.socket_manager())),
         }
     }
 }
@@ -186,6 +202,10 @@ impl Directory<PublicKey> for TestDirectory {
         RangeCfg::exact(peers.len())
     }
 
+    fn max_encode_size(peers: usize) -> usize {
+        bool::SIZE + Addresses::<PublicKey>::max_encode_size(peers)
+    }
+
     fn matches(&self, peers: &Set<PublicKey>) -> bool {
         self.0
             .as_ref()
@@ -193,6 +213,7 @@ impl Directory<PublicKey> for TestDirectory {
     }
 }
 
+/// One node's peer manager, tracking peer sets for that node alone.
 #[derive(Clone, Debug)]
 enum TestManager {
     Discovery(DiscoveryManager),
@@ -264,6 +285,10 @@ impl<R: Receiver> Receiver for Swap<R> {
         }
         Ok((peer, message))
     }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -273,7 +298,7 @@ pub(super) struct Block {
     height: Height,
     state_root: sha256::Digest,
     range: NonEmptyRange<Location>,
-    payload: Option<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>,
+    payload: Option<Payload<MinPk, ed25519::PublicKey, TestDirectory>>,
 }
 
 impl Write for Block {
@@ -308,11 +333,23 @@ impl Read for Block {
             height: Height::read(buf)?,
             state_root: sha256::Digest::read(buf)?,
             range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>::read_cfg(
+            payload: Option::<Payload<MinPk, ed25519::PublicKey, TestDirectory>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
         })
+    }
+}
+
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+            + bool::SIZE
+            + Payload::<MinPk, ed25519::PublicKey, TestDirectory>::max_encode_size(MAX_PARTICIPANTS)
     }
 }
 
@@ -346,10 +383,10 @@ impl CertifiableBlock for Block {
 
 impl ReshareBlock for Block {
     type Variant = MinPk;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = TestDirectory;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.clone()
     }
 }
@@ -386,17 +423,17 @@ struct App {
 }
 
 impl App {
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
-        mut batches: UnmerkleizedOf<Database<E>, E>,
-    ) -> Result<MerkleizedOf<Database<E>, E>, ExecutionError> {
+        mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
+    ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
         let key = Sha256::hash(&[b"height"]);
         batches = batches.write(key, Some(u64_to_digest(height.get())));
-        Ok(batches.merkleize().await?)
+        batches.merkleize().await.unwrap()
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E> for App {
+impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -413,58 +450,44 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
-        let Some(parent) = ancestry.peek().cloned() else {
-            return Ok(None);
-        };
+    ) -> Option<Proposed<Self, E>> {
+        let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let merkleized = Self::execute(height, batches).await?;
-        let bounds = merkleized.bounds();
+        let merkleized = Self::execute(height, batches).await;
         let block = Block {
             context: context.1,
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
             payload,
         };
-        Ok(Some(Proposed { block, merkleized }))
+        Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
-        // Reshare final-block payload validation is enforced by the surrounding
-        // reshare::Application wrapper; this inner app only executes state.
-        let Some(tip) = ancestry.peek().cloned() else {
-            return Ok(None);
-        };
-        let merkleized = Self::execute(tip.height(), batches).await?;
-        Ok(Some(merkleized))
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
-        Self::execute(block.height(), batches).await.map(Some)
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        // The surrounding `reshare::Application` wrapper validates the final block's reshare
+        // payload, so this inner app only executes state.
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: &MerkleizedOf<Self::Databases, E>,
-        _readers: ReadersOf<Self::Databases, E>,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
     }
 
@@ -473,7 +496,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         context: (E, Self::Context),
         block: &Self::Block,
         _captured: Self::Captured,
-        _readers: ReadersOf<Self::Databases, E>,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
             .lock()
@@ -488,7 +511,10 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }
 
@@ -529,16 +555,18 @@ struct TestRegistrar {
     public_key: ed25519::PublicKey,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RegistrationRole {
-    Signer,
-    Verifier,
-}
-
+/// A scheme installed into a node's provider and the membership it reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Registration {
     pub(super) epoch: Epoch,
-    pub(super) role: RegistrationRole,
+    pub(super) membership: Option<Membership>,
+}
+
+impl Registration {
+    /// Whether the installed scheme holds signing material.
+    pub(super) fn signs(&self) -> bool {
+        self.membership.is_some_and(|m| m.signer().is_some())
+    }
 }
 
 impl Registrar for TestRegistrar {
@@ -546,30 +574,43 @@ impl Registrar for TestRegistrar {
     type PublicKey = ed25519::PublicKey;
 
     async fn register(&self, epoch: Epoch, info: SchemeInfo<Self::Variant, Self::PublicKey>) {
-        let (scheme, role) = match info {
-            SchemeInfo::Verifier {
-                participants,
-                sharing,
-            } => (
-                Scheme::verifier(NAMESPACE, participants, sharing),
-                RegistrationRole::Verifier,
-            ),
-            SchemeInfo::Signer {
-                participants,
-                sharing,
-                share,
-            } => (
-                Scheme::signer(NAMESPACE, participants, sharing, share)
-                    .expect("share must match participant set"),
-                RegistrationRole::Signer,
-            ),
-        };
-        self.provider.register(epoch, scheme);
+        self.provider.register(epoch, scheme(info));
+        let membership = installed_membership(&self.provider, epoch);
         self.events
             .lock()
             .entry(self.public_key.clone())
             .or_default()
-            .push(Registration { epoch, role });
+            .push(Registration { epoch, membership });
+    }
+}
+
+/// Returns the membership reported by the scheme `provider` serves for `epoch`.
+fn installed_membership(provider: &DynamicProvider, epoch: Epoch) -> Option<Membership> {
+    provider
+        .scheme(epoch)
+        .expect("registered epoch must have a scheme")
+        .me()
+}
+
+/// Builds the scheme that `info` describes.
+fn scheme(info: SchemeInfo<MinPk, PublicKey>) -> Scheme {
+    match info {
+        SchemeInfo::Verifier {
+            participants,
+            sharing,
+        } => Scheme::verifier(NAMESPACE, participants, sharing),
+        SchemeInfo::Member {
+            participants,
+            sharing,
+            public_key,
+        } => Scheme::member(NAMESPACE, participants, sharing, &public_key)
+            .expect("registered member must be a participant"),
+        SchemeInfo::Signer {
+            participants,
+            sharing,
+            share,
+        } => Scheme::signer(NAMESPACE, participants, sharing, share)
+            .expect("share must match participant set"),
     }
 }
 
@@ -597,11 +638,12 @@ impl ParticipantsProvider for ScheduleProvider {
 pub(super) struct CommitteeSchedule {
     participants: Vec<ed25519::PublicKey>,
     committee_sizes: Vec<usize>,
+    rotation_stride: usize,
 }
 
 impl CommitteeSchedule {
     pub(super) fn players(&self, epoch: Epoch) -> Set<ed25519::PublicKey> {
-        let offset = epoch.get() as usize % self.participants.len();
+        let offset = (epoch.get() as usize * self.rotation_stride) % self.participants.len();
         let committee_size =
             self.committee_sizes[epoch.get() as usize % self.committee_sizes.len()];
         let players = (0..committee_size)
@@ -627,14 +669,64 @@ pub(super) struct ReshareEngine {
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
     stale: Option<Height>,
+    pruned: Option<ed25519::PublicKey>,
+    pub(super) pruned_restarts: Arc<Mutex<Vec<PrunedRestart>>>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
+    elector: RoundRobin,
 }
 
 pub(super) struct ValidatorEngine {
     context: DeterministicContext,
     handles: [Handle<()>; 6],
+}
+
+/// Observations from one restart of the participant passed to
+/// [`ReshareEngine::with_marshal_pruning`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PrunedRestart {
+    /// The epoch recovered from marshal's processed height at the restart.
+    pub(super) epoch: Epoch,
+    /// Whether marshal still held the boundary block that introduced `epoch`.
+    pub(super) boundary_held: bool,
+    /// Whether marshal still held the node's state-sync floor block, or `None` if
+    /// the node had not state synced.
+    pub(super) floor_held: Option<bool>,
+    /// Whether the reshare actor's phase gauge showed it following the epoch once
+    /// marshal processed a block after the restart, or `None` until then.
+    pub(super) following: Option<bool>,
+}
+
+/// The reshare actor's phase gauge value while it follows an epoch without
+/// participating.
+const FOLLOWING_PHASE: &str = "0";
+
+/// Returns the reshare actor phase that validator `index`'s latest start reports in
+/// the encoded `metrics`.
+///
+/// Each start of a validator labels its metrics with a `restart` count, so the series
+/// with the highest count belongs to the running actor.
+fn reshare_phase(metrics: &str, index: usize) -> Option<&str> {
+    let label = format!("index=\"{index}\"");
+    metrics
+        .lines()
+        .filter_map(|line| {
+            let (labels, value) = line
+                .strip_prefix("validator_reshare_phase{")?
+                .split_once("} ")?;
+            let mut labels = labels.split(',');
+            labels.clone().any(|pair| pair == label).then_some(())?;
+            let restart = labels.find_map(|pair| {
+                pair.strip_prefix("restart=\"")?
+                    .strip_suffix('"')?
+                    .parse::<u64>()
+                    .ok()
+            })?;
+            Some((restart, value.trim()))
+        })
+        .max_by_key(|(restart, _)| *restart)
+        .map(|(_, value)| value)
 }
 
 #[derive(Clone)]
@@ -646,29 +738,20 @@ struct InitialState {
 impl InitialState {
     async fn register_epoch_zero(
         &self,
+        public_key: &PublicKey,
         provider: &DynamicProvider,
         store: &MemorySecretStore,
-    ) -> RegistrationRole {
+    ) -> Option<Membership> {
         let mut store = store.clone();
-        let participants = self.info.output.players();
-        let sharing = self.info.output.public();
-        store.get_share(Epoch::zero()).await.map_or_else(
-            || {
-                provider.register(
-                    Epoch::zero(),
-                    Scheme::verifier(NAMESPACE, participants.clone(), sharing.clone()),
-                );
-                RegistrationRole::Verifier
-            },
-            |share| {
-                provider.register(
-                    Epoch::zero(),
-                    Scheme::signer(NAMESPACE, participants.clone(), sharing.clone(), share)
-                        .expect("initial signer share"),
-                );
-                RegistrationRole::Signer
-            },
-        )
+        let share = store.get_share(Epoch::zero()).await;
+        let info = SchemeInfo::new(
+            public_key,
+            self.info.output.players().clone(),
+            self.info.output.public().clone(),
+            share,
+        );
+        provider.register(Epoch::zero(), scheme(info));
+        installed_membership(provider, Epoch::zero())
     }
 }
 
@@ -678,13 +761,16 @@ impl ReshareEngine {
     }
 
     pub(super) fn with_committee(network: Network, total: u32, committee_size: usize) -> Self {
-        Self::with_committees(network, total, vec![committee_size])
+        Self::with_committees(network, total, vec![committee_size], 1)
     }
 
+    /// Starts each epoch's players `rotation_stride` participants after the
+    /// previous epoch's players.
     pub(super) fn with_committees(
         network: Network,
         total: u32,
         committee_sizes: Vec<usize>,
+        rotation_stride: usize,
     ) -> Self {
         assert!(!committee_sizes.is_empty());
         for committee_size in &committee_sizes {
@@ -706,6 +792,7 @@ impl ReshareEngine {
         let schedule = Arc::new(CommitteeSchedule {
             participants: participants.clone(),
             committee_sizes,
+            rotation_stride,
         });
         let players = schedule.players(Epoch::zero());
         let next_players = schedule.players(Epoch::new(1));
@@ -744,14 +831,23 @@ impl ReshareEngine {
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
             stale: None,
+            pruned: None,
+            pruned_restarts: Arc::new(Mutex::new(Vec::new())),
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
+            elector: RoundRobin::default(),
         }
     }
 
     pub(super) fn with_failures(mut self, failures: impl IntoIterator<Item = u64>) -> Self {
         self.failures = Arc::new(failures.into_iter().collect());
+        self
+    }
+
+    /// Sets the leader election. The default rotates the leader every view.
+    pub(super) fn with_elector(mut self, elector: RoundRobin) -> Self {
+        self.elector = elector;
         self
     }
 
@@ -791,6 +887,15 @@ impl ReshareEngine {
     /// node's marshal.
     pub(super) const fn with_stale(mut self, height: Height) -> Self {
         self.stale = Some(height);
+        self
+    }
+
+    /// Prunes `participant`'s marshal after every block with stateful pruning and no
+    /// extra marshal retention.
+    ///
+    /// Each restart of `participant` appends a [`PrunedRestart`] to `pruned_restarts`.
+    pub(super) fn with_marshal_pruning(mut self, participant: ed25519::PublicKey) -> Self {
+        self.pruned = Some(participant);
         self
     }
 
@@ -836,6 +941,21 @@ impl EngineDefinition for ReshareEngine {
         ]
     }
 
+    fn max_message_size(&self) -> u32 {
+        let participants = MAX_PARTICIPANTS.get();
+        let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
+            SYNC_BATCH_SIZE,
+            fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
+        );
+        max_message_size([
+            orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
+            marshal::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
+            dkg_probe::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
+            dkg_payload_size::<MinPk, ed25519::PublicKey>(MAX_PARTICIPANTS),
+            qmdb,
+        ])
+    }
+
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
         let InitContext {
             context,
@@ -850,7 +970,7 @@ impl EngineDefinition for ReshareEngine {
 
         let signer = self.signers[index].clone();
         let partition_prefix = format!("reshare-e2e-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let restarted = self.stores.lock().contains_key(public_key);
 
         // A node restarting means its configured processed hold has served its
@@ -874,18 +994,20 @@ impl EngineDefinition for ReshareEngine {
 
         let provider = DynamicProvider::new();
         let store = self.store(public_key);
-        self.initial.register_epoch_zero(&provider, &store).await;
-        let dkg_manager = self.network.manager(oracle);
+        self.initial
+            .register_epoch_zero(public_key, &provider, &store)
+            .await;
+        let dkg_manager = self.network.manager(oracle, public_key);
 
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
             marshal_resolver::Config {
                 public_key: public_key.clone(),
-                peer_provider: oracle.manager(),
+                peer_provider: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -898,7 +1020,8 @@ impl EngineDefinition for ReshareEngine {
             deque_size: 10,
             priority: false,
             codec_config: (),
-            peer_provider: oracle.manager(),
+            peer_provider: dkg_manager.clone(),
+            blocker: oracle.control(public_key.clone()),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
@@ -994,11 +1117,12 @@ impl EngineDefinition for ReshareEngine {
             let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
             provider.register(
                 artifact.info.epoch,
-                Scheme::verifier(
-                    NAMESPACE,
+                scheme(SchemeInfo::new(
+                    public_key,
                     artifact.info.output.players().clone(),
                     artifact.info.output.public().clone(),
-                ),
+                    None,
+                )),
             );
             Some(artifact)
         } else {
@@ -1037,17 +1161,26 @@ impl EngineDefinition for ReshareEngine {
         if should_state_sync {
             let finalization = match self.state_sync_floor {
                 Some(height) => {
-                    let source = self
-                        .marshals
-                        .lock()
-                        .values()
-                        .next()
-                        .cloned()
-                        .expect("state-sync floor source must be available");
-                    source
-                        .get_finalization(height)
-                        .await
-                        .expect("configured state-sync floor must be finalized")
+                    // The simulator releases delayed validators by round. Skipped views can
+                    // put that round ahead of the height whose proof the test needs.
+                    let sources: Vec<_> = self.marshals.lock().values().cloned().collect();
+                    assert!(
+                        !sources.is_empty(),
+                        "state-sync floor source must be available"
+                    );
+                    let deadline = context.current() + Duration::from_secs(30);
+                    'wait: loop {
+                        for source in &sources {
+                            if let Some(proof) = source.get_finalization(height).await {
+                                break 'wait proof;
+                            }
+                        }
+                        assert!(
+                            context.current() < deadline,
+                            "no source finalized configured floor {height}"
+                        );
+                        context.sleep(Duration::from_millis(50)).await;
+                    }
                 }
                 None => probe_artifact
                     .as_ref()
@@ -1086,18 +1219,68 @@ impl EngineDefinition for ReshareEngine {
         self.marshals
             .lock()
             .insert(public_key.clone(), marshal.clone());
+        let pruned = self.pruned.as_ref() == Some(public_key);
 
-        let db_config = FixedConfig {
-            merkle_config: MmrJournalConfig {
-                journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
-                metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
+        // Report the epoch this restart recovers, whether marshal still holds the
+        // epoch's boundary block and the node's state-sync floor block, and whether the
+        // reshare actor follows the epoch.
+        if pruned && restarted {
+            let marshal = marshal.clone();
+            let pruned_restarts = self.pruned_restarts.clone();
+            let floor = self.state_syncs.lock().get(public_key).copied();
+            context
+                .child("pruned_restart_probe")
+                .spawn(move |context| async move {
+                    let processed = marshal
+                        .get_processed()
+                        .await
+                        .expect("restarted marshal must have processed a block");
+                    let epoch = recovered_epoch(processed, &FixedEpocher::new(EPOCH_LENGTH));
+                    let boundary = epoch
+                        .previous()
+                        .map_or(Height::zero(), |previous| final_height(previous.get()));
+                    let boundary_held = marshal.get_block(boundary).await.is_some();
+                    let floor_held = match floor {
+                        Some(floor) => Some(marshal.get_block(Height::new(floor)).await.is_some()),
+                        None => None,
+                    };
+                    let restart = {
+                        let mut pruned_restarts = pruned_restarts.lock();
+                        pruned_restarts.push(PrunedRestart {
+                            epoch,
+                            boundary_held,
+                            floor_held,
+                            following: None,
+                        });
+                        pruned_restarts.len() - 1
+                    };
+
+                    // Marshal processes a block only after every reporter, including
+                    // the reshare actor, acknowledges it. Once marshal passes the
+                    // restart position, the actor has finished setup and its phase
+                    // gauge shows its role.
+                    while marshal
+                        .get_processed()
+                        .await
+                        .is_none_or(|current| current.height() <= processed.height())
+                    {
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                    let metrics = context.encode();
+                    let phase = reshare_phase(&metrics, index)
+                        .expect("restarted reshare actor must report its phase");
+                    pruned_restarts.lock()[restart].following = Some(phase == FOLLOWING_PHASE);
+                });
+        }
+
+        let db_config = fixed::Config {
+            merkle: MerkleConfig {
+                partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
-            journal_config: FixedLogConfig {
+            log: FixedLogConfig {
                 partition: format!("{partition_prefix}-qmdb-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),
@@ -1107,7 +1290,7 @@ impl EngineDefinition for ReshareEngine {
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         };
 
         let publication_context = context.child("publication");
@@ -1116,13 +1299,13 @@ impl EngineDefinition for ReshareEngine {
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
             context.child("qmdb_resolver"),
             qmdb_resolver::Config {
-                peer_provider: oracle.manager(),
+                peer_provider: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
-                max_serve_ops: NZU64!(16),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
+                max_serve_ops: SYNC_BATCH_SIZE,
                 serve_timeout: Duration::from_secs(2),
                 priority_requests: false,
                 priority_responses: false,
@@ -1131,9 +1314,6 @@ impl EngineDefinition for ReshareEngine {
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
-        let fence_epoch = probe_artifact
-            .as_ref()
-            .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
         let state_sync = probe_artifact.map(|artifact| {
             let floor = plan
                 .floor()
@@ -1149,7 +1329,11 @@ impl EngineDefinition for ReshareEngine {
             events: self.registrations.clone(),
             public_key: public_key.clone(),
         };
-        let (fence, gate) = Fence::new(fence_epoch);
+
+        // The orchestrator enters an epoch only once the reshare actor
+        // registers the epoch's scheme and marks the fence, so it never starts
+        // an engine from the state-sync verifier registered above.
+        let (fence, gate) = Fence::new();
         let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = state_sync
             .as_ref()
             .map(|state_sync| state_sync.floor.clone());
@@ -1159,10 +1343,12 @@ impl EngineDefinition for ReshareEngine {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
                 max_supported_mode: max_supported_mode(),
+                block_codec_config: (),
             },
             state_sync,
         )
         .await;
+        let probe_plan = state_sync.clone();
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
             context.child("reshare"),
             reshare::Config {
@@ -1184,7 +1370,6 @@ impl EngineDefinition for ReshareEngine {
                 sharing_mode: self.sharing_mode,
                 reveal: Reveal::V1,
                 mailbox_size: NZUsize!(100),
-                muxer_size: 128,
                 partition_prefix: format!("{partition_prefix}-reshare"),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
@@ -1216,11 +1401,15 @@ impl EngineDefinition for ReshareEngine {
                 resolvers: qmdb_sync_resolver,
                 snapshot_publisher,
                 sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
+                    fetch_batch_size: SYNC_BATCH_SIZE,
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                 },
-                prune_config: None,
+                prune_config: pruned.then_some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
                 strategy: Sequential,
             },
         );
@@ -1247,7 +1436,7 @@ impl EngineDefinition for ReshareEngine {
                 application: deferred,
                 strategy: Sequential,
                 simplex: orchestrator::SimplexConfig {
-                    elector: RoundRobin::<Sha256>::default(),
+                    elector: self.elector.clone(),
                     mailbox_size: NZUsize!(3),
                     replay_buffer: IO_BUFFER_SIZE,
                     write_buffer: IO_BUFFER_SIZE,
@@ -1255,7 +1444,8 @@ impl EngineDefinition for ReshareEngine {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_millis(500),
-                    fetch_timeout: Duration::from_secs(2),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_secs(2),
                     view_retention: ViewDelta::new(10),
                     skip: SkipPolicy::Enabled {
                         timeout: Duration::from_secs(5),
@@ -1267,7 +1457,6 @@ impl EngineDefinition for ReshareEngine {
                 gate,
                 state_sync,
                 blocks_per_epoch: EPOCH_LENGTH,
-                muxer_size: 128,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-orchestrator"),
             },
@@ -1284,7 +1473,7 @@ impl EngineDefinition for ReshareEngine {
             buffer,
             resolver,
         );
-        probe_mailbox.attach(marshal.clone());
+        probe_mailbox.attach(marshal.clone(), probe_plan);
         // Record the synced height without blocking init: awaiting the floor
         // block here would stall the simulator's restart arm (and with it the
         // crash monitor) until the block is fetched.
@@ -1407,12 +1596,114 @@ fn restart_after_epoch_zero_pruning_does_not_reseed_share() {
         assert!(restarted_view.get_share(Epoch::zero()).await.is_none());
 
         let provider = DynamicProvider::new();
-        let role = engine
+        let membership = engine
             .initial
-            .register_epoch_zero(&provider, &restarted)
+            .register_epoch_zero(&public_key, &provider, &restarted)
             .await;
-        assert_eq!(role, RegistrationRole::Verifier);
+
+        // Without its share the player still registers a scheme that reports its
+        // committee position.
+        let index = engine
+            .initial
+            .info
+            .output
+            .players()
+            .index(&public_key)
+            .expect("key must be an epoch-zero player");
+        assert_eq!(membership, Some(Membership::Member(index)));
     });
+}
+
+/// A node's manager holds no peer sets when the node starts or restarts. It tracks sets for that
+/// node alone.
+#[test]
+fn manager_starts_node_with_empty_peer_sets() {
+    for network in [Network::Discovery, Network::Lookup] {
+        deterministic::Runner::default().start(|context| async move {
+            // Imitate the simulation plan by tracking both participants for every peer.
+            let (simulated_network, oracle) = simulated::Network::new(
+                context.child("network"),
+                simulated::Config {
+                    max_size: 1024,
+                    max_peers_per_set: NZUsize!(2),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            simulated_network.start();
+            let mut rng = test_rng();
+            let node = ed25519::PrivateKey::random(&mut rng).public_key();
+            let other = ed25519::PrivateKey::random(&mut rng).public_key();
+            let participants = Set::from_iter_dedup([node.clone(), other.clone()]);
+            let mut plan = oracle.manager();
+            DkgManager::track(
+                &mut plan,
+                Epoch::zero(),
+                TrackedPeers::primary(participants.clone()),
+                &Unit,
+            )
+            .expect("key-only tracking must not fail");
+            assert!(plan.peer_set(0).await.is_some());
+
+            // A starting node's manager holds no peer sets.
+            let mut manager = network.manager(&oracle, &node);
+            assert!(manager.peer_set(0).await.is_none());
+
+            // The node tracks its own set 0 and leaves the network-wide set unchanged.
+            let peers = Set::from_iter_dedup([other.clone()]);
+            let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000);
+            let addresses = Map::from_iter_dedup([(other, Address::Symmetric(socket))]);
+            let directory = network.directory(&peers, &addresses);
+            DkgManager::track(
+                &mut manager,
+                Epoch::zero(),
+                TrackedPeers::primary(peers.clone()),
+                &directory,
+            )
+            .expect("tracked peer must have an address");
+            assert_eq!(manager.peer_set(0).await.unwrap().primary, peers);
+            assert_eq!(plan.peer_set(0).await.unwrap().primary, participants);
+
+            // A restarted node's manager holds no peer sets.
+            let mut restarted = network.manager(&oracle, &node);
+            assert!(restarted.peer_set(0).await.is_none());
+        });
+    }
+}
+
+/// A player whose epoch-zero share is gone before its actor starts registers a member scheme at
+/// its committee position, and the remaining signers finish the epoch without it.
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_registers_shareless_player_as_member() {
+    let engine = ReshareEngine::with_committee(Network::Discovery, 4, 4);
+    let public_key = engine.participants[1].clone();
+    let index = engine
+        .initial
+        .info
+        .output
+        .players()
+        .index(&public_key)
+        .expect("key must be an epoch-zero player");
+    let mut store = engine.store(&public_key);
+    futures::executor::block_on(store.prune(Epoch::new(1)));
+    let registrations = engine.registrations.clone();
+
+    super::successful_reshare_plan(engine, 0).run().unwrap();
+
+    let registered = registrations
+        .lock()
+        .get(&public_key)
+        .cloned()
+        .unwrap_or_default();
+    let expected = Registration {
+        epoch: Epoch::zero(),
+        membership: Some(Membership::Member(index)),
+    };
+    assert!(
+        registered.contains(&expected),
+        "shareless player must register as a member: {registered:?}"
+    );
 }
 
 fn archive_config<C>(
@@ -1438,7 +1729,7 @@ fn archive_config<C>(
 
 fn empty_db_root() -> sha256::Digest {
     Sha256Digest::from(hex!(
-        "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
+        "88ea517d06e70f58e0df79803dd54aeccb7337ac4ae5aa24fe79bb1e4029e755"
     ))
 }
 
@@ -1459,4 +1750,22 @@ pub(super) fn height_round(height: Height) -> Round {
         .containing(height)
         .expect("test height should be supported");
     Round::new(info.epoch(), View::new(info.relative().get()))
+}
+
+/// Stable leaders with optimistic validation.
+///
+/// A dealer's log can only be carried by a block that dealer proposes, and in this harness's
+/// epochs only by the 15 blocks from the midpoint up to but not including the final block. A
+/// ceremony needs logs from a quorum of dealers. With no skipped views, those 15 blocks span 8
+/// consecutive terms of two views. Round-robin election gives those terms to 8 consecutive
+/// leaders, and the largest committee these tests use has 7 dealers, so every dealer gets a term.
+///
+/// Two optimistic views let validators vote on a term's second view before its first is
+/// certified. The stall timeout exceeds the engine's leader and certification timeouts.
+pub(super) fn stable_leaders() -> RoundRobin {
+    RoundRobin::default().with_term(
+        TermLength::new(NZU32!(2)),
+        Duration::from_secs(5),
+        ViewDelta::new(2),
+    )
 }

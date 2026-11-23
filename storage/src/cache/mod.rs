@@ -54,7 +54,7 @@
 //!         items_per_blob: NZU64!(1024),
 //!         write_buffer: NZUsize!(1024 * 1024),
 //!         replay_buffer: NZUsize!(4096),
-//!         page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
 //!     };
 //!     let mut cache = Cache::init(context, cfg).await.unwrap();
 //!
@@ -142,7 +142,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("first"), cfg.clone())
                 .await
@@ -164,7 +164,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Cache::<_, i32>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(JournalError::Codec(_))));
@@ -184,7 +184,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(1), // no mask - each item is its own section
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("storage"), cfg.clone())
                 .await
@@ -254,7 +254,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(
                 context.child("init").with_attribute("index", 1),
@@ -299,7 +299,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(items_per_blob),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::<_, [u8; 1024]>::init(
                 context.child("init").with_attribute("index", 2),
@@ -356,17 +356,17 @@ mod tests {
     fn test_cache_clean_restart_reads_journal_once() {
         deterministic::Runner::default().start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let config = |context: &RecordingContext<_>| Config {
+            let config = || Config {
                 partition: "clean-restart-single-pass".into(),
                 codec_config: (),
                 compression: None,
                 write_buffer: NZUsize!(256),
                 replay_buffer: NZUsize!(1024),
                 items_per_blob: NZU64!(64),
-                page_cache: CacheRef::from_pooler(context, NZU16!(64), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
             };
 
-            let mut cache = Cache::<_, u64>::init(context.child("seed"), config(&context))
+            let mut cache = Cache::<_, u64>::init(context.child("seed"), config())
                 .await
                 .expect("failed to initialize cache");
             for index in 0..15 {
@@ -376,7 +376,7 @@ mod tests {
             drop(cache);
 
             recordings.clear();
-            let cache = Cache::<_, u64>::init(context.child("reopen"), config(&context))
+            let cache = Cache::<_, u64>::init(context.child("reopen"), config())
                 .await
                 .expect("failed to reopen cache");
             for index in 0..15 {
@@ -414,7 +414,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("storage"), cfg.clone())
                 .await
@@ -468,7 +468,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("storage"), cfg.clone())
                 .await
@@ -547,7 +547,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             // Insert data and sync
@@ -596,7 +596,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for easier testing
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("storage"), cfg.clone())
                 .await
@@ -648,7 +648,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(100), // Smaller sections for testing
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("storage"), cfg.clone())
                 .await
@@ -706,7 +706,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("storage"), cfg.clone())
                 .await
@@ -759,7 +759,7 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
                 items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let mut cache = Cache::init(context.child("storage"), cfg.clone())
                 .await

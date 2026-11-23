@@ -1,16 +1,17 @@
 use crate::simulate::processed::ProcessedHeight;
 use commonware_consensus::{
     marshal::{self, Identifier as MarshalIdentifier, core::Variant},
-    simplex::mocks::scheme::Scheme as MockScheme,
-    types::Height,
+    simplex::{elector::RoundRobin, mocks::scheme::Scheme as MockScheme},
+    types::{Height, TermLength, ViewDelta},
 };
 use commonware_cryptography::{Digestible, ed25519, sha256};
 use commonware_runtime::{Quota, buffer::paged::CacheRef};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZU16, NZU64, NZUsize};
+use commonware_utils::{NZU16, NZU32, NZU64, NZUsize};
 use std::{
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
+    time::Duration,
 };
 
 /// Type-erased accessor returning the oldest operation location still retained
@@ -26,8 +27,29 @@ pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";
 pub(super) const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 pub(super) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
-pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+pub(super) const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
+
+/// Marshal blocks retained in scenarios that restart a validator without state sync. Its peers
+/// must still hold every block it missed while down.
+pub(super) const RESTART_MARSHAL_RETENTION: usize = 64;
+
+/// Operations served per QMDB sync request and fetched per batch.
+pub(super) const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
+
+/// Stable leaders with optimistic validation.
+///
+/// Terms of four views hand leadership to another validator several times before any scenario
+/// reaches its exit height. Two optimistic views let validators vote on a view within a term before
+/// its parent view is certified. The stall timeout exceeds the engines' leader and certification
+/// timeouts.
+pub(super) fn stable_leaders() -> RoundRobin {
+    RoundRobin::default().with_term(
+        TermLength::new(NZU32!(4)),
+        Duration::from_secs(5),
+        ViewDelta::new(2),
+    )
+}
 
 pub(super) fn u64_to_digest(v: u64) -> sha256::Digest {
     let mut bytes = [0u8; 32];

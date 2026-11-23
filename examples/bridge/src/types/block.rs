@@ -6,7 +6,6 @@ use commonware_runtime::BufMut;
 
 /// Enum representing the valid formats for blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
 pub enum BlockFormat<D: Digest> {
     /// A random set of arbitrary data.
     Random(u128),

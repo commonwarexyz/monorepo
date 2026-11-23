@@ -37,6 +37,13 @@ pub mod bls12381;
     commonware_stability_EPSILON,
     commonware_stability_RESERVED
 )))] // BETA
+pub mod certificate;
+#[cfg(not(any(
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))] // BETA
 pub mod ed25519;
 #[cfg(not(any(
     commonware_stability_BETA,
@@ -62,8 +69,6 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
-    pub mod reed_solomon;
-
     pub mod sha512;
     pub use crate::sha512::{CoreSha512, Sha512};
 
@@ -85,7 +90,6 @@ commonware_macros::stability_scope!(BETA {
     pub mod secret;
     pub use crate::secret::Secret;
 
-    pub mod certificate;
     pub mod transcript;
 
     pub mod sha256;
@@ -104,6 +108,8 @@ commonware_macros::stability_scope!(BETA {
 
     #[cfg(feature = "std")]
     pub mod handshake;
+
+    pub mod reed_solomon;
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
     pub trait Signer: Random + Send + Sync + Clone + 'static {
@@ -589,7 +595,7 @@ commonware_macros::stability_scope!(BETA {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_parallel::Rayon;
+    use commonware_parallel::mocks::{Explorer, pooled};
     use commonware_utils::{NZUsize, test_rng};
     use std::collections::HashSet;
 
@@ -941,10 +947,7 @@ mod tests {
     /// and return their digests in input order.
     #[test]
     fn test_hash_batches_shares_whole_units() {
-        let strategy = Rayon::new(NZUsize!(4))
-            .unwrap()
-            .with_parallelism(NZUsize!(8))
-            .manual();
+        let strategy = Explorer::parallel(&pooled(NZUsize!(4), NZUsize!(8)));
         for lanes in [1, 2, 8, 16] {
             for count in [0, 1, lanes + 1, 3 * lanes, 7 * lanes + 1, 9 * lanes, 100] {
                 // Each message holds its index, and its digest pairs that index with the index of

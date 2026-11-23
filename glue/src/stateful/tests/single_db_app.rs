@@ -5,19 +5,22 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, ExecutionError, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Single, SyncEngineConfig,
-            Unmerkleized as _, UnmerkleizedOf, p2p as qmdb_resolver,
+            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            p2p as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
+        probe::{self, Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
+    Write,
+};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -39,6 +42,7 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
+use commonware_p2p::max_message_size;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -46,40 +50,34 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::contiguous::{Contiguous as _, fixed::Config as FixedLogConfig},
-    mmr::{self, Location, full::Config as MmrJournalConfig},
-    qmdb::{
-        any::{FixedConfig, unordered::fixed},
-        sync::Target,
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{Contiguous as _, fixed::Config as FixedLogConfig},
     },
+    mmr::{self, Location},
+    qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
 };
-use commonware_utils::{
-    NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
-};
+use commonware_utils::{NZDuration, NZU64, NZUsize, range::NonEmptyRange, test_rng};
 use futures::StreamExt;
-use rand_core::Rng;
 use std::{sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
 pub(super) type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Single<Qmdb<E>>;
+pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 
 /// Builds the QMDB configuration used by single-database tests.
-pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
-    FixedConfig {
-        merkle_config: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-mmr-journal"),
-            metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
-            items_per_blob: NZU64!(11),
-            write_buffer: IO_BUFFER_SIZE,
+pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
+    fixed::Config {
+        merkle: MerkleConfig {
+            partition: format!("{prefix}-qmdb-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: Default::default(),
         },
-        journal_config: FixedLogConfig {
+        log: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -89,7 +87,7 @@ pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<Two
         translator: TwoCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -165,6 +163,16 @@ impl CertifiableBlock for Block {
     }
 }
 
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+    }
+}
+
 impl Block {
     pub(super) fn genesis(state_root: sha256::Digest, range: NonEmptyRange<Location>) -> Self {
         Self {
@@ -193,25 +201,26 @@ impl App {
     }
 
     /// Execute a block: increment "counter" and write `height -> height_val`.
-    pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
+    pub(super) async fn execute<E: Spawner + StorageContext>(
         height: Height,
-        mut batches: UnmerkleizedOf<SingleDatabaseSet<E>, E>,
-    ) -> Result<MerkleizedOf<SingleDatabaseSet<E>, E>, ExecutionError> {
+        mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
+    ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batches
             .get(&counter)
-            .await?
+            .await
+            .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
         batches = batches.write(counter, Some(u64_to_digest(current + 1)));
         batches = batches.write(
             Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
-        Ok(batches.merkleize().await?)
+        batches.merkleize().await.unwrap()
     }
 }
 
-impl<E: Rng + Spawner + StorageContext> Application<E> for App {
+impl<E: Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -228,61 +237,40 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+    ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
-        let Some(parent) = ancestry.next().await else {
-            return Ok(None);
-        };
+        let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
-        let merkleized = Self::execute(height, batches).await?;
-        let bounds = merkleized.bounds();
+        let merkleized = Self::execute(height, batches).await;
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
             height,
             state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            range: merkleized.target().range,
         };
-        Ok(Some(Proposed { block, merkleized }))
+        Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
-        let mut ancestry = Box::pin(ancestry);
-        let Some(tip) = ancestry.next().await else {
-            return Ok(None);
-        };
-        let merkleized = Self::execute(tip.height(), batches).await?;
-        let bounds = merkleized.bounds();
-        if merkleized.root() != tip.inner().state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
-        {
-            return Ok(None);
-        }
-        Ok(Some(merkleized))
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
-        Self::execute(block.height(), batches).await.map(Some)
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: &MerkleizedOf<Self::Databases, E>,
-        _readers: ReadersOf<Self::Databases, E>,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
     }
 
@@ -291,12 +279,15 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         _block: &Self::Block,
         _captured: Self::Captured,
-        _readers: ReadersOf<Self::Databases, E>,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }
 
@@ -308,6 +299,7 @@ pub(crate) struct SingleDbEngine {
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
     retained_marshal_blocks: usize,
+    elector: RoundRobin,
 }
 
 impl SingleDbEngine {
@@ -324,11 +316,12 @@ impl SingleDbEngine {
             schemes,
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
-                fetch_batch_size: NZU64!(16),
+                fetch_batch_size: SYNC_BATCH_SIZE,
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: NZUsize!(8),
             },
             retained_marshal_blocks: 10,
+            elector: RoundRobin::default(),
         }
     }
 
@@ -345,6 +338,19 @@ impl SingleDbEngine {
             max_outstanding_requests: NZUsize!(1),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Retains enough marshal blocks for a validator restarted without state sync to fetch those
+    /// it missed while down.
+    pub(crate) fn with_restart_retention(mut self) -> Self {
+        self.retained_marshal_blocks = RESTART_MARSHAL_RETENTION;
+        self
+    }
+
+    /// Sets the leader election. The default rotates the leader every view.
+    pub(crate) fn with_elector(mut self, elector: RoundRobin) -> Self {
+        self.elector = elector;
         self
     }
 }
@@ -370,6 +376,27 @@ impl EngineDefinition for SingleDbEngine {
         ]
     }
 
+    fn max_message_size(&self) -> u32 {
+        let participants = u32::try_from(self.schemes.len()).unwrap();
+        let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
+            SYNC_BATCH_SIZE,
+            fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
+        );
+        max_message_size([
+            simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
+                participants,
+            ),
+            marshal::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+                &(),
+            ),
+            probe::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+            ),
+            qmdb,
+        ])
+    }
+
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
         let InitContext {
             context,
@@ -385,7 +412,7 @@ impl EngineDefinition for SingleDbEngine {
         let scheme = self.schemes[index].clone();
 
         let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
         // QMDB database config (created by Stateful::start)
         let db_config = qmdb_config(&partition_prefix, page_cache.clone());
@@ -406,8 +433,8 @@ impl EngineDefinition for SingleDbEngine {
             peer_provider: oracle.manager(),
             blocker: oracle.control(public_key.clone()),
             mailbox_size: NZUsize!(100),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -425,6 +452,7 @@ impl EngineDefinition for SingleDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(public_key.clone()),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
@@ -523,9 +551,9 @@ impl EngineDefinition for SingleDbEngine {
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
-                max_serve_ops: NZU64!(16),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
+                max_serve_ops: SYNC_BATCH_SIZE,
                 serve_timeout: Duration::from_secs(2),
                 priority_requests: false,
                 priority_responses: false,
@@ -597,7 +625,7 @@ impl EngineDefinition for SingleDbEngine {
         // Simplex engine
         let simplex_config = simplex::Config {
             scheme,
-            elector: RoundRobin::<Sha256>::default(),
+            elector: self.elector.clone(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
             relay: deferred.clone(),
@@ -618,7 +646,8 @@ impl EngineDefinition for SingleDbEngine {
                 timeout: Duration::from_secs(5),
                 budget: simplex::SkipBudget::Participants,
             },
-            fetch_timeout: Duration::from_secs(2),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_secs(2),
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         };

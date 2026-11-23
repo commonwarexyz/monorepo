@@ -10,18 +10,14 @@ use commonware_cryptography::{
 use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
-        Application, ExecutionError, Input, Proposed,
-        db::{
-            DatabaseSet, Merkleized as _, MerkleizedOf, ReadersOf, Unmerkleized as _,
-            UnmerkleizedOf,
-        },
+        Application, Finality, Input, Proposed,
+        db::{DatabaseSet, Unmerkleized as _},
     },
 };
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::qmdb::sync::Target;
-use commonware_utils::{non_empty_range, sequence::U64};
+use commonware_utils::sequence::U64;
 use futures::StreamExt;
-use rand::Rng;
 
 const HEIGHT_KEY: U64 = U64::new(0);
 
@@ -37,20 +33,21 @@ impl App {
         Self { genesis }
     }
 
-    async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
-        batches: UnmerkleizedOf<Database<E>, E>,
-    ) -> Result<MerkleizedOf<Database<E>, E>, ExecutionError> {
-        Ok(batches
+        batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
+    ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
+        batches
             .write(HEIGHT_KEY, Some(U64::new(height.get())))
             .merkleize()
-            .await?)
+            .await
+            .expect("height write must merkleize")
     }
 }
 
 impl<E> Application<E> for App
 where
-    E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: Spawner + Metrics + Clock + Storage,
 {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
@@ -68,63 +65,47 @@ where
         &mut self,
         context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+    ) -> Option<Proposed<Self, E>> {
         // The `reshare::Application` wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let Some(parent) = ancestry.next().await else {
-            return Ok(None);
-        };
+        let parent = ancestry.next().await?;
         let height = parent.height().next();
-        let merkleized = Self::execute(height, batches).await?;
-        let bounds = merkleized.bounds();
+        let merkleized = Self::execute(height, batches).await;
         let block = Block::new(
             context.1,
             parent.digest(),
             height,
-            Target::new(
-                merkleized.root(),
-                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
-            ),
+            merkleized.target(),
             payload,
         );
-        Ok(Some(Proposed { block, merkleized }))
+        Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
-        mut ancestry: impl Ancestry<Self::Block>,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
+        ancestry: impl Ancestry<Self::Block>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        // TODO (#5509): Explore direct composition of stateful and DKG validation.
+        //
         // Validation from higher layers:
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
         // - Reshare `Payload` validation is handled by `reshare::Application`
-
-        let Some(block) = ancestry.next().await else {
-            return Ok(None);
-        };
-        let merkleized = Self::execute(block.height(), batches).await?;
-        Ok(Some(merkleized))
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: UnmerkleizedOf<Self::Databases, E>,
-    ) -> Result<Option<MerkleizedOf<Self::Databases, E>>, ExecutionError> {
-        Self::execute(block.height(), batches).await.map(Some)
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(
         &mut self,
         _context: (E, Self::Context),
         _block: &Self::Block,
-        _batches: &MerkleizedOf<Self::Databases, E>,
-        _readers: ReadersOf<Self::Databases, E>,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
     }
 
@@ -133,11 +114,14 @@ where
         _context: (E, Self::Context),
         _block: &Self::Block,
         _captured: Self::Captured,
-        _readers: ReadersOf<Self::Databases, E>,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
-        Target::new(block.state_root, block.range.clone())
+        Target {
+            root: block.state_root,
+            range: block.range.clone(),
+        }
     }
 }
