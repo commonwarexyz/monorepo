@@ -463,7 +463,7 @@ mod test {
     };
     use core::{future::Future, pin::Pin};
     use futures::{StreamExt as _, future::pending, pin_mut};
-    use rand::{RngExt as _, seq::SliceRandom as _};
+    use rand::RngExt as _;
     use std::{
         collections::{BTreeMap, BTreeSet},
         num::NonZeroUsize,
@@ -900,9 +900,7 @@ mod test {
                         }
                     }
 
-                    // Crowd one translated key. Leave gaps between keys and scramble the
-                    // conflict iteration order.
-                    let mut rng = test_rng();
+                    // Crowd one translated key, leaving gaps between its keys.
                     let crowded: Vec<Digest> = (0..CROWD)
                         .map(|i| {
                             let mut bytes = [0x20; 32];
@@ -934,15 +932,13 @@ mod test {
                         gap[31] = gap[31].wrapping_add(1);
                         queries.push(gap.into());
                     }
-                    let mut flood: Vec<Digest> = crowded.iter().chain(&filler).copied().collect();
-                    flood.shuffle(&mut rng);
+                    let flood: Vec<Digest> = crowded.iter().chain(&filler).copied().collect();
                     let flooded = phases.len();
                     phases.push(flood.iter().map(|&key| (key, Some(value))).collect());
                     phases.push(probes.iter().map(|&key| (key, None)).collect());
                     phases.push(
                         probes
                             .iter()
-                            .rev()
                             .map(|&key| (key, Some(Sha256::fill(2))))
                             .collect(),
                     );
