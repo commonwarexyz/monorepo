@@ -1143,7 +1143,7 @@ mod test {
                 page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
-            init_scratch_partition: format!("journal-{suffix}-scratch"),
+            init_scratch_partition: format!("scratch-{suffix}"),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
         };

@@ -761,7 +761,7 @@ fn any_config(suffix: &str) -> any::Config<TwoCap, FixedJournalConfig, Sequentia
             replay_buffer: NZUsize!(1024),
         },
         translator: TwoCap,
-        init_scratch_partition: format!("transfers-log-{suffix}-scratch"),
+        init_scratch_partition: format!("transfers-scratch-{suffix}"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }

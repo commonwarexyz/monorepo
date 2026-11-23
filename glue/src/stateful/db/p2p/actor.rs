@@ -573,43 +573,43 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
+    fn db_config(prefix: &str) -> fixed::Config<TwoCap, Sequential> {
         let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
             merkle: MerkleConfig {
-                partition: format!("{suffix}-mmr-metadata"),
+                partition: format!("{prefix}-mmr-metadata"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 resident_height: Default::default(),
             },
             log: FixedLogConfig {
-                partition: format!("{suffix}-log-journal"),
+                partition: format!("{prefix}-log-journal"),
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_scratch_partition: format!("{suffix}-log-journal-scratch"),
+            init_scratch_partition: format!("{prefix}-log-journal-scratch"),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: NZUsize!(2),
         }
     }
 
-    async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
-        let db = TestDb::init(context.child("db"), db_config(suffix), None)
+    async fn init_db(context: deterministic::Context, prefix: &str) -> Shared<TestDb> {
+        let db = TestDb::init(context.child("db"), db_config(prefix), None)
             .await
             .expect("db init should succeed");
         Shared::new("test", db)
     }
 
     /// Create a database with one applied update.
-    async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
-        let db = TestDb::init(context.child("db"), db_config(suffix), None)
+    async fn init_seeded_db(context: deterministic::Context, prefix: &str) -> Shared<TestDb> {
+        let db = TestDb::init(context.child("db"), db_config(prefix), None)
             .await
             .expect("db init should succeed");
-        let key = Sha256::hash(&[suffix.as_bytes(), b"-key"]);
-        let value = Sha256::hash(&[suffix.as_bytes(), b"-value"]);
+        let key = Sha256::hash(&[prefix.as_bytes(), b"-key"]);
+        let value = Sha256::hash(&[prefix.as_bytes(), b"-value"]);
         let batch = db
             .new_batch()
             .write(key, Some(value))
