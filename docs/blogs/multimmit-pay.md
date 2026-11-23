@@ -1,6 +1,6 @@
 ---
 title: "The Payment Heard Round the World"
-description: "A Multimmit receipt proves a payment is irreversible, even before its block enters the shared log. At one million transactions per second, the median time from submission to a receipt at the producer was 41ms across three North American regions and 245ms across 13 regions worldwide. At 100,000 per second, those medians were 37ms and 241ms."
+description: "With Multimmit, you can verify a payment is final before the network agrees on its place in the log. When we submitted one million transactions per second, the median time to produce a receipt was 41ms across three North American regions and 245ms across 13 regions worldwide."
 date: "November 23rd, 2026"
 published-time: "2026-11-23T00:00:00Z"
 modified-time: "2026-11-23T00:00:00Z"
