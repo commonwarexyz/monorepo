@@ -343,7 +343,7 @@ pub mod tests {
                 &root,
             ));
 
-            let db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(200, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -391,7 +391,7 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
             let db = open_db(context.child("db"), partition.clone()).await;
-            let db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(500, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db).await.unwrap();
