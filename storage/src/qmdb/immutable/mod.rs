@@ -14,7 +14,7 @@
 //!
 //! - **Key lookups**: [`Db::get`] and [`Db::get_many`] return only values set at or above the floor.
 //! - **Pruning**: [`Db::prune`] only allows pruning up to the floor.
-//! - **Reconstruction**: on restart or sync, the snapshot is rebuilt from the floor
+//! - **Reconstruction**: on restart or sync, the index is rebuilt from the floor
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
 //! At the same commitment, key lookups give the same results on live, pruned, reopened, and
@@ -1407,12 +1407,12 @@ pub(super) mod tests {
             Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
         );
 
-        // Try to fetch a key before the inactivity floor (not in snapshot after reopen).
+        // Try to fetch a key before the inactivity floor (not in index after reopen).
         let floor_val = ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1;
         let inactive_key = sorted_keys[floor_val as usize - 2];
         assert!(db.get(&inactive_key).await.unwrap().is_none());
 
-        // Try to fetch a key at the inactivity floor (in snapshot after reopen).
+        // Try to fetch a key at the inactivity floor (in index after reopen).
         let active_key = sorted_keys[floor_val as usize - 1];
         assert!(db.get(&active_key).await.unwrap().is_some());
 
@@ -2239,13 +2239,13 @@ pub(super) mod tests {
         // The floor retires key1 from reads, and it stays indexed until it is pruned.
         assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
-        assert_eq!(db.snapshot.len(), 3);
+        assert_eq!(db.index.len(), 3);
 
         // Prune past the first Set (loc 1). With items_per_section=1, pruning to loc 2 removes
-        // the blob containing loc 1 and retires only that location from the snapshot.
+        // the blob containing loc 1 and retires only that location from the index.
         let db = db.prune(Location::new(2)).await.unwrap();
         assert_eq!(db.bounds().start, Location::new(2));
-        assert_eq!(db.snapshot.len(), 2);
+        assert_eq!(db.index.len(), 2);
         assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
@@ -2285,33 +2285,33 @@ pub(super) mod tests {
             db = db.apply_batch(merkleized).await.unwrap();
         }
         assert_eq!(db.bounds(), Location::new(0)..Location::new(21));
-        assert_eq!(db.snapshot.len(), 10);
+        assert_eq!(db.index.len(), 10);
 
         // Pruning to a commit retires the sets before it: one per two pruned operations.
         for loc in [2u64, 4, 6] {
             db = db.prune(Location::new(loc)).await.unwrap();
             assert_eq!(db.bounds().start, Location::new(loc));
-            assert_eq!(db.snapshot.len(), 10 - loc as usize / 2);
+            assert_eq!(db.index.len(), 10 - loc as usize / 2);
         }
         assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
 
         // The set at 9 stays indexed at the pruning boundary, though it is below the floor.
         let key4 = Sha256::fill(4);
         db = db.prune(Location::new(9)).await.unwrap();
-        assert_eq!(db.snapshot.len(), 6);
-        assert!(db.snapshot.get(&key4).eq([9]));
+        assert_eq!(db.index.len(), 6);
+        assert!(db.index.get(&key4).eq([9]));
         assert!(db.get(&key4).await.unwrap().is_none());
 
         // Pruning past it retires it from the index too.
         db = db.prune(Location::new(10)).await.unwrap();
-        assert_eq!(db.snapshot.len(), 5);
-        assert!(db.snapshot.get(&key4).next().is_none());
+        assert_eq!(db.index.len(), 5);
+        assert!(db.index.get(&key4).next().is_none());
 
         // Pruning to the floor keeps the set there, which stays readable.
         assert_eq!(db.inactivity_floor(), Location::new(19));
         db = db.prune(Location::new(19)).await.unwrap();
         assert_eq!(db.bounds().start, Location::new(19));
-        assert_eq!(db.snapshot.len(), 1);
+        assert_eq!(db.index.len(), 1);
         assert!(db.get(&Sha256::fill(8)).await.unwrap().is_none());
         assert_eq!(
             db.get(&Sha256::fill(9)).await.unwrap(),
@@ -2561,7 +2561,7 @@ pub(super) mod tests {
     }
 
     /// Applying a batch over an applied ancestor and unapplied ones, including an empty one,
-    /// inserts one snapshot location per key, matching the snapshot rebuilt on reopen.
+    /// inserts one index location per key, matching the index rebuilt on reopen.
     #[boxed]
     pub(crate) async fn run_partial_ancestor_commit<F: Family, V, C>(
         context: deterministic::Context,
@@ -2609,24 +2609,24 @@ pub(super) mod tests {
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
 
-        // The snapshot holds one location per key.
+        // The index holds one location per key.
         let keys = [key1, key2, key3];
         let locations = |db: &TestDb<F, V, C>| {
             keys.iter()
                 .map(|key| {
-                    let mut locations: Vec<_> = db.snapshot.get(key).collect();
+                    let mut locations: Vec<_> = db.index.get(key).collect();
                     locations.sort();
                     locations
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(db.snapshot.len(), keys.len());
+        assert_eq!(db.index.len(), keys.len());
         let live = locations(&db);
 
-        // Reopen: the rebuilt snapshot holds the same locations.
+        // Reopen: the rebuilt index holds the same locations.
         db.sync().await.unwrap();
         let db = open_db(context.child("reopen")).await;
-        assert_eq!(db.snapshot.len(), keys.len());
+        assert_eq!(db.index.len(), keys.len());
         assert_eq!(locations(&db), live);
 
         db.destroy().await.unwrap();
@@ -2847,13 +2847,13 @@ pub(super) mod tests {
         let db = db.apply_batch(merkleized).await.unwrap();
 
         // to_batch root matches the DB's root.
-        let snapshot = db.to_batch();
-        assert_eq!(snapshot.root(), db.root());
+        let view = db.to_batch();
+        assert_eq!(view.root(), db.root());
 
-        // Chain a child from `snapshot` and apply it.
+        // Chain a child from `view` and apply it.
         let key2 = Sha256::hash(&[&[2]]);
         let v2 = Sha256::fill(20u8);
-        let child = snapshot
+        let child = view
             .new_batch::<Sha256>()
             .set(key2, v2)
             .merkleize(&db)
@@ -2868,7 +2868,7 @@ pub(super) mod tests {
     }
 
     /// Regression: applying a batch after its unapplied ancestor's Arc is
-    /// dropped must still apply the ancestor's snapshot diffs.
+    /// dropped must still apply the ancestor's index diffs.
     #[boxed]
     pub(crate) async fn run_apply_after_ancestor_dropped<F: Family, V, C>(
         context: deterministic::Context,
@@ -2911,7 +2911,7 @@ pub(super) mod tests {
         // Apply only the tip. This is !skip_ancestors (DB hasn't changed).
         let db = db.apply_batch(c).await.unwrap();
 
-        // All three keys must be in the snapshot.
+        // All three keys must be in the index.
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
@@ -3269,7 +3269,7 @@ pub(super) mod tests {
     }
 
     /// Reinitializing at an earlier commit restores every key active at that commit, even after an
-    /// ordinary reopen rebuilds the snapshot from the latest floor.
+    /// ordinary reopen rebuilds the index from the latest floor.
     #[boxed]
     pub(crate) async fn run_bounded_initialization_after_reopen_with_floor_change<F: Family, V, C>(
         context: deterministic::Context,
@@ -3307,10 +3307,10 @@ pub(super) mod tests {
         let db = commit_sets_with_floor(db, [(k4, v4), (k5, v5), (k6, v6)], None, first_size).await;
         db.sync().await.unwrap();
 
-        // Reopen: snapshot rebuilt from floor=first_size, batch A keys excluded.
+        // Reopen: index rebuilt from floor=first_size, batch A keys excluded.
         let db = open_db(context.child("second"), None).await.unwrap();
 
-        // Verify batch A keys are NOT in the reopened snapshot (expected).
+        // Verify batch A keys are NOT in the reopened index (expected).
         assert!(db.get(&k1).await.unwrap().is_none());
 
         // Reopen at commit A.
@@ -3332,7 +3332,7 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Opening an earlier commit rebuilds the snapshot from that commit's floor, even when
+    /// Opening an earlier commit rebuilds the index from that commit's floor, even when
     /// the database was previously opened at a later floor.
     #[boxed]
     pub(crate) async fn run_bounded_initialization_after_reopen_partial_floor_gap<F: Family, V, C>(
@@ -3370,24 +3370,24 @@ pub(super) mod tests {
         let db = commit_sets_with_floor(db, [(k3, v3)], None, second_size).await;
         db.sync().await.unwrap();
 
-        // Reopen: snapshot rebuilt from floor=second_size. Only k3 is in snapshot.
+        // Reopen: index rebuilt from floor=second_size. Only k3 is in index.
         let db = open_db(context.child("second"), None).await.unwrap();
-        assert_eq!(db.snapshot.len(), 1);
+        assert_eq!(db.index.len(), 1);
         assert!(db.get(&k1).await.unwrap().is_none());
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
-        // Commit B's snapshot contains k2. Its floor excludes k1, and its end excludes k3.
+        // Commit B's index contains k2. Its floor excludes k1, and its end excludes k3.
         _ = db.sync().await.unwrap();
         let db = open_db(context.child("cap"), Some(second_size))
             .await
             .unwrap();
-        assert_eq!(db.snapshot.len(), 1);
+        assert_eq!(db.index.len(), 1);
         assert!(db.get(&k1).await.unwrap().is_none()); // below B's floor
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert!(db.get(&k3).await.unwrap().is_none()); // in suffix, removed
 
-        // Open commit A and rebuild its snapshot from floor zero.
+        // Open commit A and rebuild its index from floor zero.
         _ = db.sync().await.unwrap();
         let db = open_db(context.child("cap"), Some(first_size))
             .await
@@ -3407,7 +3407,7 @@ pub(super) mod tests {
     /// - `prune(commit_loc + 1)` is rejected (the floor is a hard ceiling).
     /// - `prune` does not affect the root (documented invariant).
     /// - Reopen reconstructs `inactivity_floor_loc` from the sole remaining commit op, and the
-    ///   in-memory snapshot is empty (all Sets were below the floor).
+    ///   in-memory index is empty (all Sets were below the floor).
     /// - A follow-on batch applies cleanly on top from the floor-at-max state.
     #[boxed]
     pub(crate) async fn run_single_commit_live_set<F: Family, V, C>(
@@ -3448,9 +3448,9 @@ pub(super) mod tests {
         assert_eq!(db.inactivity_floor(), commit_loc);
         let root_after_commit = db.root();
 
-        // All three keys are in the in-memory snapshot pre-prune, and the floor has already
+        // All three keys are in the in-memory index pre-prune, and the floor has already
         // retired them from reads.
-        assert_eq!(db.snapshot.len(), 3);
+        assert_eq!(db.index.len(), 3);
         assert_eq!(
             db.get_many(&[&k1, &k2, &k3]).await.unwrap(),
             vec![None, None, None]
@@ -3483,18 +3483,18 @@ pub(super) mod tests {
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
                 if *p == *commit_loc + 1 && *f == *commit_loc));
 
-        // Reopening rebuilds the snapshot from the inactivity floor. Only the commit
-        // remains at or above that floor, so the rebuilt snapshot contains no keys.
+        // Reopening rebuilds the index from the inactivity floor. Only the commit
+        // remains at or above that floor, so the rebuilt index contains no keys.
         let db = open_db(context.child("reopened")).await;
         assert_eq!(db.bounds().end - 1, commit_loc);
         assert_eq!(db.inactivity_floor(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
 
         // The commit op at `commit_loc` is the anchor that survived pruning. Its metadata
-        // must come back through `get_metadata` after the snapshot rebuild.
+        // must come back through `get_metadata` after the index rebuild.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
-        // Keys set below the floor are excluded from the rebuilt snapshot.
+        // Keys set below the floor are excluded from the rebuilt index.
         assert!(db.get(&k1).await.unwrap().is_none());
         assert!(db.get(&k2).await.unwrap().is_none());
         assert!(db.get(&k3).await.unwrap().is_none());
@@ -3519,7 +3519,7 @@ pub(super) mod tests {
 
         // The floor at the new commit retires the new key too, though it stays indexed until it
         // is pruned. Keys from the pre-prune batch remain excluded.
-        assert_eq!(db.snapshot.len(), 1);
+        assert_eq!(db.index.len(), 1);
         assert!(db.get(&k4).await.unwrap().is_none());
         assert!(db.get(&k1).await.unwrap().is_none());
         // Follow-on commit replaced the anchor: its metadata was `None`, so `get_metadata`

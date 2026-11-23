@@ -128,17 +128,17 @@ mod conformance;
 pub mod current;
 pub mod floor;
 pub mod immutable;
+mod index_build;
 pub mod keyless;
 mod metrics;
 pub mod operation;
-mod snapshot;
 pub mod store;
 pub mod sync;
 pub mod value;
 pub mod verify;
 
-pub use snapshot::SnapshotBuild;
-pub(super) use snapshot::build_snapshot_from_log;
+pub use index_build::IndexBuild;
+pub(super) use index_build::build_index_from_log;
 pub use verify::ProofExt;
 
 /// Reject a bound that cannot retain the bootstrap commit.
@@ -190,7 +190,7 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// Check the selected commit before recovery discards history. Rebuilding an index from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &Recovery<F, E, C, H, S>,
@@ -379,7 +379,7 @@ pub enum Error<F: Family> {
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
-    /// The requested key was not found in the snapshot.
+    /// The requested key was not found in the index.
     #[error("key not found")]
     KeyNotFound,
 
@@ -469,19 +469,19 @@ impl<F: Family> From<authenticated::Error<F>> for Error<F> {
     }
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, update
+/// For the given `key` which is known to exist in the index with location `old_loc`, update
 /// its location to `new_loc`.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
     new_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"
@@ -489,18 +489,18 @@ fn update_known_loc<F: Family, I: Index<Value = Location<F>>>(
     cursor.update(new_loc);
 }
 
-/// For the given `key` which is known to exist in the snapshot with location `old_loc`, delete
-/// it from the snapshot.
+/// For the given `key` which is known to exist in the index with location `old_loc`, delete
+/// it from the index.
 ///
 /// # Panics
 ///
-/// Panics if `key` is not found in the snapshot or if `old_loc` is not found in the cursor.
+/// Panics if `key` is not found in the index or if `old_loc` is not found in the cursor.
 fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
-    snapshot: &mut I,
+    index: &mut I,
     key: &[u8],
     old_loc: Location<F>,
 ) {
-    let mut cursor = snapshot.get_mut(key).expect("key should be known to exist");
+    let mut cursor = index.get_mut(key).expect("key should be known to exist");
     assert!(
         cursor.find(|&loc| *loc == old_loc),
         "known key with given old_loc should have been found"

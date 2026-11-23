@@ -1,4 +1,4 @@
-//! Rebuild snapshot indexes and activity bitmaps from the operations log.
+//! Rebuild index indexes and activity bitmaps from the operations log.
 
 use super::{Error, cache::Cache};
 use crate::{
@@ -25,7 +25,7 @@ use core::{convert::Infallible, num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
 use std::{collections::VecDeque, sync::Arc};
 
-/// Builds the database's snapshot by replaying the log starting at the inactivity floor. Assumes
+/// Builds the database's index by replaying the log starting at the inactivity floor. Assumes
 /// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
@@ -34,10 +34,10 @@ use std::{collections::VecDeque, sync::Arc};
 /// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
 /// `(location -> key)` cache that lets collision resolution resolve candidates from memory
 /// instead of re-reading the log; `None` disables it.
-pub(crate) async fn build_snapshot_from_log<F, C, I, Fn>(
+pub(crate) async fn build_index_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
-    snapshot: &mut I,
+    index: &mut I,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
@@ -71,15 +71,14 @@ where
         for (loc, op) in batch? {
             if let Some(key) = op.key() {
                 if op.is_delete() {
-                    let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
+                    let old_loc = delete_key(index, reader, key, cache.as_mut()).await?;
                     callback(false, old_loc);
                     if old_loc.is_some() {
                         active_keys -= 1;
                     }
                 } else if op.is_update() {
                     let new_loc = crate::merkle::Location::new(loc);
-                    let old_loc =
-                        update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
+                    let old_loc = update_key(index, reader, key, new_loc, cache.as_mut()).await?;
                     callback(true, old_loc);
                     if old_loc.is_none() {
                         active_keys += 1;
@@ -100,10 +99,10 @@ where
     Ok(active_keys)
 }
 
-/// Delete `key` from the snapshot if it exists, using a stable log reader, and return the
+/// Delete `key` from the index if it exists, using a stable log reader, and return the
 /// previously associated location.
 pub(super) async fn delete_key<F, I, R>(
-    snapshot: &mut I,
+    index: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
@@ -114,8 +113,8 @@ where
     R: Contiguous,
     R::Item: Operation<F>,
 {
-    // If the translated key is in the snapshot, get a cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut(key.as_ref()) else {
+    // If the translated key is in the index, get a cursor to look for the key.
+    let Some(cursor) = index.get_mut(key.as_ref()) else {
         return Ok(None);
     };
     delete_at_cursor::<F, _, _>(cursor, reader, key, cache).await
@@ -123,7 +122,7 @@ where
 
 /// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
 /// it was present among the cursor's conflicts. When supplied, the matched location is removed
-/// from `cache` with the snapshot deletion.
+/// from `cache` with the index deletion.
 async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
@@ -142,7 +141,7 @@ where
         return Ok(None);
     };
 
-    // Cache entries mirror current snapshot locations, so invalidate the matched location with
+    // Cache entries mirror current index locations, so invalidate the matched location with
     // the authoritative deletion.
     cursor.delete();
     if let Some(cache) = cache {
@@ -152,9 +151,9 @@ where
     Ok(Some(loc))
 }
 
-/// Update `key` in the snapshot using a stable log reader, returning its old location if present.
+/// Update `key` in the index using a stable log reader, returning its old location if present.
 pub(super) async fn update_key<F, I, R>(
-    snapshot: &mut I,
+    index: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
@@ -166,9 +165,9 @@ where
     R: Contiguous,
     R::Item: Operation<F>,
 {
-    // If the translated key is not in the snapshot, insert the new location. Otherwise, get a
+    // If the translated key is not in the index, insert the new location. Otherwise, get a
     // cursor to look for the key.
-    let Some(cursor) = snapshot.get_mut_or_insert(key.as_ref(), new_loc) else {
+    let Some(cursor) = index.get_mut_or_insert(key.as_ref(), new_loc) else {
         return Ok(None);
     };
     update_at_cursor::<F, _, _>(cursor, reader, key, new_loc, cache).await
@@ -177,7 +176,7 @@ where
 /// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
 /// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
 /// is inserted at the cursor. When supplied, the matched old location is removed from `cache` with
-/// the snapshot update.
+/// the index update.
 async fn update_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
@@ -195,7 +194,7 @@ where
     if let Some(loc) =
         find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
     {
-        // Removing the superseded cache entry with the snapshot update lets the caller reuse its
+        // Removing the superseded cache entry with the index update lets the caller reuse its
         // slot for `new_loc` instead of evicting another entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
@@ -205,7 +204,7 @@ where
         return Ok(Some(loc));
     }
 
-    // The key wasn't in the snapshot, so add it to the cursor.
+    // The key wasn't in the index, so add it to the cursor.
     cursor.insert(new_loc);
 
     Ok(None)
@@ -250,15 +249,15 @@ where
 
 /// Bounded depth (in batches) of each per-worker channel during a parallel build. Backpressure keeps
 /// the replay from running arbitrarily far ahead of a slow worker.
-const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
+const INDEX_CHANNEL_DEPTH: usize = 4;
 
-/// A batch of keyed operations routed to a snapshot-build worker: each entry is the op's key, its
+/// A batch of keyed operations routed to a index-build worker: each entry is the op's key, its
 /// location, and whether it is a delete.
 type RoutedBatch<K> = Vec<(K, u64, bool)>;
 
 /// Parameters shared by the inline replay and decode chunks of one parallel build.
 #[derive(Clone, Copy)]
-struct SnapshotRouting {
+struct IndexRouting {
     /// Number of insert workers routed to.
     workers: usize,
     /// Maps a key to its index partition.
@@ -269,17 +268,17 @@ struct SnapshotRouting {
     init_buffer: NonZeroUsize,
 }
 
-/// Number of operations the snapshot replay batches per worker-channel send during a parallel
+/// Number of operations the index replay batches per worker-channel send during a parallel
 /// build. Build throughput is mostly insensitive to this value, so it is a constant rather than
 /// configuration. Small in tests so ordinary logs exercise batch boundaries.
 #[cfg(not(test))]
-const SNAPSHOT_ROUTE_BATCH: usize = 4096;
+const INDEX_ROUTE_BATCH: usize = 4096;
 #[cfg(test)]
-const SNAPSHOT_ROUTE_BATCH: usize = 3;
+const INDEX_ROUTE_BATCH: usize = 3;
 
 /// Operations ahead of its insert at which a parallel-build worker hints an operation's partition
 /// entries. The partition's header is hinted twice as far ahead. One in tests, so the hints reach
-/// their steady state within a [SNAPSHOT_ROUTE_BATCH].
+/// their steady state within a [INDEX_ROUTE_BATCH].
 #[cfg(not(test))]
 const PREFETCH_DISTANCE: usize = 16;
 #[cfg(test)]
@@ -291,9 +290,9 @@ const PREFETCH_DISTANCE: usize = 1;
 /// order. Together with the decoder count, this bounds the queued operations. Each decoder also
 /// reserves one batch per worker. Small in tests so ordinary logs exercise chunk boundaries.
 #[cfg(not(test))]
-const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
+const INDEX_DECODE_CHUNK: u64 = 1 << 17;
 #[cfg(test)]
-const SNAPSHOT_DECODE_CHUNK: u64 = 64;
+const INDEX_DECODE_CHUNK: u64 = 64;
 
 /// What a parallel build's decode task does with each operation of its chunk besides routing it.
 trait ChunkVisitor<F: Family, Item>: Send + 'static {
@@ -358,8 +357,8 @@ impl<F: Family, Item> Scan<F, Item> for IndexOnly {
 
     fn chunks(&self, floor: u64, end: u64) -> impl Iterator<Item = Range<u64>> + Send + 'static {
         (floor..end)
-            .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"))
-            .map(move |start| start..(start + SNAPSHOT_DECODE_CHUNK).min(end))
+            .step_by(usize::try_from(INDEX_DECODE_CHUNK).expect("chunk size fits usize"))
+            .map(move |start| start..(start + INDEX_DECODE_CHUNK).min(end))
     }
 
     fn visitor(&self, _: Range<u64>) {}
@@ -388,16 +387,16 @@ impl<F: Family, H: MerkleHasher<F> + 'static, Item: Encode> Scan<F, Item> for Le
 }
 
 /// Replay `range` and send each worker's keyed operations at or after `floor` in log order, in
-/// batches of at most [SNAPSHOT_ROUTE_BATCH] operations. `visitor` sees every replayed operation,
+/// batches of at most [INDEX_ROUTE_BATCH] operations. `visitor` sees every replayed operation,
 /// including those before `floor`.
 ///
 /// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
 /// joining them.
-async fn route_snapshot<F, C, T, Fut>(
+async fn route_index<F, C, T, Fut>(
     log: &C,
     range: Range<u64>,
     floor: u64,
-    routing: SnapshotRouting,
+    routing: IndexRouting,
     visitor: &mut T,
     mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
 ) -> Result<(), Error<F>>
@@ -414,7 +413,7 @@ where
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
-        .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
+        .map(|_| Vec::with_capacity(INDEX_ROUTE_BATCH))
         .collect();
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
@@ -426,9 +425,9 @@ where
             let Some(key) = op.into_key() else { continue };
             let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
             batches[w].push((key, loc, is_delete));
-            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+            if batches[w].len() >= INDEX_ROUTE_BATCH {
                 let routed =
-                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(INDEX_ROUTE_BATCH));
                 if !send(w, routed).await {
                     return Ok(());
                 }
@@ -445,12 +444,12 @@ where
     Ok(())
 }
 
-/// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
+/// Build one parallel-init worker's partial index: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
 /// `reader` and `(location -> key)` cache. Sets the bits of the range's active locations in the
 /// shared `active` bitmap (indexed over `activity`, the replayed region) and returns the populated
 /// worker index along with the range's active-key count.
-async fn build_snapshot_worker<F, C, R>(
+async fn build_index_worker<F, C, R>(
     log: Arc<C>,
     mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
     mut index: R,
@@ -526,13 +525,13 @@ where
     Ok((index, active_keys))
 }
 
-/// Build a snapshot serially on the calling task via [build_snapshot_from_log], collecting each
+/// Build an index serially on the calling task via [build_index_from_log], collecting each
 /// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
-/// activity bitmap (see [Rebuild::build_snapshot]).
-async fn build_snapshot_serial<F, C, I>(
+/// activity bitmap (see [Rebuild::build_index]).
+async fn build_index_serial<F, C, I>(
     inactivity_floor_loc: Location<F>,
     reader: &C,
-    snapshot: &mut I,
+    index: &mut I,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
@@ -545,10 +544,10 @@ where
     // supersedes. The state after the last op is each location's final status.
     let mut activity = BitMap::new();
     let floor = *inactivity_floor_loc;
-    let active_keys = build_snapshot_from_log(
+    let active_keys = build_index_from_log(
         inactivity_floor_loc,
         reader,
-        snapshot,
+        index,
         init_buffer,
         cache_size,
         |is_active, old_loc| {
@@ -562,7 +561,7 @@ where
     Ok((active_keys, activity))
 }
 
-/// Worker counts, partition ranges, and cache allocation for a parallel snapshot build.
+/// Worker counts, partition ranges, and cache allocation for a parallel index build.
 pub struct ParallelPlan {
     /// Total partitions to distribute.
     partitions: usize,
@@ -646,12 +645,12 @@ impl ParallelPlan {
     }
 }
 
-/// Build a snapshot by decoding the log replay in contiguous chunks on concurrent decode tasks
+/// Build an index by decoding the log replay in contiguous chunks on concurrent decode tasks
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
-/// [Rebuild::build_snapshot]).
-async fn build_snapshot_parallel<F, E, C, I, S>(
-    snapshot: &mut I,
+/// [Rebuild::build_index]).
+async fn build_index_parallel<F, E, C, I, S>(
+    index: &mut I,
     plan: ParallelPlan,
     context: E,
     inactivity_floor_loc: Location<F>,
@@ -677,20 +676,20 @@ where
     let mut handles = Vec::with_capacity(plan.workers);
     let per_worker_cache = plan.per_worker_cache;
     for (w, (lo, range_len)) in plan.ranges().enumerate() {
-        let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
+        let (tx, rx) = mpsc::channel(INDEX_CHANNEL_DEPTH);
         senders.push(tx);
         let log = log.clone();
 
         // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
         // only that many slots, so per-worker memory is the range, not the full partition set.
-        let worker_index = snapshot.new_range(lo, range_len);
+        let worker_index = index.new_range(lo, range_len);
         let active = active.clone();
         let handle = context
-            .child("snapshot_worker")
+            .child("index_worker")
             .with_attribute("worker", w)
             .dedicated()
             .spawn(move |_| {
-                build_snapshot_worker::<F, C, I::Range>(
+                build_index_worker::<F, C, I::Range>(
                     log,
                     rx,
                     worker_index,
@@ -711,7 +710,7 @@ where
     // resolving a collision). Routing stops on the first such send failure and the join below
     // surfaces that worker's error, rather than panicking on the send.
     let mut pending = VecDeque::new();
-    let routing = SnapshotRouting {
+    let routing = IndexRouting {
         workers: plan.workers,
         partition_of: I::partition_of,
         range_size: plan.range_size,
@@ -722,7 +721,7 @@ where
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
         if plan.decoders == 0 {
             let senders = &senders;
-            return route_snapshot::<F, C, _, _>(
+            return route_index::<F, C, _, _>(
                 &**log,
                 floor..end,
                 floor,
@@ -744,14 +743,14 @@ where
             // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial
             // per worker), so every decoder can finish regardless of which chunk is being
             // forwarded.
-            let capacity = (chunk.end - chunk.start) as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
+            let capacity = (chunk.end - chunk.start) as usize / INDEX_ROUTE_BATCH + plan.workers;
             let (tx, rx) = mpsc::channel(capacity);
             let handle = context
-                .child("snapshot_decoder")
+                .child("index_decoder")
                 .dedicated()
                 .spawn(move |_| async move {
                     let tx = &tx;
-                    route_snapshot::<F, C, _, _>(
+                    route_index::<F, C, _, _>(
                         &*log,
                         chunk,
                         floor,
@@ -806,10 +805,10 @@ where
     routing_result?;
     let joined = joined?;
 
-    // Install each worker's partition range into the snapshot and fold its active-key count in.
+    // Install each worker's partition range into the index and fold its active-key count in.
     let mut total_items = 0;
     for (worker_index, worker_keys) in joined {
-        snapshot.install_range(worker_index);
+        index.install_range(worker_index);
         total_items += worker_keys;
     }
 
@@ -829,17 +828,14 @@ where
     Ok((total_items, active))
 }
 
-/// Configures snapshot rebuilding during QMDB initialization.
+/// Configures index rebuilding during QMDB initialization.
 ///
 /// This trait is sealed to the index types provided by this crate.
 #[expect(
     private_bounds,
-    reason = "the Rebuild supertrait is private so only QMDB can call build_snapshot"
+    reason = "the Rebuild supertrait is private so only QMDB can call build_index"
 )]
-pub trait SnapshotBuild<F: Family>:
-    Index<Value = Location<F>> + Rebuild<F> + Sized + 'static
-{
-}
+pub trait IndexBuild<F: Family>: Index<Value = Location<F>> + Rebuild<F> + Sized + 'static {}
 
 /// Replays the log into an index owned by initialization. Implementations must drop all log
 /// clones before returning, including on error.
@@ -850,7 +846,7 @@ pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
     /// build's `(location -> key)` cache in entries (`None` disables it).
-    fn build_snapshot<E, C>(
+    fn build_index<E, C>(
         &mut self,
         _context: E,
         inactivity_floor_loc: Location<F>,
@@ -864,7 +860,7 @@ pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         async move {
-            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+            build_index_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
         }
     }
 
@@ -882,9 +878,9 @@ pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
         None
     }
 
-    /// Like [Self::build_snapshot], but follows `plan`, whose decode tasks also hash every chunk
+    /// Like [Self::build_index], but follows `plan`, whose decode tasks also hash every chunk
     /// of `leaves` and send them to it in order.
-    fn build_snapshot_hashing<E, C, H>(
+    fn build_index_hashing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -899,13 +895,13 @@ pub(super) trait Rebuild<F: Family>: Index<Value = Location<F>> + Sized {
         H: MerkleHasher<F> + 'static;
 }
 
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
-impl<F: Family, T: Translator> SnapshotBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+impl<F: Family, T: Translator> IndexBuild<F> for crate::index::unordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator> IndexBuild<F> for crate::index::ordered::Index<T, Location<F>> {}
+impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
     for crate::index::partitioned::unordered::Index<T, Location<F>, P>
 {
 }
-impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
+impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
     for crate::index::partitioned::ordered::Index<T, Location<F>, P>
 {
 }
@@ -913,7 +909,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
 impl<F: Family, T: Translator> Rebuild<F> for crate::index::unordered::Index<T, Location<F>> {
     type HashingPlan = Infallible;
 
-    async fn build_snapshot_hashing<E, C, H>(
+    async fn build_index_hashing<E, C, H>(
         &mut self,
         _context: E,
         _inactivity_floor_loc: Location<F>,
@@ -934,7 +930,7 @@ impl<F: Family, T: Translator> Rebuild<F> for crate::index::unordered::Index<T, 
 impl<F: Family, T: Translator> Rebuild<F> for crate::index::ordered::Index<T, Location<F>> {
     type HashingPlan = Infallible;
 
-    async fn build_snapshot_hashing<E, C, H>(
+    async fn build_index_hashing<E, C, H>(
         &mut self,
         _context: E,
         _inactivity_floor_loc: Location<F>,
@@ -955,7 +951,7 @@ impl<F: Family, T: Translator> Rebuild<F> for crate::index::ordered::Index<T, Lo
 impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
     type HashingPlan = ParallelPlan;
 
-    async fn build_snapshot<E, C>(
+    async fn build_index<E, C>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -970,16 +966,10 @@ impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
     {
         let Some(plan) = ParallelPlan::new(self.partition_count(), init_concurrency, cache_size)
         else {
-            return build_snapshot_serial(
-                inactivity_floor_loc,
-                &**log,
-                self,
-                init_buffer,
-                cache_size,
-            )
-            .await;
+            return build_index_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size)
+                .await;
         };
-        build_snapshot_parallel(
+        build_index_parallel(
             self,
             plan,
             context,
@@ -999,7 +989,7 @@ impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
         ParallelPlan::hashing(self.partition_count(), init_concurrency, cache_size)
     }
 
-    async fn build_snapshot_hashing<E, C, H>(
+    async fn build_index_hashing<E, C, H>(
         &mut self,
         context: E,
         inactivity_floor_loc: Location<F>,
@@ -1013,7 +1003,7 @@ impl<F: Family, I: Partitioned<Value = Location<F>>> Rebuild<F> for I {
         C: Contiguous<Item: Operation<F> + Encode> + 'static,
         H: MerkleHasher<F> + 'static,
     {
-        build_snapshot_parallel(
+        build_index_parallel(
             self,
             plan,
             context,

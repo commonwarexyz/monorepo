@@ -353,10 +353,10 @@ where
     /// Add `items` to `batch`, merkleize, and compute the post-apply root, all as one CPU-bound job
     /// submitted through [`Strategy::spawn`].
     ///
-    /// The job hashes against an immutable snapshot of the committed Merkle state, so a parallel
+    /// The job hashes against an immutable view of the committed Merkle state, so a parallel
     /// strategy can host the batch's dominant CPU phase on its own pool instead of occupying the
     /// calling task. If the job's caller is cancelled, the job still runs to completion
-    /// against its snapshot and the result is discarded.
+    /// against its view and the result is discarded.
     pub(crate) async fn merkleize(
         &self,
         batch: UnmerkleizedBatch<F, H, C::Item, S>,
@@ -367,7 +367,7 @@ where
         C::Item: 'static,
     {
         let ancestors = batch.inner.retain_ancestors();
-        let mem = self.merkle.snapshot();
+        let mem = self.merkle.view();
         let hasher = self.hasher.clone();
         let strategy = self.strategy().clone();
         strategy
@@ -4787,7 +4787,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Commit and release the prefix. Its Merkle nodes now resolve through the snapshot.
+        // Commit and release the prefix. Its Merkle nodes now resolve through the view.
         journal = journal.apply_batch(&prefix).await.unwrap();
         drop(prefix);
 
