@@ -64,7 +64,7 @@ All public primitives (and primitive dialects) in the Commonware Library are ann
 
 | Level        | Index | Description                                                                              |
 |--------------|-------|------------------------------------------------------------------------------------------|
-| **WIP**      | 0     | Under development. Merged to trunk but not released: excluded unless explicitly enabled. |
+| **WIP**      | 0     | Under development. Not compiled unless explicitly enabled.                               |
 | **ALPHA**    | 1     | Breaking changes expected. No migration path provided.                                   |
 | **BETA**     | 2     | Wire and storage formats stable. Breaking changes include a migration path.              |
 | **GAMMA**    | 3     | API stable. Extensively tested and fuzzed.                                               |
