@@ -56,9 +56,9 @@ struct Level<D> {
     /// Ordinal of the first node.
     first: u64,
     /// Sealed chunks of [LEVEL_CHUNK] digests. The first `skip` digests of the front chunk are
-    /// dropped. `skip` is 0 when there are no chunks. A sealed chunk keeps the tail's buffer, so
-    /// sealing copies no digests.
-    chunks: VecDeque<Arc<Vec<D>>>,
+    /// dropped. `skip` is 0 when there are no chunks. A sealed chunk takes over the tail's buffer,
+    /// so sealing a tail of exactly [LEVEL_CHUNK] capacity copies no digests.
+    chunks: VecDeque<Arc<Box<[D]>>>,
     skip: usize,
     /// Digests after the last sealed chunk, fewer than [LEVEL_CHUNK].
     tail: Vec<D>,
@@ -97,7 +97,7 @@ impl<D: Copy> Level<D> {
         self.tail.push(digest);
         if self.tail.len() == LEVEL_CHUNK {
             let sealed = core::mem::replace(&mut self.tail, Vec::with_capacity(LEVEL_CHUNK));
-            self.chunks.push_back(Arc::new(sealed));
+            self.chunks.push_back(Arc::new(sealed.into_boxed_slice()));
         }
     }
 
