@@ -15,8 +15,14 @@ use std::{
 
 const RAW_OUTPUT: &str = "gungraun-output.jsonl";
 const CUSTOM_OUTPUT: &str = "commonware-bench-metrics.jsonl";
-// Setting `RUSTFLAGS` overrides `.cargo/config.toml`, so these flags must also enable `WIP`.
-const BENCHMARK_TRACKING_CFG: &str = "--cfg benchmark_tracking --cfg commonware_stability_WIP";
+// Setting `RUSTFLAGS` overrides `.cargo/config.toml`, so a tracker built inside the monorepo
+// (where that config enables `WIP`) must forward the `WIP` cfg itself. A tracker built elsewhere
+// must not, or it would compile `WIP` code in the commonware dependencies of external projects.
+const BENCHMARK_TRACKING_CFG: &str = if cfg!(commonware_stability_WIP) {
+    "--cfg benchmark_tracking --cfg commonware_stability_WIP"
+} else {
+    "--cfg benchmark_tracking"
+};
 
 pub(crate) fn run_benchmarks(
     benchmarks: &[Benchmark],
