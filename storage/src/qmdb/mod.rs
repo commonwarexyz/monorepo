@@ -30,17 +30,17 @@
 //! at the database or parent batch's floor, and `with_inactivity_floor` sets a different one. That
 //! default holds the floor, so their logs grow until the application advances it.
 //!
-//! A batch records no commit metadata unless `with_metadata` sets it ([store] takes metadata in
-//! `finalize` instead). Metadata belongs to one batch. Child batches start without it, and [any]
-//! and [current] keep it through `stage` and `expand`.
+//! A batch records no commit metadata unless `with_metadata` sets it. Metadata belongs to one
+//! batch. Child batches start without it, and [any] and [current] keep it through `stage` and
+//! `expand`.
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
 //! # Batch validity
 //!
-//! A batch's chain has a set of states: its recorded database boundary, each ancestor's tip, and
-//! the batch's own tip. While the database is at one of them, value reads through the batch are
+//! An authenticated batch's chain includes the recorded database boundary, each ancestor's tip,
+//! and the batch's own tip. While the database is at one of them, value reads through the batch are
 //! exact, because the batch retains the writes of every ancestor the database has not applied. At
 //! any other state, for example after a sibling or a descendant of the batch is applied, reads
 //! return [`Error::StaleRead`], and merkleize and apply return [`Error::StaleBatch`]. Merkleize
@@ -82,8 +82,9 @@
 //! Mutating methods take the database by value and return it on success. If a mutating
 //! method returns an error, or its future is dropped before it finishes, the database is
 //! gone: state that was not yet durable is discarded, but everything already on disk stays
-//! recoverable. This applies to validation errors too (e.g. rejecting a stale batch);
-//! use each database's `validate_batch` to pre-check a batch without risking the handle.
+//! recoverable. This applies to validation errors too (e.g. rejecting a stale batch).
+//! On authenticated databases, call `validate_batch` before applying a batch to check it
+//! without risking the handle.
 //!
 //! # Traits
 //!
@@ -138,7 +139,6 @@ pub mod value;
 pub mod verify;
 
 pub use index_build::IndexBuild;
-pub(super) use index_build::build_index_from_log;
 pub use verify::ProofExt;
 
 /// Reject a bound that cannot retain the bootstrap commit.
