@@ -161,97 +161,64 @@ const WAKE_COUNT: u32 = 2;
 /// futex2 flags of the ring and thread waits: a private 32-bit word.
 #[cfg(not(feature = "loom"))]
 const FUTEX2_PRIVATE_U32: u32 = 0x02 | libc::FUTEX_PRIVATE_FLAG as u32;
-cfg_if::cfg_if! {
-    if #[cfg(all(not(feature = "loom"), not(miri)))] {
-        /// System call of the thread wait: futex2 `futex_wait`, which `libc`
-        /// does not name. Linux numbers each system call added since 5.1 alike
-        /// on every architecture, relative to its base, so it is
-        /// `io_uring_setup` plus 30.
-        const IDLE_WAIT_SYSCALL: libc::c_long = libc::SYS_io_uring_setup + 30;
+/// futex2 `futex_wait`, which `libc` does not name. Linux numbers each system
+/// call added since 5.1 alike on every architecture, relative to its base, so
+/// it is `io_uring_setup` plus 30.
+#[cfg(not(feature = "loom"))]
+const SYS_FUTEX_WAIT: libc::c_long = libc::SYS_io_uring_setup + 30;
 
-        /// Block on `word` while it equals `snapshot`, for at most `timeout`,
-        /// returning the system call's result.
-        ///
-        /// The timeout is an absolute `CLOCK_MONOTONIC` time, the clock of
-        /// [`Instant`], read here, so time spent since the caller's reading
-        /// extends it.
-        fn idle_wait(word: &AtomicU32, snapshot: u32, timeout: Option<Duration>) -> libc::c_long {
-            const NANOS_PER_SEC: libc::c_long = 1_000_000_000;
-            let timeout = timeout.map(|timeout| {
-                let mut now = libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                };
-                // SAFETY: `now` is writable storage that outlives the call.
-                let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
-                // CLOCK_MONOTONIC exists on every supported kernel and the
-                // pointer is valid, so the call cannot fail.
-                assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
+/// Block on `word` while it equals `snapshot`, for at most `timeout`,
+/// returning the system call's result.
+///
+/// The timeout is an absolute `CLOCK_MONOTONIC` time, the clock of [`Instant`],
+/// read here, so time spent since the caller's reading extends it.
+#[cfg(not(feature = "loom"))]
+fn idle_wait(word: &AtomicU32, snapshot: u32, timeout: Option<Duration>) -> libc::c_long {
+    const NANOS_PER_SEC: libc::c_long = 1_000_000_000;
+    let timeout = timeout.map(|timeout| {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `now` is writable storage that outlives the call.
+        let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+        // CLOCK_MONOTONIC exists on every supported kernel and the pointer is
+        // valid, so the call cannot fail.
+        assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
 
-                // Both nanosecond fields are below one second, so their sum
-                // carries at most one second.
-                let nanos = now.tv_nsec + libc::c_long::from(timeout.subsec_nanos());
-                let secs = libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX);
-                libc::timespec {
-                    tv_sec: now
-                        .tv_sec
-                        .saturating_add(secs)
-                        .saturating_add(nanos / NANOS_PER_SEC),
-                    tv_nsec: nanos % NANOS_PER_SEC,
-                }
-            });
-            let timeout_ptr = timeout
-                .as_ref()
-                .map_or(std::ptr::null(), std::ptr::from_ref);
-
-            // SAFETY: `word` is an aligned atomic futex word that outlives the
-            // call. `timeout_ptr` is null or references the initialized local
-            // timespec, which remains alive and unchanged until return. On the
-            // 64-bit targets the runtime supports, `libc::timespec` has the
-            // layout of the kernel's `__kernel_timespec`. The value and mask
-            // are passed as `unsigned long`, as the kernel reads them, without
-            // bits above the word size, which it rejects.
-            unsafe {
-                libc::syscall(
-                    IDLE_WAIT_SYSCALL,
-                    word.as_ptr(),
-                    libc::c_ulong::from(snapshot),
-                    libc::c_ulong::from(u32::MAX),
-                    FUTEX2_PRIVATE_U32,
-                    timeout_ptr,
-                    libc::CLOCK_MONOTONIC,
-                )
-            }
+        // Both nanosecond fields are below one second, so their sum carries at
+        // most one second.
+        let nanos = now.tv_nsec + libc::c_long::from(timeout.subsec_nanos());
+        let secs = libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX);
+        libc::timespec {
+            tv_sec: now
+                .tv_sec
+                .saturating_add(secs)
+                .saturating_add(nanos / NANOS_PER_SEC),
+            tv_nsec: nanos % NANOS_PER_SEC,
         }
-    } else if #[cfg(not(feature = "loom"))] {
-        /// System call of the thread wait under Miri, which implements only
-        /// `FUTEX_WAIT` and models no timer slack.
-        const IDLE_WAIT_SYSCALL: libc::c_long = libc::SYS_futex;
+    });
+    let timeout_ptr = timeout
+        .as_ref()
+        .map_or(std::ptr::null(), std::ptr::from_ref);
 
-        /// Block on `word` while it equals `snapshot`, for at most `timeout`,
-        /// returning the system call's result.
-        fn idle_wait(word: &AtomicU32, snapshot: u32, timeout: Option<Duration>) -> libc::c_long {
-            let timeout = timeout.map(|timeout| libc::timespec {
-                tv_sec: timeout.as_secs().try_into().unwrap_or(libc::time_t::MAX),
-                tv_nsec: timeout.subsec_nanos().into(),
-            });
-            let timeout_ptr = timeout
-                .as_ref()
-                .map_or(std::ptr::null(), std::ptr::from_ref);
-
-            // SAFETY: `word` is an aligned atomic futex word that outlives the
-            // call. `timeout_ptr` is null or references the initialized local
-            // timespec, which remains alive and unchanged until return.
-            unsafe {
-                libc::syscall(
-                    IDLE_WAIT_SYSCALL,
-                    word.as_ptr(),
-                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
-                    snapshot,
-                    timeout_ptr,
-                )
-            }
-        }
+    // SAFETY: `word` is an aligned atomic futex word that outlives the call.
+    // `timeout_ptr` is null or references the initialized local timespec,
+    // which remains alive and unchanged until return. On the 64-bit targets
+    // the runtime supports, `libc::timespec` has the layout of the kernel's
+    // `__kernel_timespec`. The value and mask are passed as `unsigned long`,
+    // as the kernel reads them, without bits above the word size, which it
+    // rejects.
+    unsafe {
+        libc::syscall(
+            SYS_FUTEX_WAIT,
+            word.as_ptr(),
+            libc::c_ulong::from(snapshot),
+            libc::c_ulong::from(u32::MAX),
+            FUTEX2_PRIVATE_U32,
+            timeout_ptr,
+            libc::CLOCK_MONOTONIC,
+        )
     }
 }
 
@@ -807,7 +774,6 @@ pub mod tests {
 
     /// Neither an elapsed deadline nor a kernel timeout counts as a
     /// notification.
-    #[commonware_macros::test_group("miri")]
     #[test]
     fn test_timed_park_expiry_is_not_notification() {
         // Park against an elapsed deadline.
@@ -962,7 +928,6 @@ pub mod tests {
     /// and disarm always ends the park. The notifier waits until the waiter
     /// bit is visible, so each round stresses the real concurrent path rather
     /// than only the single-threaded stale snapshot.
-    #[commonware_macros::test_group("miri")]
     #[test]
     fn test_park_handles_concurrent_unpark_races() {
         for _ in 0..64 {
@@ -1108,7 +1073,7 @@ pub mod tests {
                 .next()
                 .and_then(|field| field.strip_prefix("0x"))
                 .and_then(|field| usize::from_str_radix(field, 16).ok());
-            number == Some(IDLE_WAIT_SYSCALL) && address == Some(unparker.word.as_ptr() as usize)
+            number == Some(SYS_FUTEX_WAIT) && address == Some(unparker.word.as_ptr() as usize)
         }
 
         /// Wait until the thread at `task` sleeps in a futex call on the word,
