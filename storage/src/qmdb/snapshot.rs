@@ -1313,17 +1313,36 @@ async fn remove_scratch(context: &impl Storage, scratch: &str) -> Result<(), Run
     Ok(())
 }
 
-/// Build `snapshot` from `log` in two phases that each use every task of `init_concurrency`.
+/// Drop a build's `buckets`, which closes its scratch blob, and remove the blob if the build
+/// wrote one. Every task that shared the buckets must have ended.
+async fn close_scratch<B, R>(
+    context: &impl Storage,
+    buckets: Arc<Buckets<B, R>>,
+    scratch: &str,
+) -> Result<(), RuntimeError> {
+    let spilled = Arc::into_inner(buckets)
+        .expect("tasks were joined")
+        .blob
+        .into_inner()
+        .is_some();
+    if spilled {
+        remove_scratch(context, scratch).await?;
+    }
+    Ok(())
+}
+
+/// Build `snapshot` from `log` in two phases, each on up to `init_concurrency` tasks.
 ///
 /// First, tasks replay the log in chunks and append the record of every keyed operation to the
 /// bucket that owns its key's partition. Then tasks sort each bucket by key and location, let
 /// the newest operation of each key decide whether the key survives, and load the survivors in
-/// key order. The order operations arrive in does not matter, because a key's operations are
+/// key order. One task sorts a bucket, so an index with a single partition is sorted by one
+/// task. The order operations arrive in does not matter, because a key's operations are
 /// compared directly.
 ///
-/// A build that holds more than [MEMORY_BYTES] of records keeps the rest in a blob of the
-/// `scratch` partition. Returns the number of active keys and the activity bitmap (see
-/// [Rebuild::build_snapshot]).
+/// Once a build holds more than [MEMORY_BYTES] of records, a bucket that has collected
+/// [SPILL_BYTES] of them writes them to a blob of the `scratch` partition. Returns the number
+/// of active keys and the activity bitmap (see [Rebuild::build_snapshot]).
 ///
 /// `scan` chooses the chunks of the first phase and sees each one's operations (see [Scan]). If
 /// it stops the build, nothing is sorted and the result is unspecified.
@@ -1410,16 +1429,18 @@ where
     )
     .await?;
     drop(scan);
+    if !routed {
+        // The scan reports why it stopped the build, and its caller discards the result.
+        close_scratch(&context, shared, scratch).await?;
+        return Ok((0, BitMap::new()));
+    }
 
     // All sorters share one atomic bitmap to track the activity bits. Keys are partitioned
     // across buckets, so every bit has a single writer.
     let active = Arc::new(Atomic::zeroes(ops));
     let sorters = tasks.min(buckets);
     let next = Arc::new(AtomicUsize::new(0));
-    let filled = if !routed {
-        // The scan reports why it stopped the build, and its caller discards the result.
-        Vec::new()
-    } else if sorters <= 1 {
+    let filled = if sorters <= 1 {
         vec![sort_and_load::<F, _, _>(&context, &shared, &next, &active).await?]
     } else {
         // A sorter fills the partitions of the buckets it claims, so the order the sorters
@@ -1441,16 +1462,8 @@ where
         running.join().await?
     };
 
-    // The joins reclaimed exclusive ownership of the buckets and the bitmap. Dropping the
-    // buckets closes the scratch blob, if the build needed one.
-    let spilled = Arc::into_inner(shared)
-        .expect("tasks were joined")
-        .blob
-        .into_inner()
-        .is_some();
-    if spilled {
-        remove_scratch(&context, scratch).await?;
-    }
+    // The joins reclaimed exclusive ownership of the buckets and the bitmap.
+    close_scratch(&context, shared, scratch).await?;
     let mut active = Arc::into_inner(active)
         .expect("tasks were joined")
         .into_bitmap();
