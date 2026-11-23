@@ -228,8 +228,7 @@ pub use commonware_macros_impl::select_loop;
 ///
 /// `ALPHA` is the default level: a build that sets no stability cfg compiles every item
 /// marked `ALPHA` or higher. `WIP` items are the exception. They are compiled only when
-/// `commonware_stability_WIP` is set (and no other level is), which the monorepo does in
-/// `.cargo/config.toml`.
+/// `commonware_stability_WIP` is set (and no other level is).
 ///
 /// See [commonware README](https://github.com/commonwarexyz/monorepo#stability) for stability level definitions.
 ///
@@ -284,6 +283,9 @@ pub use commonware_macros_impl::stability;
 /// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, modules with stability
 /// less than N are excluded.
 ///
+/// `WIP` modules are compiled only when `commonware_stability_WIP` is set (and no other level
+/// is). See [macro@stability].
+///
 /// # Example
 /// ```rust,ignore
 /// use commonware_macros::stability_mod;
@@ -295,6 +297,9 @@ pub use commonware_macros_impl::stability_mod;
 ///
 /// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, items with stability
 /// less than N are excluded.
+///
+/// `WIP` items are compiled only when `commonware_stability_WIP` is set (and no other level
+/// is). See [macro@stability].
 ///
 /// # Example
 /// ```rust,ignore
