@@ -6,15 +6,36 @@ use commonware_cryptography::bls12381::primitives::{
     ops::aggregate,
     variant::{MinPk, MinSig},
 };
-use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_parallel::{Rayon, Sequential, ThreadPool, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, iter::NonEmpty, non_empty};
 use libfuzzer_sys::fuzz_target;
+use std::sync::{Arc, OnceLock};
 
 mod common;
 use common::{
     arbitrary_bytes, arbitrary_g1, arbitrary_g2, arbitrary_messages, arbitrary_vec_g1,
     arbitrary_vec_g2,
 };
+
+const MAX_CONCURRENCY: usize = 8;
+
+/// One pool per concurrency value, built on first use and shared by all invocations: building
+/// a pool per operation grows memory under ASan. Each operation gets a new strategy with a
+/// fresh adaptive policy: a shared policy would learn from earlier inputs to run these small
+/// folds serially.
+static POOLS: [OnceLock<ThreadPool>; MAX_CONCURRENCY + 1] =
+    [const { OnceLock::new() }; MAX_CONCURRENCY + 1];
+
+fn parallel_strategy(concurrency: usize) -> Rayon {
+    let pool = POOLS[concurrency].get_or_init(|| {
+        Arc::new(
+            ThreadPoolBuilder::new(NZUsize!(concurrency))
+                .build()
+                .unwrap(),
+        )
+    });
+    Rayon::with_pool(Arc::clone(pool))
+}
 
 #[derive(Debug)]
 enum FuzzOperation {
@@ -89,13 +110,13 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
                 public_key: arbitrary_g1(u)?,
                 messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g2(u)?,
-                concurrency: u.int_in_range(1..=8)?,
+                concurrency: u.int_in_range(1..=MAX_CONCURRENCY)?,
             }),
             7 => Ok(FuzzOperation::VerifySameSignerMinSig {
                 public_key: arbitrary_g2(u)?,
                 messages: arbitrary_messages(u, 1, 20)?,
                 signature: arbitrary_g1(u)?,
-                concurrency: u.int_in_range(1..=8)?,
+                concurrency: u.int_in_range(1..=MAX_CONCURRENCY)?,
             }),
             _ => Ok(FuzzOperation::CombinePublicKeysMinPk {
                 public_keys: Vec::new(),
@@ -172,10 +193,9 @@ fn fuzz(op: FuzzOperation) {
                 .collect();
 
             let combined_msg = if concurrency > 1 {
-                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
                 aggregate::combine_messages::<MinPk, _>(
                     non_empty![@messages_refs.iter()],
-                    &strategy,
+                    &parallel_strategy(concurrency),
                 )
             } else {
                 aggregate::combine_messages::<MinPk, _>(
@@ -199,10 +219,9 @@ fn fuzz(op: FuzzOperation) {
                 .collect();
 
             let combined_msg = if concurrency > 1 {
-                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
                 aggregate::combine_messages::<MinSig, _>(
                     non_empty![@messages_refs.iter()],
-                    &strategy,
+                    &parallel_strategy(concurrency),
                 )
             } else {
                 aggregate::combine_messages::<MinSig, _>(

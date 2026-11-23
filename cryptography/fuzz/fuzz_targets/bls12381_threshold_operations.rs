@@ -8,10 +8,13 @@ use commonware_cryptography::bls12381::primitives::{
     sharing::{ModeVersion, Sharing},
     variant::{MinPk, MinSig, PartialSignature, Variant},
 };
-use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_parallel::{Rayon, Sequential, ThreadPool, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, Participant, non_empty, test_rng};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroU32;
+use std::{
+    num::NonZeroU32,
+    sync::{Arc, OnceLock},
+};
 
 mod common;
 use common::{
@@ -21,6 +24,26 @@ use common::{
     arbitrary_vec_of_vec_partial_sig_g2, arbitrary_vec_partial_sig_g1,
     arbitrary_vec_partial_sig_g2,
 };
+
+const MAX_CONCURRENCY: usize = 4;
+
+/// One pool per concurrency value, built on first use and shared by all invocations: building
+/// a pool per operation grows memory under ASan. Each operation gets a new strategy with a
+/// fresh adaptive policy: a shared policy would learn from earlier inputs to run small inputs
+/// serially.
+static POOLS: [OnceLock<ThreadPool>; MAX_CONCURRENCY + 1] =
+    [const { OnceLock::new() }; MAX_CONCURRENCY + 1];
+
+fn parallel_strategy(concurrency: usize) -> Rayon {
+    let pool = POOLS[concurrency].get_or_init(|| {
+        Arc::new(
+            ThreadPoolBuilder::new(NZUsize!(concurrency))
+                .build()
+                .unwrap(),
+        )
+    });
+    Rayon::with_pool(Arc::clone(pool))
+}
 
 enum FuzzOperation {
     SignProofOfPossessionMinPk {
@@ -204,12 +227,12 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             10 => Ok(FuzzOperation::RecoverMultipleMinPk {
                 sharing: u.arbitrary()?,
                 signature_groups: arbitrary_vec_of_vec_partial_sig_g2(u, 0, 5, 0, 10)?,
-                concurrency: u.int_in_range(1..=4)?,
+                concurrency: u.int_in_range(1..=MAX_CONCURRENCY)?,
             }),
             11 => Ok(FuzzOperation::RecoverMultipleMinSig {
                 sharing: u.arbitrary()?,
                 signature_groups: arbitrary_vec_of_vec_partial_sig_g1(u, 0, 5, 0, 10)?,
-                concurrency: u.int_in_range(1..=4)?,
+                concurrency: u.int_in_range(1..=MAX_CONCURRENCY)?,
             }),
             12 => Ok(FuzzOperation::RecoverPairMinPk {
                 sharing: u.arbitrary()?,
@@ -429,7 +452,7 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
+                let strategy = parallel_strategy(concurrency);
                 let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }
@@ -440,7 +463,7 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
+                let strategy = parallel_strategy(concurrency);
                 let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }

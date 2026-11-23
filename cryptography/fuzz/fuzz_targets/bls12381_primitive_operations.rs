@@ -11,11 +11,27 @@ use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Ring, Space},
     poly::Poly,
 };
-use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
+use commonware_parallel::{Rayon, Sequential, ThreadPool, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, Participant};
 use libfuzzer_sys::fuzz_target;
 use rand::{SeedableRng, rngs::StdRng};
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{Arc, LazyLock},
+};
+
+const MSM_CONCURRENCY: usize = 4;
+
+/// Built once and shared by all invocations: building a pool per operation grows memory under
+/// ASan. Each operation gets a new strategy with a fresh adaptive policy: a shared policy would
+/// learn from earlier inputs to run small inputs serially.
+static MSM_POOL: LazyLock<ThreadPool> = LazyLock::new(|| {
+    Arc::new(
+        ThreadPoolBuilder::new(NZUsize!(MSM_CONCURRENCY))
+            .build()
+            .unwrap(),
+    )
+});
 
 #[derive(Debug, Clone)]
 enum FuzzOperation {
@@ -695,7 +711,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G1MsmParallel { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
+                let strategy = Rayon::with_pool(Arc::clone(&MSM_POOL));
                 let _ = G1::msm(&points[..len], &scalars[..len], &strategy);
             }
         }
@@ -703,7 +719,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::G2MsmParallel { points, scalars } => {
             let len = points.len().min(scalars.len());
             if len > 0 {
-                let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(4))).unwrap();
+                let strategy = Rayon::with_pool(Arc::clone(&MSM_POOL));
                 let _ = G2::msm(&points[..len], &scalars[..len], &strategy);
             }
         }
