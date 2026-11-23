@@ -39,7 +39,7 @@
 //!         init_scratch_partition: "test-partition-scratch".into(),
 //!         init_buffer: NZUsize!(1 << 21),
 //!         strategy: Sequential,
-//!         init_concurrency: NZUsize!(1),
+//!         init_concurrency: NZUsize!(8),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap, _>::init(ctx.child("store"), config, None)
