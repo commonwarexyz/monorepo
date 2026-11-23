@@ -13,6 +13,7 @@ no_std_packages=(
 
 target="riscv32imac-unknown-none-elf"
 image="ghcr.io/commonwarexyz/monorepo/rust-riscv32imac-cross@sha256:41e68788e362c24f5398e321cf701e709d14ddf2f7b419cfcb90216afa292ab8"
+
 # The image sets RUSTFLAGS, which overrides .cargo/config.toml, so append the WIP cfg (and any
 # caller flags) to it inside the container.
 extra_rustflags="${RUSTFLAGS:+$RUSTFLAGS }-D warnings --cfg commonware_stability_WIP"
