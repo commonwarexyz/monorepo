@@ -196,6 +196,16 @@ pub fn metric_samples<'a>(
     metrics: &'a str,
     name: &'a str,
 ) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    named_metric_samples(metrics, name).map(|(_, labels, value)| (labels, value))
+}
+
+/// Iterates over the full encoded name, label set, and value of encoded Prometheus samples
+/// matching `name`, as [`metric_samples`] does.
+#[cfg(any(test, feature = "test-utils"))]
+fn named_metric_samples<'a>(
+    metrics: &'a str,
+    name: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a str, &'a str)> + 'a {
     metrics.lines().filter_map(move |line| {
         let line = line.trim();
         if line.starts_with('#') {
@@ -240,7 +250,7 @@ pub fn metric_samples<'a>(
             return None;
         }
 
-        Some((labels, rest.split_whitespace().next()?))
+        Some((sample_name, labels, rest.split_whitespace().next()?))
     })
 }
 
@@ -317,9 +327,10 @@ pub fn metric_sum(metrics: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
 /// Returns the upper bound of the first bucket of histogram `name` in encoded Prometheus `metrics`
 /// that holds its `percentile`-th percentile sample, with the histogram's sample count.
 ///
-/// A series is the set of bucket samples that share every label but `le`. Every series must use the
-/// same bucket bounds, and buckets with the same bound are summed across series. `name` may be
-/// either the full encoded metric name or its unprefixed suffix, without the `_bucket` suffix.
+/// A series is the set of bucket samples that share their full encoded metric name and every label
+/// but `le`. Every series must use the same bucket bounds, and buckets with the same bound are
+/// summed across series. `name` may be either the full encoded metric name or its unprefixed
+/// suffix, without the `_bucket` suffix, so every histogram ending in `name` contributes series.
 /// Returns `None` when the histogram is absent or holds no samples. The bound is infinite when the
 /// percentile falls beyond the largest finite bucket.
 ///
@@ -331,8 +342,8 @@ pub fn metric_sum(metrics: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
 #[must_use]
 pub fn histogram_percentile(metrics: &str, name: &str, percentile: u64) -> Option<(f64, u64)> {
     let bucket = format!("{name}_bucket");
-    let mut series = BTreeMap::<Vec<(&str, Cow<'_, str>)>, Vec<(f64, u64)>>::new();
-    for (labels, value) in metric_samples(metrics, &bucket) {
+    let mut series = BTreeMap::<(&str, Vec<(&str, Cow<'_, str>)>), Vec<(f64, u64)>>::new();
+    for (sample_name, labels, value) in named_metric_samples(metrics, &bucket) {
         let mut bound = None;
         let mut key = Vec::new();
         for (label, label_value) in metric_labels(labels) {
@@ -351,7 +362,10 @@ pub fn histogram_percentile(metrics: &str, name: &str, percentile: u64) -> Optio
             bound => bound.parse().expect("histogram bucket bound is a number"),
         };
         let count = value.parse().expect("histogram bucket count is an integer");
-        series.entry(key).or_default().push((bound, count));
+        series
+            .entry((sample_name, key))
+            .or_default()
+            .push((bound, count));
     }
 
     let mut series = series.into_values().map(|mut buckets| {
@@ -1155,6 +1169,30 @@ latency_bucket{node=\"b\",role=\"x\",le=\"+Inf\"} 1
         assert_eq!(
             histogram_percentile(metrics, "latency", 100),
             Some((2.0, 3))
+        );
+    }
+
+    #[test]
+    fn histogram_percentile_keeps_metrics_with_a_shared_suffix_apart() {
+        // Both histograms end in `latency` and have the same labels, so only their names tell
+        // their series apart.
+        let metrics = "\
+a_latency_bucket{node=\"x\",le=\"1\"} 50
+a_latency_bucket{node=\"x\",le=\"+Inf\"} 50
+b_latency_bucket{node=\"x\",le=\"1\"} 0
+b_latency_bucket{node=\"x\",le=\"+Inf\"} 50
+";
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 50),
+            Some((1.0, 100))
+        );
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 51),
+            Some((f64::INFINITY, 100))
+        );
+        assert_eq!(
+            histogram_percentile(metrics, "b_latency", 50),
+            Some((f64::INFINITY, 50))
         );
     }
 
