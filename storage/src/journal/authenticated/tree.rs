@@ -95,9 +95,25 @@ impl<D: Copy> Level<D> {
     fn push(&mut self, digest: D) {
         self.tail.push(digest);
         if self.tail.len() == LEVEL_CHUNK {
-            self.chunks
-                .push_back(core::mem::take(&mut self.tail).into());
+            let sealed = core::mem::replace(&mut self.tail, Vec::with_capacity(LEVEL_CHUNK));
+            self.chunks.push_back(sealed.into());
         }
+    }
+
+    /// Make room for `additional` more nodes, so adding them reallocates neither the chunk list
+    /// nor the tail. Sealed chunks are never copied as the level grows. Room that cannot be
+    /// reserved is left to grow as the nodes arrive.
+    fn reserve(&mut self, additional: usize) {
+        if additional == 0 {
+            return;
+        }
+        let Some(total) = self.tail.len().checked_add(additional) else {
+            return;
+        };
+        let _ = self.chunks.try_reserve(total / LEVEL_CHUNK);
+        let _ = self
+            .tail
+            .try_reserve_exact(total.min(LEVEL_CHUNK) - self.tail.len());
     }
 
     /// Drop the first `count` nodes, which must be held.
@@ -182,6 +198,18 @@ impl<D: Copy> Resident<D> {
             }
         }
         Ok(())
+    }
+
+    /// Make room for the nodes born by size `end`, so adding them reallocates no level (see
+    /// [Level::reserve]).
+    fn reserve<F: Family>(&mut self, end: Position<F>) {
+        let born = born(end);
+        for (level, &to) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
+            let Ok(additional) = usize::try_from(to.saturating_sub(level.end())) else {
+                continue;
+            };
+            level.reserve(additional);
+        }
     }
 
     /// Drop nodes before `boundary`.
@@ -571,6 +599,13 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(())
     }
 
+    /// Make room for the resident nodes that appending the operations up to `end` adds. A replay
+    /// to `end` reserves first, so that it never stops to regrow a level.
+    pub(crate) fn reserve(&mut self, end: Location<F>) {
+        self.resident.reserve(F::location_to_position(end));
+        self.update_metrics();
+    }
+
     /// Append the digests of the operations from the current size to `end`.
     pub(crate) async fn replay<C, H>(
         mut self,
@@ -584,6 +619,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         self.check_replay_end(journal, end)?;
+        self.reserve(end);
 
         // Each operation is read once, so its pages are not kept in the OS page cache.
         let stream = journal
@@ -731,6 +767,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         self.check_replay_end(journal.as_ref(), end)?;
+        self.reserve(end);
 
         // Spawn a task that reads and hashes the next chunk, or return false if none is left.
         let plan = self.chunk_plan(end, height);
@@ -1549,6 +1586,79 @@ mod tests {
     #[test]
     fn subtrees_match_batches_mmb() {
         deterministic::Runner::default().start(subtrees_match_batches::<mmb::Family>);
+    }
+
+    /// Reserving for a replay leaves every level room for the nodes the replay adds, so the
+    /// replay reallocates neither a level's chunk list nor its tail, in trees opened at boundaries
+    /// on and off level edges.
+    async fn replay_regrows_no_level<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let total = 513;
+        let expected = oracle::<F>(&Operations::new(total), &hasher);
+        let capacities = |tree: &Tree<F, D, Sequential>| -> Vec<(usize, usize)> {
+            let levels = tree.resident.levels.iter();
+            levels
+                .map(|level| (level.chunks.capacity(), level.tail.capacity()))
+                .collect()
+        };
+        for height in [0, 2, 5] {
+            for boundary in [0, 1, 31, 32, 33, 257, total] {
+                let case = format!("resident {height}, boundary {boundary}");
+                let pins: Vec<_> = F::nodes_to_pin(Location::new(boundary))
+                    .map(|p| expected.get_node(p).unwrap())
+                    .collect();
+                let ops = Operations::range(boundary..total);
+                let mut tree =
+                    Tree::<F, D, _>::new(Location::new(boundary), pins, &config(height), &context)
+                        .unwrap();
+                tree.reserve(Location::new(total));
+                let reserved = capacities(&tree);
+                let tree = tree
+                    .replay(&ops, &hasher, Location::new(total), NZU64!(7))
+                    .await
+                    .unwrap();
+                assert_eq!(capacities(&tree), reserved, "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn replay_regrows_no_level_mmr() {
+        deterministic::Runner::default().start(replay_regrows_no_level::<mmr::Family>);
+    }
+    #[test]
+    fn replay_regrows_no_level_mmb() {
+        deterministic::Runner::default().start(replay_regrows_no_level::<mmb::Family>);
+    }
+
+    /// A chunk list whose room cannot be reserved is skipped, and the level still takes the nodes
+    /// that arrive. The level holds leaves, and room for every leaf is more than one allocation can
+    /// describe, so the reservation is refused before any allocator is asked.
+    fn reserve_skips_a_level_too_large<F: Family>() {
+        let mut resident = Resident {
+            height: 0,
+            levels: vec![Level::<D>::new(0)],
+        };
+        assert!(u128::from(*F::MAX_LEAVES) * size_of::<D>() as u128 > isize::MAX as u128);
+        resident.reserve(F::location_to_position(F::MAX_LEAVES));
+        assert_eq!(resident.levels[0].chunks.capacity(), 0);
+
+        let end = F::location_to_position(Location::new(100));
+        resident
+            .extend_with::<F>(end, |_, ordinal| Ok(Sha256::fill(ordinal as u8)))
+            .unwrap();
+        let level = &resident.levels[0];
+        assert_eq!(level.len(), 100);
+        assert_eq!(level.get(99), Some(Sha256::fill(99)));
+    }
+
+    #[test]
+    fn reserve_skips_a_level_too_large_mmr() {
+        reserve_skips_a_level_too_large::<mmr::Family>();
+    }
+    #[test]
+    fn reserve_skips_a_level_too_large_mmb() {
+        reserve_skips_a_level_too_large::<mmb::Family>();
     }
 
     /// A chunk, whole or partial, that does not start at the tree's end is rejected.

@@ -1,0 +1,63 @@
+#multimmit-pay-latency {
+    margin: 20px 0;
+}
+
+#multimmit-pay-latency .latency-chart svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #fff;
+    font: 12px monospace;
+}
+
+#multimmit-pay-latency .latency-chart [data-condition] text {
+    paint-order: stroke;
+    stroke: #fff;
+    stroke-width: 3px;
+    stroke-linejoin: round;
+}
+
+#multimmit-pay-latency details {
+    margin: 10px 0 8px;
+}
+
+#multimmit-pay-latency summary {
+    display: list-item;
+    list-style: revert;
+    cursor: pointer;
+}
+
+#multimmit-pay-latency summary::-webkit-details-marker { display: revert; }
+
+#multimmit-pay-latency table {
+    width: 100%;
+    border-collapse: collapse;
+    font: 12px/1.4 monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+#multimmit-pay-latency table caption {
+    text-align: left;
+    padding: 8px 0;
+}
+
+#multimmit-pay-latency :is(th, td) {
+    padding: 4px 3px;
+    text-align: right;
+}
+
+#multimmit-pay-latency :is(th[rowspan], th[scope="row"], th[scope="rowgroup"]) {
+    text-align: left;
+}
+
+#multimmit-pay-latency th[scope="colgroup"] {
+    text-align: center;
+}
+
+#multimmit-pay-latency th[scope="row"] {
+    font-weight: normal;
+}
+
+#multimmit-pay-latency th[scope="rowgroup"] {
+    padding-top: 10px;
+}
