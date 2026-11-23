@@ -589,6 +589,9 @@ impl<'a> Searcher<'a> {
         // this is the last return, both updates already precede the kick's
         // fence in this thread.
         if pool.idle().searching.fetch_sub(1, Ordering::Release) == 1 {
+            #[cfg(test)]
+            tests::at_wake_point(tests::WakePoint::LastSearchReturn);
+
             // That was the last count, so wake a parked worker, if any, to carry
             // on the search.
             pool.kick();
@@ -885,6 +888,8 @@ pub mod tests {
         /// In a withdrawal that found its bit claimed, before the worker takes
         /// over the claim's count.
         AfterClaimedWithdrawal,
+        /// In a search's return of the last count, before it kicks.
+        LastSearchReturn,
     }
 
     /// A hook this thread runs once when it reaches its point.

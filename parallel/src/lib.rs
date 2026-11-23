@@ -5882,10 +5882,6 @@ mod test {
     #[test]
     fn same_pool_join_calls_the_block_hook() {
         std::thread::spawn(|| {
-            /// A block hook that only counts its calls.
-            fn count() {
-                BLOCK_HOOK_CALLS.with(|calls| calls.set(calls.get() + 1));
-            }
             let pool = Arc::new(
                 ThreadPoolBuilder::new(NZUsize!(1))
                     .use_current_thread()
@@ -5894,7 +5890,7 @@ mod test {
             );
             let strategy = Rayon::with_pool(pool);
             assert!(strategy.current_placement().is_some());
-            assert!(crate::set_block_hook(Some(count)).is_none());
+            assert!(crate::set_block_hook(Some(count_block_hook)).is_none());
             assert_eq!(strategy.join(|| 1, || 2), (1, 2));
             assert!(crate::set_block_hook(None).is_some());
             assert_eq!(BLOCK_HOOK_CALLS.with(core::cell::Cell::get), 1);

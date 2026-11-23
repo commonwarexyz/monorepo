@@ -2095,7 +2095,7 @@ mod loom_tests {
     use crate::iouring::{
         idle::{
             Look, Park, Searcher,
-            tests::{WakePoint, on_wake_point, search_then_look},
+            tests::{WakePoint, clear_wake_hooks, on_wake_point, search_then_look},
         },
         park::Parker,
         pool::KICK,
@@ -2110,7 +2110,9 @@ mod loom_tests {
     };
     use rstest::rstest;
     use std::{
+        cell::Cell,
         future::{Future, poll_fn},
+        rc::Rc,
         task::{Poll, Waker},
     };
 
@@ -2495,21 +2497,27 @@ mod loom_tests {
     }
 
     /// Create `tasks` tasks retained by `set` that each complete on their
-    /// first poll, counting it in `ran`. Their runnables go into `ready`
-    /// through `Pool::enqueue`, as [`enqueue_raising`] queues its own.
-    /// `ready` must own a run queue of `pool`. Returns the tasks so the model
-    /// can check their references at the end.
+    /// first poll, counting it in `ran`, and in `runs` if given, which loom
+    /// does not track. Their runnables go into `ready` through
+    /// `Pool::enqueue`, as [`enqueue_raising`] queues its own. `ready` must
+    /// own a run queue of `pool`. Returns the tasks so the model can check
+    /// their references at the end.
     fn enqueue_counting(
         pool: &std::sync::Arc<Pool>,
         set: &Tasks,
         ready: &mut Ready,
         ran: &RanCount,
+        runs: Option<&std::sync::Arc<std::sync::atomic::AtomicUsize>>,
         tasks: usize,
     ) -> Vec<Task> {
         (0..tasks)
             .map(|_| {
                 let ran = ran.clone();
+                let runs = runs.cloned();
                 let future = poll_fn(move |_| {
+                    if let Some(runs) = &runs {
+                        runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     *ran.0.lock().unwrap() += 1;
                     ran.1.notify_all();
                     Poll::Ready(())
@@ -3076,11 +3084,19 @@ mod loom_tests {
     /// and returns a nonfinal count require worker two to find the remaining
     /// backlog, rather than park after observing a stale claim. A lost handoff
     /// leaves the owner blocked and loom reports a deadlock. Claims round down.
-    /// Pushes and scans retain their concurrent queue publication.
+    /// Pushes and scans retain their concurrent queue publication. The model
+    /// fails if no execution has worker one take only the oldest runnable,
+    /// before worker two took any, and return a nonfinal count while worker
+    /// two has run none.
     #[test]
     fn test_search_return_publishes_the_steal_to_the_last_return() {
         /// Backlog requiring more progress than one half-backlog steal.
         const TASKS: usize = KICK + 1;
+        /// Set by an execution that reaches the schedule above. Loom tracks
+        /// neither it nor the record of the oldest task and of the runs, so
+        /// they add no executions.
+        static REACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        REACHED.store(false, std::sync::atomic::Ordering::Relaxed);
         let mut builder = loom::model::Builder::new();
         builder.preemption_bound = Some(2);
         builder.check(|| {
@@ -3090,6 +3106,8 @@ mod loom_tests {
             let stop = Arc::new(AtomicBool::new(false));
             let ran: RanCount = Arc::new((Mutex::new(0), Condvar::new()));
             let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+            let oldest = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
             // An empty search takes a count, held across the pushes so their
             // kicks are left to it. This worker then scans once more, runs
@@ -3098,6 +3116,8 @@ mod loom_tests {
                 let pool = pool.clone();
                 let set = set.clone();
                 let gate = gate.clone();
+                let oldest = oldest.clone();
+                let runs = runs.clone();
                 move || {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
@@ -3105,11 +3125,40 @@ mod loom_tests {
                     reach(&gate, 1);
                     await_stage(&gate, 2);
                     let stolen = searcher.search(&mut ready);
+
+                    // Steals take from the head, so a steal that took the
+                    // oldest task came before any of worker two's.
+                    let first = stolen.as_ref().is_some_and(|runnable| {
+                        runnable.0.as_ptr().addr().get()
+                            == oldest.load(std::sync::atomic::Ordering::Relaxed)
+                    });
+
+                    // Loom runs every model thread on one OS thread, so the
+                    // hook would also run for another worker's last return.
+                    // None can return the last count while this one holds a
+                    // count, and this one reaches no loom operation between
+                    // its return and clearing the hook, so the hook runs only
+                    // if this return is the last.
+                    let last = Rc::new(Cell::new(false));
+                    on_wake_point(WakePoint::LastSearchReturn, {
+                        let last = last.clone();
+                        move || last.set(true)
+                    });
+                    // Before this return only worker two can have run a task.
+                    let unran = runs.load(std::sync::atomic::Ordering::Relaxed) == 0;
                     searcher.leave_search();
-                    if let Some(runnable) = stolen {
+                    clear_wake_hooks();
+
+                    // Run the stolen runnable first, as the drive loop does,
+                    // then what the steal published, counting both.
+                    let mut taken = 0;
+                    for runnable in stolen.into_iter().chain(std::iter::from_fn(|| ready.pop())) {
                         run(&set, runnable);
+                        taken += 1;
                     }
-                    drain(&set, &mut ready);
+                    if first && unran && taken == 1 && !last.get() {
+                        REACHED.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
             });
             let parked = thread::spawn({
@@ -3126,7 +3175,11 @@ mod loom_tests {
             // then blocks as in a long poll until two have run.
             await_stage(&gate, 1);
             let mut ready = pool.queue(0).owner();
-            let handles = enqueue_counting(&pool, &set, &mut ready, &ran, TASKS);
+            let handles = enqueue_counting(&pool, &set, &mut ready, &ran, Some(&runs), TASKS);
+            oldest.store(
+                handles[0].as_ptr().addr().get(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             reach(&gate, 2);
             wait_ran_count(&ran, TASKS - 1);
 
@@ -3139,6 +3192,10 @@ mod loom_tests {
                 assert_eq!(refs(&task.state), 1);
             }
         });
+        assert!(
+            REACHED.load(std::sync::atomic::Ordering::Relaxed),
+            "no execution had worker one take only the oldest runnable and return a nonfinal count"
+        );
     }
 
     /// The publication model through quiescence, at one preemption, with a
@@ -3196,7 +3253,7 @@ mod loom_tests {
             // then blocks as in a long poll until three have run.
             await_stage(&gate, 1);
             let mut ready = pool.queue(0).owner();
-            let handles = enqueue_counting(&pool, &set, &mut ready, &ran, TASKS);
+            let handles = enqueue_counting(&pool, &set, &mut ready, &ran, None, TASKS);
             reach(&gate, 2);
             wait_ran_count(&ran, TASKS - 1);
 

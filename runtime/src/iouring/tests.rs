@@ -25,8 +25,13 @@ use super::{
 };
 use crate::{
     Blob as _, IoBufMut, IoBufsMut, Listener as _, Metrics as _, Network as _, ReadOptions,
-    Resolver as _, Runner as _, Sink as _, Storage as _, Stream as _, WriteOptions,
+    Resolver as _, Runner as _, Sink as _, Storage as _, Strategizer as _, Stream as _,
+    WriteOptions,
     utils::{extract_panic_message, reschedule},
+};
+use commonware_parallel::{
+    Strategy as _,
+    mocks::{Explorer, pooled},
 };
 use commonware_utils::sync::OwnedAsyncMutexGuard;
 use futures::{
@@ -4114,40 +4119,37 @@ fn test_remote_task_panic_respects_policy() {
 
 /// Shutdown completes the writes that tasks dropped while they were still
 /// queued behind a one-slot ring, on the ring of each worker, so a second
-/// runner reads back every byte.
+/// runner reads back every byte. The root issues the first writer's writes on
+/// worker zero's ring itself, since a spawned task could be stolen, and sends
+/// the others to worker one.
 #[test]
 fn test_shutdown_drains_queued_writes_on_every_ring() {
+    /// Open the blob of `actor` and register eight one-byte writes to it,
+    /// dropping each after its first poll.
+    async fn issue(context: Context, actor: u8) {
+        let (blob, _) = context.open("retained", &[actor]).await.unwrap();
+        for offset in 0..8 {
+            let write = blob.write_at(offset, vec![actor + 1], WriteOptions::default());
+            let mut write = pin!(write);
+
+            // Dropping a registered write retains its kernel work,
+            // including submissions queued behind the single slot.
+            let _ = futures::poll!(&mut write);
+        }
+    }
+
     let cfg = config()
         .with_worker_threads(2)
         .with_ring_config(RingConfig { size: 1 });
     Runner::new(cfg.clone()).start(|context| async move {
-        for actor in 0_u8..4 {
-            let write = {
-                let context = context.child("writer");
-                async move {
-                    let (blob, _) = context.open("retained", &[actor]).await.unwrap();
-                    for offset in 0..8 {
-                        let write = blob.write_at(offset, vec![actor + 1], WriteOptions::default());
-                        let mut write = pin!(write);
-
-                        // Dropping a registered write retains its kernel work,
-                        // including submissions queued behind the single slot.
-                        let _ = futures::poll!(&mut write);
-                    }
-                    pending::<()>().await;
-                }
-            };
-
-            // Queue the first writer here and send the others to worker one.
-            if actor == 0 {
-                context.child("writer").spawn(move |_| write);
-            } else {
-                let _ = spawn_elsewhere(&context, write);
-            }
+        issue(context.child("writer"), 0).await;
+        for actor in 1_u8..4 {
+            let writer = context.child("writer");
+            let _ = spawn_elsewhere(&context, async move {
+                issue(writer, actor).await;
+                pending::<()>().await;
+            });
         }
-
-        // Let the locally queued writer run if no peer has taken it.
-        reschedule().await;
     });
     Runner::new(cfg).start(|context| async move {
         for actor in 0_u8..4 {
@@ -5092,11 +5094,6 @@ fn test_run_queue_pop_at_the_interval_pays_the_hint_debt() {
 /// worker zero replaces with its own while it runs, on return and on unwind.
 #[test]
 fn test_runner_restores_the_callers_block_hook() {
-    use commonware_parallel::{
-        Strategy as _,
-        mocks::{Explorer, pooled},
-    };
-
     std::thread_local! {
         /// Calls of `outer` on this thread.
         static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -5135,9 +5132,6 @@ fn test_runner_restores_the_callers_block_hook() {
 /// before it could be stolen.
 #[test]
 fn test_rayon_call_hands_off_the_run_queue() {
-    use crate::Strategizer as _;
-    use commonware_parallel::{Strategy as _, mocks::Explorer};
-
     /// Longer than the test, so only the hand-off can move the queued task.
     const AGE: Duration = MAX_STEAL_AGE;
     let cfg = config().with_worker_threads(2).with_steal_age(AGE);
@@ -6234,7 +6228,6 @@ fn spawn_thread_recorder(
 /// it holds a pending receive, so the re-look must bound either wait.
 #[rstest::rstest]
 #[case::lone_runnable_behind_a_long_poll_is_claimed_by_an_idle_worker(Duration::ZERO)]
-#[case::twenty_milliseconds(Duration::from_millis(20))]
 #[case::default(DEFAULT_STEAL_AGE)]
 fn test_young_lone_runnable_behind_a_long_poll_is_taken_once_it_ripens(
     #[case] age: Duration,

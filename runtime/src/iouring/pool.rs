@@ -1787,37 +1787,24 @@ pub mod tests {
         }
     }
 
-    /// A new task's first runnable that a spawn queued alone is ripe at once,
-    /// however long the steal age. The look neither starts an observation nor
-    /// sets a re-look deadline. A woken runnable at the next count is young
-    /// again.
-    #[test]
-    fn test_spawned_lone_runnable_is_ripe_at_once() {
-        let pool = aged_pool(2, MAX_STEAL_AGE);
-        let mut relook = None;
-        assert!(pool.ripe(0, 5, true, &mut relook));
-        assert!(relook.is_none());
-        assert_eq!(pool.seen[0].key.load(Ordering::Relaxed), UNSEEN);
-
-        assert!(!pool.ripe(0, 6, false, &mut relook));
-        assert!(relook.is_some());
-    }
-
     /// A look reports a lone runnable that a spawn queued as stealable at
-    /// once, and one that a wake queued only once it ripens, through the run
-    /// queue's mark for the newest spawned count.
+    /// once, however long the steal age, and one that a wake queued only once
+    /// it ripens, through the run queue's mark for the newest spawned count.
+    /// The look at the spawned runnable neither starts an observation nor sets
+    /// a re-look deadline.
     #[test]
     fn test_has_stealable_takes_a_spawned_lone_runnable_at_once() {
         let pool = aged_pool(2, MAX_STEAL_AGE);
         let set = Tasks::new(1);
         let (mut zero, mut one) = (ready(&pool, 0), ready(&pool, 1));
 
-        // Spawned alone: stealable at once, and stolen.
+        // Spawned alone: stealable at once, unobserved, and stolen.
         let (spawned, runnable) = task(&set);
         pool.enqueue_spawned(&mut zero, runnable);
         let mut relook = None;
         assert!(pool.has_stealable(1, &mut relook));
         assert!(relook.is_none());
+        assert_eq!(pool.seen[0].key.load(Ordering::Relaxed), UNSEEN);
         let stolen = pool
             .steal(1, 0, &mut one, &mut relook)
             .expect("the lone runnable is stolen");
