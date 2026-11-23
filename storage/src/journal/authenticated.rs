@@ -975,6 +975,7 @@ where
                 .dedicated()
                 .spawn(move |_| async move {
                     let mut merkle = merkle;
+                    merkle.reserve(end);
                     while let Some(chunk) = rx.recv().await {
                         merkle = merkle.apply_chunk(&hasher, chunk).await?;
                     }
