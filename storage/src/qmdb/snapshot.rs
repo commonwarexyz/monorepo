@@ -1,10 +1,10 @@
 //! Rebuild snapshot indexes and activity bitmaps from the operations log.
 //!
-//! A build never probes the index it fills. It replays the log once, writing a small record for
-//! every keyed operation into the bucket that owns the key's partition. It then sorts each
-//! bucket by key and location, which puts the operations of one key side by side with the newest
-//! last, and loads the keys whose newest operation is not a delete. Buckets of a build too large
-//! to hold in memory live in a scratch blob until they are sorted.
+//! A build has two phases. It first replays the log once, writing a small record for every keyed
+//! operation into the bucket that owns the key's partition. It then sorts each bucket by key and
+//! location, which puts the operations of one key side by side with the newest last, and loads
+//! the keys whose newest operation is not a delete. Buckets of a build too large to hold in
+//! memory live in a scratch blob until they are sorted.
 //!
 //! The tasks that replay the log can also hash its operations for the journal's Merkle structure,
 //! so that initialization reads the log once.
