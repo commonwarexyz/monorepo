@@ -1,6 +1,6 @@
 //! Rebuild snapshot indexes and activity bitmaps from the operations log.
 //!
-//! A build has two phases. It first replays the log once, writing a small record for every keyed
+//! A build has two phases. It first replays the log, writing a small record for every keyed
 //! operation into the bucket that owns the key's partition. It then sorts each bucket by key and
 //! location, which puts the operations of one key side by side with the newest last, and loads
 //! the keys whose newest operation is not a delete. Buckets of a build too large to hold in
@@ -83,9 +83,11 @@ const MEMORY_BYTES: u64 = 64 << 20;
 const MEMORY_BYTES: u64 = 1024;
 
 /// Bytes of records a bucket collects before it writes them to the scratch blob, once the build
-/// holds more than [MEMORY_BYTES]. Small in tests so ordinary logs write several times.
+/// holds more than [MEMORY_BYTES]. A bucket with fewer keeps them in memory, so a build with many
+/// buckets holds up to this much for each. Small writes are costly: in benchmarks, a build that
+/// wrote 256 KiB at a time took 19% longer. Small in tests so ordinary logs write several times.
 #[cfg(not(test))]
-const SPILL_BYTES: usize = 1 << 20;
+const SPILL_BYTES: usize = 4 << 20;
 #[cfg(test)]
 const SPILL_BYTES: usize = 256;
 

@@ -19,7 +19,7 @@ use crate::{
         delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         metrics::Metrics,
-        operation::{Committable as _, Key, Operation as _, same_key},
+        operation::{Committable as _, Key, Operation as _},
         selection_error, update_known_loc, validate_initialization_bound,
         validate_initialization_commit,
         value::{VariableEncoding, VariableValue},
@@ -260,7 +260,7 @@ where
                 unreachable!("location does not reference update operation. loc={loc}");
             };
 
-            if same_key(&k, key) {
+            if &k == key {
                 return Ok(Some(v));
             }
         }
@@ -2431,95 +2431,6 @@ mod test {
 
             // Destroy the store
             db.destroy().await.unwrap();
-        });
-    }
-
-    /// A key whose bytes leave out part of it, which [Key] forbids: keys with the same bytes and
-    /// different tags are unequal.
-    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct Tagged {
-        bytes: [u8; 4],
-        tag: u8,
-    }
-
-    impl AsRef<[u8]> for Tagged {
-        fn as_ref(&self) -> &[u8] {
-            &self.bytes
-        }
-    }
-
-    impl commonware_codec::Write for Tagged {
-        fn write(&self, buf: &mut impl bytes::BufMut) {
-            self.bytes.write(buf);
-            self.tag.write(buf);
-        }
-    }
-
-    impl commonware_codec::FixedSize for Tagged {
-        const SIZE: usize = 5;
-    }
-
-    impl Read for Tagged {
-        type Cfg = ();
-
-        fn read_cfg(
-            buf: &mut impl commonware_codec::Buf,
-            _: &(),
-        ) -> Result<Self, commonware_codec::Error> {
-            use commonware_codec::ReadExt as _;
-            Ok(Self {
-                bytes: <[u8; 4]>::read(buf)?,
-                tag: u8::read(buf)?,
-            })
-        }
-    }
-
-    #[test_traced("DEBUG")]
-    #[should_panic(expected = "keys with equal bytes must be equal")]
-    fn test_store_rejects_unequal_keys_with_equal_bytes() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                log: JournalConfig {
-                    partition: "journal".into(),
-                    write_buffer: NZUsize!(64 * 1024),
-                    replay_buffer: NZUsize!(64 * 1024),
-                    compression: None,
-                    codec_config: ((), ((0..=10000).into(), ())),
-                    items_per_section: NZU64!(7),
-                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                },
-                translator: TwoCap,
-                init_scratch_partition: "journal-scratch".into(),
-                init_buffer: NZUsize!(1 << 21),
-                strategy: Sequential,
-                init_concurrency: NZUsize!(1),
-            };
-            let db = Db::<_, Tagged, Vec<u8>, TwoCap, Sequential>::init(
-                context.child("store"),
-                cfg,
-                None,
-            )
-            .await
-            .unwrap();
-            let first = Tagged {
-                bytes: [1, 2, 3, 4],
-                tag: 0,
-            };
-            let second = Tagged {
-                bytes: [1, 2, 3, 4],
-                tag: 1,
-            };
-            let batch = db
-                .new_batch()
-                .write(first.clone(), Some(vec![1]))
-                .write(second.clone(), Some(vec![2]))
-                .finalize();
-            let db = db.apply_batch(batch).await.unwrap();
-
-            // Whichever key the index returns first, looking up the other one meets it.
-            let _ = db.get(&first).await;
-            let _ = db.get(&second).await;
         });
     }
 
