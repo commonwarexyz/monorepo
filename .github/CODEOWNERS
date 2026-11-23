@@ -1,0 +1,4 @@
+# Every file belongs to this team. The rule on main asks for a code owner's approval, so a pull
+# request needs an approval from one of its members, whatever it changes.
+
+* @commonwarexyz/monorepo-reviewers

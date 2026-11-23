@@ -18,7 +18,6 @@ enum Scenario {
     Cache(cache::fuzz::Plan<false>),
     WideCache(cache::fuzz::Plan<true>),
     BitmapIsUnset(IsUnsetPlan),
-    N5f1Quorum(faults::N5f1QuorumPlan),
     QuorumSafety(faults::QuorumSafetyPlan),
 }
 
@@ -30,7 +29,6 @@ impl Plan {
             Scenario::Cache(plan) => plan.run(),
             Scenario::WideCache(plan) => plan.run(),
             Scenario::BitmapIsUnset(plan) => plan.run(),
-            Scenario::N5f1Quorum(plan) => plan.run(),
             Scenario::QuorumSafety(plan) => plan.run(),
         }
         Ok(())
