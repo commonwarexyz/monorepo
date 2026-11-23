@@ -1,6 +1,6 @@
 ---
 title: "The Payment Heard Round the World"
-description: "With Multimmit, you can verify a payment is final before the network agrees on its place in the log. When we submitted one million transactions per second, the median time to produce a receipt was 41ms across three North American regions and 245ms across 13 regions worldwide."
+description: "With Multimmit, you can verify a payment is final before the network agrees on its place in the log. Receipts were ready in a median of 41ms across three North American regions and 245ms across 13 worldwide, even at a million transactions a second."
 date: "November 23rd, 2026"
 published-time: "2026-11-23T00:00:00Z"
 modified-time: "2026-11-23T00:00:00Z"
