@@ -106,8 +106,14 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Buf, BufsMut, Error, Read, Write};
+    use crate::{Buf, BufsMut, Error, Read, Write, types::lazy::Lazy};
     use bytes::{BufMut, Bytes, BytesMut, TryGetError, buf::UninitSlice};
+    #[cfg(feature = "std")]
+    use std::collections::{HashMap, HashSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     /// One-byte test type that uses the default aggregate hooks.
     ///
@@ -219,12 +225,6 @@ pub(crate) mod tests {
 
     #[test]
     fn test_encode_inline_size_matches_inline_bytes() {
-        use crate::types::lazy::Lazy;
-        use std::{
-            collections::{BTreeMap, BTreeSet},
-            sync::Arc,
-        };
-
         // Long enough that its length prefix takes two bytes.
         let payload = Bytes::from(vec![7u8; 200]);
         let values = vec![1u32, 2, 3];
@@ -249,8 +249,6 @@ pub(crate) mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_encode_inline_size_matches_inline_bytes_hash_collections() {
-        use std::collections::{HashMap, HashSet};
-
         // Long enough that its length prefix takes two bytes.
         let payload = Bytes::from(vec![7u8; 200]);
 
