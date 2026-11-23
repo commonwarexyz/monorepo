@@ -396,7 +396,7 @@ pub struct Pool {
     /// before another worker may steal it. Zero steals it at once, as does a
     /// pool of one worker, which has no thief.
     steal_age: u64,
-    /// The origin of the stamps' clock.
+    /// The origin of the stamps' and hints' clock, which the timers share.
     epoch: Instant,
     /// Loom only: the microseconds since `epoch` that the stamps' clock
     /// reads, which a model advances where real time would pass, so its
@@ -478,7 +478,7 @@ impl Pool {
                 u64::try_from(steal_age.as_nanos().div_ceil(1_000))
                     .expect("steal age must fit in microseconds")
             },
-            epoch: Instant::now(),
+            epoch: origin,
             #[cfg(feature = "loom")]
             model_clock: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
