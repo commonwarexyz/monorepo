@@ -2051,7 +2051,7 @@ mod tests {
 
         fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
             MerkleConfig {
-                partition: format!("initial-target-{suffix}-merkle-metadata"),
+                partition: format!("initial-target-merkle-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 resident_height: Default::default(),
@@ -2060,7 +2060,7 @@ mod tests {
 
         fn fixed_journal_config(suffix: &str) -> FixedJournalConfig {
             FixedJournalConfig {
-                partition: format!("initial-target-{suffix}-log"),
+                partition: format!("initial-target-log-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache(),
                 write_buffer: NZUsize!(1024),
@@ -2070,7 +2070,7 @@ mod tests {
 
         fn variable_journal_config<C>(suffix: &str, codec_config: C) -> VariableJournalConfig<C> {
             VariableJournalConfig {
-                partition: format!("initial-target-{suffix}-log"),
+                partition: format!("initial-target-log-{suffix}"),
                 items_per_section: NZU64!(7),
                 compression: None,
                 codec_config,
@@ -2087,7 +2087,7 @@ mod tests {
                 merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
                 translator: TwoCap,
-                init_scratch_partition: format!("initial-target-{suffix}-scratch"),
+                init_scratch_partition: format!("initial-target-scratch-{suffix}"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }
@@ -2100,7 +2100,7 @@ mod tests {
                 merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
-                init_scratch_partition: format!("initial-target-{suffix}-scratch"),
+                init_scratch_partition: format!("initial-target-scratch-{suffix}"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }
@@ -2112,9 +2112,9 @@ mod tests {
             storage_current::Config {
                 merkle: merkle_config(suffix),
                 log: fixed_journal_config(suffix),
-                grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
+                grafted_metadata_partition: format!("initial-target-grafted-metadata-{suffix}"),
                 translator: TwoCap,
-                init_scratch_partition: format!("initial-target-{suffix}-grafted-metadata-scratch"),
+                init_scratch_partition: format!("initial-target-scratch-{suffix}"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }
@@ -2126,9 +2126,9 @@ mod tests {
             storage_current::Config {
                 merkle: merkle_config(suffix),
                 log: variable_journal_config(suffix, ((), ())),
-                grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
+                grafted_metadata_partition: format!("initial-target-grafted-metadata-{suffix}"),
                 translator: TwoCap,
-                init_scratch_partition: format!("initial-target-{suffix}-grafted-metadata-scratch"),
+                init_scratch_partition: format!("initial-target-scratch-{suffix}"),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(2),
             }
