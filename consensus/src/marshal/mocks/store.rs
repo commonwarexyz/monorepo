@@ -141,11 +141,14 @@ impl<T: Certificates> Certificates for WithheldSync<T> {
     }
 
     async fn sync(self) -> Result<Self, Self::Error> {
+        // Record that the sync began, then never complete it.
         self.sync_started.store(true, Ordering::Release);
         std::future::pending().await
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
+        // The returned handle records that the sync began when it is first polled, and it never
+        // resolves.
         let started = self.sync_started.clone();
         let handle = Handle::from_future(async move {
             started.store(true, Ordering::Release);

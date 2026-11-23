@@ -392,9 +392,13 @@ mod tests {
         }
     }
 
+    /// State sync starts from the block marshal already processed when that block is above the
+    /// selected finalization, even though the block has no finalization of its own.
     #[test]
     fn resolve_covers_durable_marshal_progress() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            // Marshal stores block one without a finalization of its own. The finalization of its
+            // successor is stored by height, so marshal delivers block one under it.
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor", 1);
             let selected = fixtures::finalization(&fixture, 0, Sha256::fill(0));
             let processed_block = TestBlock::new(1, 1);
@@ -414,11 +418,15 @@ mod tests {
             )
             .await;
 
+            // Wait until marshal has processed block one. The block still has no finalization of
+            // its own.
             while marshal.get_processed().await.map(Processed::height) != Some(Height::new(1)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(marshal.get_finalization(Height::new(1)).await.is_none());
 
+            // The selected finalization is below the processed height, so state sync starts from
+            // block one.
             let resolved = resolve(&marshal, floor, &selected).await;
             assert_eq!(
                 Anchor::from_block(&resolved),

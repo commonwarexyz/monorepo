@@ -2551,10 +2551,10 @@ where
         mut self: Box<Self>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self> {
+        // A block at or below the tip has a stored finalization at or above it, and a block at or
+        // below the processed height was already delivered. The block store only reports ranges
+        // looking forward, so collect the stored ranges above both first.
         let covered = self.tip.max(self.floor.processed_height());
-
-        // The block store only reports ranges looking forward, so collect the stored ranges above
-        // `covered` first and then descend through them without visiting the gaps between them.
         let mut ranges = Vec::new();
         let mut cursor = Some(covered.next());
         while let Some(start) = cursor {
@@ -2564,11 +2564,16 @@ where
             }
             cursor = next;
         }
+
+        // Descend through the stored heights without visiting the gaps between ranges, and stop at
+        // the first block whose finalization is cached.
         let heights = ranges
             .into_iter()
             .rev()
             .flat_map(|(start, end)| (start.get()..=end.get()).rev().map(Height::new));
         for height in heights {
+            // The cache is keyed by block digest, so a cached finalization counts only when it
+            // names the commitment of this block.
             let Some(stored) = self.get_finalized_block(height).await else {
                 continue;
             };

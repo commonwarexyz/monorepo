@@ -1402,9 +1402,14 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_restart_restores_reported_finalization_after_interrupted_sync() {
         const PREFIX: &str = "coding-interrupted-sync";
+
+        // Run marshal on a certificate archive whose syncs never complete, report the finalization
+        // of a coded block and crash. Then restart on the stores the crash left.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         let ((provider, block, finalization), checkpoint) =
             runner.start_and_recover(|mut context| async move {
+                // Start marshal for the coding variant. The block archive syncs and the certificate
+                // archive never does.
                 let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
                     &mut context,
                     NAMESPACE,
@@ -1431,6 +1436,9 @@ mod tests {
                     Some(Processed::Block(Height::zero()))
                 );
 
+                // Verify a coded block and report its finalization. The payload of the finalization
+                // is the coding commitment of the block. Marshal caches the finalization and stores
+                // the block.
                 let genesis = genesis_block();
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let ctx = CodingCtx {
@@ -1454,12 +1462,14 @@ mod tests {
                     mailbox.get_info(Identifier::Latest).await,
                     Some((block.height(), block.digest()))
                 );
+
+                // The certificate archive never syncs, so the block is not delivered.
                 context.sleep(Duration::from_secs(1)).await;
                 assert!(application.pending_ack_heights().is_empty());
                 (provider, block, finalization)
             });
-
         deterministic::Runner::from(checkpoint).start(move |context| async move {
+            // The crash kept the coded block and lost its finalization by height.
             let config = test_config(PREFIX, provider);
             let (certificates, blocks) =
                 immutable_finalized_stores(&context, PREFIX, &config).await;
@@ -1470,6 +1480,8 @@ mod tests {
                     .unwrap()
             );
             assert_eq!(certificates.last_index(), None);
+
+            // Restart on those stores.
             let (actor, mailbox, _) = core::Actor::<_, TestCodingVariant, _, _, _, _, _>::init(
                 context.child("actor"),
                 certificates,
@@ -1481,6 +1493,9 @@ mod tests {
             let application = Application::<CodingB>::manual_ack();
             let _handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+
+            // Marshal delivers the block under the finalization it restored from the cache. That
+            // finalization names the coding commitment of the block, and nothing was requested.
             select! {
                 height = application.acknowledged() => assert_eq!(height, block.height()),
                 _ = context.sleep(Duration::from_secs(5)) => panic!("block must be delivered"),
