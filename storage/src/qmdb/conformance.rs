@@ -124,18 +124,18 @@ type ImmutableMmbCompactVariable =
 const PAGE_SIZE: NonZeroU16 = NZU16!(101);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
+fn merkle_config(prefix: &str) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        partition: format!("{suffix}-mm"),
+        partition: format!("{prefix}-mm"),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
         resident_height: Default::default(),
     }
 }
 
-fn fixed_log_config(suffix: &str, page_cache: CacheRef) -> FConfig {
+fn fixed_log_config(prefix: &str, page_cache: CacheRef) -> FConfig {
     FConfig {
-        partition: format!("{suffix}-log"),
+        partition: format!("{prefix}-log"),
         items_per_blob: NZU64!(7),
         page_cache,
         write_buffer: NZUsize!(1024),
@@ -143,9 +143,9 @@ fn fixed_log_config(suffix: &str, page_cache: CacheRef) -> FConfig {
     }
 }
 
-fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfig<C> {
+fn variable_log_config<C>(prefix: &str, page_cache: CacheRef, codec_config: C) -> VConfig<C> {
     VConfig {
-        partition: format!("{suffix}-log"),
+        partition: format!("{prefix}-log"),
         items_per_section: NZU64!(7),
         compression: None,
         codec_config,
@@ -155,61 +155,61 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config(suffix: &str) -> any::Config<OneCap, FConfig, Sequential> {
+fn any_fixed_config(prefix: &str) -> any::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle: merkle_config(suffix),
-        log: fixed_log_config(suffix, pc),
+        merkle: merkle_config(prefix),
+        log: fixed_log_config(prefix, pc),
         translator: OneCap,
-        init_scratch_partition: format!("{suffix}-scratch"),
+        init_scratch_partition: format!("{prefix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }
 }
 
-fn any_variable_config(suffix: &str) -> any::Config<OneCap, VConfig<((), ())>, Sequential> {
+fn any_variable_config(prefix: &str) -> any::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
-        merkle: merkle_config(suffix),
-        log: variable_log_config(suffix, pc, ((), ())),
+        merkle: merkle_config(prefix),
+        log: variable_log_config(prefix, pc, ((), ())),
         translator: OneCap,
-        init_scratch_partition: format!("{suffix}-scratch"),
+        init_scratch_partition: format!("{prefix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }
 }
 
-fn current_fixed_config(suffix: &str) -> current::Config<OneCap, FConfig, Sequential> {
+fn current_fixed_config(prefix: &str) -> current::Config<OneCap, FConfig, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle: merkle_config(suffix),
-        log: fixed_log_config(suffix, pc),
-        grafted_metadata_partition: format!("{suffix}-graft"),
+        merkle: merkle_config(prefix),
+        log: fixed_log_config(prefix, pc),
+        grafted_metadata_partition: format!("{prefix}-graft"),
         translator: OneCap,
-        init_scratch_partition: format!("{suffix}-scratch"),
+        init_scratch_partition: format!("{prefix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }
 }
 
-fn current_variable_config(suffix: &str) -> current::Config<OneCap, VConfig<((), ())>, Sequential> {
+fn current_variable_config(prefix: &str) -> current::Config<OneCap, VConfig<((), ())>, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
-        merkle: merkle_config(suffix),
-        log: variable_log_config(suffix, pc, ((), ())),
-        grafted_metadata_partition: format!("{suffix}-graft"),
+        merkle: merkle_config(prefix),
+        log: variable_log_config(prefix, pc, ((), ())),
+        grafted_metadata_partition: format!("{prefix}-graft"),
         translator: OneCap,
-        init_scratch_partition: format!("{suffix}-scratch"),
+        init_scratch_partition: format!("{prefix}-scratch"),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
     }
 }
 
-fn immutable_fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
+fn immutable_fixed_config(prefix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle: merkle_config(suffix),
-        log: fixed_log_config(suffix, pc),
+        merkle: merkle_config(prefix),
+        log: fixed_log_config(prefix, pc),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
@@ -217,12 +217,12 @@ fn immutable_fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequ
 }
 
 fn immutable_variable_config(
-    suffix: &str,
+    prefix: &str,
 ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
     let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
-        merkle: merkle_config(suffix),
-        log: variable_log_config(suffix, pc, ((), ())),
+        merkle: merkle_config(prefix),
+        log: variable_log_config(prefix, pc, ((), ())),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: NZUsize!(2),
@@ -230,11 +230,11 @@ fn immutable_variable_config(
 }
 
 fn compact_witness_config<C>(
-    suffix: &str,
+    prefix: &str,
     codec_config: C,
 ) -> crate::journal::contiguous::variable::Config<C> {
     crate::journal::contiguous::variable::Config {
-        partition: format!("{suffix}-compact-witness"),
+        partition: format!("{prefix}-compact-witness"),
         items_per_section: NZU64!(64),
         compression: None,
         codec_config,
@@ -244,19 +244,19 @@ fn compact_witness_config<C>(
     }
 }
 
-fn immutable_fixed_compact_config(suffix: &str) -> immutable::fixed::CompactConfig<Sequential> {
+fn immutable_fixed_compact_config(prefix: &str) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, ()),
+        witness: compact_witness_config(prefix, ()),
     }
 }
 
 fn immutable_variable_compact_config(
-    suffix: &str,
+    prefix: &str,
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, ((), ())),
+        witness: compact_witness_config(prefix, ((), ())),
     }
 }
 
@@ -318,50 +318,50 @@ mod tests {
     type KeylessMmbCompactVariable =
         keyless::variable::CompactDb<mmb::Family, Ctx, Vec<u8>, Sha256, Sequential>;
 
-    fn keyless_fixed_config(suffix: &str) -> keyless::fixed::Config<Sequential> {
+    fn keyless_fixed_config(prefix: &str) -> keyless::fixed::Config<Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
-            merkle: merkle_config(suffix),
-            log: fixed_log_config(suffix, pc),
+            merkle: merkle_config(prefix),
+            log: fixed_log_config(prefix, pc),
             init_concurrency: NZUsize!(2),
         }
     }
 
     fn keyless_variable_config(
-        suffix: &str,
+        prefix: &str,
     ) -> keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
-            merkle: merkle_config(suffix),
-            log: variable_log_config(suffix, pc, ((0..=10000).into(), ())),
+            merkle: merkle_config(prefix),
+            log: variable_log_config(prefix, pc, ((0..=10000).into(), ())),
             init_concurrency: NZUsize!(2),
         }
     }
 
-    fn keyless_fixed_compact_config(suffix: &str) -> keyless::fixed::CompactConfig<Sequential> {
+    fn keyless_fixed_compact_config(prefix: &str) -> keyless::fixed::CompactConfig<Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix, ()),
+            witness: compact_witness_config(prefix, ()),
         }
     }
 
     fn keyless_variable_compact_config(
-        suffix: &str,
+        prefix: &str,
     ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix, ((0..=10000usize).into(), ())),
+            witness: compact_witness_config(prefix, ((0..=10000usize).into(), ())),
         }
     }
 
     type Store = store::Db<Ctx, Digest, Digest, OneCap, Sequential>;
 
-    fn store_config(suffix: &str) -> store::Config<OneCap, ((), ()), Sequential> {
+    fn store_config(prefix: &str) -> store::Config<OneCap, ((), ()), Sequential> {
         let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         store::Config {
-            log: variable_log_config(suffix, pc, ((), ())),
+            log: variable_log_config(prefix, pc, ((), ())),
             translator: OneCap,
-            init_scratch_partition: format!("{suffix}-scratch"),
+            init_scratch_partition: format!("{prefix}-scratch"),
             init_buffer: NZUsize!(1 << 21),
             strategy: Sequential,
         }
@@ -1008,8 +1008,8 @@ mod tests {
                 type Error = crate::qmdb::Error<$family>;
 
                 async fn run(context: Ctx, $s: u64) -> Result<(), Self::Error> {
-                    let suffix = format!("{}-{}", stringify!($name), $s);
-                    let mut $d = <$db>::init(context.child("db"), ($cfg_fn)(&suffix), None).await?;
+                    let prefix = format!("{}-{}", stringify!($name), $s);
+                    let mut $d = <$db>::init(context.child("db"), ($cfg_fn)(&prefix), None).await?;
                     let _root = $body;
                     $d.sync().await?;
                     Ok(())
