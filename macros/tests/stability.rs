@@ -10,7 +10,7 @@ const EXPLICIT_LEVEL: bool = cfg!(any(
     commonware_stability_RESERVED
 ));
 
-// All items at level 4 so they're always available
+// All items at EPSILON so they're always available
 #[stability(EPSILON)]
 const fn level_4_fn() -> u8 {
     4
@@ -44,7 +44,7 @@ fn test_level_4_items_compile() {
 }
 
 // Test that lower-level items are excluded at higher stability levels
-// These items and their tests are gated together using stability(2)
+// These items and their tests are gated together using stability(BETA)
 #[stability(BETA)]
 mod level_2_tests {
     use commonware_macros::stability;
@@ -74,7 +74,7 @@ mod level_2_tests {
     }
 }
 
-// Test stability_scope! macro at level 4 (always available)
+// Test stability_scope! macro at EPSILON (always available)
 stability_scope!(EPSILON {
     const fn scope_level_4_fn() -> u8 {
         44
@@ -98,7 +98,7 @@ fn test_stability_scope_level_4() {
     assert_eq!(s.value, 444);
 }
 
-// Test stability_scope! at level 2 (excluded at levels 3, 4)
+// Test stability_scope! at BETA (excluded at GAMMA and above)
 #[stability(BETA)]
 mod stability_scope_level_2_tests {
     use commonware_macros::stability_scope;
@@ -151,7 +151,7 @@ fn test_stability_scope_with_cfg() {
     assert_eq!(s.value, 555);
 }
 
-// Test stability_scope! with cfg at GAMMA level
+// Test stability_scope! with cfg at BETA level
 #[stability(BETA)]
 mod stability_scope_with_cfg_level_2_tests {
     use commonware_macros::stability_scope;

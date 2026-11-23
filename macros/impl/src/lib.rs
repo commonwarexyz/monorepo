@@ -14,7 +14,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Error, Expr, Ident, Item, ItemFn, LitInt, LitStr, Pat, Token, Visibility, braced,
+    Error, Expr, Ident, Item, ItemFn, LitStr, Pat, Token, Visibility, braced,
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
 };
@@ -24,46 +24,32 @@ mod nextest;
 /// Highest stability level index (`EPSILON`).
 const MAX_LEVEL: u8 = 5;
 
-/// Stability level input that accepts either a literal integer (0-5) or a named constant
-/// (WIP, ALPHA, BETA, GAMMA, DELTA, EPSILON).
+/// Stability level input: one of the named levels (WIP, ALPHA, BETA, GAMMA, DELTA, EPSILON).
+///
+/// Integer levels are not accepted, so inserting a level can never silently change what an
+/// existing annotation means.
 struct StabilityLevel {
     value: u8,
 }
 
-const LEVEL_RANGE_ERROR: &str = "stability level must be 0, 1, 2, 3, 4, or 5";
+const LEVEL_NAME_ERROR: &str =
+    "expected stability level: WIP, ALPHA, BETA, GAMMA, DELTA, or EPSILON";
 
 impl Parse for StabilityLevel {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let lookahead = input.lookahead1();
-        if lookahead.peek(LitInt) {
-            let lit: LitInt = input.parse()?;
-            let value: u8 = lit
-                .base10_parse()
-                .map_err(|_| Error::new(lit.span(), LEVEL_RANGE_ERROR))?;
-            if value > MAX_LEVEL {
-                return Err(Error::new(lit.span(), LEVEL_RANGE_ERROR));
-            }
-            Ok(Self { value })
-        } else if lookahead.peek(Ident) {
-            let ident: Ident = input.parse()?;
-            let value = match ident.to_string().as_str() {
-                "WIP" => 0,
-                "ALPHA" => 1,
-                "BETA" => 2,
-                "GAMMA" => 3,
-                "DELTA" => 4,
-                "EPSILON" => 5,
-                _ => {
-                    return Err(Error::new(
-                        ident.span(),
-                        "expected stability level: WIP, ALPHA, BETA, GAMMA, DELTA, EPSILON, or 0-5",
-                    ));
-                }
-            };
-            Ok(Self { value })
-        } else {
-            Err(lookahead.error())
-        }
+        let ident: Ident = input
+            .parse()
+            .map_err(|err| Error::new(err.span(), LEVEL_NAME_ERROR))?;
+        let value = match ident.to_string().as_str() {
+            "WIP" => 0,
+            "ALPHA" => 1,
+            "BETA" => 2,
+            "GAMMA" => 3,
+            "DELTA" => 4,
+            "EPSILON" => 5,
+            _ => return Err(Error::new(ident.span(), LEVEL_NAME_ERROR)),
+        };
+        Ok(Self { value })
     }
 }
 
