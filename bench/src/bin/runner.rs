@@ -15,7 +15,8 @@ use std::{
 
 const RAW_OUTPUT: &str = "gungraun-output.jsonl";
 const CUSTOM_OUTPUT: &str = "commonware-bench-metrics.jsonl";
-const BENCHMARK_TRACKING_CFG: &str = "--cfg benchmark_tracking";
+// Setting `RUSTFLAGS` overrides `.cargo/config.toml`, so these flags must also enable `WIP`.
+const BENCHMARK_TRACKING_CFG: &str = "--cfg benchmark_tracking --cfg commonware_stability_WIP";
 
 pub(crate) fn run_benchmarks(
     benchmarks: &[Benchmark],
