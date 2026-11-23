@@ -11,5 +11,8 @@ pub mod reconfigurer;
 pub mod relay;
 pub mod reporter;
 pub mod scheme;
-pub mod twins;
-pub mod wrapped;
+
+commonware_macros::stability_scope!(ALPHA {
+    pub mod twins;
+    pub mod wrapped;
+});

@@ -42,8 +42,8 @@ impl Label {
     }
 
     /// Get the name of the task.
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 

@@ -4,14 +4,14 @@ use crate::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
     qmdb::{
         self,
-        operation::Floored,
+        operation::Committable,
         sync::{ServeError, source},
     },
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _,
-    Write,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
+    ReadExt as _, ReadRangeExt as _, Write, util::max_items_size,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -26,7 +26,8 @@ use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
 pub enum Request<F: Family> {
     /// Fetch the operations in `[start, start + max_ops)`.
     Operations {
-        /// Prove against the root the database had at this size.
+        /// The number of operations in the log immediately after a commit.
+        /// Use the database root at that size to verify the proof.
         size: Location<F>,
         /// First operation to return.
         start: Location<F>,
@@ -37,7 +38,8 @@ pub enum Request<F: Family> {
     /// location the client will retain. The proof in the response authenticates the pinned nodes,
     /// so there is no way to request them on their own.
     Boundary {
-        /// Prove against the root the database had at this size.
+        /// The number of operations in the log immediately after a commit.
+        /// Use the database root at that size to verify the proof.
         size: Location<F>,
         /// The operation to return, which is also the location of the returned pinned nodes.
         start: Location<F>,
@@ -45,7 +47,8 @@ pub enum Request<F: Family> {
 }
 
 impl<F: Family> Request<F> {
-    /// The size whose root the response's proof must verify against.
+    /// The number of operations in the log immediately after a commit.
+    /// Use the database root at that size to verify the proof.
     pub const fn size(&self) -> Location<F> {
         match self {
             Self::Operations { size, .. } | Self::Boundary { size, .. } => *size,
@@ -180,6 +183,11 @@ impl<F: Family> EncodeSize for Request<F> {
             Self::Boundary { size, start } => size.encode_size() + start.encode_size(),
         }
     }
+}
+
+impl<F: Family> MaxEncodeSize for Request<F> {
+    // The widest variant is an operations request: a tag, two locations, and an operation count.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE + 2 * Location::<F>::MAX_ENCODE_SIZE + NonZeroU64::SIZE;
 }
 
 impl<F: Family> Read for Request<F> {
@@ -336,6 +344,21 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
             } => proof.encode_size() + op.encode_size() + pinned_nodes.encode_size(),
         }
     }
+}
+
+/// Returns an upper bound on the encoded size of a [`Response`] that carries at most `max_ops`
+/// operations of at most `op` encoded bytes each.
+///
+/// An operations response carries a proof of at most [`MAX_PROOF_DIGESTS_PER_ELEMENT`] digests per
+/// operation. A boundary response carries a proof for one operation and at most
+/// [`MAX_PINNED_NODES`] pinned nodes.
+pub fn max_response_size<F: Family, D: Digest>(max_ops: usize, op: usize) -> usize {
+    let operations = Proof::<F, D>::max_encode_size(max_ops * MAX_PROOF_DIGESTS_PER_ELEMENT)
+        + max_items_size(max_ops, op);
+    let boundary = Proof::<F, D>::max_encode_size(MAX_PROOF_DIGESTS_PER_ELEMENT)
+        + op
+        + max_items_size(MAX_PINNED_NODES, D::SIZE);
+    operations.max(boundary) + u8::SIZE
 }
 
 impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
@@ -513,7 +536,7 @@ impl<F, E, C, H, S> Source for authenticated::Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared + Floored<F>>,
+    C: Contiguous<Item: EncodeShared + Committable<F>>,
     H: Hasher,
     S: Strategy,
 {
@@ -557,7 +580,7 @@ where
                 let op = operations
                     .pop()
                     .ok_or(crate::merkle::Error::RangeOutOfBounds(start))?;
-                let pinned_nodes = self.merkle.pinned_nodes_at(start).await?;
+                let pinned_nodes = self.pinned_nodes_at(start).await?;
                 Response::Boundary {
                     proof,
                     op,
@@ -569,8 +592,7 @@ where
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Source
-    for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Source for crate::qmdb::any::Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,
@@ -596,6 +618,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         merkle::mmr,
+        qmdb::any::ordered::fixed::test as ordered_fixed,
         translator::{OneCap, TwoCap},
     };
     use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _};
@@ -789,12 +812,12 @@ pub(crate) mod tests {
     /// Fetch `target`'s final commit operation and pinned nodes from `source`.
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
-        target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
+        target: crate::qmdb::sync::Target<R::Family, R::Digest>,
     ) -> Result<Response<R::Family, R::Op, R::Digest>, R::Error> {
         let (response, _feedback) = source
             .serve(Request::Boundary {
-                size: target.size,
-                start: target.size - 1,
+                size: target.range.end(),
+                start: target.range.start(),
             })
             .await?;
         Ok(response)
@@ -965,7 +988,6 @@ pub(crate) mod tests {
             deterministic::Context,
             Vec<u8>,
             Sha256,
-            (commonware_codec::RangeCfg<usize>, ()),
             Rayon,
         >;
         type ImmutableFixedCompactDb = crate::qmdb::immutable::fixed::CompactDb<
@@ -982,7 +1004,6 @@ pub(crate) mod tests {
             ShaDigest,
             Vec<u8>,
             Sha256,
-            ((), (commonware_codec::RangeCfg<usize>, ())),
             Rayon,
         >;
 
@@ -1110,6 +1131,33 @@ pub(crate) mod tests {
         assert!(R::decode_cfg(Copying(&[9u8]), &(1, ())).is_err());
     }
 
+    #[test]
+    fn test_serve_rejects_non_commit_sizes() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = ordered_fixed::create_test_db(context).await;
+            let db = ordered_fixed::apply_ops(db, ordered_fixed::create_test_ops(1)).await;
+
+            // The initial commit is at 0 and the write is at 1.
+            let start = Location::new(0);
+            for size in [Location::new(0), Location::new(2)] {
+                for request in [
+                    Request::Operations {
+                        size,
+                        start,
+                        max_ops: NZU64!(1),
+                    },
+                    Request::Boundary { size, start },
+                ] {
+                    let result = db.serve(request).await.map(|_| ());
+                    assert!(
+                        matches!(result, Err(qmdb::Error::NotCommitBoundary(s)) if s == size),
+                        "{request:?} returned {result:?}"
+                    );
+                }
+            }
+        });
+    }
+
     /// A source behind a lock reaches the source and reports its error.
     #[test]
     fn test_locked_source_reaches_source() {
@@ -1141,9 +1189,9 @@ pub(crate) mod tests {
             };
             let expected = response.encode();
             let source = SequenceSource::new(vec![response]);
-            let target = crate::qmdb::sync::CompactTarget {
+            let target = crate::qmdb::sync::Target {
                 root: ShaDigest::from([7u8; 32]),
-                size,
+                range: commonware_utils::non_empty_range!(size - 1, size),
             };
 
             let response = fetch_compact_state(&source, target).await.unwrap();

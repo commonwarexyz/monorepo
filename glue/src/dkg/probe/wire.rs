@@ -1,12 +1,15 @@
+//! Wire format of DKG probe messages.
+
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
+    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
 };
 use commonware_consensus::{
     marshal::core::{ExpectedCommitment, Variant},
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
+use commonware_parallel::Strategy;
 
 /// First byte of a DKG probe message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,8 +80,8 @@ where
 {
     /// Boundary finalization response.
     Boundary(Finalization<S, V::Commitment>),
-    /// Finalized block response. The body remains encoded until the epoch and
-    /// responding peer match the outstanding request.
+    /// Block response whose body remains encoded until the epoch and responding
+    /// peer match the outstanding request.
     Block {
         /// Epoch echoed from the request.
         epoch: Epoch,
@@ -95,22 +98,22 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
-    /// Request the boundary finalization for `epoch`.
+    /// Request for the finalization of `epoch`'s boundary block.
     BoundaryRequest(Epoch),
-    /// Respond with a boundary finalization.
+    /// Finalization of a requested boundary block.
     BoundaryResponse(Finalization<S, V::Commitment>),
-    /// Request the boundary block for `epoch`.
+    /// Request for `epoch`'s boundary block.
     BlockRequest(Epoch),
-    /// Respond with a finalized block.
+    /// A requested boundary block.
     BlockResponse {
         /// Epoch echoed from the request.
         epoch: Epoch,
-        /// Requested finalized block.
+        /// Boundary block of `epoch`.
         block: V::Block,
     },
-    /// Request the receiver's latest finalization.
+    /// Request for the receiver's latest finalization.
     LatestRequest,
-    /// Respond with the receiver's latest finalization.
+    /// The receiver's latest finalization.
     LatestResponse(Finalization<S, V::Commitment>),
 }
 
@@ -167,6 +170,23 @@ where
     }
 }
 
+impl<S, V> Message<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
+    /// Returns an upper bound on the encoded size of a message for committees of at most
+    /// `participants` and application blocks of at most `application` encoded bytes.
+    pub fn max_encode_size(participants: u32, application: usize) -> usize {
+        // After its tag, a boundary or block request carries an epoch, a latest request nothing, a
+        // boundary or latest response a finalization, and a block response an epoch and a backfill
+        // block.
+        let finalization = Finalization::<S, V::Commitment>::max_encode_size(participants);
+        let block = Epoch::MAX_ENCODE_SIZE + V::max_backfill_block_size(application);
+        Tag::SIZE + Epoch::MAX_ENCODE_SIZE.max(finalization).max(block)
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<S, V> arbitrary::Arbitrary<'_> for Message<S, V>
 where
@@ -191,7 +211,7 @@ where
     }
 }
 
-/// Decode a boundary protocol request.
+/// Decodes a request, returning `Ok(None)` if the tag names a response.
 pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Error> {
     let tag = Tag::read(&mut reader)?;
     match tag {
@@ -202,7 +222,9 @@ pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Erro
     }
 }
 
-/// Decode a boundary protocol response.
+/// Decodes a response, returning `Ok(None)` if the tag names a request.
+///
+/// A block response's body stays encoded (see [`read_block`]).
 pub(crate) fn read_response<S, V, R>(
     mut reader: R,
     certificate_cfg: &<S::Certificate as Read>::Cfg,
@@ -230,17 +252,24 @@ where
     }
 }
 
-/// Decode the body of a block response using the payload of a verified finalization.
-pub(crate) fn read_block<V>(
+/// Decodes a block response body and binds it to `commitment`, the payload of a verified
+/// finalization.
+pub(crate) async fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+    strategy: &impl Strategy,
 ) -> Result<V::Block, Error>
 where
     V: Variant,
 {
-    let block_cfg = V::block_cfg(block_codec_config, ExpectedCommitment::Trusted(commitment));
-    V::Block::decode_cfg(reader, &block_cfg)
+    V::decode_block(
+        reader,
+        block_codec_config,
+        ExpectedCommitment::Trusted(commitment),
+        strategy,
+    )
+    .await
 }
 
 #[cfg(all(test, feature = "arbitrary"))]

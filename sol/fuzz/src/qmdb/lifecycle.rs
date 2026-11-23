@@ -9,16 +9,19 @@ use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{Graftable, PendingChunk as _, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig},
+    merkle::{Graftable, PendingChunk as _, mmb, mmr},
     qmdb::{
         self,
-        any::{ordered::fixed::Update, value::FixedEncoding},
+        any::ordered::fixed::Update,
         current::{
-            FixedConfig,
-            ordered::{fixed::Db, proof::ExclusionProof},
+            ordered::{
+                fixed::{Config, Db},
+                proof::ExclusionProof,
+            },
             proof::constant::OperationProof,
         },
+        value::FixedEncoding,
     },
     translator::OneCap,
 };
@@ -59,19 +62,16 @@ impl LifecycleArgs {
     }
 }
 
-fn config(context: &deterministic::Context) -> FixedConfig<OneCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(context, NZU16!(4096), NZUsize!(8));
-    FixedConfig {
-        merkle_config: MerkleConfig {
-            journal_partition: "lifecycle-merkle-journal".into(),
-            metadata_partition: "lifecycle-merkle-metadata".into(),
-            items_per_blob: NZU64!(11),
-            write_buffer: NZUsize!(1024),
+fn config() -> Config<OneCap, Sequential> {
+    let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
+    Config {
+        merkle: MerkleConfig {
+            partition: "lifecycle-merkle-metadata".into(),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: Default::default(),
         },
-        journal_config: JournalConfig {
+        log: JournalConfig {
             partition: "lifecycle-operations".into(),
             items_per_blob: NZU64!(7),
             page_cache,
@@ -82,7 +82,7 @@ fn config(context: &deterministic::Context) -> FixedConfig<OneCap, Sequential> {
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(4096),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -119,10 +119,10 @@ fn output<F: Graftable, D: Digest>(
 
 async fn membership<F: Graftable, H: Hasher>(
     db: &Database<F, H>,
-    value: FixedBytes<32>,
+    expected_value: FixedBytes<32>,
 ) -> Result<OperationOutput, qmdb::Error<F>> {
-    assert_eq!(db.get(&key(2)).await?.as_ref(), Some(&value));
-    let proof = db.key_value_proof(key(2)).await?;
+    let (proof, value) = db.key_value_proof(&key(2)).await?;
+    assert_eq!(value, expected_value);
     assert!(proof.verify::<H, FixedEncoding<FixedBytes<32>>>(key(2), value.clone(), &db.root()));
     Ok(output(
         db.root(),
@@ -145,7 +145,7 @@ async fn exclusion<F: Graftable, H: Hasher>(
     let (proof, operation) = match proof {
         ExclusionProof::KeyValue(proof, update) => (proof, Operation::Update(update)),
         ExclusionProof::Commit(proof, metadata) => {
-            let operation = Operation::CommitFloor(metadata, proof.loc);
+            let operation = Operation::Commit(metadata, proof.loc);
             (proof, operation)
         }
     };
@@ -162,31 +162,29 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
     )
     .start(|context| async move {
         let initial = FixedBytes::new(leaf(seed, 0));
-        let db = Database::<F, H>::init(context.child("initial"), config(&context), None).await?;
+        let db = Database::<F, H>::init(context.child("initial"), config(), None).await?;
         let batch = db
             .new_batch()
             .write(key(2), Some(initial.clone()))
             .write(key(4), Some(FixedBytes::new(leaf(seed, 1))))
             .write(key(6), Some(FixedBytes::new(leaf(seed, 2))))
-            .merkleize(&db, None)
+            .merkleize(&db)
             .await?;
-        let (db, _) = db.apply_batch(batch).await?;
-        let db = db.commit().await?;
+        let db = db.apply_batch(batch).await?.commit().await?;
         let before = membership(&db, initial).await?;
         let root = db.root();
         drop(db);
 
-        let mut db =
-            Database::<F, H>::init(context.child("overwrite"), config(&context), None).await?;
+        let mut db = Database::<F, H>::init(context.child("overwrite"), config(), None).await?;
         assert_eq!(db.root(), root);
         for round in 0..OVERWRITES {
             let batch = db
                 .new_batch()
                 .write(key(2), Some(FixedBytes::new(leaf(seed, round + 3))))
                 .write(key(4), None)
-                .merkleize(&db, None)
+                .merkleize(&db)
                 .await?;
-            (db, _) = db.apply_batch(batch).await?;
+            db = db.apply_batch(batch).await?;
         }
         let db = db.commit().await?;
         let root = db.root();
@@ -198,7 +196,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
         assert!(retained_start > 0);
         drop(db);
 
-        let db = Database::<F, H>::init(context.child("pruned"), config(&context), None).await?;
+        let db = Database::<F, H>::init(context.child("pruned"), config(), None).await?;
         assert_eq!(db.root(), root);
         assert_eq!(*db.bounds().start, retained_start);
         assert_eq!(db.get(&key(6)).await?, Some(FixedBytes::new(leaf(seed, 2))));
@@ -208,15 +206,15 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .new_batch()
             .write(key(2), None)
             .write(key(6), None)
-            .merkleize(&db, Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))))
+            .with_metadata(Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))))
+            .merkleize(&db)
             .await?;
-        let (db, _) = db.apply_batch(batch).await?;
-        let db = db.commit().await?;
+        let db = db.apply_batch(batch).await?.commit().await?;
         assert!(db.is_empty());
         let root = db.root();
         drop(db);
 
-        let db = Database::<F, H>::init(context.child("empty"), config(&context), None).await?;
+        let db = Database::<F, H>::init(context.child("empty"), config(), None).await?;
         assert_eq!(db.root(), root);
         assert!(db.is_empty());
         assert_eq!(
@@ -257,8 +255,8 @@ mod tests {
                 assert_eq!(fixture.after.root, fixture.excluded.root);
                 assert_ne!(fixture.after.root, fixture.empty.root);
                 assert!(fixture.retainedStart > Uint256::ZERO);
-                assert_eq!(fixture.before.operation[0], 0xd2);
-                assert_eq!(fixture.empty.operation[0], 0xd3);
+                assert_eq!(fixture.before.operation[0], 0x01);
+                assert_eq!(fixture.empty.operation[0], 0x00);
             }
         }
     }

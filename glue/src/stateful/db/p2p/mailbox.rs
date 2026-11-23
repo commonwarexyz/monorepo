@@ -1,4 +1,4 @@
-//! Mailbox and wire types for the QMDB sync resolver service.
+//! Mailbox for the QMDB sync resolver.
 
 use crate::stateful::db::{AttachableResolver, Shared};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -24,9 +24,9 @@ where
     F: Family,
     D: Digest,
 {
-    /// Provide a database handle so the actor can serve incoming requests.
+    /// A database to serve peer requests from, replacing any earlier one.
     AttachDatabase(Shared<DB>),
-    /// Fetch operations from a remote peer via the P2P resolver engine.
+    /// A request to fetch the response to `request` from peers.
     GetOperations {
         request: Request<F>,
         response: Reply<Response<F, Op, D>>,
@@ -46,6 +46,10 @@ where
     }
 }
 
+/// Messages retained while the mailbox is full.
+///
+/// Only the latest attachment is kept, and fetches whose caller dropped its reply receiver are
+/// discarded.
 pub(super) struct Pending<DB, F, Op, D>
 where
     F: Family,
@@ -160,6 +164,9 @@ where
     Op: Send,
     D: Digest,
 {
+    /// Attaches `db` for serving peer requests, replacing any previously attached database.
+    ///
+    /// Reads already in progress keep the database they started with.
     pub fn attach_database(&self, db: Shared<DB>) {
         let _ = self.sender.enqueue(Message::AttachDatabase(db));
     }

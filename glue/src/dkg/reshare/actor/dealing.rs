@@ -2,14 +2,16 @@ use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     network::Manager,
     reshare::{
-        Actor, EpochInfoResponse, Message as MailboxMessage,
+        Actor, Message as MailboxMessage,
+        actor::inclusion::ArtifactRequests,
         metrics::Phase,
         store::{AckOutcome, Dealer, Player, Store},
     },
     types::Message,
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Codec, Decode, Encode};
 use commonware_consensus::{
+    Heightable as _,
     marshal::core::Variant as MarshalVariant,
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher},
@@ -22,23 +24,20 @@ use commonware_cryptography::{
         },
         primitives::variant::Variant as BlsVariant,
     },
-    certificate::Scheme,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Message as NetworkMessage, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
-};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _};
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use rand_core::CryptoRng;
 use std::ops::ControlFlow;
 use tracing::{Instrument as _, debug, info, info_span, warn};
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -46,17 +45,24 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    /// Run the early dealing phase for `epoch`.
+    /// Runs the dealing window of `epoch`.
     ///
-    /// The phase processes inbound dealer messages and acknowledgements while
-    /// finalized blocks remain in [`EpochPhase::Early`]. It returns after the
-    /// final early block is acknowledged.
+    /// Exchanges dealings and acknowledgements with peers, resending this
+    /// node's unacknowledged dealings on each finalized block. Dealer-log
+    /// requests receive no log and final-block requests are held for the
+    /// inclusion window.
+    ///
+    /// Returns `Continue` with the held requests after the last block before
+    /// the midpoint is acknowledged, and `Break` on shutdown or when the
+    /// mailbox or the epoch's P2P channel closes. Panics as described on
+    /// [`Self::covered`], or if an unapplied finalized block lies outside the
+    /// [`EpochPhase::Early`] part of `epoch`.
     pub(super) async fn dealing<SE, RE>(
         &mut self,
         epoch: Epoch,
@@ -64,13 +70,14 @@ where
         mut dealer: Option<&mut Dealer<V, C>>,
         mut player: Option<&mut Player<V, C>>,
         (mut sender, mut receiver): (SE, RE),
-    ) -> ControlFlow<()>
+    ) -> ControlFlow<(), ArtifactRequests<B, V, C>>
     where
         SE: Sender<PublicKey = C::PublicKey>,
         RE: Receiver<PublicKey = C::PublicKey>,
     {
         self.metrics.set_phase(Phase::Dealing);
 
+        let mut requests = ArtifactRequests::default();
         select_loop! {
             self.context,
             on_stopped => {
@@ -88,17 +95,28 @@ where
                     });
                 }
                 MailboxMessage::ReleaseLog { .. } => {}
-                MailboxMessage::EpochInfo { span, response, .. } => {
-                    let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
-                    process.in_scope(|| {
-                        let _ = response.send_lossy(EpochInfoResponse::Pending);
-                    });
+                MailboxMessage::EpochInfo {
+                    span,
+                    ancestry,
+                    response,
+                } => {
+                    let process =
+                        info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
+                    if requests.push(span, ancestry, response) {
+                        process.in_scope(|| {
+                            debug!("holding final-block request until the epoch midpoint");
+                        });
+                    }
                 }
                 MailboxMessage::Finalized {
                     span,
                     block,
                     response,
                 } => {
+                    if self.covered(&block) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.dealing.finalized",
@@ -133,13 +151,14 @@ where
                             .midpoint(epoch)
                             .and_then(|midpoint| midpoint.previous())
                             == Some(block.height());
+                        self.advance(&block);
                         response.acknowledge();
                         done
                     }
                     .instrument(process)
                     .await;
                     if done {
-                        return ControlFlow::Continue(());
+                        return ControlFlow::Continue(requests);
                     }
                 }
             },
@@ -260,7 +279,10 @@ where
                         );
                     }
                     Err(DkgAckError::InvalidAck) => {
-                        // The authenticated sender acknowledged a transcript this actor never sent.
+                        // This dealer sends one public message per epoch (its seed is
+                        // persisted) and the channel authenticates the sender, so an
+                        // acknowledgement that does not match it cannot come from an
+                        // honest player.
                         commonware_p2p::block!(self.blocker, from, ?epoch, "invalid ack signature");
                     }
                 }
@@ -320,6 +342,7 @@ mod tests {
     use commonware_actor::Feedback;
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
+        Digested, Digestible as _,
         bls12381::{
             dkg::feldman_desmedt::{Dealer as CryptoDealer, Info, Player as CryptoPlayer, Reveal},
             primitives::sharing::Mode,
@@ -339,7 +362,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         convert::Infallible,
-        marker::PhantomData,
+        num::NonZeroUsize,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -366,6 +389,10 @@ mod tests {
             };
             self.received.fetch_add(1, Ordering::SeqCst);
             Ok((self.peer.clone(), message))
+        }
+
+        fn capacity(&self) -> NonZeroUsize {
+            NZUsize!(16)
         }
     }
 
@@ -396,7 +423,7 @@ mod tests {
                 NZU64!(2),
             )
             .await;
-            let (fence, _gate) = Fence::new(Epoch::zero());
+            let (fence, _gate) = Fence::new();
             let (mut actor, mut mailbox) = mocks::TestReshareActor::new(
                 context.child("actor"),
                 Config {
@@ -415,16 +442,17 @@ mod tests {
                     reveal: Reveal::V1,
                     mailbox_size: NZUsize!(16),
                     partition_prefix: "dealing-priority-actor".into(),
+                    page_cache: mocks::page_cache(),
+                    write_buffer: mocks::IO_BUFFER,
+                    replay_buffer: mocks::IO_BUFFER,
                     max_participants: NZU32!(16),
                     blocks_per_epoch: NZU64!(2),
-                    batch_verifier: PhantomData::<ed25519::Batch>,
                 },
             );
 
-            let mut store = Store::init(
+            let mut store = mocks::store(
                 context.child("store"),
                 "dealing-priority-store",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;
@@ -435,7 +463,8 @@ mod tests {
                 received: received.clone(),
             };
             let (sender, _) = inert_channel([peer]);
-            let block = Arc::new(mocks::genesis_block(signer.public_key()));
+            let block = mocks::genesis_block(signer.public_key());
+            let block = Digested::precomputed(block.clone(), block.digest());
             let (ack, waiter) = Exact::handle();
             assert_eq!(
                 mailbox.report(marshal::Update::Block(block, ack)),
@@ -487,10 +516,9 @@ mod tests {
                 NZU64!(8),
             )
             .await;
-            let mut store = Store::init(
+            let mut store = mocks::store(
                 context.child("store"),
                 "authenticated-fault-store",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;

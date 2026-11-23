@@ -33,6 +33,9 @@ pub use tokio::sync::{
     RwLockReadGuard as AsyncRwLockReadGuard, RwLockWriteGuard as AsyncRwLockWriteGuard,
 };
 
+mod exclusive;
+pub use exclusive::Exclusive;
+
 /// A Tokio-based async mutex whose acquisitions are recorded as tracing spans.
 ///
 /// Each lock is identified by a static name, recorded as the `lock` field on the

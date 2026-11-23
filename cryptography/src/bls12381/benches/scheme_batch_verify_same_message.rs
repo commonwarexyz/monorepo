@@ -1,6 +1,9 @@
-use commonware_cryptography::{BatchVerifier, Signer as _, bls12381};
+use commonware_cryptography::{
+    BatchEntry, BatchVerifier, Signer as _,
+    bls12381::{PrivateKey, PublicKey},
+};
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{NZUsize, TestRng, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
@@ -14,26 +17,45 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
     rng.fill(&mut msg);
     for n_signers in [1, 10, 100, 1000, 10000].into_iter() {
         for concurrency in [1, 8] {
-            let rayon = (concurrency > 1).then(|| Rayon::new(NZUsize!(concurrency)).unwrap());
+            let rayon = (concurrency > 1)
+                .then(|| Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap());
             c.bench_function(
                 &format!("{}/pks={} conc={}", module_path!(), n_signers, concurrency),
                 |b| {
                     b.iter_batched(
                         || {
-                            let mut batch = bls12381::Batch::new(n_signers);
-                            for _ in 0..n_signers {
-                                let signer = bls12381::PrivateKey::random(&mut rng);
-                                let sig = signer.sign(namespace, &msg);
-                                assert!(batch.add(namespace, &msg, &signer.public_key(), &sig));
-                            }
-                            batch
+                            (0..n_signers)
+                                .map(|_| {
+                                    let signer = PrivateKey::random(&mut rng);
+                                    (signer.public_key(), signer.sign(namespace, &msg))
+                                })
+                                .collect::<Vec<_>>()
                         },
                         |batch| {
-                            #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
-                                black_box(batch.verify(&mut verify_rng, rayon))
+                                black_box(PublicKey::verify_batch(
+                                    &mut verify_rng,
+                                    &batch,
+                                    |_, (public_key, signature)| BatchEntry {
+                                        namespace,
+                                        message: &msg,
+                                        public_key,
+                                        signature,
+                                    },
+                                    rayon,
+                                ))
                             } else {
-                                black_box(batch.verify(&mut verify_rng, &Sequential))
+                                black_box(PublicKey::verify_batch(
+                                    &mut verify_rng,
+                                    &batch,
+                                    |_, (public_key, signature)| BatchEntry {
+                                        namespace,
+                                        message: &msg,
+                                        public_key,
+                                        signature,
+                                    },
+                                    &Sequential,
+                                ))
                             }
                         },
                         BatchSize::SmallInput,

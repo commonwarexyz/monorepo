@@ -1,19 +1,16 @@
 use crate::{
     merkle::Family,
     qmdb::{
-        any::{
-            FixedValue,
-            operation::{
-                COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
-                update,
-            },
-            value::FixedEncoding,
+        any::operation::{
+            COMMIT_CONTEXT, DELETE_CONTEXT, Operation, OperationCodec, UPDATE_CONTEXT, Update,
+            update,
         },
         operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
+        value::{FixedEncoding, FixedValue},
     },
 };
 use commonware_codec::{
-    Buf, Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
+    Buf, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
 };
 use commonware_runtime::BufMut;
@@ -42,7 +39,7 @@ const fn total_op_size<K: Array, V: FixedSize, S: FixedSize>() -> usize {
 impl<F, V, S> OperationCodec<F, S> for FixedEncoding<V>
 where
     F: Family,
-    S::Key: Array + Codec,
+    S::Key: Array,
     V: FixedValue,
     S: Update<Value = V, ValueEncoding = Self> + CodecFixed<Cfg = ()>,
 {
@@ -61,7 +58,7 @@ where
                 p.write(buf);
                 buf.put_bytes(0, total - update_op_size::<S>());
             }
-            Operation::CommitFloor(metadata, floor_loc) => {
+            Operation::Commit(metadata, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
                 write_commit_fixed(metadata, *floor_loc, buf);
                 buf.put_bytes(0, total - commit_fixed_operation_size::<V>());
@@ -90,7 +87,7 @@ where
             COMMIT_CONTEXT => {
                 let (metadata, floor_loc) = read_commit_fixed(buf)?;
                 ensure_zeros(buf, total - commit_fixed_operation_size::<V>())?;
-                Ok(Operation::CommitFloor(metadata, floor_loc))
+                Ok(Operation::Commit(metadata, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
         }

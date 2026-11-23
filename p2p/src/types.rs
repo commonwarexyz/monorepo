@@ -1,8 +1,11 @@
 //! Shared address types for p2p networking.
 
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_runtime::{BufMut, Error as RuntimeError, Resolver};
-use commonware_utils::{Hostname, IpAddrExt};
+use commonware_utils::{Hostname, IpAddrExt, max};
+use either::Either;
 use std::net::{IpAddr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
@@ -23,6 +26,15 @@ pub enum Ingress {
         /// Port to connect to.
         port: u16,
     },
+}
+
+impl MaxEncodeSize for Ingress {
+    // A DNS ingress with a maximum-length hostname is wider than any socket address.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            SocketAddr::MAX_ENCODE_SIZE,
+            Hostname::MAX_ENCODE_SIZE + u16::SIZE,
+        );
 }
 
 impl Ingress {
@@ -65,17 +77,16 @@ impl Ingress {
         resolver: &impl Resolver,
     ) -> Result<impl Iterator<Item = SocketAddr>, RuntimeError> {
         match self {
-            Self::Socket(addr) => Ok(vec![*addr].into_iter()),
+            Self::Socket(addr) => Ok(Either::Left(core::iter::once(*addr))),
             Self::Dns { host, port } => {
                 let ips = resolver.resolve(host.as_str()).await?;
                 if ips.is_empty() {
                     return Err(RuntimeError::ResolveFailed(host.to_string()));
                 }
-                Ok(ips
-                    .into_iter()
-                    .map(move |ip| SocketAddr::new(ip, *port))
-                    .collect::<Vec<_>>()
-                    .into_iter())
+                let port = *port;
+                Ok(Either::Right(
+                    ips.into_iter().map(move |ip| SocketAddr::new(ip, port)),
+                ))
             }
         }
     }
@@ -211,6 +222,13 @@ impl EncodeSize for Address {
     }
 }
 
+impl MaxEncodeSize for Address {
+    // An asymmetric address carries an ingress and an egress socket address, so it is wider than
+    // any symmetric one.
+    const MAX_ENCODE_SIZE: usize =
+        u8::SIZE + Ingress::MAX_ENCODE_SIZE + SocketAddr::MAX_ENCODE_SIZE;
+}
+
 impl Read for Address {
     type Cfg = ();
 
@@ -269,8 +287,22 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_runtime::IoBuf;
-    use commonware_utils::hostname;
+    use commonware_utils::{hostname, hostname::MAX_HOSTNAME_LEN};
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// Returns a hostname of the maximum length: three 63-character labels and one 61-character
+    /// label, joined by dots.
+    fn widest_hostname() -> Hostname {
+        let host = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(host.len(), MAX_HOSTNAME_LEN);
+        hostname!(&host)
+    }
 
     #[test]
     fn test_ingress_socket_roundtrip() {
@@ -320,6 +352,43 @@ mod tests {
 
         let result = Ingress::decode(IoBuf::from(buf));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ingress_max_encode_size() {
+        let host = widest_hostname();
+        let prefix_slack = Hostname::MAX_ENCODE_SIZE - host.encode_size();
+        let dns = Ingress::Dns {
+            host,
+            port: u16::MAX,
+        };
+        assert_eq!(dns.encode_size() + prefix_slack, Ingress::MAX_ENCODE_SIZE);
+
+        // An IPv6 socket ingress is narrower.
+        let socket = Ingress::Socket(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX));
+        assert!(socket.encode_size() < Ingress::MAX_ENCODE_SIZE);
+    }
+
+    #[test]
+    fn test_address_max_encode_size() {
+        let host = widest_hostname();
+        let prefix_slack = Hostname::MAX_ENCODE_SIZE - host.encode_size();
+        let egress = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX);
+        let asymmetric = Address::Asymmetric {
+            ingress: Ingress::Dns {
+                host,
+                port: u16::MAX,
+            },
+            egress,
+        };
+        assert_eq!(
+            asymmetric.encode_size() + prefix_slack,
+            Address::MAX_ENCODE_SIZE
+        );
+
+        // A symmetric address is narrower.
+        let symmetric = Address::Symmetric(egress);
+        assert!(symmetric.encode_size() < Address::MAX_ENCODE_SIZE);
     }
 
     #[test]

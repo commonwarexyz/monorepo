@@ -790,10 +790,7 @@ impl<F: Additive> Matrix<F> {
     ///
     /// This will return `None` if `min_coefficients < self.rows`, which would mean
     /// discarding data, instead of padding it.
-    pub fn as_polynomials(&self, min_coefficients: usize) -> Option<PolynomialVector<F>>
-    where
-        F: Clone,
-    {
+    pub fn as_polynomials(&self, min_coefficients: usize) -> Option<PolynomialVector<F>> {
         if min_coefficients < self.rows {
             return None;
         }
@@ -810,7 +807,7 @@ impl<F: Additive> Matrix<F> {
     /// of rows in the other matrix.
     pub fn mul(&self, other: &Self) -> Self
     where
-        F: Clone + Ring,
+        F: Ring,
     {
         assert_eq!(self.cols, other.rows);
         let mut out = Self::zero(self.rows, other.cols);
@@ -1199,10 +1196,7 @@ impl<F: Additive> EvaluationVector<F> {
     }
 
     /// Fill a specific row.
-    pub fn fill_row(&mut self, row: usize, data: &[F])
-    where
-        F: Clone,
-    {
+    pub fn fill_row(&mut self, row: usize, data: &[F]) {
         assert!(data.len() <= self.data.cols);
         self.data[row][..data.len()].clone_from_slice(data);
         self.active_rows.set(row as u64, true);

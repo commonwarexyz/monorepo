@@ -1,5 +1,6 @@
 //! Utility functions for metrics
 
+mod batched;
 pub mod histogram;
 mod registration;
 pub mod status;
@@ -34,6 +35,7 @@ pub mod raw {
     };
 }
 
+pub use batched::{Batchable, Batched};
 use commonware_utils::sync::Mutex;
 use prometheus_client::encoding::{
     MetricEncoder as PromMetricEncoder,
@@ -74,7 +76,7 @@ pub trait GaugeExt {
     fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
 
     /// Atomically raise a gauge to at least the provided value.
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error>;
+    fn try_set_max<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
 }
 
 impl GaugeExt for raw::Gauge {
@@ -83,7 +85,7 @@ impl GaugeExt for raw::Gauge {
         Ok(self.set(value))
     }
 
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error> {
+    fn try_set_max<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error> {
         let value = value.try_into()?;
         Ok(self.inner().fetch_max(value, Ordering::Relaxed))
     }
@@ -151,24 +153,18 @@ pub fn validate_label(label: &str) {
 
 /// Add an attribute to a sorted attribute list, maintaining sorted order via binary search.
 ///
-/// Returns `true` if the key was new, `false` if it was a duplicate (value overwritten).
+/// A duplicate key has its value overwritten.
 pub fn add_attribute(
     attributes: &mut Vec<(String, String)>,
     key: &str,
     value: impl std::fmt::Display,
-) -> bool {
+) {
     let key_string = key.to_string();
     let value_string = value.to_string();
 
     match attributes.binary_search_by(|(k, _)| k.cmp(&key_string)) {
-        Ok(pos) => {
-            attributes[pos].1 = value_string;
-            false
-        }
-        Err(pos) => {
-            attributes.insert(pos, (key_string, value_string));
-            true
-        }
+        Ok(pos) => attributes[pos].1 = value_string,
+        Err(pos) => attributes.insert(pos, (key_string, value_string)),
     }
 }
 
@@ -387,13 +383,18 @@ impl<M> Registered<M> {
     /// Create a metric handle with an explicit lifecycle registration.
     ///
     /// The provided [`Registration`] controls what happens when the last clone
-    /// of this handle is dropped. Use [`Registration::from`] with `()` for a
-    /// raw handle that is not exposed by a runtime registry.
+    /// of this handle is dropped. Use [`Self::detached`] when the handle needs no
+    /// registry entry or cleanup.
     pub fn with_registration(metric: M, registration: Registration) -> Self {
         Self {
             metric: Arc::new(metric),
             registration,
         }
+    }
+
+    /// Create a metric handle with no registry entry and no cleanup on drop.
+    pub fn detached(metric: M) -> Self {
+        Self::with_registration(metric, Registration::from(()))
     }
 
     pub fn metric(&self) -> &M {

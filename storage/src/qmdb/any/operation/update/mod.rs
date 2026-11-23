@@ -1,4 +1,4 @@
-use crate::qmdb::{any::value::ValueEncoding, operation::Key};
+use crate::qmdb::{operation::Key, value::ValueEncoding};
 use commonware_codec::CodecShared;
 use std::fmt;
 
@@ -26,15 +26,6 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
     type Cached: Send + Sync;
 
-    /// Whether merkleize may emit a staged delete directly at its read-resolved location.
-    /// When false, staged deletes fall back to normal mutations.
-    const STAGES_DELETES: bool;
-
-    /// Whether merkleize may stage a read that resolved in an uncommitted ancestor's diff.
-    /// `Some` supplies the cached payload recorded for such a read. `None` leaves those
-    /// slots unresolved, so their updates fall back to normal mutations.
-    const STAGES_ANCESTORS: Option<Self::Cached>;
-
     /// The updated key.
     fn key(&self) -> &Self::Key;
 
@@ -47,18 +38,35 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// Consumes the update and returns its owned value.
     fn into_value(self) -> Self::Value;
 
-    /// Build the cached payload from a resolved update.
-    fn cached(&self) -> Self::Cached;
+    /// Build the [`Cached`](Self::Cached) payload of the update that `update` returns. `update` is
+    /// called only when the payload depends on the update.
+    fn cached<'a>(update: impl FnOnce() -> &'a Self) -> Self::Cached
+    where
+        Self: 'a;
 
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
+/// Splits an update into its owned key, value, and cached payload, rebuilds it from them, and
+/// states whether deleting a key involves its collision siblings.
+pub(crate) trait Parts: Update {
+    /// Whether a collision sibling can hold the predecessor link that deleting a key rewrites.
+    const SIBLINGS: bool;
+
+    /// Consumes the update and returns its owned key, value, and [`Cached`](Update::Cached)
+    /// payload.
+    fn into_parts(self) -> (Self::Key, Self::Value, Self::Cached);
+
+    /// Rebuilds the update that [`into_parts`](Self::into_parts) split.
+    fn from_parts(key: Self::Key, value: Self::Value, cached: Self::Cached) -> Self;
+}
+
 #[cfg(test)]
 mod tests {
     use super::ordered::Update as OrderedUpdate;
-    use crate::qmdb::any::{
-        unordered::Update as UnorderedUpdate,
+    use crate::qmdb::{
+        any::unordered::Update as UnorderedUpdate,
         value::{FixedEncoding, VariableEncoding},
     };
     use commonware_codec::{Codec, RangeCfg, Read};

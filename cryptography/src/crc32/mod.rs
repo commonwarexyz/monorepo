@@ -31,6 +31,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -90,7 +91,11 @@ impl Hasher for Crc32 {
         hasher.finalize().1
     }
 
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        _strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
         (Self::hash(left), Self::hash(right))
     }
 

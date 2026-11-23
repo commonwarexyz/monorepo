@@ -3,7 +3,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{
+    Buf, EncodeSize, MaxEncodeSize, RangeCfg, Read, Write, util::max_items_size,
+};
 use core::{
     fmt,
     hash::Hash,
@@ -101,6 +103,13 @@ impl<T: Write> Write for Set<T> {
 impl<T: EncodeSize> EncodeSize for Set<T> {
     fn encode_size(&self) -> usize {
         self.0.encode_size()
+    }
+}
+
+impl<T: MaxEncodeSize> Set<T> {
+    /// Returns an upper bound on the encoded size of a set of at most `len` items.
+    pub fn max_encode_size(len: usize) -> usize {
+        max_items_size(len, T::MAX_ENCODE_SIZE)
     }
 }
 
@@ -683,6 +692,14 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for Map<K, V> {
     }
 }
 
+impl<K: MaxEncodeSize, V> Map<K, V> {
+    /// Returns an upper bound on the encoded size of a map of at most `len` entries whose values
+    /// encode to at most `value` bytes each.
+    pub fn max_encode_size(len: usize, value: usize) -> usize {
+        Set::<K>::max_encode_size(len) + max_items_size(len, value)
+    }
+}
+
 impl<K: Read + Ord, V: Read> Read for Map<K, V> {
     type Cfg = (RangeCfg<usize>, K::Cfg, V::Cfg);
 
@@ -1001,7 +1018,7 @@ impl<'a, K, V> IntoIterator for &'a BiMap<K, V> {
 impl<K, V> arbitrary::Arbitrary<'_> for BiMap<K, V>
 where
     K: for<'a> arbitrary::Arbitrary<'a> + Ord,
-    V: for<'a> arbitrary::Arbitrary<'a> + Ord + Eq + Hash,
+    V: for<'a> arbitrary::Arbitrary<'a> + Ord + Hash,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let mut vec = Vec::<(K, V)>::arbitrary(u)?;

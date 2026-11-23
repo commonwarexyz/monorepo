@@ -1,162 +1,341 @@
-//! Bootstrap and continuously reshare threshold secrets.
+//! Threshold key generation and continuous resharing for epoch-based consensus.
 //!
-//! This module wires threshold-key management into consensus without owning the
-//! application's state machine or private-key policy. It provides two public
-//! entry points:
+//! `dkg` creates a BLS12-381 threshold key with a one-shot [`bootstrap`] ceremony and
+//! rotates its shares across application epochs with [`reshare`]. Both use
+//! [Feldman-Desmedt](commonware_cryptography::bls12381::dkg::feldman_desmedt) DKG and resharing.
 //!
-//! - [`bootstrap`] runs a contained, one-shot DKG chain that trustlessly creates
-//!   an initial threshold secret.
-//! - [`reshare`] runs alongside an application chain and continuously rotates
-//!   threshold shares across epochs.
+//! # Overview
 //!
-//! Both paths produce or consume [`types::EpochInfo`], the public artifact that
-//! describes the threshold output for an epoch. The application stores that
-//! artifact in its own blocks and installs epoch-scoped schemes through a
-//! [`Registrar`].
+//! Each epoch has _dealers_ who hold shares from the previous output, _players_ receiving
+//! new shares, and _next players_ announced one epoch before their ceremony. A
+//! [`types::EpochInfo`] describes the epoch's public output, participants, and transport
+//! directory. Genesis carries epoch zero's info, and each epoch's final block carries
+//! the next epoch's info.
+//!
+//! # Architecture
+//!
+//! - [`bootstrap::Engine`] creates the initial threshold output on a single-epoch chain.
+//! - [`reshare::Actor`] runs each epoch's ceremony and registers its consensus scheme.
+//! - [`orchestrator::Actor`] runs one Simplex engine per epoch and advances at finalized boundaries.
+//! - [`probe::Actor`] discovers a state-sync floor and its epoch info, and serves them to peers.
+//! - [`state_sync::Plan`] keeps state-sync material and epoch checkpoints for restart and serving.
+//! - [`fence::Fence`] gates epoch entry on scheme registration.
 //!
 //! # Application Contract
 //!
-//! Application blocks implement [`ReshareBlock`] and carry at most one
-//! [`types::Payload`]. Connect an application to the reshare mailbox by wrapping
-//! it in [`reshare::Application`], which drives both sides of the contract:
+//! Application blocks implement [`ReshareBlock`]. The [`reshare::Application`] wrapper selects
+//! each proposal's payload and checks payload placement and final-block epoch info during
+//! verification. The application includes the selected payload from [`reshare::Input`] in its
+//! block. See the [reshare contract](reshare#application-contract) for the full rules.
 //!
-//! - For proposals, the wrapper selects and fetches the payload to include (a
-//!   dealer log from the midpoint onward, the epoch info on the final block) and
-//!   hands it to the application through [`reshare::Input`]. The
-//!   application takes it in its own `propose` and attaches it to the block it
-//!   builds, because only the application can build its block type. It does not
-//!   talk to the reshare mailbox or track epoch boundaries itself.
-//! - For verification, the wrapper rejects a final block whose payload does not
-//!   match the independently constructed [`types::EpochInfo`], and rejects stray
-//!   payloads on early non-final blocks, so the application does not implement
-//!   these checks by hand.
-//!
-//! The protocol also requires the application to provide a [`SecretStore`].
-//! Secret storage is intentionally user-owned: deployments differ on encryption,
-//! access control, hardware isolation, backups, and pruning. Anything written to
-//! this trait is private ceremony material and must be protected by the
-//! application's security policy.
+//! The application supplies a [`SecretStore`] for private ceremony material, a
+//! [`ParticipantsProvider`] for future committees and directories, and a [`Registrar`] to
+//! install consensus schemes.
 //!
 //! # State Sync
 //!
-//! Reshare supports nodes that join through state sync. A node can participate in
-//! the synced epoch's reshare ceremony when its certified floor is at or before
-//! the epoch midpoint, because marshal replays the complete dealer-log inclusion
-//! window. A later floor has skipped part of that public history, so the reshare
-//! actor follows that ceremony for the rest of the epoch instead.
+//! [`probe`] discovers a finalized floor together with its epoch's [`types::EpochInfo`].
+//! Pass any persisted floor through [`probe::Config::floor`] so discovery cannot select
+//! epoch info older than the floor the node will use.
+//! Start from the later of the persisted floor and [`probe::Artifact::floor`], ordered by
+//! round, and pair it with [`probe::Artifact::info`].
 //!
-//! Follower mode affects only resharing. State-sync startup first registers the
-//! certified current-epoch consensus scheme, so a node with a recovered share can
-//! still sign ordinary non-boundary blocks. It cannot locally derive the next
-//! [`types::EpochInfo`] needed to propose or complete verification of the final
-//! block, and resumes resharing after learning that block's externally finalized
-//! outcome.
+//! Before starting the actors, initialize one [`state_sync::Plan`] under a stable partition prefix.
+//! Clone it into the reshare and orchestrator configurations and pass a clone to
+//! [`probe::Mailbox::attach`]. It persists the material until marshal recovers beyond the synced
+//! epoch and is independent of [`crate::stateful`].
 //!
-//! A `player` that missed private dealings may need public reveals to recover its
-//! share and must treat a revealed share as public. To preserve share privacy, a
-//! future player should state sync while it is still a `next_player` and be online
-//! before the early dealing window.
+//! A floor at or before the epoch midpoint preserves the full dealer-log inclusion window,
+//! allowing participation in that ceremony. With a later floor, the node follows the ceremony
+//! and resumes resharing from the finalized outcome. A follower with a recovered share can
+//! still sign ordinary blocks, but cannot propose or complete verification of the final block.
+//! If the network has advanced to a later epoch, marshal delivers the intervening boundaries.
 //!
-//! This timing makes it safe for [`ParticipantsProvider`] to be backed by chain
-//! state (e.g., a staking contract). The chain can announce future players first,
-//! giving those nodes an epoch to state sync before their shares are needed.
+//! A validator that holds a share for the current epoch takes part in its ceremony and must stay
+//! online for the whole epoch. If it follows the ceremony, it counts as a faulty validator at the
+//! final block, so that block finalizes only if `2f + 1` other validators vote to finalize it.
 //!
-//! A node beginning state sync has no application state from which to resolve
-//! participant reachability. Everything required to connect to the active
-//! committee therefore rides in
-//! [`types::EpochInfo`] itself: the key-only participant sets and the
-//! transport [`network::Directory`] for those participants. The provider hooks
-//! are consulted only while building or verifying an epoch's final block,
-//! which only fully synced nodes do.
-//!
-//! Before starting either actor, initialize one [`state_sync::Plan`] under a
-//! stable node-wide partition prefix and clone it into the orchestrator and
-//! reshare configurations. The plan durably records fresh state-sync material
-//! before the actors start, so a node can restart immediately after state sync
-//! completes. Both actors share one recovery decision, and the plan removes
-//! stale material once marshal's recovered epoch advances beyond the synced
-//! epoch. This API is independent of the optional [`crate::stateful`] actor.
-//!
-//! [`probe`] fixes the state-sync floor and the epoch info atomically: the
-//! floor is the highest finalization from an `f + 1` sample of the configured
-//! bootstrap committee, and the epoch info is fetched for that floor's own
-//! epoch. The actors therefore always start in the floor's epoch with its
-//! public info in hand. If the network crosses an epoch boundary while
-//! application state sync is still running, the node starts at the floor's
-//! epoch and catches up through ordinary marshal delivery: backup vote or
-//! certificate traffic from a future epoch hints marshal to fetch the missing
-//! boundary finalization. See [`probe`] for the bootstrap trust model.
+//! Players that miss private dealings may recover through public reveals, which expose their
+//! shares. To keep a share private, join while still a next player and be online before the
+//! dealing window (see [Offline Players](reshare#offline-players)).
 //!
 //! # Peer Activation
 //!
-//! DKG peer identities remain key-only in ceremony artifacts and all wire
-//! messages. Transport-specific reachability lives in the
-//! [`network::Directory`] embedded in each [`types::EpochInfo`], so activation
-//! through [`network::Manager`] consumes only in-band data:
+//! Peer identities are public keys. Each [`types::EpochInfo`] carries a [`network::Directory`]
+//! with the transport data needed to reach its participants. [`network::Manager`] activates
+//! peers from that artifact during normal operation, restart, and state sync. Bootstrap and
+//! probe activate their configured peer snapshots.
 //!
-//! - One-shot bootstrap activates epoch zero from its configured directory
-//!   before registering its DKG channel.
-//! - A fresh-node probe activates its configured bootstrap snapshot and
-//!   directory when the first subscriber appears, before requesting a latest
-//!   finalization.
-//! - Continuous operation activates an epoch from the epoch's own
-//!   [`types::EpochInfo`] after its readiness gate opens and before Simplex or
-//!   its epoch channels start.
+//! The P2P adapters use the epoch as the peer-set ID. New sets must advance the ID;
+//! repeated IDs keep the existing peers and directory. Bootstrap uses epoch zero,
+//! including on restart.
 //!
-//! Restart and state-sync entry activate the recovered epoch from the same
-//! certificate-backed [`types::EpochInfo`] as uninterrupted operation, so no
-//! out-of-band registry access is required during recovery.
+//! # Reconfiguration
+//!
+//! The [`ParticipantsProvider`] may change the committee arbitrarily between epochs, and
+//! consensus allows consecutive committees to be disjoint. Under the `3f + 1` model, up to `f`
+//! members of each committee may be faulty (Byzantine or offline), and departed members may go
+//! offline.
+//!
+//! As [Catching Up](orchestrator#catching-up) describes, a lagging node catches up only from
+//! peers it tracks. Each epoch's tracked peers include the next two committees, so a node one
+//! or two epochs behind still tracks the current committee, however much it changed, and any
+//! of its honest members can serve the final block and every block the node is missing below
+//! it. A node further behind needs a tracked peer that is still in the current committee or
+//! still follows the chain and relays its certificates. Without one, it must be restarted
+//! through [state sync](#state-sync).
+//!
+//! A peer serves the lagging node only while the two stay connected and the peer still holds
+//! the missing blocks. Current-epoch nodes keep dialing lagging members of the current
+//! committee. They disconnect other lagging nodes once those nodes fall out of their
+//! `tracked_peer_sets` most recent peer sets, except for configured bootstrap peers in
+//! authenticated discovery. [Marshal retention](#marshal-retention) is a window behind each
+//! peer's processed height, so a lagging node must finish catching up before its peers prune
+//! the blocks it is missing.
+//!
+//! # Marshal Delivery
+//!
+//! Marshal must deliver every finalized block above each actor's acknowledged tip in height
+//! order. Redelivery is acknowledged without repeating effects. The reshare actor panics on a
+//! block above its tip that does not extend it by one height, and the orchestrator panics on a
+//! block beyond its active epoch. Only the startup floor may skip heights. Advancing a live
+//! marshal floor must not skip unacknowledged blocks, including dealer logs and epoch boundaries.
 //!
 //! # Marshal Retention
 //!
-//! DKG startup relies on marshal's local finalized block archive unless the node
-//! is entering through one-time state sync. On an ordinary restart, the active
-//! epoch is derived from marshal's processed height, and the public
-//! [`types::EpochInfo`] for that epoch is loaded from the finalized boundary
-//! block that introduced it.
+//! Each epoch starts from a boundary block that carries its [`types::EpochInfo`]. Epoch zero starts
+//! from genesis, and every later epoch from the previous epoch's final block. Both DKG actors need
+//! the epoch's info, and the orchestrator starts the epoch's Simplex engine from the boundary
+//! block's commitment.
 //!
-//! For epoch zero, that boundary is height zero. For later epochs, the boundary
-//! is the final block of the previous epoch:
+//! Restarted actors recover the epoch `e` containing the height after marshal's processed height
+//! `P`, or epoch zero if marshal has processed nothing. While the plan keeps state-sync material,
+//! they start in its floor's epoch `f`, and the orchestrator starts Simplex from the floor
+//! finalization the material holds.
+//!
+//! The DKG actors store what a later restart or a joining peer needs while they process each block,
+//! so marshal may prune finalized blocks below `P` without waiting on them.
+//!
+//! The [`state_sync::Plan`] keeps a _checkpoint_ for each epoch the orchestrator enters from its
+//! boundary block. The checkpoint holds that block and marshal's finalization of it, when marshal
+//! has one. At each boundary, the orchestrator records the next epoch's checkpoint before it
+//! acknowledges the final block, so `P` cannot pass a boundary whose epoch is not durable. With `F`
+//! the final block of epoch `e`:
 //!
 //! ```text
-//! boundary(current_epoch) = last_block(current_epoch - 1)
+//!   ...  | F - 1 |   F   | F + 1 |  ...
+//!   ----- epoch e ------>|<---- epoch e + 1 ----
+//!                    ^
+//!                    '-- final block of epoch e, carries EpochInfo(e + 1)
+//!
+//!  orchestrator, on delivery of F:
+//!
+//!         +--------------------+     +-------------+     +---------------+
+//!   ----->| record and sync    |---->| enter e + 1 |---->| acknowledge F |----> P = F once every
+//!         | checkpoint e + 1   |     | stop e      |     |               |      reporter acked
+//!         +--------------------+     +-------------+     +---------------+
+//!      ^                          ^                                         ^
+//!   crash 1                    crash 2                                   crash 3
+//!
+//!   crash | checkpoints | P                        | restart loads
+//!   ------+-------------+--------------------------+------------------------------------
+//!     1   | e           | below F                  | checkpoint e, then F is redelivered
+//!     2   | e, e + 1    | below F                  | checkpoint e, then F is redelivered
+//!     3   | e, e + 1    | below F (ack unrecorded) | checkpoint e, then F is redelivered
+//!         |             | F                        | checkpoint e + 1
 //! ```
 //!
-//! An operator running stateful pruning MUST keep marshal's finalized block
-//! retention window at least one full epoch wide, so the previous epoch's
-//! boundary block survives until the current epoch finishes. Concretely, the
-//! marshal retention floor configured through the stateful
-//! [`PruneConfig`](crate::stateful::PruneConfig)
-//! (`max_pending_acks + 1 + retained_marshal_blocks` finalized blocks) MUST be
-//! greater than or equal to the DKG epoch length (`blocks_per_epoch`). DKG does
-//! not need blocks before that previous boundary for ordinary restart, but it
-//! does need the boundary block itself to recover the epoch's public threshold
-//! output, participant set, and Simplex floor commitment.
+//! Marshal delivers up to its pending acknowledgement window ahead of `P`, so while another
+//! reporter lags the orchestrator can cross several boundaries before `P` does. Recording a
+//! checkpoint therefore keeps every checkpoint from the epoch recovered from `P` onward and drops
+//! older ones, so every epoch a later restart can recover keeps its checkpoint.
 //!
-//! This coupling is the operator's responsibility. The two knobs are configured
-//! independently: `blocks_per_epoch` is a DKG configuration, while the marshal
-//! retention floor is set on the stateful
-//! [`PruneConfig`](crate::stateful::PruneConfig). The library cannot enforce the
-//! relationship, and no runtime check couples them
-//! ([`PruneConfig::assert_valid`](crate::stateful::PruneConfig::assert_valid)
-//! only compares marshal and QMDB retention). Pruning the boundary before the
-//! current epoch finishes leaves a restarting validator without the local public
-//! material required for normal recovery, and the orchestrator panics on startup
-//! with a `missing finalized boundary block` error.
+//! Restart takes the active epoch from the first of these sources that applies:
 //!
-//! Nodes that serve `dkg::probe` responses for other peers also need the
-//! corresponding boundary finalization and boundary block for every epoch they
-//! intend to serve.
+//! 1. the plan's state-sync material, while `e` is at or before `f`
+//! 2. the plan's checkpoint for `e`
+//! 3. `e`'s boundary block in marshal
 //!
-//! See [`probe`], [`fence`], [`orchestrator`], [`reshare`], [`state_sync`], and
-//! [`types`] for the detailed actors, synchronization points, and wire artifacts.
+//! Startup deletes state-sync material once `e` passes `f`, and the orchestrator records a boundary
+//! block read in step 3 as checkpoint `e`. With no source, the orchestrator exits and the reshare
+//! actor follows `e`. With `L` blocks per epoch:
+//!
+//! ```text
+//!   plan partitions, outside marshal
+//!   +------------------------+-----------------------------+
+//!   | 1. state-sync material | 2. checkpoint e             |
+//!   |    EpochInfo(f)        |    boundary block           |------------.
+//!   |    floor finalization  |    its finalization, when   |            |
+//!   |    floor height h      |    marshal had one          |            v
+//!   +------------------------+-----------------------------+     probe serves joiners
+//!                                       ^                                 ^
+//!                                       | copied when entering e          | latest finalization
+//!                                       |                                 |
+//!   marshal's archive                   |                                 |
+//!   xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx| e*L - 1 | e*L | ... |   P   | ... | tip |
+//!   pruned, advancing ------------>|    ^    |<---------- epoch e -----------
+//!                                       |
+//!                                       3. boundary block (genesis when e is 0)
+//! ```
+//!
+//! A new node starts epoch zero from genesis through step 3, and a restart reaches step 3 for any
+//! epoch without kept material or a checkpoint. Initialize the plan with [`state_sync::Plan::init`]
+//! on every node, with or without state-sync material. A [`state_sync::Plan::disabled`] plan
+//! records no checkpoints, so each restart reads the boundary block from marshal and the probe
+//! serves no epoch.
+//!
+//! Material passed to [`state_sync::Plan::init`] replaces any stored material and its recorded
+//! floor height but leaves checkpoints in place. If startup then deletes the material as stale,
+//! restart continues from step 2.
+//!
+//! The reshare actor also needs the height `h` of the floor block to decide whether it participates
+//! in `f`'s ceremony or follows it, as [State Sync](reshare#state-sync) describes. A startup that
+//! lacks `h` or finds the floor block unprocessed waits for the block from marshal and records its
+//! height with the material if the plan has none. Once the plan has `h` and marshal has processed
+//! the floor block, a restart takes `h` from the plan and resumes from marshal's processed position
+//! without reading the block, so marshal may prune it:
+//!
+//! ```text
+//!         never delivered     floor block h             delivered from h onward
+//!   --------------------------|-------|-------|-----|-------|-------|------>
+//!                             |   h   | h + 1 | ... | P - 1 |   P   |
+//!                             ^
+//!   first startup             | marshal fetches h, the reshare actor waits for it and
+//!                             | records h with the material
+//!   restart, P >= h           |xxxxxxx| h may be pruned, so resume at P with h from the plan
+//!   restart, P = h - 1        |   h   | the floor was just installed, so h is marshal's
+//!                             |       | anchor and is read locally
+//! ```
+//!
+//! A restart from a checkpoint never reads the boundary block. A restart with `h` in the plan reads
+//! the floor block only before marshal has processed it, and until then marshal is either fetching
+//! that block for its floor or stores it as the anchor of its processed position.
+//!
+//! Material passed to [`state_sync::Plan::init`] has no `h`, so the next startup reads its floor
+//! block even if marshal has already processed it. Marshal skips a configured floor that its
+//! persisted round floor already covers and does not fetch the floor block. A node must therefore
+//! only be given material whose floor block its marshal still stores or will fetch, or its reshare
+//! actor may wait forever for a block that marshal has already pruned.
+//!
+//! [`Stateful`](crate::stateful::Stateful) does not prune marshal before [`crate::stateful`] state
+//! sync completes, so an application that passes material only until then meets this rule. Under
+//! this rule, marshal retention does not limit restart.
+//!
+//! The [`probe`] answers latest-finalization requests from marshal. It answers a request for epoch
+//! `e`'s boundary finalization or block from the node's checkpoint for `e`, and only when that
+//! checkpoint holds the finalization. A joining node can therefore discover an epoch from any peer
+//! that entered it through its boundary with the finalization, however far that peer's marshal has
+//! pruned.
+//!
+//! A peer that entered an epoch by state sync has no checkpoint for it. If marshal repaired the
+//! boundary block by walking back from a later block, the checkpoint may lack its finalization.
+//! Marshal can archive that finalization later, but it does not update the checkpoint. In either
+//! case the peer cannot serve the epoch. Since recording a checkpoint drops older ones, a peer
+//! serves only its recent epochs. Discovery asks every peer for the boundary, so one peer that
+//! can serve it suffices. After trying every verified responder, discovery samples latest
+//! finalizations again to find a newer boundary while keeping the previous fetch as a fallback.
+//!
+//! Under stateful pruning, [`PruneConfig::retained_marshal_blocks`] sets marshal's retention.
+//! Retain at least one epoch's worth of blocks (`blocks_per_epoch`) as a starting point for
+//! catch-up. A lagging node needs its epoch's final block and any missing blocks before it. Set a
+//! larger window to cover the lag you expect, as [Reconfiguration](#reconfiguration) describes.
+//! With an initialized plan, restart and probe serving do not depend on this window.
+//!
+//! The reshare actor treats every block marshal has processed as applied, and its journal stores
+//! dealer logs but not the last block it applied, so a node's marshal, application, and reshare
+//! partitions must be restored from the same point. If chain storage is restored ahead of the
+//! reshare journal, the actor derives the next epoch from an incomplete set of dealer logs and
+//! rejects the valid final block. Restore the plan's partitions from that point too, since a plan
+//! from another point may lack the active epoch's checkpoint.
+//!
+//! [`PruneConfig::retained_marshal_blocks`]: crate::stateful::PruneConfig::retained_marshal_blocks
+//!
+//! # Message Sizes
+//!
+//! The reshare [`Actor`](reshare::Actor) sends each dealing and acknowledgement as a
+//! [`Message`](types::Message) on the subchannel of its epoch. Dealer logs and epoch artifacts
+//! travel in application blocks as a [`Payload`](types::Payload).
+//!
+//! ```text
+//! Every message is prefixed by its epoch:
+//! +---------------------------------+
+//! | epoch subchannel (varint, 1-10) |
+//! +---------------------------------+
+//!
+//! Dealing (tag 0):
+//! +---------+---------------------+--------------------------------------+------------+
+//! | tag (1) | count (varint, 1-5) | commitment (count x V::Public::SIZE) | share (32) |
+//! +---------+---------------------+--------------------------------------+------------+
+//!
+//! Acknowledgement (tag 1):
+//! +---------+--------------------------------+
+//! | tag (1) | signature (P::Signature::SIZE) |
+//! +---------+--------------------------------+
+//!
+//! Payload with a dealer log (tag 0):
+//! +---------+------------------+---------------------+--------------------------------------+
+//! | tag (1) | dealer (P::SIZE) | count (varint, 1-5) | commitment (count x V::Public::SIZE) |
+//! +---------+------------------+---------------------+--------------------------------------+
+//! | results | signature (P::Signature::SIZE)                                                |
+//! +---------+-------------------------------------------------------------------------------+
+//!
+//! Results, one entry per player (tag 0):
+//! +---------+---------------+---------------------+-------------------------+
+//! | tag (1) | players (set) | count (varint, 1-5) | entries (count x entry) |
+//! +---------+---------------+---------------------+-------------------------+
+//!
+//! Results with too many reveals (tag 1):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Entry with an acknowledgement (tag 0):
+//! +---------+--------------------------------+
+//! | tag (1) | signature (P::Signature::SIZE) |
+//! +---------+--------------------------------+
+//!
+//! Entry with a revealed share (tag 1):
+//! +---------+------------+
+//! | tag (1) | share (32) |
+//! +---------+------------+
+//!
+//! Payload with an epoch artifact (tag 1):
+//! +---------+-------------+----------------------+-------------+
+//! | tag (1) | outcome (1) | epoch (varint, 1-10) | output      |
+//! +---------+-----+-------+------------+---------+-------------+
+//! | players (set) | next players (set) | directory (encoded D) |
+//! +---------------+--------------------+-----------------------+
+//!
+//! Output:
+//! +--------------+----------+------------+-------------------------------------------------+
+//! | summary (32) | mode (1) | total (4)  | count (varint, 1-5)                             |
+//! +--------------+----------+------------+---------------+---------------+-----------------+
+//! | commitment (count x V::Public::SIZE) | dealers (set) | players (set) | revealed (set)  |
+//! +--------------------------------------+---------------+---------------+-----------------+
+//!
+//! Set:
+//! +---------------------+------------------------+
+//! | count (varint, 1-5) | keys (count x P::SIZE) |
+//! +---------------------+------------------------+
+//! ```
+//!
+//! `V` is the BLS variant, `P` the participant key, and `D` the epoch's [`Directory`]. Every
+//! `count` is at most the participant bound given to [`max_payload_size`] or
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size). [`max_payload_size`] is the
+//! larger of the dealing and acknowledgement bounds plus the widest epoch subchannel prefix.
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the larger of the two payload
+//! bounds, with the directory bound of the payload's type.
+//!
+//! Size application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
+//! [`orchestrator::max_payload_size`] covers Simplex on epoch subchannels,
+//! [`probe::max_payload_size`] the probe, and [`bootstrap::max_payload_size`] the one-shot engine.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
 use commonware_cryptography::{
-    PublicKey, Signer,
+    PublicKey,
     bls12381::{
-        dkg::feldman_desmedt::DealerPrivMsg,
+        dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg},
         primitives::{group::Share, variant::Variant},
     },
     transcript::Summary,
@@ -166,6 +345,8 @@ use std::future::Future;
 
 pub mod bootstrap;
 pub mod fence;
+mod limits;
+pub use limits::max_payload_size;
 pub mod network;
 pub mod orchestrator;
 pub mod probe;
@@ -181,21 +362,19 @@ pub trait ReshareBlock: Block {
     /// BLS variant used by the DKG payload.
     type Variant: Variant;
 
-    /// Signer type used by DKG payloads.
-    type Signer: Signer;
+    /// Participant public key type carried by DKG payloads.
+    type PublicKey: PublicKey;
 
     /// Transport directory type carried by this block's epoch artifacts.
-    type Directory: Directory<<Self::Signer as Signer>::PublicKey>;
+    type Directory: Directory<Self::PublicKey>;
 
-    /// Retrieves the [`Payload`](types::Payload) carried by this block, if any.
-    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::Signer, Self::Directory>>;
+    /// Returns the [`Payload`](types::Payload) carried by this block, if any.
+    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::PublicKey, Self::Directory>>;
 }
 
-/// A registrar of signing schemes that supplies a [`Provider`] an [`Epoch`]-scoped
-/// [`ThresholdScheme`] in preparation for a transition to the given [`Epoch`].
+/// Installs epoch-scoped threshold schemes into the consensus [`Provider`].
 ///
 /// [`Provider`]: commonware_cryptography::certificate::Provider
-/// [`ThresholdScheme`]: commonware_consensus::simplex::scheme::bls12381_threshold
 pub trait Registrar: Send + Sync + 'static {
     /// BLS variant used by the DKG payload.
     type Variant: Variant;
@@ -203,10 +382,12 @@ pub trait Registrar: Send + Sync + 'static {
     /// Participant public key type.
     type PublicKey: PublicKey;
 
-    /// Hook for handling an epoch transition.
+    /// Registers the threshold scheme described by `info` for `epoch`.
     ///
-    /// Registration is idempotent. An actor may repeat the same epoch and scheme
-    /// after recovering state-sync startup material.
+    /// When this future resolves, the consensus [`Provider`] must return the scheme for
+    /// `epoch`. Repeated calls with the same `epoch` and `info` must be safe.
+    ///
+    /// [`Provider`]: commonware_cryptography::certificate::Provider
     fn register(
         &self,
         epoch: Epoch,
@@ -214,80 +395,65 @@ pub trait Registrar: Send + Sync + 'static {
     ) -> impl Future<Output = ()> + Send;
 }
 
-/// Interface for a secret store that persists and retrieves the private DKG/reshare
-/// material for different [`Epoch`]s.
+/// Application-owned storage for the secret material of DKG and reshare ceremonies.
 ///
-/// All material entrusted to this trait is secret and must be stored as such: it must
-/// never be written to plaintext protocol storage, carried on-chain, or sent to peers.
-/// This includes the dealer RNG seed, which seeds a dealer's sharing polynomial and so
-/// reveals every share that dealer sends.
+/// All stored material must remain private, including dealer RNG seeds, which determine
+/// every share a dealer sends. Keep it out of public protocol storage, blocks, and messages.
 ///
-/// Writes must be durable before their returned future resolves. When
-/// [`put_share`](Self::put_share), [`put_seed`](Self::put_seed), or
-/// [`put_dealing`](Self::put_dealing) resolves, the stored material MUST survive a crash: the
-/// reshare actor treats a resolved put as a durable commitment and does not re-derive the
-/// material after a restart. A buffered store that resolves before the write is stable can let a
-/// dealer reseed with fresh randomness and re-deal different shares for the same epoch
-/// (equivocation), or lose a share it has already relied upon.
+/// Writes must be durable when their futures resolve. Losing an acknowledged write can
+/// cause a dealer to equivocate after restart or lose a share already in use.
+///
+/// Once a restarted node starts reading this store, operations from previous runs
+/// must not change stored material. This includes writes and prunes whose futures
+/// were dropped. Reads must reflect the state left by those operations.
 pub trait SecretStore: Send + Sync + 'static {
-    /// Stores a [`Share`] for a given [`Epoch`].
-    ///
-    /// Must be durable before the returned future resolves (see the trait documentation).
+    /// Stores this node's [`Share`] for `epoch`.
     fn put_share(&mut self, epoch: Epoch, share: Share) -> impl Future<Output = ()> + Send;
 
-    /// Retrieves a [`Share`] for a given [`Epoch`], if it exists.
+    /// Returns this node's [`Share`] for `epoch`, if stored.
     fn get_share(&mut self, epoch: Epoch) -> impl Future<Output = Option<Share>> + Send;
 
-    /// Stores the dealer RNG seed for a given [`Epoch`].
+    /// Stores this node's dealer RNG seed for `epoch`.
     ///
-    /// The seed deterministically replays this node's dealer randomness across a
-    /// restart. It is secret: knowing it reveals every share the dealer distributes.
-    ///
-    /// Must be durable before the returned future resolves: no-equivocation safety depends on the
-    /// seed being recovered verbatim after a crash so the dealer replays identical randomness
-    /// rather than re-dealing fresh shares.
+    /// Restarted dealers reuse the stored seed to deal the same shares.
     fn put_seed(&mut self, epoch: Epoch, seed: Summary) -> impl Future<Output = ()> + Send;
 
-    /// Retrieves the dealer RNG seed for a given [`Epoch`], if it exists.
+    /// Returns this node's dealer RNG seed for `epoch`, if stored.
     fn get_seed(&mut self, epoch: Epoch) -> impl Future<Output = Option<Summary>> + Send;
 
     /// Stores a private dealing received from `dealer` during `epoch`.
-    fn put_dealing<P: PublicKey>(
+    ///
+    /// `public` distinguishes multiple dealings from the same dealer in one epoch.
+    /// A private dealing is valid only with its matching public message.
+    fn put_dealing<V: Variant, P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: P,
+        public: &DealerPubMsg<V>,
         private: DealerPrivMsg,
     ) -> impl Future<Output = ()> + Send;
 
-    /// Retrieves a private dealing received from `dealer` during `epoch`.
-    fn get_dealing<P: PublicKey>(
+    /// Returns the private dealing received from `dealer` during `epoch` with `public`,
+    /// if stored.
+    fn get_dealing<V: Variant, P: PublicKey>(
         &mut self,
         epoch: Epoch,
         dealer: &P,
+        public: &DealerPubMsg<V>,
     ) -> impl Future<Output = Option<DealerPrivMsg>> + Send;
 
     /// Prunes secrets older than `min`.
     fn prune(&mut self, min: Epoch) -> impl Future<Output = ()> + Send;
 }
 
-/// Participant policy provider.
+/// Source of the participant sets and transport directories of future epochs.
 ///
-/// This is the only application hook on canonical epoch structure: it supplies
-/// the intended participant set and transport directory for a future `epoch`.
-/// The actor derives dealers, current players, and ordinary epoch progression
-/// from finalized public truth, and consults this only for the values of an
-/// epoch it cannot yet read from a finalized boundary block.
+/// Results are embedded in [`EpochInfo`](types::EpochInfo) when deriving an epoch's final
+/// block. This provider may read application state, such as a staking contract. Startup
+/// and peer activation use the finalized artifacts.
 ///
-/// Both hooks are consulted exclusively while building or verifying an epoch's
-/// final block, so implementations may be backed by application state (e.g., a
-/// staking or address-registry contract): a node performing those operations is
-/// fully synced. Their results are embedded in the next
-/// [`types::EpochInfo`], which is what recovering and state-syncing nodes use
-/// instead of this provider.
-///
-/// [`participants`](Self::participants) and [`directory`](Self::directory)
-/// must be deterministic for the same inputs across all honest nodes (see
-/// their documentation for the exact contracts).
+/// For the same inputs, repeated calls and all honest nodes must return the same value.
+/// Divergence prevents agreement on the epoch's final block.
 pub trait ParticipantsProvider: Send + Sync + 'static {
     type PublicKey: PublicKey;
 
@@ -296,46 +462,24 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
 
     /// Returns the intended participant set for `epoch`.
     ///
-    /// This MUST be deterministic and stable: for a given `epoch`, every honest
-    /// node MUST return an identical [`Set`], with the same membership AND the
-    /// same ordering, and repeated calls MUST return the same `Set`.
+    /// Committed as `next_players` in the final block of epoch `epoch - 2`. The set must be
+    /// fixed before any honest node proposes or verifies that block.
     ///
-    /// The returned set MUST be non-empty and MUST contain no more than the
-    /// actor's configured `max_participants` entries. A violation is treated as
-    /// a deterministic provider contract failure.
-    ///
-    /// In continuous reshare, this hook is consulted while building or
-    /// verifying the final block two epochs before `epoch`. That block carries
-    /// the [`types::EpochInfo`] for the following epoch, with this set embedded
-    /// verbatim as `next_players`.
-    ///
-    /// Therefore the result for `epoch` must be locked in before honest nodes
-    /// propose or verify the final block that announces it as `next_players`.
-    /// The proposer and every verifier independently rebuild
-    /// and compare the value for equality. Because [`Set`] is order sensitive
-    /// (both its equality and its encoding depend on element order), any
-    /// divergence in membership or ordering between proposer and verifier
-    /// rejects a valid final block and stalls the epoch boundary. Canonicalize
-    /// (e.g. sort) the returned `Set` so it is identical regardless of how the
-    /// underlying membership is stored or queried.
+    /// The set must be non-empty and contain at most `max_participants` entries. The reshare
+    /// actor panics on a violation. Ceremonies with this set succeed only if enough of its
+    /// members lead a block in each [inclusion window](reshare#liveness).
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
 
-    /// Returns the transport directory embedded in the [`types::EpochInfo`]
+    /// Returns the transport directory embedded in the [`EpochInfo`](types::EpochInfo)
     /// for `epoch`.
     ///
-    /// `peers` is the union of the epoch's dealers, players, and next players.
-    /// It may contain up to three times the actor's configured
-    /// `max_participants` entries when those sets are disjoint. The returned
-    /// directory MUST contain exactly these peers. Missing or unrequested
-    /// entries are treated as a deterministic provider contract failure.
+    /// The directory must contain exactly `peers`: the union of dealers, players, and
+    /// next players, up to three times `max_participants`. The reshare actor panics on a
+    /// mismatch.
     ///
-    /// This is consulted while building or verifying the final block of
-    /// `epoch - 1`, under the same determinism and lock-in contract as
-    /// [`participants`](Self::participants): for a given `epoch` and `peers`,
-    /// every honest node MUST return an identical value, including the same
-    /// reachability data for each peer, and repeated calls MUST return the same
-    /// value. An update submitted during an epoch takes effect in a later
-    /// epoch's directory, never retroactively.
+    /// Committed in the final block of epoch `epoch - 1`. All reachability data must be
+    /// fixed before any honest node proposes or verifies that block. Later updates must
+    /// take effect in a future epoch's directory.
     fn directory(
         &mut self,
         epoch: Epoch,

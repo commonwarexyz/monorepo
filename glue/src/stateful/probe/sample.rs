@@ -1,12 +1,12 @@
-//! Shared floor-sampling primitives.
+//! Floor sampling shared by the stateful and DKG probes.
 //!
 //! [`stateful::probe`](crate::stateful::probe) and
 //! [`dkg::probe`](crate::dkg::probe) both discover a floor by soliciting a
 //! committee's latest finalizations and selecting the highest from `f + 1`
-//! distinct replies. [`Sample`] owns the bookkeeping of that protocol:
-//! per-peer reply dedup, the fault-budget threshold, and max-selection. Each
-//! probe keeps its own wire format, committee source, minimum-epoch filter,
-//! verification, and peer blocking.
+//! distinct replies. [`Sample`] owns the bookkeeping of that protocol: one
+//! reply per peer, the fault-budget threshold, and selection of the highest
+//! reply. Each probe keeps its own wire format, committee source,
+//! minimum-epoch filter, verification, and peer blocking.
 
 use commonware_consensus::{
     marshal::{
@@ -25,13 +25,13 @@ use std::collections::BTreeMap;
 /// The sample counts at most one reply per peer and resolves to the highest
 /// reply once `f + 1` distinct peers have contributed, where `f` is the
 /// maximum fault count of the solicited committee under the `3f + 1` model.
-/// Waiting for `f + 1` replies guarantees at least one comes from an honest,
-/// current committee member, so the selected floor is at least as recent as
-/// that member's latest finalization.
+/// If at most `f` members of that committee are faulty, `f + 1` replies
+/// include one from an honest member, so the selected floor is at least as
+/// recent as that member's reply.
 ///
-/// Callers verify replies and enforce committee membership before recording
-/// them, and judge which recorded replies are currently usable at selection
-/// time (a reply may become unjudgeable if its epoch's scheme is forgotten).
+/// Callers must verify replies and enforce committee membership before
+/// recording them, and judge at selection time which recorded replies are
+/// usable (a reply becomes unjudgeable if its epoch's scheme is forgotten).
 pub(crate) struct Sample<S, D>
 where
     S: Scheme<D>,
@@ -66,38 +66,41 @@ where
         self.floor.as_ref()
     }
 
-    /// Returns whether a reply from `peer` is still awaited.
+    /// Returns whether a reply from `peer` is still awaited: `false` once the
+    /// floor is selected or after `peer` has contributed to the current request
+    /// round.
     ///
-    /// A reply is not awaited once the floor is selected or after the peer has
-    /// already contributed this request round; callers skip such replies
-    /// before decoding or verifying them, so a duplicate can neither inflate
-    /// the sample nor be treated as a fault.
-    pub(crate) fn pending(&self, peer: &S::PublicKey) -> bool {
+    /// Callers should check this before decoding or verifying a reply, so a
+    /// duplicate costs no verification and is never treated as a fault.
+    pub(crate) fn awaits(&self, peer: &S::PublicKey) -> bool {
         self.floor.is_none() && !self.replies.contains_key(peer)
     }
 
-    /// Records a verified reply from `peer`.
+    /// Records `finalization` as the reply of `peer`, keeping only the first
+    /// reply from each peer in a request round.
     ///
-    /// Callers filter replies below [`Sample::minimum_epoch`] before decoding
-    /// or verifying them: such replies are stale by definition (the chain
-    /// reached the minimum epoch, so any current committee member holds a
-    /// finalization at or above its boundary) but not proof of misbehavior.
+    /// Callers must verify the reply and check that `peer` belongs to the
+    /// solicited committee first. Callers should discard replies below
+    /// [`Sample::minimum_epoch`] without treating them as faults: the chain has
+    /// reached the minimum epoch, so such replies are stale rather than
+    /// evidence of misbehavior.
     pub(crate) fn record(&mut self, peer: S::PublicKey, finalization: Finalization<S, D>) {
         self.replies.entry(peer).or_insert(finalization);
     }
 
-    /// Clears collected replies for a new request round.
+    /// Discards the selected floor and all collected replies, starting a new
+    /// request round.
     pub(crate) fn reset(&mut self) {
         self.replies.clear();
+        self.floor = None;
     }
 
-    /// Attempts to select the highest reply from a sample of distinct peers.
+    /// Selects the highest judgeable reply once `f + 1` replies are judgeable,
+    /// where `f` is derived from `committee_size`.
     ///
-    /// Only replies for which `judgeable` returns true are counted or
-    /// eligible: a recorded reply whose epoch can no longer be judged must not
-    /// contribute to the sample. Selection requires `f + 1` judgeable replies,
-    /// where `f` is derived from `committee_size`. Returns the floor exactly
-    /// once, when it is first selected.
+    /// Only replies for which `judgeable` returns `true` are counted or
+    /// eligible. Returns the floor exactly once, when it is first selected, and
+    /// `None` otherwise.
     pub(crate) fn select(
         &mut self,
         committee_size: usize,
@@ -107,12 +110,12 @@ where
             return None;
         }
 
-        let (floor, replies) =
+        let (floor, count) =
             self.replies
                 .values()
-                .fold((None, 0usize), |(floor, replies), finalization| {
+                .fold((None, 0usize), |(floor, count), finalization| {
                     if !judgeable(finalization) {
-                        return (floor, replies);
+                        return (floor, count);
                     }
                     let floor = floor
                         .is_none_or(|candidate: &Finalization<S, D>| {
@@ -120,10 +123,10 @@ where
                         })
                         .then_some(finalization)
                         .or(floor);
-                    (floor, replies + 1)
+                    (floor, count + 1)
                 });
         let floor = floor?;
-        if replies < N3f1::max_faults(committee_size) as usize + 1 {
+        if count < N3f1::max_faults(committee_size) as usize + 1 {
             return None;
         }
 
@@ -132,9 +135,7 @@ where
     }
 }
 
-/// Fetches the latest finalization from marshal, if available.
-///
-/// Both probes answer solicitations with this lookup while serving.
+/// Returns marshal's latest finalization, if any.
 pub(crate) async fn latest_finalization<S, V>(
     marshal: &MarshalMailbox<S, V>,
 ) -> Option<Finalization<S, V::Commitment>>
@@ -142,6 +143,6 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
-    let (latest_height, _) = marshal.get_info(Identifier::Latest).await?;
-    marshal.get_finalization(latest_height).await
+    let (height, _) = marshal.get_info(Identifier::Latest).await?;
+    marshal.get_finalization(height).await
 }

@@ -1,9 +1,6 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{
-        any::value::ValueEncoding,
-        operation::{Committable, Floored},
-    },
+    qmdb::{operation::Committable, value::ValueEncoding},
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -13,10 +10,7 @@ use core::fmt::Display;
 pub(crate) mod fixed;
 pub(crate) mod variable;
 
-/// Wire tag for [Operation::Commit].
-pub const COMMIT_CONTEXT: u8 = 0;
-/// Wire tag for [Operation::Append].
-pub const APPEND_CONTEXT: u8 = 1;
+pub use crate::qmdb::operation::{APPEND_CONTEXT, COMMIT_CONTEXT};
 
 /// Delegates Operation-level codec (Write, Read) to the value encoding.
 ///
@@ -24,7 +18,7 @@ pub const APPEND_CONTEXT: u8 = 1;
 /// variable does not. A single blanket `impl Write for Operation<F, V>` dispatches here, while
 /// the two impls of this trait (on FixedEncoding and VariableEncoding) live on different Self
 /// types and therefore do not overlap.
-pub trait Codec: ValueEncoding + Sized {
+pub trait OperationCodec: ValueEncoding + Sized {
     type ReadCfg: Clone + Send + Sync + 'static;
 
     fn write_operation<F: Family>(op: &Operation<F, Self>, buf: &mut impl BufMut);
@@ -55,7 +49,7 @@ impl<F: Family, V: ValueEncoding> Operation<F, V> {
     }
 
     /// Returns the inactivity floor location if this is a commit operation.
-    pub const fn has_floor(&self) -> Option<Location<F>> {
+    pub const fn inactivity_floor(&self) -> Option<Location<F>> {
         match self {
             Self::Commit(_, loc) => Some(*loc),
             Self::Append(_) => None,
@@ -63,26 +57,24 @@ impl<F: Family, V: ValueEncoding> Operation<F, V> {
     }
 }
 
-impl<F: Family, V: Codec> Write for Operation<F, V> {
+impl<F: Family, V: OperationCodec> Write for Operation<F, V> {
     fn write(&self, buf: &mut impl BufMut) {
         V::write_operation(self, buf)
     }
 }
 
-impl<F: Family, V: Codec> Committable for Operation<F, V> {
-    fn is_commit(&self) -> bool {
-        matches!(self, Self::Commit(_, _))
+impl<F: Family, V: ValueEncoding> Committable<F> for Operation<F, V> {
+    fn inactivity_floor(&self) -> Option<Location<F>> {
+        self.inactivity_floor()
+    }
+
+    fn initial_commit() -> Self {
+        Self::Commit(None, Location::new(0))
     }
 }
 
-impl<F: Family, V: ValueEncoding> Floored<F> for Operation<F, V> {
-    fn has_floor(&self) -> Option<Location<F>> {
-        self.has_floor()
-    }
-}
-
-impl<F: Family, V: Codec> Read for Operation<F, V> {
-    type Cfg = <V as Codec>::ReadCfg;
+impl<F: Family, V: OperationCodec> Read for Operation<F, V> {
+    type Cfg = <V as OperationCodec>::ReadCfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         V::read_operation(buf, cfg)
@@ -126,7 +118,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{merkle::mmr, qmdb::any::value::VariableEncoding};
+    use crate::{merkle::mmr, qmdb::value::VariableEncoding};
     use commonware_codec::Encode;
     use commonware_formatting::hex;
     use commonware_utils::sequence::U64;
@@ -163,7 +155,7 @@ mod tests {
         use super::Operation;
         use crate::{
             merkle::mmr,
-            qmdb::any::value::{FixedEncoding, VariableEncoding},
+            qmdb::value::{FixedEncoding, VariableEncoding},
         };
         use commonware_codec::conformance::CodecConformance;
         use commonware_utils::sequence::U64;

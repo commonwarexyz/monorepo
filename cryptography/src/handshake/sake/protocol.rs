@@ -1,0 +1,803 @@
+use super::{
+    Error,
+    exchange::{EphemeralPublicKey, SecretKey},
+};
+use crate::{
+    PublicKey, Signature, Signer, Verifier,
+    transcript::{self, Summary, Transcript},
+};
+use commonware_codec::{Buf, Encode, FixedSize, Mode, Read, ReadExt, Write, mode, modes};
+use core::ops::Range;
+use rand_core::CryptoRng;
+
+const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
+const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
+
+/// Transcript schema used by a SAKE handshake.
+///
+/// The version is part of the protocol definition: both peers must agree on it out of band.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum Version {
+    /// Commits the dialer identity after the [Syn] signature. If the signature scheme lacks
+    /// conservative exclusive ownership (it admits key substitution), a dialer can complete a
+    /// handshake under a public key other than its own under which its [Syn] signature also
+    /// verifies.
+    V0,
+    /// Commits both identities before every signature and uses injective transcript framing.
+    V1,
+}
+
+impl From<Version> for Mode {
+    fn from(version: Version) -> Self {
+        match version {
+            Version::V0 => mode!(0),
+            Version::V1 => mode!(1),
+        }
+    }
+}
+
+impl Version {
+    /// Returns the protocol namespace forked from the application namespace.
+    ///
+    /// V0 has its own namespace. Subsequent versions share the SAKE namespace and commit their
+    /// mode before the handshake fields.
+    const fn namespace(self) -> &'static [u8] {
+        match self {
+            Self::V0 => b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE",
+            Self::V1 => b"_COMMONWARE_CRYPTOGRAPHY_SAKE",
+        }
+    }
+
+    /// Returns the transcript framing used by this version.
+    ///
+    /// V0 framing is safe for [Version::V0] because the application namespace is summarized as a
+    /// single packet before SAKE commits a fixed sequence of canonical encodings at fixed
+    /// positions.
+    const fn transcript(self) -> transcript::Version {
+        match self {
+            Self::V0 => transcript::Version::V0,
+            Self::V1 => transcript::Version::V1,
+        }
+    }
+
+    /// Returns whether a peer's own identity is committed before it signs [Syn].
+    const fn binds_identity_before_syn(self) -> bool {
+        match self {
+            Self::V0 => false,
+            Self::V1 => true,
+        }
+    }
+}
+
+/// First handshake message sent by the dialer.
+/// Contains the dialer's timestamp, ephemeral key, and transcript signature.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct Syn<S: Signature> {
+    time_ms: u64,
+    epk: EphemeralPublicKey,
+    sig: S,
+}
+
+impl<S: Signature> FixedSize for Syn<S> {
+    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
+}
+
+impl<S: Signature> Write for Syn<S> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.time_ms.write(buf);
+        self.epk.write(buf);
+        self.sig.write(buf);
+    }
+}
+
+impl<S: Signature> Read for Syn<S> {
+    type Cfg = S::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            time_ms: ReadExt::read(buf)?,
+            epk: ReadExt::read(buf)?,
+            sig: Read::read_cfg(buf, cfg)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Signature> arbitrary::Arbitrary<'_> for Syn<S>
+where
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            time_ms: u.arbitrary()?,
+            epk: u.arbitrary()?,
+            sig: u.arbitrary()?,
+        })
+    }
+}
+
+/// Second handshake message sent by the listener.
+/// Contains the listener's timestamp, ephemeral key, transcript signature, and confirmation tag.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct SynAck<S: Signature> {
+    time_ms: u64,
+    epk: EphemeralPublicKey,
+    sig: S,
+    confirmation: Summary,
+}
+
+impl<S: Signature> FixedSize for SynAck<S> {
+    const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
+}
+
+impl<S: Signature> Write for SynAck<S> {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.time_ms.write(buf);
+        self.epk.write(buf);
+        self.sig.write(buf);
+        self.confirmation.write(buf);
+    }
+}
+
+impl<S: Signature> Read for SynAck<S> {
+    type Cfg = S::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            time_ms: ReadExt::read(buf)?,
+            epk: ReadExt::read(buf)?,
+            sig: Read::read_cfg(buf, cfg)?,
+            confirmation: ReadExt::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S: Signature> arbitrary::Arbitrary<'_> for SynAck<S>
+where
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            time_ms: u.arbitrary()?,
+            epk: u.arbitrary()?,
+            sig: u.arbitrary()?,
+            confirmation: u.arbitrary()?,
+        })
+    }
+}
+
+/// Third handshake message sent by the dialer.
+/// Contains dialer's confirmation tag to complete the handshake.
+#[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(feature = "arbitrary", derive(Debug, arbitrary::Arbitrary))]
+pub struct Ack {
+    confirmation: Summary,
+}
+
+impl FixedSize for Ack {
+    const SIZE: usize = Summary::SIZE;
+}
+
+impl Write for Ack {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.confirmation.write(buf);
+    }
+}
+
+impl Read for Ack {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        Ok(Self {
+            confirmation: ReadExt::read(buf)?,
+        })
+    }
+}
+
+/// State maintained by the dialer during handshake.
+/// Tracks ephemeral secret, peer identity, and protocol transcript.
+pub struct DialState<P> {
+    esk: SecretKey,
+    peer_identity: P,
+    transcript: Transcript,
+    ok_timestamps: Range<u64>,
+}
+
+/// State maintained by the listener during handshake.
+/// Retains the secret transcript until the dialer's confirmation is verified.
+pub struct ListenState {
+    transcript: Transcript,
+}
+
+/// Inputs that start a dialer or listener: the namespace, timing bounds, identities, and
+/// [Version].
+pub struct Context<S, P> {
+    version: Version,
+    transcript: Transcript,
+    current_time: u64,
+    ok_timestamps: Range<u64>,
+    my_identity: S,
+    peer_identity: P,
+}
+
+impl<S, P> Context<S, P> {
+    /// Creates a context from the application namespace, the local time, the accepted range of
+    /// peer timestamps (both in milliseconds), the local signer, the expected peer identity, and
+    /// the [Version].
+    pub fn new(
+        namespace: &[u8],
+        current_time_ms: u64,
+        ok_timestamps: Range<u64>,
+        my_identity: S,
+        peer_identity: P,
+        version: Version,
+    ) -> Self {
+        let mut transcript =
+            Transcript::new(namespace, version.transcript()).fork(version.namespace());
+        if let Some(modes) = modes![version] {
+            transcript.commit(modes.encode());
+        }
+        Self {
+            version,
+            transcript,
+            current_time: current_time_ms,
+            ok_timestamps,
+            my_identity,
+            peer_identity,
+        }
+    }
+}
+
+/// Initiates a handshake as the dialer.
+/// Returns the dialer state and the first message to send.
+pub fn dial_start<S: Signer, P: PublicKey>(
+    rng: impl CryptoRng,
+    ctx: Context<S, P>,
+) -> (DialState<P>, Syn<<S as Signer>::Signature>) {
+    let Context {
+        version,
+        current_time,
+        ok_timestamps,
+        my_identity,
+        peer_identity,
+        mut transcript,
+    } = ctx;
+
+    // Generate an ephemeral key and commit the timestamp and listener identity.
+    let esk = SecretKey::new(rng);
+    let epk = esk.public();
+    let dialer_identity = my_identity.public_key().encode();
+    transcript
+        .commit(current_time.encode())
+        .commit(peer_identity.encode());
+
+    // V1 commits the dialer identity before signing so the [Syn] signature covers it. V0 commits it
+    // after.
+    if version.binds_identity_before_syn() {
+        transcript.commit(&dialer_identity[..]);
+    }
+    let sig = transcript.commit(epk.encode()).sign(&my_identity);
+    if !version.binds_identity_before_syn() {
+        transcript.commit(dialer_identity);
+    }
+    (
+        DialState {
+            esk,
+            peer_identity,
+            transcript,
+            ok_timestamps,
+        },
+        Syn {
+            time_ms: current_time,
+            epk,
+            sig,
+        },
+    )
+}
+
+/// Completes a handshake as the dialer.
+/// Verifies the listener's [SynAck] and returns the [Ack] to send and the confirmed secret
+/// transcript. The caller must send [Ack] before using the transcript for application data.
+pub fn dial_end<P: PublicKey>(
+    state: DialState<P>,
+    msg: SynAck<<P as Verifier>::Signature>,
+) -> Result<(Ack, Transcript), Error> {
+    let DialState {
+        esk,
+        peer_identity,
+        mut transcript,
+        ok_timestamps,
+    } = state;
+
+    // Check the listener's timestamp and verify its signature over the transcript.
+    if !ok_timestamps.contains(&msg.time_ms) {
+        return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
+    }
+    if !transcript
+        .commit(msg.time_ms.encode())
+        .commit(msg.epk.encode())
+        .verify(&peer_identity, &msg.sig)
+    {
+        return Err(Error::InvalidSignature);
+    }
+
+    // Commit the shared secret, then derive the confirmations from the transcript.
+    let Some(shared) = esk.exchange(&msg.epk) else {
+        return Err(Error::InvalidEphemeralKey);
+    };
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
+    let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
+    let confirmation_d2l = transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
+
+    // Accept the listener only if it derived the same transcript.
+    if msg.confirmation != confirmation_l2d {
+        return Err(Error::InvalidConfirmation);
+    }
+
+    Ok((
+        Ack {
+            confirmation: confirmation_d2l,
+        },
+        transcript,
+    ))
+}
+
+/// Processes the first handshake message as the listener.
+/// Verifies the dialer's [Syn] and returns the listener state and the [SynAck] to send.
+pub fn listen_start<S: Signer, P: PublicKey>(
+    rng: impl CryptoRng,
+    ctx: Context<S, P>,
+    msg: Syn<<P as Verifier>::Signature>,
+) -> Result<(ListenState, SynAck<<S as Signer>::Signature>), Error> {
+    let Context {
+        version,
+        current_time,
+        my_identity,
+        peer_identity,
+        ok_timestamps,
+        mut transcript,
+    } = ctx;
+
+    // Check the dialer's timestamp and commit it with the listener identity.
+    if !ok_timestamps.contains(&msg.time_ms) {
+        return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
+    }
+    let dialer_identity = peer_identity.encode();
+    transcript
+        .commit(msg.time_ms.encode())
+        .commit(my_identity.public_key().encode());
+
+    // Commit the dialer identity where the dialer did: before verifying the [Syn] signature under
+    // V1 and after under V0.
+    if version.binds_identity_before_syn() {
+        transcript.commit(&dialer_identity[..]);
+    }
+    if !transcript
+        .commit(msg.epk.encode())
+        .verify(&peer_identity, &msg.sig)
+    {
+        return Err(Error::InvalidSignature);
+    }
+    if !version.binds_identity_before_syn() {
+        transcript.commit(dialer_identity);
+    }
+
+    // Sign the listener's timestamp and ephemeral key.
+    let esk = SecretKey::new(rng);
+    let epk = esk.public();
+    let sig = transcript
+        .commit(current_time.encode())
+        .commit(epk.encode())
+        .sign(&my_identity);
+
+    // Commit the shared secret and derive the confirmation the dialer must match.
+    let Some(shared) = esk.exchange(&msg.epk) else {
+        return Err(Error::InvalidEphemeralKey);
+    };
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
+    let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
+
+    Ok((
+        ListenState { transcript },
+        SynAck {
+            time_ms: current_time,
+            epk,
+            sig,
+            confirmation: confirmation_l2d,
+        },
+    ))
+}
+
+/// Completes the handshake as the listener.
+/// Verifies the dialer's confirmation and returns the confirmed secret transcript.
+pub fn listen_end(state: ListenState, msg: Ack) -> Result<Transcript, Error> {
+    let confirmation_d2l = state.transcript.fork(LABEL_CONFIRMATION_D2L).summarize();
+    if msg.confirmation != confirmation_d2l {
+        return Err(Error::InvalidConfirmation);
+    }
+
+    Ok(state.transcript)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::{Signer, ed25519::PrivateKey, secp256r1::standard};
+    use commonware_codec::{Codec, Copying, DecodeExt};
+    use commonware_math::algebra::Random;
+    use commonware_utils::{test_rng, union_unique};
+    use p256::{
+        AffinePoint, FieldBytes, ProjectivePoint, Scalar,
+        elliptic_curve::{ops::Reduce, sec1::ToSec1Point as _},
+    };
+    use sha2::{Digest, Sha256};
+
+    const VERSIONS: [Version; 2] = [Version::V0, Version::V1];
+
+    fn test_encode_roundtrip<T: Codec<Cfg = ()> + PartialEq>(value: &T) {
+        assert!(value == &<T as DecodeExt<_>>::decode(value.encode()).unwrap());
+    }
+
+    /// Completes a handshake under each [Version] and checks that both peers return the same
+    /// transcript.
+    #[test]
+    fn test_can_setup() -> Result<(), Error> {
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+
+            // Run the three-message handshake and check each message round-trips through its codec.
+            let (d_state, msg1) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    dialer_crypto.clone(),
+                    listener_crypto.public_key(),
+                    version,
+                ),
+            );
+            test_encode_roundtrip(&msg1);
+            let (l_state, msg2) = listen_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    listener_crypto,
+                    dialer_crypto.public_key(),
+                    version,
+                ),
+                msg1,
+            )?;
+            test_encode_roundtrip(&msg2);
+            let (msg3, dialer) = dial_end(d_state, msg2)?;
+            test_encode_roundtrip(&msg3);
+            let listener = listen_end(l_state, msg3)?;
+            assert_eq!(dialer.summarize(), listener.summarize());
+        }
+
+        Ok(())
+    }
+
+    /// Rejects a [SynAck] or [Ack] whose confirmation does not match the transcript.
+    #[test]
+    fn test_mismatched_confirmation_fails() {
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+            let wrong = Transcript::new(b"wrong", version.transcript()).summarize();
+            let start = |rng: &mut _| {
+                let (d_state, msg1) = dial_start(
+                    &mut *rng,
+                    Context::new(
+                        b"test_namespace",
+                        0,
+                        0..1,
+                        dialer_crypto.clone(),
+                        listener_crypto.public_key(),
+                        version,
+                    ),
+                );
+                let (l_state, msg2) = listen_start(
+                    &mut *rng,
+                    Context::new(
+                        b"test_namespace",
+                        0,
+                        0..1,
+                        listener_crypto.clone(),
+                        dialer_crypto.public_key(),
+                        version,
+                    ),
+                    msg1,
+                )
+                .unwrap();
+                (d_state, l_state, msg2)
+            };
+
+            // The dialer rejects a SynAck carrying the wrong confirmation.
+            let (d_state, _, mut msg2) = start(&mut rng);
+            msg2.confirmation = wrong;
+            assert!(matches!(
+                dial_end(d_state, msg2),
+                Err(Error::InvalidConfirmation)
+            ));
+
+            // The listener rejects an Ack carrying the wrong confirmation.
+            let (d_state, l_state, msg2) = start(&mut rng);
+            let (mut msg3, _) = dial_end(d_state, msg2).unwrap();
+            msg3.confirmation = wrong;
+            assert!(matches!(
+                listen_end(l_state, msg3),
+                Err(Error::InvalidConfirmation)
+            ));
+        }
+    }
+
+    /// Rejects a [Syn] signed under a different application namespace.
+    #[test]
+    fn test_mismatched_namespace_fails() {
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+
+            let (_, msg1) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"namespace_a",
+                    0,
+                    0..1,
+                    dialer_crypto.clone(),
+                    listener_crypto.public_key(),
+                    version,
+                ),
+            );
+
+            let result = listen_start(
+                &mut rng,
+                Context::new(
+                    b"namespace_b",
+                    0,
+                    0..1,
+                    listener_crypto,
+                    dialer_crypto.public_key(),
+                    version,
+                ),
+                msg1,
+            );
+
+            assert!(matches!(result, Err(Error::InvalidSignature)));
+        }
+    }
+
+    /// Rejects a [Syn] from a dialer running a different [Version].
+    #[test]
+    fn test_mismatched_version_fails() {
+        for (dialer_version, listener_version) in
+            [(Version::V0, Version::V1), (Version::V1, Version::V0)]
+        {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+
+            let (_, msg1) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    dialer_crypto.clone(),
+                    listener_crypto.public_key(),
+                    dialer_version,
+                ),
+            );
+
+            let result = listen_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    listener_crypto,
+                    dialer_crypto.public_key(),
+                    listener_version,
+                ),
+                msg1,
+            );
+
+            assert!(matches!(result, Err(Error::InvalidSignature)));
+        }
+    }
+
+    /// Rejects a [Syn] when the listener expects a different dialer identity.
+    #[test]
+    fn test_mismatched_dialer_identity_fails() {
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+            let impostor_crypto = PrivateKey::random(&mut rng);
+
+            let (_, msg1) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    dialer_crypto,
+                    listener_crypto.public_key(),
+                    version,
+                ),
+            );
+
+            let result = listen_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    listener_crypto,
+                    impostor_crypto.public_key(),
+                    version,
+                ),
+                msg1,
+            );
+
+            assert!(matches!(result, Err(Error::InvalidSignature)));
+        }
+    }
+
+    /// Reconstructs the transcript a listener verifies a [Syn] against, with the dialer identity
+    /// included or omitted before the ephemeral key.
+    fn syn_transcript<P: PublicKey>(
+        version: Version,
+        syn: &Syn<P::Signature>,
+        listener: &P,
+        dialer: Option<&P>,
+    ) -> Transcript {
+        let mut transcript =
+            Transcript::new(b"test_namespace", version.transcript()).fork(version.namespace());
+        if version == Version::V1 {
+            transcript.commit(&[1][..]);
+        }
+        transcript
+            .commit(syn.time_ms.encode())
+            .commit(listener.encode());
+        if let Some(dialer) = dialer {
+            transcript.commit(dialer.encode());
+        }
+        transcript.commit(syn.epk.encode());
+        transcript
+    }
+
+    /// Checks that a V1 [Syn] signature covers the dialer identity and that a V0 [Syn] signature
+    /// omits it.
+    #[test]
+    fn test_syn_signature_dialer_identity() {
+        for (version, covers) in [(Version::V0, false), (Version::V1, true)] {
+            let mut rng = test_rng();
+            let dialer_crypto = PrivateKey::random(&mut rng);
+            let listener_crypto = PrivateKey::random(&mut rng);
+            let dialer = dialer_crypto.public_key();
+            let listener = listener_crypto.public_key();
+
+            let (_, syn) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    dialer_crypto,
+                    listener.clone(),
+                    version,
+                ),
+            );
+
+            // The signature verifies only over the transcript layout of its version.
+            let with = syn_transcript(version, &syn, &listener, Some(&dialer));
+            let without = syn_transcript(version, &syn, &listener, None);
+            assert_eq!(with.verify(&dialer, &syn.sig), covers, "{version:?}");
+            assert_eq!(without.verify(&dialer, &syn.sig), !covers, "{version:?}");
+        }
+    }
+
+    /// Derives the second public key under which an ECDSA signature over `summary` verifies.
+    ///
+    /// Replacing the signature's nonce point `R` with `-R` yields `Q' = -Q - 2 e r^-1 G`.
+    fn substitute(
+        key: &standard::PublicKey,
+        summary: &Summary,
+        sig: &standard::Signature,
+    ) -> standard::PublicKey {
+        // Transcript signatures use an empty namespace, so the signed payload is the summary
+        // behind a zero-length namespace prefix.
+        let payload = union_unique(b"", summary.as_ref());
+        let hash: [u8; 32] = Sha256::digest(&payload).into();
+        let e = <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(hash));
+        let sig = p256::ecdsa::Signature::from_slice(&sig.encode()).unwrap();
+        let r: Scalar = *sig.r();
+        let r_inv = r.invert().unwrap();
+        let q = p256::PublicKey::from_sec1_bytes(&key.encode())
+            .unwrap()
+            .to_projective();
+        let derived: AffinePoint = (-q - ProjectivePoint::GENERATOR * (e * r_inv).double()).into();
+        standard::PublicKey::decode(Copying(derived.to_sec1_point(true).as_bytes())).unwrap()
+    }
+
+    /// V1 rejects a [Syn] whose signature verifies under a derived identity.
+    ///
+    /// Some signature schemes let anyone derive a second public key under which an existing
+    /// signature verifies. Under V0 the [Syn] signature does not cover the dialer identity, so a
+    /// dialer that signs with its own key can complete the handshake while claiming the derived
+    /// key. V1 commits the dialer identity before signing, so the claim fails verification.
+    #[test]
+    fn test_v1_rejects_derived_identity() {
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer = standard::PrivateKey::random(&mut rng);
+            let listener = standard::PrivateKey::random(&mut rng);
+
+            // The dialer signs a Syn with its own key.
+            let (state, syn) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    0,
+                    0..1,
+                    dialer.clone(),
+                    listener.public_key(),
+                    version,
+                ),
+            );
+
+            // It derives a second identity under which that signature verifies and claims it.
+            let (dialer_key, listener_key) = (dialer.public_key(), listener.public_key());
+            let signed = syn_transcript(
+                version,
+                &syn,
+                &listener_key,
+                version.binds_identity_before_syn().then_some(&dialer_key),
+            )
+            .summarize();
+            let derived = substitute(&dialer_key, &signed, &syn.sig);
+            assert_ne!(derived, dialer_key);
+            assert!(signed.verify(&derived, &syn.sig));
+
+            // Rebuild the dialer transcript with the derived identity in its V0 position.
+            let mut claimed = syn_transcript(version, &syn, &listener_key, None);
+            claimed.commit(derived.encode());
+            let result = listen_start(
+                &mut rng,
+                Context::new(b"test_namespace", 0, 0..1, listener, derived, version),
+                syn,
+            );
+
+            // V1 fails the [Syn] signature check because the signature covers the real dialer
+            // identity.
+            if version == Version::V1 {
+                assert!(matches!(result, Err(Error::InvalidSignature)));
+                continue;
+            }
+
+            // Under V0 the dialer finishes the exchange under the derived identity.
+            let (listen_state, syn_ack) = result.unwrap();
+            let state = DialState {
+                transcript: claimed,
+                ..state
+            };
+            let (ack, dialer) = dial_end(state, syn_ack).unwrap();
+            let listener = listen_end(listen_state, ack).unwrap();
+            assert_eq!(dialer.summarize(), listener.summarize());
+        }
+    }
+}

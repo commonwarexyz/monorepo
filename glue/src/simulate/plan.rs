@@ -17,9 +17,9 @@ use commonware_p2p::{
 };
 use commonware_runtime::{Clock, Runner as _, Spawner, Supervisor as _, deterministic};
 use commonware_utils::{NZUsize, TryCollect, channel::mpsc, ordered::Set, probability};
-use rand::seq::IndexedRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     ops::RangeInclusive,
     sync::{
         Arc,
@@ -67,9 +67,6 @@ pub struct Plan<D: EngineDefinition> {
     /// Network link configuration.
     pub link: Link,
 
-    /// Maximum size of a p2p message (bytes).
-    pub max_message_size: u32,
-
     /// Engine definition (how to wire up each validator).
     pub engine: D,
 
@@ -105,7 +102,6 @@ pub struct PlanBuilder<D: EngineDefinition> {
     seeds: Vec<u64>,
     participants: Vec<D::PublicKey>,
     link: Link,
-    max_message_size: u32,
     engine: D,
     crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
@@ -136,9 +132,8 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     /// Participants are derived from the engine via
     /// [`EngineDefinition::participants`].
     ///
-    /// Defaults: seed 0, 1MB max message size, good links (10ms latency,
-    /// 5ms jitter, 100% success), no crashes, 10 required finalizations,
-    /// no timeout.
+    /// Defaults: seed 0, good links (10ms latency, 5ms jitter, 100% success),
+    /// no crashes, 10 required finalizations, no timeout.
     pub fn new(engine: D) -> Self {
         let participants = engine.participants();
         Self {
@@ -149,7 +144,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                 jitter: Duration::from_millis(5),
                 success_rate: probability!(1.0),
             },
-            max_message_size: 1024 * 1024,
             engine,
             crashes: vec![],
             required_finalizations: 10,
@@ -178,11 +172,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 
     pub const fn link(mut self, link: Link) -> Self {
         self.link = link;
-        self
-    }
-
-    pub const fn max_message_size(mut self, size: u32) -> Self {
-        self.max_message_size = size;
         self
     }
 
@@ -277,7 +266,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             seed,
             participants: self.participants.clone(),
             link: self.link.clone(),
-            max_message_size: self.max_message_size,
             engine: self.engine.clone(),
             crashes: self.crashes.clone(),
             required_finalizations: self.required_finalizations,
@@ -345,16 +333,16 @@ impl<D: EngineDefinition> Plan<D> {
 
     fn processed_height_crashes(
         &self,
-    ) -> impl Iterator<Item = (usize, &D::PublicKey, RangeInclusive<u64>, Duration)> {
+    ) -> impl Iterator<Item = (usize, &[D::PublicKey], RangeInclusive<u64>, Duration)> {
         self.crashes
             .iter()
             .enumerate()
             .filter_map(|(index, crash)| match crash {
                 Crash::ProcessedHeight {
-                    participant,
+                    participants,
                     heights,
                     downtime,
-                } => Some((index, participant, heights.clone(), *downtime)),
+                } => Some((index, &participants[..], heights.clone(), *downtime)),
                 _ => None,
             })
     }
@@ -367,42 +355,52 @@ impl<D: EngineDefinition> Plan<D> {
         restart_tx: &mpsc::Sender<D::PublicKey>,
     ) -> u64 {
         let mut crashes = 0;
-        for (index, participant, heights, downtime) in self.processed_height_crashes() {
+        for (index, participants, heights, downtime) in self.processed_height_crashes() {
             if triggered.contains(&index) {
                 continue;
             }
-            let Some(state) = team.active_state(participant) else {
-                continue;
-            };
-            let processed = state.processed_height().await;
-            if processed < *heights.start() {
+
+            // The crash is due once every participant is running and reports a height inside the
+            // window. A reported height past the window fails the run.
+            let mut due = true;
+            for participant in participants {
+                let Some(state) = team.active_state(participant) else {
+                    due = false;
+                    continue;
+                };
+                let processed = state.processed_height().await;
+                assert!(
+                    processed <= *heights.end(),
+                    "reported processed height must not be past the crash window: {processed} not in {heights:?}",
+                );
+                due &= processed >= *heights.start();
+            }
+            if !due {
                 continue;
             }
-            assert!(
-                heights.contains(&processed),
-                "validator skipped configured processed-height crash window: {processed} not in {heights:?}",
-            );
 
             triggered.insert(index);
-            if !team.crash(participant) {
-                continue;
+            for participant in participants {
+                if !team.crash(participant) {
+                    continue;
+                }
+                crashes += 1;
+                let pk = participant.clone();
+                let restart_tx = restart_tx.clone();
+                ctx.child("processed_height_restart")
+                    .spawn(move |ctx| async move {
+                        if downtime > Duration::ZERO {
+                            ctx.sleep(downtime).await;
+                        }
+                        let _ = restart_tx.send(pk).await;
+                    });
             }
-            crashes += 1;
-            let pk = participant.clone();
-            let restart_tx = restart_tx.clone();
-            ctx.child("processed_height_restart")
-                .spawn(move |ctx| async move {
-                    if downtime > Duration::ZERO {
-                        ctx.sleep(downtime).await;
-                    }
-                    let _ = restart_tx.send(pk).await;
-                });
         }
         crashes
     }
 
     /// Determine which participants should be delayed at startup.
-    fn delayed_participants(&self) -> HashSet<D::PublicKey> {
+    fn delayed_participants(&self) -> BTreeSet<D::PublicKey> {
         self.crashes
             .iter()
             .find_map(|crash| match crash {
@@ -412,6 +410,50 @@ impl<D: EngineDefinition> Plan<D> {
                 _ => None,
             })
             .unwrap_or_default()
+    }
+
+    /// Check finalization properties against the active validators.
+    async fn check_finalization(&self, team: &Team<D>) -> Result<(), String> {
+        let states = team.active_states();
+        for prop in &self.finalization_property {
+            match prop.check(&states).await {
+                Ok(()) => {
+                    info!(
+                        target: "simulator",
+                        property = prop.name(),
+                        "finalization property passed"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        target: "simulator",
+                        property = prop.name(),
+                        error = %e,
+                        "finalization property failed"
+                    );
+                    return Err(format!(
+                        "finalization property violation ({}): {e}",
+                        prop.name()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop accepting reports and check the ones already queued.
+    async fn drain(
+        &self,
+        tracker: &mut ProgressTracker<D::PublicKey>,
+        monitor: &mut mpsc::UnboundedReceiver<FinalizationUpdate<D::PublicKey>>,
+        team: &Team<D>,
+    ) -> Result<(), String> {
+        monitor.close();
+        while let Some(update) = monitor.recv().await {
+            tracker.observe(update)?;
+            self.check_finalization(team).await?;
+        }
+        Ok(())
     }
 
     /// Check post-run properties, log completion, and build the result.
@@ -472,7 +514,7 @@ impl<D: EngineDefinition> Plan<D> {
         let (network, oracle) = Network::<_, D::PublicKey>::new(
             ctx.child("network"),
             simulated::Config {
-                max_size: self.max_message_size,
+                max_size: self.engine.max_message_size(),
                 max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -493,7 +535,8 @@ impl<D: EngineDefinition> Plan<D> {
 
         let total = self.participants.len();
         let mut team = Team::new(self.engine.clone(), self.participants.clone());
-        let (monitor_tx, mut monitor_rx) = mpsc::channel::<FinalizationUpdate<D::PublicKey>>(1024);
+        let (monitor_tx, mut monitor_rx) =
+            mpsc::unbounded_channel::<FinalizationUpdate<D::PublicKey>>();
         let (restart_tx, mut restart_rx) = mpsc::channel::<D::PublicKey>(10);
         let (crash_tx, mut crash_rx) = mpsc::channel::<()>(1);
         let (schedule_tx, mut schedule_rx) = mpsc::channel::<ScheduleCmd<D::PublicKey>>(10);
@@ -561,6 +604,9 @@ impl<D: EngineDefinition> Plan<D> {
             Err("simulation stopped before completion".into());
         const EXIT_POLL: Duration = Duration::from_millis(25);
 
+        // Branches are polled in order. Delayed restarts, scheduled crashes and restarts, and
+        // random crash ticks come before monitor updates, so a steady stream of updates cannot
+        // starve them.
         select_loop! {
             ctx,
             on_stopped => {
@@ -570,115 +616,6 @@ impl<D: EngineDefinition> Plan<D> {
                 let was_delayed = delayed.contains(&pk);
                 team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
                     .await;
-            },
-            Some(update) = monitor_rx.recv() else {
-                result = Err("monitor channel closed".into());
-                break;
-            } => {
-                tracker.observe(update)?;
-                crashes += self
-                    .trigger_processed_height_crashes(
-                        &ctx,
-                        &mut team,
-                        &mut processed_height_crashes,
-                        &restart_tx,
-                    )
-                    .await;
-
-                // Check finalization properties
-                let states = team.active_states();
-                for prop in &self.finalization_property {
-                    match prop.check(&states).await {
-                        Ok(()) => {
-                            info!(
-                                target: "simulator",
-                                property = prop.name(),
-                                "finalization property passed"
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                target: "simulator",
-                                property = prop.name(),
-                                error = %e,
-                                "finalization property failed"
-                            );
-                            return Err(format!(
-                                "finalization property violation ({}): {e}",
-                                prop.name()
-                            ));
-                        }
-                    }
-                }
-
-                // Check termination.
-                let target_count = if delayed_started { total } else { active_count };
-                let states = team.active_states();
-                let done = self
-                    .exit_condition
-                    .reached(&tracker, &states, target_count)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "exit condition evaluation failed ({}): {e}",
-                            self.exit_condition.name()
-                        )
-                    })?;
-                if done {
-                    result = self
-                        .finish(
-                            &ctx,
-                            tracker,
-                            &team,
-                            crashes,
-                            &scheduled_actions,
-                            delayed_started,
-                        )
-                        .await;
-                    break;
-                }
-
-                // Start delayed validators after enough progress
-                if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
-                    info!(target: "simulator", "starting delayed participants");
-                    for pk in &delayed {
-                        team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
-                            .await;
-                    }
-                    delayed_started = true;
-                }
-            },
-            _ = ctx.sleep(EXIT_POLL) => {
-                if !self.exit_condition.requires_polling() {
-                    continue;
-                }
-                let target_count = if delayed_started { total } else { active_count };
-                let states = team.active_states();
-                let done = self
-                    .exit_condition
-                    .reached(&tracker, &states, target_count)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "exit condition evaluation failed ({}): {e}",
-                            self.exit_condition.name()
-                        )
-                    })?;
-                if !done {
-                    continue;
-                }
-
-                result = self
-                    .finish(
-                        &ctx,
-                        tracker,
-                        &team,
-                        crashes,
-                        &scheduled_actions,
-                        delayed_started,
-                    )
-                    .await;
-                break;
             },
             Some(cmd) = schedule_rx.recv() else break => match cmd {
                 ScheduleCmd::Crash(pk) => {
@@ -713,6 +650,96 @@ impl<D: EngineDefinition> Plan<D> {
                         let _ = restart_tx.send(pk).await;
                     });
                 }
+            },
+            Some(update) = monitor_rx.recv() else {
+                result = Err("monitor channel closed".into());
+                break;
+            } => {
+                tracker.observe(update)?;
+                crashes += self
+                    .trigger_processed_height_crashes(
+                        &ctx,
+                        &mut team,
+                        &mut processed_height_crashes,
+                        &restart_tx,
+                    )
+                    .await;
+
+                // Check finalization properties
+                self.check_finalization(&team).await?;
+
+                // Check termination.
+                let target_count = if delayed_started { total } else { active_count };
+                let states = team.active_states();
+                let done = self
+                    .exit_condition
+                    .reached(&tracker, &states, target_count)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "exit condition evaluation failed ({}): {e}",
+                            self.exit_condition.name()
+                        )
+                    })?;
+                if done {
+                    self.drain(&mut tracker, &mut monitor_rx, &team).await?;
+                    result = self
+                        .finish(
+                            &ctx,
+                            tracker,
+                            &team,
+                            crashes,
+                            &scheduled_actions,
+                            delayed_started,
+                        )
+                        .await;
+                    break;
+                }
+
+                // Start delayed validators after enough progress
+                if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
+                    info!(target: "simulator", "starting delayed participants");
+                    let mut order: Vec<_> = delayed.iter().cloned().collect();
+                    order.shuffle(&mut ctx);
+                    for pk in order {
+                        team.start_one(&ctx, &oracle, pk, monitor_tx.clone(), true)
+                            .await;
+                    }
+                    delayed_started = true;
+                }
+            },
+            _ = ctx.sleep(EXIT_POLL) => {
+                if !self.exit_condition.requires_polling() {
+                    continue;
+                }
+                let target_count = if delayed_started { total } else { active_count };
+                let states = team.active_states();
+                let done = self
+                    .exit_condition
+                    .reached(&tracker, &states, target_count)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "exit condition evaluation failed ({}): {e}",
+                            self.exit_condition.name()
+                        )
+                    })?;
+                if !done {
+                    continue;
+                }
+
+                self.drain(&mut tracker, &mut monitor_rx, &team).await?;
+                result = self
+                    .finish(
+                        &ctx,
+                        tracker,
+                        &team,
+                        crashes,
+                        &scheduled_actions,
+                        delayed_started,
+                    )
+                    .await;
+                break;
             },
         }
 
@@ -756,10 +783,9 @@ impl<D: EngineDefinition> Plan<D> {
         result
     }
 
-    /// Schedule executor -- sleeps until each scheduled time and
-    /// applies the action. Network actions are applied directly via the
-    /// oracle; node actions (crash/restart) are sent as commands to the
-    /// select loop which owns the team.
+    /// Sleeps until each scheduled time and applies its action. Network
+    /// actions go directly to the oracle, and node actions (crash/restart)
+    /// go as commands to the select loop that owns the team.
     async fn run_action_scheduler(
         ctx: deterministic::Context,
         fault_ctx: deterministic::Context,
@@ -846,10 +872,14 @@ impl<D: EngineDefinition> Plan<D> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use commonware_consensus::types::{Epoch, Round, View};
+    use super::{
+        super::{exit::ProcessedHeightAtLeast, processed::ProcessedHeight},
+        *,
+    };
+    use commonware_consensus::types::{Epoch, Height, Round, View};
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Clock, Handle, Quota, Spawner};
+    use commonware_utils::{sync::Mutex, vec::NonEmptyVec};
     use std::{
         future::Future,
         pin::Pin,
@@ -858,17 +888,37 @@ mod tests {
 
     #[derive(Clone)]
     struct FinalizingEngine {
+        /// Participant public keys in index order.
         participants: Vec<ed25519::PublicKey>,
+        /// Delay before a node emits any report.
         finalize_after: Duration,
+        /// Number of ordinary finalizations each node reports, one per view.
         finalizations: u64,
+        /// Delay after each ordinary finalization. Zero emits a burst.
+        period: Duration,
+        /// Scripted (validator, view and height, digest byte) reports emitted by
+        /// the first node before ordinary finalizations.
+        script: Vec<(ed25519::PublicKey, u64, u8)>,
+        /// Participant indices recorded in delayed initialization order.
+        starts: Arc<Mutex<Vec<usize>>>,
     }
 
     struct FinalizingNode {
+        /// Runtime context for the reporting task.
         context: deterministic::Context,
-        monitor: mpsc::Sender<FinalizationUpdate<ed25519::PublicKey>>,
+        /// Channel for reporting finalizations to the harness.
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<ed25519::PublicKey>>,
+        /// Validator reported for ordinary finalizations.
         pk: ed25519::PublicKey,
+        /// Delay before emitting any report.
         finalize_after: Duration,
+        /// Number of ordinary finalizations to report, one per view.
         finalizations: u64,
+        /// Delay after each ordinary finalization. Zero emits a burst.
+        period: Duration,
+        /// Scripted (validator, view and height, digest byte) reports emitted
+        /// before ordinary finalizations.
+        script: Vec<(ed25519::PublicKey, u64, u8)>,
     }
 
     #[derive(Clone)]
@@ -878,12 +928,50 @@ mod tests {
 
     struct FaultObservingNode {
         context: deterministic::Context,
-        monitor: mpsc::Sender<FinalizationUpdate<ed25519::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<ed25519::PublicKey>>,
         pk: ed25519::PublicKey,
     }
 
     #[derive(Clone)]
     struct AllStatesSawFault;
+
+    /// Validators that each process and report one height per period.
+    #[derive(Clone)]
+    struct ProcessingEngine {
+        /// Participant public keys in index order.
+        participants: Vec<ed25519::PublicKey>,
+        /// Time each validator takes to process a height, in participant order.
+        periods: Vec<Duration>,
+        /// Height each validator has processed, kept across restarts.
+        processed: Vec<Arc<AtomicU64>>,
+        /// Every validator start, in order.
+        starts: Arc<Mutex<Vec<Start>>>,
+    }
+
+    /// A validator start in a [ProcessingEngine] run.
+    #[derive(Debug)]
+    struct Start {
+        /// Participant index of the validator that started.
+        index: usize,
+        /// Height each validator had processed by then, in participant order.
+        heights: Vec<u64>,
+    }
+
+    struct ProcessingNode {
+        /// Runtime context for the processing task.
+        context: deterministic::Context,
+        /// Channel for reporting processed heights to the harness.
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<ed25519::PublicKey>>,
+        /// Validator reported for each height.
+        pk: ed25519::PublicKey,
+        /// Time taken to process a height.
+        period: Duration,
+        /// Height this validator has processed.
+        processed: Arc<AtomicU64>,
+    }
+
+    /// Height a [ProcessingEngine] validator has processed.
+    struct Processed(Arc<AtomicU64>);
 
     impl FinalizingEngine {
         fn new(num_validators: u64, finalize_after: Duration, finalizations: u64) -> Self {
@@ -894,6 +982,9 @@ mod tests {
                 participants,
                 finalize_after,
                 finalizations,
+                period: Duration::ZERO,
+                script: vec![],
+                starts: Arc::default(),
             }
         }
     }
@@ -904,6 +995,26 @@ mod tests {
                 .map(|seed| ed25519::PrivateKey::from_seed(seed).public_key())
                 .collect();
             Self { participants }
+        }
+    }
+
+    impl ProcessingEngine {
+        fn new(periods: impl IntoIterator<Item = Duration>) -> Self {
+            let periods: Vec<_> = periods.into_iter().collect();
+            Self {
+                participants: (0..periods.len() as u64)
+                    .map(|seed| ed25519::PrivateKey::from_seed(seed).public_key())
+                    .collect(),
+                processed: periods.iter().map(|_| Arc::default()).collect(),
+                periods,
+                starts: Arc::default(),
+            }
+        }
+    }
+
+    impl ProcessedHeight for Processed {
+        async fn processed_height(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
         }
     }
 
@@ -920,12 +1031,28 @@ mod tests {
             vec![]
         }
 
+        fn max_message_size(&self) -> u32 {
+            commonware_p2p::max_message_size(core::iter::empty::<usize>())
+        }
+
         fn init(
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
         ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
             let finalize_after = self.finalize_after;
             let finalizations = self.finalizations;
+            let period = self.period;
+
+            // Only the first node emits the script so its reports stay ordered.
+            let script = if ctx.index == 0 {
+                self.script.clone()
+            } else {
+                vec![]
+            };
+
+            if ctx.delayed {
+                self.starts.lock().push(ctx.index);
+            }
             async move {
                 (
                     FinalizingNode {
@@ -934,6 +1061,8 @@ mod tests {
                         pk: ctx.public_key.clone(),
                         finalize_after,
                         finalizations,
+                        period,
+                        script,
                     },
                     (),
                 )
@@ -945,18 +1074,39 @@ mod tests {
             let monitor = engine.monitor;
             let finalize_after = engine.finalize_after;
             let finalizations = engine.finalizations;
+            let period = engine.period;
+            let script = engine.script;
             engine.context.spawn(move |ctx| async move {
+                // The initial delay lets scheduled actions run before reports arrive.
                 if finalize_after > Duration::ZERO {
                     ctx.sleep(finalize_after).await;
                 }
-                for view in 1..=finalizations {
-                    let _ = monitor
+
+                // Synchronous sends queue the full script before the plan can
+                // process earlier progress, preserving a trailing conflict.
+                for (pk, view, digest) in script {
+                    monitor
                         .send(FinalizationUpdate {
-                            pk: pk.clone(),
+                            pk,
                             round: Round::new(Epoch::zero(), View::new(view)),
-                            block_digest: vec![view as u8],
+                            height: Height::new(view),
+                            block_digest: vec![digest],
                         })
-                        .await;
+                        .expect("report must enter monitor queue");
+                }
+
+                // Emit ordinary progress at the configured pace. A nonzero period
+                // keeps the reporter active while the plan checks completion.
+                for view in 1..=finalizations {
+                    let _ = monitor.send(FinalizationUpdate {
+                        pk: pk.clone(),
+                        round: Round::new(Epoch::zero(), View::new(view)),
+                        height: Height::new(view),
+                        block_digest: vec![view as u8],
+                    });
+                    if period > Duration::ZERO {
+                        ctx.sleep(period).await;
+                    }
                 }
             })
         }
@@ -973,6 +1123,10 @@ mod tests {
 
         fn channels(&self) -> Vec<(u64, Quota)> {
             vec![]
+        }
+
+        fn max_message_size(&self) -> u32 {
+            commonware_p2p::max_message_size(core::iter::empty::<usize>())
         }
 
         fn init(
@@ -998,13 +1152,76 @@ mod tests {
             let monitor = engine.monitor;
             engine.context.spawn(move |ctx| async move {
                 ctx.sleep(Duration::from_millis(10)).await;
-                let _ = monitor
-                    .send(FinalizationUpdate {
-                        pk,
-                        round: Round::new(Epoch::zero(), View::new(1)),
-                        block_digest: vec![1],
-                    })
-                    .await;
+                let _ = monitor.send(FinalizationUpdate {
+                    pk,
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                    height: Height::new(1),
+                    block_digest: vec![1],
+                });
+            })
+        }
+    }
+
+    impl EngineDefinition for ProcessingEngine {
+        type PublicKey = ed25519::PublicKey;
+        type Engine = ProcessingNode;
+        type State = Processed;
+
+        fn participants(&self) -> Vec<Self::PublicKey> {
+            self.participants.clone()
+        }
+
+        fn channels(&self) -> Vec<(u64, Quota)> {
+            vec![]
+        }
+
+        fn max_message_size(&self) -> u32 {
+            commonware_p2p::max_message_size(core::iter::empty::<usize>())
+        }
+
+        fn init(
+            &self,
+            ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
+        ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
+            let processed = self.processed[ctx.index].clone();
+            let heights = self
+                .processed
+                .iter()
+                .map(|height| height.load(Ordering::Relaxed))
+                .collect();
+            self.starts.lock().push(Start {
+                index: ctx.index,
+                heights,
+            });
+            let node = ProcessingNode {
+                context: ctx.context,
+                monitor: ctx.monitor,
+                pk: ctx.public_key.clone(),
+                period: self.periods[ctx.index],
+                processed: processed.clone(),
+            };
+            async move { (node, Processed(processed)) }
+        }
+
+        fn start(engine: Self::Engine) -> Handle<()> {
+            let ProcessingNode {
+                context,
+                monitor,
+                pk,
+                period,
+                processed,
+            } = engine;
+            context.spawn(move |context| async move {
+                loop {
+                    context.sleep(period).await;
+                    let height = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = monitor.send(FinalizationUpdate {
+                        pk: pk.clone(),
+                        round: Round::new(Epoch::zero(), View::new(height)),
+                        height: Height::new(height),
+                        block_digest: vec![height as u8],
+                    });
+                }
             })
         }
     }
@@ -1080,6 +1297,134 @@ mod tests {
                 ))
             })
         }
+    }
+
+    /// A delayed property check that can overlap with report production.
+    #[derive(Clone)]
+    struct SlowCheck {
+        /// Deterministic clock used to suspend the check.
+        context: Arc<deterministic::Context>,
+        /// Number of checks completed or in progress.
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FinalizationProperty<()> for SlowCheck {
+        fn name(&self) -> &str {
+            "slow_check"
+        }
+        fn check<'a>(
+            &'a self,
+            _states: &'a [&'a ()],
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.context.sleep(Duration::from_millis(5)).await;
+                Ok(())
+            })
+        }
+    }
+
+    /// Completion must drain the accepted backlog while the reporter keeps sending.
+    #[test]
+    fn completion_does_not_require_a_quiet_reporter() {
+        deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+            // Emit reports every millisecond while each check takes five.
+            let mut engine = FinalizingEngine::new(1, Duration::ZERO, u64::MAX);
+            engine.period = Duration::from_millis(1);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let property = SlowCheck {
+                context: Arc::new(context.child("check")),
+                calls: calls.clone(),
+            };
+            let result = PlanBuilder::new(engine)
+                .required_finalizations(1)
+                .finalization_property(property)
+                .build()
+                .run_inner(context)
+                .await
+                .expect("finite checks must complete despite continuous finalizations");
+
+            // Every accepted tip is checked, including tips queued during a check.
+            let checked = calls.load(Ordering::Relaxed);
+            assert!(
+                checked > 1,
+                "must check the backlog accepted during the first check"
+            );
+            assert_eq!(checked as u64, result.tracker.min_view());
+        });
+    }
+
+    #[test]
+    fn queued_fork_must_fail_simulation() {
+        // Reports from both validators meet the exit condition before the final
+        // report conflicts with an earlier digest at the same height.
+        let mut engine = FinalizingEngine::new(2, Duration::ZERO, 0);
+        let a = engine.participants[0].clone();
+        let b = engine.participants[1].clone();
+        engine.script = vec![(b.clone(), 2, 2), (a, 3, 3), (b, 3, 4)];
+
+        // Every accepted report must be checked before the simulation succeeds.
+        let error = PlanBuilder::new(engine)
+            .required_finalizations(2)
+            .timeout(Duration::from_secs(2))
+            .run()
+            .err()
+            .expect("queued conflict must fail");
+        assert!(error.contains("fork detected"), "{error}");
+    }
+
+    /// Draining the accepted backlog after completion must not start delayed validators.
+    #[test]
+    #[should_panic(expected = "delayed validators were never started")]
+    fn delayed_start_does_not_follow_completion() {
+        // The active node queues three tips at once. Completion commits after the
+        // first tip, while the delay round is only reached by the queued third tip.
+        let mut engine = FinalizingEngine::new(2, Duration::ZERO, 0);
+        let active = engine.participants[0].clone();
+        let delayed = engine.participants[1].clone();
+        engine.script = vec![
+            (active.clone(), 1, 1),
+            (active.clone(), 2, 2),
+            (active, 3, 3),
+        ];
+
+        // The plan must keep its team fixed after completion.
+        let _ = PlanBuilder::new(engine)
+            .required_finalizations(1)
+            .timeout(Duration::from_secs(2))
+            .crash(Crash::DelayRound {
+                participants: vec![delayed],
+                round: Round::new(Epoch::zero(), View::new(3)),
+            })
+            .run();
+    }
+
+    #[test]
+    fn multi_delayed_start_is_deterministic() {
+        // Repeat the same seeded run and capture the delayed initialization order.
+        let mut observed = HashSet::new();
+        for _ in 0..24 {
+            // Two participants start after the active nodes reach view one.
+            let engine = FinalizingEngine::new(4, Duration::from_millis(100), 2);
+            let delayed = engine.participants[..2].to_vec();
+            let starts = engine.starts.clone();
+            PlanBuilder::new(engine)
+                .seed(7)
+                .required_finalizations(2)
+                .timeout(Duration::from_secs(2))
+                .crash(Crash::DelayRound {
+                    participants: delayed,
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                })
+                .run()
+                .unwrap();
+
+            // Both delayed nodes must start, in the same order on every run.
+            let order = starts.lock().clone();
+            assert_eq!(order.len(), 2);
+            observed.insert(order);
+        }
+        assert_eq!(observed.len(), 1, "different start orders: {observed:?}");
     }
 
     #[test]
@@ -1164,6 +1509,216 @@ mod tests {
         assert_eq!(
             result.crashes, 1,
             "second crash before restart should be a no-op and not counted"
+        );
+    }
+
+    /// Runs one validator against `crash` while its reports outpace the plan's checks, and
+    /// returns the number of crashes the plan applied.
+    fn crashes_while_reports_outpace_checks(
+        crash: impl FnOnce(ed25519::PublicKey) -> Crash<ed25519::PublicKey> + Send + 'static,
+    ) -> u64 {
+        deterministic::Runner::timed(Duration::from_secs(2)).start(|context| async move {
+            // Emit reports every millisecond while each check takes five, so reports stay
+            // queued behind the check in progress.
+            let mut engine = FinalizingEngine::new(1, Duration::ZERO, u64::MAX);
+            engine.period = Duration::from_millis(1);
+            let crash = crash(engine.participants[0].clone());
+            let property = SlowCheck {
+                context: Arc::new(context.child("check")),
+                calls: Arc::new(AtomicUsize::new(0)),
+            };
+            PlanBuilder::new(engine)
+                .required_finalizations(20)
+                .finalization_property(property)
+                .crash(crash)
+                .build()
+                .run_inner(context)
+                .await
+                .expect("simulation must complete")
+                .crashes
+        })
+    }
+
+    #[test]
+    fn scheduled_crash_applies_while_reports_outpace_checks() {
+        let crashes = crashes_while_reports_outpace_checks(|pk| {
+            Crash::Schedule(
+                Schedule::new()
+                    .at(Duration::from_millis(10), Action::Crash(pk.clone()))
+                    .at(Duration::from_millis(20), Action::Restart(pk)),
+            )
+        });
+        assert_eq!(crashes, 1, "scheduled crash must apply before completion");
+    }
+
+    #[test]
+    fn random_crash_applies_while_reports_outpace_checks() {
+        let crashes = crashes_while_reports_outpace_checks(|_| Crash::Random {
+            frequency: Duration::from_millis(30),
+            downtime: Duration::from_millis(5),
+            count: 1,
+        });
+        assert!(crashes > 0, "random crash must apply before completion");
+    }
+
+    /// A processed-height crash waits until every participant is running and inside the
+    /// window, then stops them together.
+    #[test]
+    fn processed_height_crash_stops_participants_together() {
+        // The fast validators enter the shared window after about 50ms. The slow validator first
+        // stops alone at height 2 for 200ms, so it enters the window after about 350ms. It sits
+        // between the fast validators in participant order, so neither the first nor the last
+        // participant decides alone when the shared crash is due.
+        let (slow, fast) = (1, [0, 2]);
+        let engine = ProcessingEngine::new([
+            Duration::from_millis(10),
+            Duration::from_millis(30),
+            Duration::from_millis(10),
+        ]);
+        let participants = engine.participants.clone();
+        let starts = engine.starts.clone();
+        let result = PlanBuilder::new(engine)
+            .crash(Crash::ProcessedHeight {
+                participants: NonEmptyVec::new(participants[slow].clone()),
+                heights: 2..=2,
+                downtime: Duration::from_millis(200),
+            })
+            .crash(Crash::ProcessedHeight {
+                participants: NonEmptyVec::try_from(participants)
+                    .expect("engine must have participants"),
+                heights: 5..=45,
+                downtime: Duration::from_millis(100),
+            })
+            .exit_condition(ProcessedHeightAtLeast::new(8))
+            .timeout(Duration::from_secs(2))
+            .run()
+            .expect("simulation must complete")
+            .pop()
+            .expect("one seed must produce one result");
+        assert_eq!(
+            result.crashes, 4,
+            "the slow validator must stop twice and each fast validator once"
+        );
+
+        // After every validator starts, the slow one restarts alone, once the fast ones have
+        // processed 20 heights or more. The last three restarts then record the same heights, so no
+        // validator ran while another was stopped. The slow validator stopped as it entered the
+        // window, when the fast ones were already inside it.
+        let starts = starts.lock();
+        let [_, _, _, alone, together @ ..] = starts.as_slice() else {
+            panic!("validators must start at least four times: {starts:?}");
+        };
+        assert_eq!(
+            alone.index, slow,
+            "the slow validator must restart alone first"
+        );
+        assert!(
+            fast.iter().all(|&index| alone.heights[index] >= 20),
+            "the slow validator must stay stopped for its downtime"
+        );
+        let mut restarted: Vec<_> = together.iter().map(|start| start.index).collect();
+        restarted.sort_unstable();
+        assert_eq!(
+            restarted,
+            [0, 1, 2],
+            "every validator must restart once after the shared crash"
+        );
+        let heights = &together[0].heights;
+        assert!(
+            together.iter().all(|start| start.heights == *heights),
+            "validators must stop together"
+        );
+        assert_eq!(
+            heights[slow], 5,
+            "the crash must come as the slow validator enters"
+        );
+        assert!(
+            fast.iter().all(|&index| heights[index] > 5),
+            "the fast validators must run until the slow one enters"
+        );
+    }
+
+    /// A participant that passes the window before another enters it fails the run.
+    #[test]
+    #[should_panic(expected = "reported processed height must not be past the crash window")]
+    fn processed_height_crash_requires_every_participant_inside_window() {
+        // The fast validator processes height 10, past the window, after about 100ms. The slow
+        // validator has then processed only height 3 and has yet to enter the window.
+        let engine = ProcessingEngine::new([Duration::from_millis(10), Duration::from_millis(30)]);
+        let participants = NonEmptyVec::try_from(engine.participants.clone())
+            .expect("engine must have participants");
+        let _ = PlanBuilder::new(engine)
+            .crash(Crash::ProcessedHeight {
+                participants,
+                heights: 5..=9,
+                downtime: Duration::from_millis(100),
+            })
+            .exit_condition(ProcessedHeightAtLeast::new(8))
+            .timeout(Duration::from_secs(2))
+            .run();
+    }
+
+    /// Runs one validator that processes a height every 10ms against `crash` until it has
+    /// processed `exit` heights. Returns the number of crashes the plan applied and the height
+    /// the validator had processed at each of its starts.
+    fn crashes_and_start_heights(
+        crash: impl FnOnce(ed25519::PublicKey) -> Crash<ed25519::PublicKey>,
+        exit: u64,
+    ) -> (u64, Vec<u64>) {
+        let engine = ProcessingEngine::new([Duration::from_millis(10)]);
+        let crash = crash(engine.participants[0].clone());
+        let starts = engine.starts.clone();
+        let result = PlanBuilder::new(engine)
+            .crash(crash)
+            .exit_condition(ProcessedHeightAtLeast::new(exit))
+            .timeout(Duration::from_secs(2))
+            .run()
+            .expect("simulation must complete")
+            .pop()
+            .expect("one seed must produce one result");
+        let heights = starts.lock().iter().map(|start| start.heights[0]).collect();
+        (result.crashes, heights)
+    }
+
+    /// A validator stopped by a processed-height crash with no downtime restarts and keeps
+    /// processing.
+    #[test]
+    fn processed_height_crash_restarts_without_downtime() {
+        let (crashes, starts) = crashes_and_start_heights(
+            |pk| Crash::ProcessedHeight {
+                participants: NonEmptyVec::new(pk),
+                heights: 2..=2,
+                downtime: Duration::ZERO,
+            },
+            4,
+        );
+        assert_eq!(crashes, 1, "the validator must stop once");
+        assert_eq!(
+            starts,
+            [0, 2],
+            "the validator must restart at the height it stopped at"
+        );
+    }
+
+    /// A validator stopped by random crashes with no downtime restarts each time and keeps
+    /// processing.
+    #[test]
+    fn random_crash_restarts_without_downtime() {
+        // A crash is due every 25ms. With immediate restarts the validator needs 70ms to
+        // process six heights, so it stops exactly twice.
+        let (crashes, starts) = crashes_and_start_heights(
+            |_| Crash::Random {
+                frequency: Duration::from_millis(25),
+                downtime: Duration::ZERO,
+                count: 1,
+            },
+            6,
+        );
+        assert_eq!(crashes, 2, "the validator must stop twice");
+        assert_eq!(
+            starts,
+            [0, 2, 4],
+            "the validator must restart at the height it stopped at"
         );
     }
 

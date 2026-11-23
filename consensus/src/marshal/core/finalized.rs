@@ -66,14 +66,14 @@ impl<C, B> Storage<C, B> {
     }
 
     /// Read guard over the certificate store.
-    async fn finalizations(&self) -> AsyncRwLockReadGuard<'_, C> {
+    pub async fn finalizations(&self) -> AsyncRwLockReadGuard<'_, C> {
         AsyncRwLockReadGuard::map(self.inner.read().await, |slot| {
             &slot.as_ref().expect(POISONED).0
         })
     }
 
     /// Read guard over the block store.
-    async fn blocks(&self) -> AsyncRwLockReadGuard<'_, B> {
+    pub async fn blocks(&self) -> AsyncRwLockReadGuard<'_, B> {
         AsyncRwLockReadGuard::map(self.inner.read().await, |slot| {
             &slot.as_ref().expect(POISONED).1
         })
@@ -107,7 +107,11 @@ impl<C, B> Storage<C, B> {
     }
 }
 
-impl<C: Certificates, B: Blocks> Storage<C, B> {
+impl<C, B> Storage<C, B>
+where
+    C: Certificates<BlockDigest = <B::Block as Digestible>::Digest>,
+    B: Blocks,
+{
     /// Store a finalized block and, when consensus supplied one, its certificate.
     pub async fn put(
         &self,
@@ -121,7 +125,7 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
             let (blocks, finalizations) = futures::join!(
                 async {
                     blocks
-                        .put(&block)
+                        .put(digest, &block)
                         .await
                         .unwrap_or_else(|e| panic!("failed to store finalized block: {e}"))
                 },
@@ -135,6 +139,26 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
                     }
                 }
             );
+            (finalizations, blocks, ())
+        })
+        .await
+    }
+
+    /// Store and durably persist a certificate without touching the block store.
+    pub async fn put_finalization(
+        &self,
+        height: Height,
+        digest: C::BlockDigest,
+        finalization: Finalization<C::Scheme, C::Commitment>,
+    ) {
+        self.mutate(|finalizations, blocks| async move {
+            let finalizations = finalizations
+                .put(height, digest, &finalization)
+                .await
+                .unwrap_or_else(|e| panic!("failed to store finalization: {e}"))
+                .sync()
+                .await
+                .unwrap_or_else(|e| panic!("failed to sync finalization: {e}"));
             (finalizations, blocks, ())
         })
         .await
@@ -185,19 +209,19 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
         .await
     }
 
-    /// Prune both stores below `height`.
-    pub async fn prune(&self, height: Height) {
+    /// Prune certificates below `finalizations_height` and blocks below `blocks_height`.
+    pub async fn prune(&self, finalizations_height: Height, blocks_height: Height) {
         self.mutate(|finalizations, blocks| async move {
             let (blocks, finalizations) = futures::join!(
                 async {
                     blocks
-                        .prune(height)
+                        .prune(blocks_height)
                         .await
                         .unwrap_or_else(|e| panic!("failed to prune finalized blocks: {e}"))
                 },
                 async {
                     finalizations
-                        .prune(height)
+                        .prune(finalizations_height)
                         .await
                         .unwrap_or_else(|e| panic!("failed to prune finalizations: {e}"))
                 }
@@ -238,6 +262,11 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
             .get(ArchiveID::Key(&digest))
             .await
             .unwrap_or_else(|e| panic!("failed to get block by digest: {e}"))
+    }
+
+    /// Whether a finalized block is stored at `height`, read from the index alone.
+    pub async fn has_block(&self, height: Height) -> bool {
+        self.blocks().await.next_gap(height).0.is_some()
     }
 
     /// Whether a certificate is stored at `height`.
@@ -403,7 +432,11 @@ where
         }
     };
     let block = match block {
-        Ok(Some(block)) => block.into(),
+        // The block at a height is stored under the digest its finalization commits to.
+        Ok(Some(stored)) => V::restore(
+            stored,
+            V::commitment_to_inner(finalization.proposal.payload),
+        ),
         Ok(None) => {
             metrics.missing.inc();
             debug!(%height, "finalized block missing on serve");

@@ -16,9 +16,7 @@ use bytes::BufMut;
 
 const BTREESET_TYPE: &str = "BTreeSet";
 
-// ---------- BTreeSet ----------
-
-impl<K: Ord + Eq + Write> Write for BTreeSet<K> {
+impl<K: Write> Write for BTreeSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
 
@@ -38,7 +36,7 @@ impl<K: Ord + Eq + Write> Write for BTreeSet<K> {
     }
 }
 
-impl<K: Ord + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
+impl<K: EncodeSize> EncodeSize for BTreeSet<K> {
     fn encode_size(&self) -> usize {
         let mut size = self.len().encode_size();
         for item in self {
@@ -56,7 +54,7 @@ impl<K: Ord + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     }
 }
 
-impl<K: Read + Ord + Eq> Read for BTreeSet<K> {
+impl<K: Read + Ord> Read for BTreeSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -84,7 +82,7 @@ mod tests {
     // Generic round trip test function for BTreeSet
     fn round_trip_btree<K>(set: &BTreeSet<K>, range_cfg: RangeCfg<usize>, item_cfg: K::Cfg)
     where
-        K: Write + EncodeSize + Read + Ord + Eq + Debug + PartialEq,
+        K: Write + EncodeSize + Read + Ord + Debug,
         BTreeSet<K>: Read<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Decode<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Debug

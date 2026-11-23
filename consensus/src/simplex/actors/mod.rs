@@ -8,7 +8,7 @@ pub mod voter;
 ///
 /// The wire key names only a view, so a responder cannot tell which certificate was
 /// asked for and may answer with one that does not settle the request. Keeping the
-/// ask local lets the requester recognize that case (see [resolver::Actor::settled]).
+/// ask local lets the requester recognize that case.
 ///
 /// Only three of the four combinations occur: background repair always wants a
 /// nullification, while proposal ancestry wants either kind.
@@ -68,10 +68,10 @@ impl Kind {
 /// The boundary at which an ask retires.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Until {
-    /// The resolver floor passes the view.
+    /// The resolver floor reaches the view.
     ///
     /// Used for background repair of the nullification gaps below the current
-    /// view, which resolver state stops tracking once its floor is above them.
+    /// view, which resolver state stops tracking once its floor reaches them.
     Floor,
     /// The view is finalized.
     ///

@@ -16,9 +16,9 @@ use tracing::debug;
 
 /// The service phase of [`Probe`](super::Probe).
 ///
-/// Answers peers' `Request` with the latest finalization from the attached marshal. By
-/// construction it never issues outbound requests. It is reached only after discovery has
-/// consumed its floor and a marshal has been attached.
+/// Answers each peer `Request` with the attached marshal's latest finalization, if any, and never
+/// issues requests. See the [module documentation](crate::stateful::probe#lifecycle) for when it
+/// starts.
 pub(super) struct Service<E, S, V, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -42,7 +42,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    /// Runs the service loop until the actor shuts down.
+    /// Runs the service loop until the actor stops or the network receiver closes.
     pub(super) async fn run(
         mut self,
         sender: &mut impl Sender<PublicKey = P>,
@@ -65,14 +65,13 @@ where
                 mailbox_drained = true;
                 continue;
             } => match message {
-                // If a floor was discovered, serve it to any late subscriber. A source node that
-                // entered service directly has none, so its subscribers never resolve.
+                // Serve the selected floor, if any. Without one, dropping `response` closes the
+                // subscription.
                 Message::Subscribe { response } => {
                     if let Some(ref floor) = self.floor {
                         response.send_lossy(floor.clone());
                     }
                 }
-                // Already in service; an additional marshal attachment is ignored.
                 Message::Attach { .. } => {}
             },
             Ok((peer, mut message)) = receiver.recv() else {

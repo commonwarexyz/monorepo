@@ -1,5 +1,2168 @@
 # Release Notes
 
+## v2026.11.0
+
+### Stability
+
+The following crates and APIs are now BETA ([#5810]):
+
+- `commonware_storage::qmdb`
+- `commonware_storage::merkle`
+- `commonware_storage::merkle::mmr`
+- `commonware_storage::merkle::mmb`
+- `commonware_storage::bmt`
+- `commonware_storage::journal::authenticated`
+- `commonware_storage::AuthenticatedBitMap`
+- `commonware_storage::MerkleizedBitMap`
+- `commonware_storage::UnmerkleizedBitMap`
+- `commonware_storage::index::immutable`
+- `commonware_storage::journal::contiguous::fixed::Journal::init_at_size`
+- `commonware_storage::journal::contiguous::variable::Journal::init_at_size`
+- `commonware_coding`
+- `commonware_cryptography::reed_solomon`
+- `commonware_collector`
+- `commonware_consensus::Application`
+- `commonware_consensus::marshal::standard::Inline`
+- `commonware_consensus::marshal::standard::Deferred`
+- `commonware_consensus::marshal::coding`
+- `commonware_consensus::types::coding`
+- `commonware_utils::range::contains_cyclic`
+
+### QMDB Formats
+
+QMDB operations now share one tag table: commit is 0, update is 1, delete is 2,
+set is 3, and append is 4. `qmdb::operation` now exports the tags as
+`COMMIT_CONTEXT`, `UPDATE_CONTEXT`, `DELETE_CONTEXT`, `SET_CONTEXT`, and
+`APPEND_CONTEXT`. The new tags change how Any, Current, Immutable, and Store
+encode operations and how Keyless encodes appends. Every root and proof that
+commits to a retagged operation also changes, including the genesis roots of
+Any, Current, and Immutable. Rebuild Store in fresh partitions. Rebuild or
+resync each of the other databases into fresh partitions. Then recompute every
+pinned root of those databases ([#5787]).
+
+`LibQMDBCurrent` now expects the new update and commit tags when it parses the
+operation in an exclusion proof. Redeploy any contract that embeds
+`LibQMDBCurrent.verifyExclusion` or the `verifyExclusion` wrapper of
+`LibQMDBCurrentMMR` or `LibQMDBCurrentMMB`. The other Solidity QMDB verifiers
+hash the operation bytes they receive, so they need only the new roots and
+proofs. The `commonware-dkg` example's genesis block commits to a QMDB root, so
+start a fresh example network instead of reusing the example's existing storage
+([#5787]).
+
+Any, Current, and the full (non-compact) Immutable and Keyless databases no
+longer persist Merkle nodes. The authenticated journal that these databases
+build on no longer persists Merkle nodes either. The databases and the journal
+now store an operation log and a frontier, which records the pruning boundary
+and the digests pinned there. At startup, the databases and the journal now
+replay the retained operations to rebuild the tree in memory. Startup time
+therefore grows with the number of retained operations, so keep databases well
+pruned to keep it short. On a large database, set `init_concurrency` above 1 so
+that several tasks share the replay ([#5158]).
+
+A standalone authenticated journal with a pruned log cannot reopen under a fresh
+frontier. Rebuild it, or seed it with its pruning boundary and pinned digests
+through `Journal::from_components` and `persist_boundary`. Nothing in this
+release reads or removes the old node journal partitions that
+`journal_partition` named. Delete those partitions, and the rest of each
+replaced database, once nothing needs them. Compact databases keep their witness
+journal, and the standalone `merkle::full::Merkle` keeps its node journal
+([#5158]).
+
+`sync::CompactTarget` is removed, so describe a compact database's state with a
+`sync::Target` whose range is `[size - 1, size)`. `CompactDb::target` now
+returns that `Target`. The encoded target now carries both ends of the range, so
+re-encode any payload that carries a compact target ([#4590]).
+
+### QMDB Configuration
+
+In Any and Current, `Config::merkle_config` is renamed to `merkle` and
+`Config::journal_config` is renamed to `log`. In Immutable,
+`Config::merkle_config` is renamed to `merkle`, the name Keyless already uses
+([#5574]). In Any, Current, Immutable, and Keyless, `merkle` is now a
+`journal::authenticated::Config` instead of a `merkle::full::Config`. Replace
+`metadata_partition` with `partition`, which names the frontier's partition, and
+give that partition a fresh name. Add `resident_height`, and keep
+`replay_buffer` and `strategy`. Remove `journal_partition`, `items_per_blob`,
+`write_buffer`, and `page_cache`, which described the node journal. Current
+keeps `grafted_metadata_partition` ([#5158]).
+
+`resident_height` takes a `ResidentHeight`, the lowest tree height a database
+keeps in memory. When a proof, prune, or sync request needs a node below that
+height, the database rebuilds the node from the operations beneath it. A lower
+`ResidentHeight` therefore uses more memory and fewer reads.
+`ResidentHeight::new` accepts 0 through 8, and the default is 5. A height of 0
+keeps every node in memory ([#5158]).
+
+Any and Current `Config` drop their fourth type parameter, which was the type of
+`init_concurrency`. `init_concurrency` is now a `NonZeroUsize` for every index
+type. Immutable and Keyless `Config` gain `init_concurrency`, and their
+`Db::init` now requires a context that implements `Spawner`. Set
+`init_concurrency` to 1 to replay on the calling task ([#5158]).
+
+`FixedConfig` and `VariableConfig` are removed from `qmdb::any` and
+`qmdb::current`. Use the `Config` that each fixed and variable module, including
+each partitioned module, now exports beside its `Db` ([#5575]). Current's
+ordered, unordered, fixed, variable, and partitioned modules now re-export
+`Operation` and `Update`. Current's partitioned modules gain `p256` and `p64k`,
+which Any's partitioned modules already have. Both `p256` and `p64k` provide a
+`Db` and a `Config` ([#5610]). The free function `any::init` is removed, so call
+`Db::init` on the database type ([#5495]). `SnapshotBuild::build_snapshot` and
+`SnapshotBuild::Concurrency` are removed, so rebuild a snapshot by opening the
+database ([#5158], [#5783]).
+
+Any, Current, and the full Immutable and Keyless databases no longer report the
+`merkle_journal` and `merkle_metadata` metric families. The frontier's metadata
+now reports under `frontier`. The in-memory tree now reports
+`resident_hits_total`, `region_fills_total`, `filled_leaves_total`,
+`replayed_leaves_total`, and `resident_bytes` under `merkle` ([#5158]).
+
+### QMDB Types and Batches
+
+`immutable::Immutable` is renamed to `immutable::Db`, and `keyless::Keyless` is
+renamed to `keyless::Db` ([#5577]). `qmdb::any`, `qmdb::current`, and
+`qmdb::store` now export `Db` directly instead of through their `db` modules.
+`qmdb::store` now exports `Batch`, `Changeset`, and `Config` the same way
+([#5608]). The ordered and unordered Current `db` modules are no longer public,
+so name `current::Db` or a fixed or variable alias ([#5633]). `any::Db` now
+takes the bitmap chunk size as a const parameter after the strategy and defaults
+it to 64 bytes. Omit the chunk size when naming the type, because an Any
+database opens and syncs only at the default size ([#5792]).
+
+`FixedEncoding`, `VariableEncoding`, `ValueEncoding`, `FixedValue`, and
+`VariableValue` move from `qmdb::any::value` to `qmdb::value` ([#5606]).
+`ValueEncoding` is now sealed, so choose `FixedEncoding` or `VariableEncoding`
+([#5644]). `operation::Key` no longer requires `Deref<Target = [u8]>`. QMDB now
+indexes a key by its `AsRef<[u8]>` bytes. A key's ordering must match the
+ordering of those bytes ([#5780]). `chain::Commitment` now implements the codec
+traits ([#5591]).
+
+In Any and Current, `Operation::CommitFloor` is renamed to `Operation::Commit`.
+Any and Current commits now display their floor as `floor:<location>` ([#5612]).
+Any and Current operations now implement `Eq`. `qmdb::any` and `qmdb::immutable`
+now re-export the operation tags they use ([#5613]). `inactivity_floor_loc` is
+renamed to `inactivity_floor` on every database. Any and Current now expose
+`inactivity_floor` without the `commonware-storage/test-traits` feature.
+`has_floor` is renamed to `inactivity_floor` on Immutable and Keyless operations
+([#5580]).
+
+`operation::Floored` is removed, so call `Committable::inactivity_floor` in
+place of `Floored::has_floor` ([#4590], [#5580]). `operation::Committable` now
+takes the Merkle family as a type parameter and gives `is_commit` a default
+implementation. `Committable` now requires `inactivity_floor` and
+`initial_commit` ([#4590]). Immutable operations now implement `Committable`
+([#5611]). Immutable operations no longer implement `operation::Operation`. Use
+`key` to borrow a key. Match `immutable::Operation::Set` in place of `into_key`
+([#5644]).
+
+In Any and Current, unmerkleized batches and the `Staged` batches that `stage`
+returns now take commit metadata through `with_metadata` instead of an argument
+to `merkleize`. `merkleize` now advances the floor with `floor::Proportional`
+and no longer takes a policy. To use another policy, call `merkleize_with(&db,
+&mut policy)` on an unmerkleized batch or `merkleize_with(slots, unstaged, &db,
+&mut policy)` on a staged batch. Immutable and Keyless batches, including
+compact batches, now take metadata through `with_metadata` and the floor through
+`with_inactivity_floor`, both before `merkleize(&db)`. An Immutable or Keyless
+batch that sets no floor inherits the floor of its database or parent batch. In
+Any, Current, Immutable, and Keyless, a batch that sets no metadata commits
+without metadata ([#5316]).
+
+In Any and Current, `stage` now returns `(staged, values)` and `expand` now
+returns `(staged, range, values)`. Update every use that reads these tuples by
+position, because some code written for the previous order still compiles with
+the values swapped ([#5601]). Ordered Any's `get_all` is renamed to
+`get_with_next_key` ([#5603]). Ordered Current gains `get_with_next_key`
+([#5577], [#5603]). `get_many` now takes a slice of owned or borrowed keys on
+Any, Current, and full Immutable databases and batches. `stage` and `expand` on
+Any and Current now take the same kind of slice. An empty slice literal now
+needs an element type, as in `&[] as &[K]` ([#4886]).
+
+`size` is removed from Store and full Immutable databases, so read
+`bounds().end` ([#5577]). `size` is also removed from full Keyless merkleized
+batches, so read `bounds().tip.size` ([#5605]). `get` and `get_many` on full
+Keyless merkleized batches now order their type parameters `E, C, H` ([#5577]).
+
+Immutable `get` and `get_many` now return `None` for a key whose set operation
+lies below the inactivity floor, as batch reads already do. Do not treat `None`
+as proof that the key was never set ([#5770]). Keyless `get` and `get_many` now
+return `BelowInactivityFloor` for a location below the floor, whether or not the
+log still holds the operation at that location ([#5784]).
+
+Store batches now use `write(key, Some(value))` and `write(key, None)` instead
+of `update` and `delete`. `store::Db` and `store::Batch` gain `get_many`, which
+returns results in input order. On a batch, `get_many` also reflects the batch's
+own writes and deletes ([#5600]). Store batches now take metadata through
+`with_metadata`, and `finalize` now takes no argument.
+`store::Db::apply_batch(batch)` now applies `floor::Proportional`, so call
+`apply_batch_with(batch, &mut policy)` to use another policy ([#5577]).
+
+`store::Config`, `Db`, and `Batch` gain a strategy type parameter, and `Config`
+gains `strategy`. Pass `Sequential` to keep reads on the calling thread
+([#5649]). Store now reports the operation log metrics that the full databases
+share. Store now also emits INFO spans under `qmdb.store.db` for `apply_batch`,
+`commit`, `sync`, `start_sync`, and `prune` ([#5647]).
+
+`Error::FloorBeyondSize` is renamed to `FloorBeyondCommit` ([#5313]). When a
+database's `init` is given `Some(max_size)`, it now returns
+`Error::NoRetainedCommit` if pruning prevents it from selecting a commit within
+that bound. For that failure, the new error replaces `HistoricalFloorPruned` on
+compact databases and `Journal(ItemPruned)` on the others ([#5158], [#5791]).
+The `codec_config` docs now state that the setting limits what a database can
+decode and does not limit what the database writes. Check keys, values, and
+commit metadata against that configuration before writing them. A write outside
+those limits can succeed and leave data that the database cannot decode. For a
+compact database, check commit metadata against `witness.codec_config`
+([#5786]).
+
+An Immutable read now panics instead of returning `UnexpectedData` when the
+database's index points at an operation that is not a set. Full Keyless
+`get_metadata` now panics instead of returning `None` when the last operation is
+not a commit. Both checks guard invariants that a valid database upholds
+([#5642]).
+
+### QMDB Proofs
+
+`qmdb::ProofExt` replaces the free functions of `qmdb::verify`. Only the Merkle
+`Proof` implements `ProofExt`. On a proof, call `verify` in place of
+`verify_proof`, `verify_with_pinned_nodes` in place of
+`verify_proof_and_pinned_nodes`, and `verify_and_extract_digests` in place of
+`verify_proof_and_extract_digests`. Call `to_proof_store` in place of
+`create_proof_store` and `verify_multi` in place of `verify_multi_proof`. Call
+`ProofStore::multi_proof` in place of `create_multi_proof` ([#5543], [#5793]).
+Every `ProofExt` method except `verify_multi` takes an exact-size iterator of
+operation references instead of a slice ([#5615]). `verify_multi` takes an
+iterator of location and operation pairs instead of a slice ([#5633]).
+
+Current proofs can now be verified only by calling a method on the proof's own
+type. `RangeProof::verify` replaces `Db::verify_range_proof`, and
+`RangeProof::verify_and_extract_digests` replaces the free
+`verify_proof_and_extract_digests`. Unordered Current's `KeyValueProof` is now a
+struct that wraps an `OperationProof` in its `proof` field.
+`KeyValueProof::verify` replaces `Db::verify_key_value_proof` ([#5530]).
+`RangeProof::verify` and `verify_with_chunk_size` now take an exact-size
+iterator of operation references ([#5615]). `RangeProof` gains
+`verify_and_extract_digests_with_chunk_size` for a chunk size chosen at runtime
+([#5543]).
+
+Current `key_value_proof` now borrows its key and returns `(proof, value)`
+([#5529]). Current `Db::pinned_nodes_at` is renamed to `ops_pinned_nodes_at`.
+The other databases keep `pinned_nodes_at` ([#5607]). `KEY_VALUE_CONTEXT` and
+`COMMIT_CONTEXT` move from `current::ordered` to `current::ordered::proof`
+([#5613]). Current `Db::ops_root_witness` is no longer async and now returns a
+reference. Current `MerkleizedBatch` gains `chunks`, `pruned_chunks`,
+`grafted_nodes`, `ops_pinned_nodes`, and `ops_root_witness`. These methods
+expose what the batch publishes when it is applied ([#5562]).
+
+A historical proof or sync request on a non-compact database now returns
+`Error::NotCommitBoundary` for a size of zero. The request now also returns that
+error when the last operation within the requested size is retained and is not a
+commit ([#5785]).
+
+### QMDB Sync and Compact Databases
+
+`sync::engine::Config` moves to `sync::Config`, and `qmdb::immutable::sync` is
+no longer public ([#5313]). `Target::new` is removed, so build `Target { root,
+range }` ([#5613]). `sync::Database` gains `init`, `initial_target`, `target`,
+and `prune_to_target`. Read `target().root` in place of `sync::Database::root`.
+On Current, both give the ops root, and `Db::root` still returns the canonical
+root. The new `sync::MerkleizedBatch` trait reports the `root` and `target` that
+a database reaches when it applies the batch. Compact sync now returns
+`EngineError::InvalidTarget` for a target that covers more than the last commit.
+`InvalidTarget` now carries `bounds` instead of `lower_bound_pos` and
+`upper_bound_pos` ([#4590]).
+
+`sync::Database` is now sealed, so only the databases that `commonware-storage`
+provides can implement it. The trait no longer exposes `from_sync_result`,
+`persist_sync_result`, or `local_pinned_nodes`, so run a sync through
+`sync::sync` ([#5795]). A sync now persists its frontier and prunes older
+operations only after it verifies the target root. After an interrupted sync,
+call `sync::sync` again with a trusted target ([#5158]). When the destination
+database holds none of the target's operations, a sync now discards that
+database's leftover Merkle state before it appends fetched operations ([#5665]).
+
+`qmdb::compact` is now public and exports `Db`, `Config`, `Operation`,
+`UnmerkleizedBatch`, `MerkleizedBatch`, and `initial_root`. The Immutable and
+Keyless `CompactDb` and `CompactConfig` aliases keep their names.
+`Config::commit_codec_config` is removed, so set the codec configuration in
+`witness.codec_config`. Compact sync now checks a fetched commit against the
+destination's codec configuration before it replaces the witness journal.
+Opening a compact database now returns `Error::Journal` instead of
+`DataCorrupted` when the selected witness holds a commit that does not decode.
+The `qmdb.keyless.compact.*` and `qmdb.immutable.compact.*` spans are renamed to
+`qmdb.compact.*` and gain a `kind` field ([#4605]). Keyless
+`CompactUnmerkleizedBatch` gains `size`, the location of the next append
+([#5605]).
+
+### Journals and Recovery
+
+`Recovery` replaces the `Replay` types of the segmented fixed, variable, and
+`Oversized` journals, and `replay` is removed from all three. Read an open
+segmented or `Oversized` journal with `get` at known positions ([#5663],
+[#5664], [#5671]). Dropping a pending `Recovery::next` on any of the three
+journals now ends that recovery. The next call to `next` returns
+`Error::ReplayInterrupted` and `finish` returns `Error::ReplayFailed`, so open
+the journal again ([#5535]).
+
+Segmented variable `Journal::init` now takes the `ReadOptions` that `replay`
+took and returns a `Recovery`. Drain `Recovery::next` until it returns `None`,
+then call `finish` to get the journal. `Config` gains `replay_buffer`, which
+sets the size of the replay buffer for recovery and `init_at_most`. Recovery now
+reads every section from its first item ([#5664]).
+
+Segmented fixed `Journal::init` is removed. Open the journal by calling
+`Journal::preflight_floors` with an empty map and the `ReadOptions` that
+`replay` took. Then drain `Recovery::next` and await `finish`. To restore an
+exact durable checkpoint, call `preflight_restore` with the section and byte
+size that the checkpoint records, then await `finish` without draining. `Config`
+gains `replay_buffer`, and `init_at_most` keeps its signature ([#5663],
+[#5671]).
+
+`Oversized::init`, `init_at_most`, and `init_with_metadata_at_most` are removed.
+`init_with_metadata` is renamed to `init_with_markers` and now returns a
+`Recovery`. Pass the same marker partition for a journal that already used
+markers, or a new, empty partition for a journal that relied on
+`Oversized::init`. With a new, empty partition, recovery now checks each section
+from its first entry and truncates the section at the first missing, incomplete,
+or checksum-invalid value. In both cases, drain `next` and await `finish` to get
+the journal. For a journal that already used markers, `finish` replaces
+`finish_tracked` ([#5663]).
+
+Open a new journal with `init_with_checkpoint` and `(0, 0)`. Use `(0, 0)` only
+for empty storage or an intentional reset, because `init_with_checkpoint`
+restores exactly the checkpoint it is given. Restore an existing journal only to
+a checkpoint that the journal's owner published after syncing the data it
+covers. `init_with_metadata_at_most` has no replacement. `Glob::init` is
+removed, so call `glob::Recovery::init` and then `finish` ([#5663]).
+
+After an interrupted `destroy`, a contiguous variable journal now reopens
+through ordinary crash recovery or as an empty journal at position zero, as the
+contiguous fixed journal already does. `Queue` now reopens the same way. After
+an interrupted `destroy`, an unbounded `init` of Store now reopens the database
+at the last retained commit or as a new database ([#5665]).
+
+If an index already holds a record, `Ordinal::put` now leaves that record
+unchanged and still returns `Ok`. Write a replacement at a new index. A
+segmented fixed journal whose item type encodes to zero bytes no longer
+compiles. The `Freezer::destroy` docs now state that a checkpoint returned
+earlier stops describing the stored data once `destroy` is called. Retire the
+checkpoint before calling `destroy`, and reopen with `None` after an interrupted
+`destroy` ([#5687]).
+
+`contiguous::Mutable` gains `prune_target`, which reports where pruning to a
+given position stops. The default clamps the position to the journal's bounds,
+so override `prune_target` in a custom journal that prunes in larger units
+([#5158]). Segmented variable `Journal::get_many` now takes an `IntoIterator` of
+owned offsets, so pass `offsets.iter().copied()` for a slice ([#4886]). A
+contiguous variable journal now declines a cached batch read when it finds
+overlapping frame ranges, including ranges it computes from a frame's length
+prefix ([#5766]).
+
+`Metadata::init` now returns `Error::Corruption` instead of panicking when a
+blob passes its checksum but does not decode ([#5158]). `RMap::missing_items`
+now returns an empty vector for a limit of zero instead of panicking ([#5772]).
+A synchronous cached read of a single fixed journal item now uses a stack buffer
+if the item encodes to at most 128 bytes ([#5261]). The `Queue` docs now state
+that reopening can deliver appends that were never committed, including part of
+an interrupted `enqueue_bulk`. Handle duplicate deliveries ([#5773]).
+
+### Merkle Trees and Authenticated Journals
+
+Merkle `Proof` methods and `ProofStore::new` now take the location before the
+elements, and `verify_multi_inclusion` now takes `(location, element)` pairs.
+BMT `Proof::verify_element_inclusion` now takes the position before the leaf,
+and BMT `verify_multi_inclusion` now takes `(position, digest)` pairs.
+`AuthenticatedBitMap::verify_bit_inclusion` now takes the bit before the chunk.
+`Proof::verify_proof_and_pinned_nodes` is renamed to
+`verify_range_inclusion_with_pinned_nodes`. Calls in the previous order no
+longer compile ([#5545]).
+
+The Merkle range methods, `reconstruct_root`, and `ProofStore::new` now take
+their elements as an exact-size iterator instead of a slice. BMT
+`verify_multi_inclusion` now takes an iterator of pairs ([#4886]). BMT
+`verify_range_inclusion` now takes an exact-size iterator of digests ([#5615]).
+
+With the `commonware-storage/std` feature, `merkle::batch::UnmerkleizedBatch`
+gains `add_many`, which appends a slice of items and uses the batch's strategy
+to hash whole subtrees. Pass the same hasher to `add_many` and `merkleize`
+([#4942]).
+
+A custom Merkle family must now implement `Family::birth_offset` ([#4942]).
+`subtree_root_position` and `leftmost_leaf` move from `Graftable` to `Family`. A
+custom family's `peaks` and `nodes_to_pin` must now return at most
+`MAX_PINNED_NODES` entries. A merkleized batch now keeps the ancestor digests
+its proofs need, so those proofs no longer depend on the parent batches staying
+alive ([#5158]).
+
+`authenticated::Journal::new` and `init_at_most` now take
+`authenticated::Config` instead of `merkle::full::Config`.
+`Journal::from_components` now takes the context, the config, the operation
+journal, the hasher, the start location, the digests pinned at that location,
+and the apply batch size. `from_components` builds the tree without persisting a
+frontier, so call the new `persist_boundary` after verifying the root. Until
+`persist_boundary` records the boundary, `prune` does nothing on that journal.
+`Journal` gains `pinned_nodes_at` and now implements `merkle::storage::Storage`
+and `merkle::Readable`. The journal's `bounds` now start at the frontier. A read
+before the frontier now returns `ItemPruned` even when a blob still holds the
+operation ([#5158]).
+
+The authenticated journal no longer implements `contiguous::Mutable`, and
+`journal::Error::Merkle` is removed. Call the authenticated journal's own
+methods, apply a journal batch in place of `append_many`, and match
+`authenticated::Error::Merkle` in place of `journal::Error::Merkle` ([#5794]).
+`Journal::destroy` now removes the operation log first and the frontier second,
+and Current removes its grafted metadata last. After an interrupted destroy, a
+database now reopens as the previous database or as an empty one. Reopening also
+discards any frontier or grafted metadata left beside an empty log ([#5158],
+[#5665]).
+
+### Broadcast and Networking
+
+Buffered broadcast `Config` and `Engine` gain a blocker type parameter ahead of
+the strategy. `Config` gains `blocker`, so pass a `Blocker` for the network's
+peers. The engine now decodes inbound messages on its strategy in the
+background. The engine now handles decoded messages as they become available, in
+an order that can differ from arrival order. The engine now calls its blocker on
+the sender of a message that fails to decode. Decoded messages now wait in an
+inbox as large as the network receiver's `capacity`. The engine now drops a
+decoded message that arrives while that inbox is full. When several broadcasts
+of one digest wait behind a full `Mailbox`, they now merge into a single send to
+the union of their recipients. The message encoding is unchanged ([#5519]).
+
+The engine now counts decode results by status in `ingress_decode_total`, and
+`receive_total` no longer reports `Invalid`. The coding marshal's shard engine
+now reports `shard_ingress_decode_total` ([#5519]).
+
+`Recipients` gains `union_with` ([#5519]). `p2p::max_message_size` now takes an
+`IntoIterator` of sizes instead of a slice ([#5615]). `Resolver::fetch_all` and
+`TargetedResolver::fetch_all_targeted` now take an `IntoIterator` instead of a
+`Vec` ([#4886]).
+
+### Parallelism and SIMD
+
+`Rayon::new` now takes a `commonware_parallel::rayon::ThreadPoolBuilder`, and
+`ThreadPoolBuilder::new` now takes the worker count as a `NonZeroUsize`, so
+write `Rayon::new(ThreadPoolBuilder::new(n))`. `ThreadPoolBuilder` no longer
+implements `Default`, and `num_threads` is removed. The builder no longer reads
+`RAYON_NUM_THREADS` or `RAYON_RS_NUM_CPUS`, so set the worker count explicitly.
+The `thread_name` and `start_handler` callbacks now receive a `WorkerPosition`
+instead of an index. Read `index` for the index the callbacks received before,
+or `group` and `offset` for the worker's group and its position in that group
+([#5508]).
+
+On Linux, `Rayon::new` can now group its workers by last-level cache. For each
+group assigned a cache, `Rayon` asks the kernel to keep the threads it started
+on the CPUs that share that cache. The tokio and io_uring runtimes now build
+their strategies with `Rayon::new`, so those strategies can group workers the
+same way. When a thread outside any pool calls `Rayon`, the call can now run
+with that thread limited to one group's CPUs. When `Rayon` limits a caller to
+one group's CPUs, it asks the kernel to restore the caller's previous CPU
+affinity when the call ends. A thread that the caller starts while limited
+inherits the limit. A pool passed to `Rayon::with_pool` stays a single group and
+keeps its threads' affinity. Every pool on macOS also stays a single group and
+keeps its threads' affinity. `Rayon::new` now names the threads it starts
+`group<g>-<w>` unless the builder sets `thread_name` ([#5508]).
+
+`Strategy::join` on `Rayon` can now run both closures in sequence on the caller
+when the caller is outside its pool. Neither closure may rely on the other
+running on a worker. When `join` runs the closures in sequence on a caller
+outside the pool, the second closure does not run if the first panics ([#5508]).
+
+To decide whether to try running work serially on the caller, `Rayon` now
+measures the time threads spend on the work instead of the elapsed time. Time
+that work spends queued behind other jobs therefore no longer prevents a serial
+run. `Strategy` gains `block_on`, which waits synchronously for a future. The
+default implementation polls the future in a loop. On `Rayon`, a pool worker
+runs queued jobs while it waits, and any other caller parks between polls.
+Inside work that runs on the strategy, use `block_on` to wait on the future that
+`Strategy::spawn` returns, so that `Rayon` counts the spawned work and not the
+wait ([#5551]).
+
+`Simd` tokens must now be `Send`, `Sync`, and `'static`. The vector and table
+types of `Simd` and `Neon` must now be `Send` and `Sync` ([#5724]). On an x86-64
+target built without SSE2, `commonware_simd::dispatch` now uses the scalar
+backend, and `NativeX86V3` and `NativeX86V4C` are unavailable ([#5691]).
+
+### Collector
+
+The collector's p2p engine now carries requests and responses on one channel
+instead of two. `Engine::start` now takes a single sender and receiver pair.
+Each message is now a one-byte tag followed by the unchanged request or response
+encoding. Upgrade every collector peer together. Size the channel with the new
+`collector::p2p::max_message_size`, and set the channel's quota for request and
+response traffic combined ([#5761]).
+
+`Handler::process` now returns the `oneshot::Receiver` of a response channel
+that the handler supplies, instead of taking a sender. Drop that channel's
+sender to decline a request. The `Handler::process` and `Monitor::collected`
+docs now state that each method must return promptly, because both run on the
+engine's loop. In `p2p::Config`, `priority_request` is renamed to
+`priority_requests` and `priority_response` is renamed to `priority_responses`.
+`request_codec` is renamed to `request_codec_config` and `response_codec` is
+renamed to `response_codec_config`. `p2p::Message` is removed. `Mailbox::new` is
+no longer public, so take the mailbox from `Engine::new`. Requests and responses
+no longer need `Digestible`. The `Engine` type now requires its context to
+implement `Metrics` ([#5761]).
+
+The engine no longer reports `requests_total` and `responses_total`. It now
+reports `send_total`, `collect_total`, and `serve_total` by status,
+`invalid_total` for messages that fail to decode, and a `serve_processing` gauge
+of requests the engine is still serving ([#5761]).
+
+### DKG and Stateful Applications
+
+With an enabled `state_sync::Plan`, the DKG orchestrator now writes each epoch's
+boundary block to a checkpoint before it acknowledges the block. A validator
+with no applicable state-sync record can now restart from that checkpoint after
+marshal has pruned the block. The probe now serves boundary certificates and
+blocks from checkpoints that hold a finalization. During discovery, the probe
+now samples again when its boundary fetch runs out of responders without finding
+the block. Probe messages are unchanged ([#5555]).
+
+`dkg::state_sync::Plan` now takes the signing scheme and the marshal variant as
+`Plan<S, MV>`. `state_sync::Config` gains a type parameter and
+`block_codec_config`, which must match marshal's block codec configuration.
+Initialize one plan, and give a clone to the orchestrator and to the reshare
+actor. Pass another clone as the new second argument of
+`probe::Mailbox::attach`, which panics on `Plan::disabled()`.
+`orchestrator::Config` and `orchestrator::Actor` drop their DKG variant
+parameter ([#5555]).
+
+The plan's state-sync record now also stores the height of its floor. Neither
+this release nor v2026.10.1 reads the other's record. Start with an empty
+state-sync partition or a new `partition_prefix`. A validator that starts with
+neither a checkpoint nor a state-sync record still needs marshal to hold the
+current epoch's boundary block ([#5555]).
+
+Marshal's `Mailbox::get_finalization` now also checks marshal's cache when the
+archive holds the block at the requested height without that block's
+finalization ([#5555]). The `SecretStore` docs now state that reads after a
+restart must reflect the state that earlier runs left. The `SecretStore` docs
+also state that no operation from an earlier run may change the store once those
+reads begin ([#5753]). The `DatabaseSet` docs now state that a caller must
+discard the whole set and every handle to its databases when a pending `apply`,
+`finalize`, or `prune` is cancelled ([#5540]).
+
+`stateful::db::qmdb` adds `Unmerkleized<D>` and `Merkleized<D>`, where `D` is
+the database type. These types wrap the batches of Any, Current, Immutable,
+Keyless, and compact databases. They replace `AnyUnmerkleized`, `AnyMerkleized`,
+`CurrentUnmerkleized`, `CurrentMerkleized`, and the Immutable and Keyless
+wrappers. The modules of the Immutable and Keyless wrappers are no longer
+public. `Merkleized<D>` provides `target` ([#4590]). `D` must implement the new
+sealed `stateful::db::qmdb::Qmdb` trait ([#4590], [#5795]). Ordered Any
+databases and partitioned Any and Current databases now implement `ManagedDb`
+and `StateSyncDb`. Compact databases now use `sync::Target` as their
+`ManagedDb::SyncTarget` ([#4590]).
+
+`glue::transfers` now settles balances in the account's own amount type.
+`Account` gains an associated `Amount` type, so add `type Amount = u64` to keep
+an existing account's `u64` balances. `Change` now takes the account type
+instead of the effect type and no longer implements `Hash`. `Transfer::changes`
+now yields `(&Self::Key, Change<Self::Account>)` ([#5695]).
+
+### Runtime
+
+`buffer::Read::read` now restores the reader's position when a read fails or is
+cancelled ([#5539]). The runtime now records the `write_at`, `resize`, `sync`,
+and `start_sync` spans of `runtime.storage.blob` at DEBUG instead of INFO.
+OpenTelemetry now exports the `write_at` span's `bytes` field and the `resize`
+span's `len` field as numbers ([#5677]). The io_uring runner now propagates a
+waker panic raised while the runner drops queued messages at shutdown, even when
+the root task finished without error ([#5597]). `Spawner::spawn` no longer makes
+the compiler prove `Send` a second time for a spawned future. That second proof
+could exceed the recursion limit for deeply nested futures ([#5804]). The
+runtime now does less work when it spawns under a parent with many children,
+polls a task that stays pending, or reads from the page cache in batches
+([#5526], [#5527], [#5622]).
+
+### Encoding and Utilities
+
+`commonware-codec` adds `Uint<BITS, LIMBS>` and its `U256` alias. A `Uint` is an
+unsigned integer of a fixed width that encodes as big-endian bytes. `Uint`
+provides `ZERO`, `ONE`, `MAX`, `BYTES`, `from_limbs`, `as_limbs`,
+`leading_zeros`, `overflowing_add`, and `overflowing_sub`. `varint::UInt` now
+encodes a `Uint`, and `varint::Decoder` now reads a `Uint`. The varint of a
+`Uint` has the same bytes as the varint of an unsigned primitive that holds the
+same value. `commonware-utils` adds the `Amount` trait, which provides `ZERO`
+and checked and overflowing addition and subtraction. `u8`, `u16`, `u32`, `u64`,
+`u128`, and `Uint` implement `Amount` ([#5657]).
+
+`Viewing::new` is no longer `const`. `Viewing` gains `split_to`, which returns a
+cursor over the next `len` bytes and advances the original cursor past them
+([#5627]). `Lazy<T>` now treats two values with identical retained bytes as
+equal without decoding them. Compare only values read under the same
+`Read::Cfg`, and do not mutate a decoded value in a way that changes its
+equality, ordering, or hash. `Lazy<T>` now requires `T: Eq` for its `PartialEq`
+and `PartialOrd` ([#5447]). `PrioritySet::reconcile` now takes an `IntoIterator`
+of references instead of a slice ([#4886]).
+
+### Cryptography
+
+`threshold::recover_multiple` now takes an `IntoIterator` instead of a `Vec`
+([#4886]). The `Output::revealed` docs now state that the set lists the players
+whose shares the selected dealers may have exposed in the round. The set can
+omit a player whose share leaked outside the protocol. The set can also omit a
+player when an adversary can rebuild that player's new share from an earlier
+share and this round's reveals ([#5706], [#5708]).
+
+On x86-64 CPUs with SHA-NI, AVX2, SSSE3, and SSE4.1, `Sha256::hash` gains a fast
+path for single messages shaped like Merkle leaves and nodes ([#5719]). The
+paired SHA-NI path now clears the upper vector registers first, which avoids a
+slowdown on affected CPUs ([#5713]). Both changes leave digests unchanged
+([#5713], [#5719]).
+
+### Toolchain and Dependencies
+
+Every Commonware package now declares Rust 1.95.0 as its minimum supported
+version, which the workspace already required. `commonware_utils::sync` now
+re-exports its locks and guards from `parking_lot` 0.13. Update a direct
+`parking_lot` dependency to 0.13 wherever its types are used with Commonware's
+types ([#5691]). The workspace lockfile now selects `crypto-bigint` 0.7.11
+instead of the yanked 0.7.5 ([#5763]).
+
+### Clearing
+
+The new `commonware-clearing` crate adds Bajillion, a protocol that preconfirms
+payments and settles them in epochs. Validators certify each epoch's summary. An
+operator countersigns the payment state a sender submits in a
+`bajillion::Request`. The sender then issues each receiver a `Receipt`. `Close`,
+`Checked`, and `Proposal` settle an epoch against the QMDB `Balances` and
+`Payouts` stores. `Summary`, `Challenge`, `BalanceProof`, and `PayoutProof` let
+a deployment's ledger verify posts, shortfalls, and claims. Each deployment
+chooses its `Amount` type and a `Namespace` for its signatures ([#5591]).
+
+### Deployer
+
+Deployer YAML now accepts `bandwidth_weighting` under `monitoring` and under
+each instance. On instance types that support the setting, `vpc-1` favors
+networking and `ebs-1` favors EBS. The deployer applies the setting when it
+creates an instance. `InstanceConfig` and `MonitoringConfig` gain a
+`bandwidth_weighting` field. The new `BandwidthWeighting` enum has `Default`,
+`Vpc1`, and `Ebs1`. With the `commonware-deployer/aws` feature,
+`ec2::launch_instances` now takes `bandwidth_weighting` after
+`storage_throughput`, so pass `BandwidthWeighting::Default` to keep the standard
+split ([#5619]). With the same feature, `aws::s3::hash_files` now takes an
+`IntoIterator<Item = String>` instead of a `Vec<String>` ([#4886]).
+
+### Testing
+
+The certificate macros for Ed25519, Secp256r1, and BLS12-381 now generate
+`fixture` whenever `commonware-cryptography/mocks` is enabled, instead of when
+the calling crate has a `mocks` feature. `impl_certificate_mock!` now generates
+`fixture` and `fixture_with` on the same condition. Enable `mocks` on the
+`commonware-cryptography` dependency of any test that calls a generated fixture.
+The Ed25519, Secp256r1, and BLS12-381 macros no longer add `#[allow(dead_code)]`
+to `fixture` ([#5654]).
+
+With the `commonware-storage/test-traits` feature, `DbAny` and `Provable` now
+take the family as `Family = F` instead of a type parameter. On `BatchableDb`
+and `UnmerkleizedBatch`, `K` is renamed to `Key` and `V` is renamed to `Value`.
+`DbAny` now inherits `Key` and `Value` from `BatchableDb` ([#5614]). A custom
+`UnmerkleizedBatch` must now implement `with_metadata` and `merkleize_with`
+([#5316]). `DbAny::size` is removed, so read `bounds().end` ([#5605]).
+`BitmapPrunedBits::oldest_retained` is removed, so read `*db.bounds().start`
+([#5496]). `DbAny::get_many` now takes a slice of owned or borrowed keys
+([#4886]).
+
+The simulated network now sends a message only when the sender tracks the
+recipient and the recipient tracks the sender. `Control` gains `manager` and
+`socket_manager`, which return managers for one peer's sets. `Control` also
+gains `reset_peer_sets`, which queues a reset that clears those sets and ends
+subscriptions to them. When an oracle manager accepts a set, the manager now
+copies that set to each peer whose retained sets all have lower indices.
+`tracked_peer_sets` now bounds each peer's history. A peer that tracks a set
+through its own manager now counts toward `max_peers_per_set` even when the set
+omits that peer ([#5572]).
+
+With the `commonware-runtime/test-utils` feature, `commonware_runtime::mocks`
+adds `ReadGate`, `ReadGateContext`, and `ReadGateBlob`, which park reads from
+one storage partition. `ReadGateContext::new` wraps a context and returns the
+wrapper with a disarmed gate. `ReadGate::arm` parks every later read of the
+partition, and `disarm` lets new reads through without releasing the parked
+ones. `blocked` counts the reads parked since the last `arm` ([#5535]).
+`ReadGate::parked` returns a receiver that gets a signal when a later read is
+parked. `ReadGateContext` implements `Spawner` when the wrapped context does
+([#5158]).
+
+With the `fuzz` feature, `commonware-codec`, `commonware-parallel`, and
+`commonware-utils` each add a `fuzz::Plan`, whose `run` executes one generated
+test case. With the same feature on targets other than `wasm32`,
+`commonware-consensus` adds its own `fuzz::Plan` and `fuzz::simplex::{FuzzInput,
+Mode, Scheme}`. `Scheme::run` drives a Simplex simulation. Simplex's
+`mocks::twins` and `mocks::wrapped` are no longer compiled when
+`commonware_stability_BETA` is set ([#5774]).
+
+`commonware-collector` gains an `arbitrary` feature ([#5761]). The new
+`commonware-clearing` crate has an `arbitrary` feature as well ([#5591]). With
+the `commonware-codec/arbitrary` feature, `Uint` implements `Arbitrary`
+([#5657]). With the `commonware-storage/arbitrary` feature,
+`qmdb::chain::Commitment` now implements `Arbitrary` ([#5591]).
+
+`conformance_tests!` now finds `conformance.toml` through `CARGO_MANIFEST_DIR`
+when a test runs, so set that variable to run a generated test binary directly.
+`test_group` now looks for the nextest config from the calling crate unless
+`COMMONWARE_NEXTEST_CONFIG` is set ([#5524]). `commonware-bench` adds `Inputs`.
+`Inputs::current` picks `Smoke`, `Standard`, or `Full` inputs when a benchmark
+runs. Set `COMMONWARE_BENCH_FULL=1` for `Full` instead of rebuilding with a cfg
+flag ([#5588]).
+
+[#4590]: https://github.com/commonwarexyz/monorepo/pull/4590
+[#4605]: https://github.com/commonwarexyz/monorepo/pull/4605
+[#4886]: https://github.com/commonwarexyz/monorepo/pull/4886
+[#4942]: https://github.com/commonwarexyz/monorepo/pull/4942
+[#5158]: https://github.com/commonwarexyz/monorepo/pull/5158
+[#5261]: https://github.com/commonwarexyz/monorepo/pull/5261
+[#5313]: https://github.com/commonwarexyz/monorepo/pull/5313
+[#5316]: https://github.com/commonwarexyz/monorepo/pull/5316
+[#5447]: https://github.com/commonwarexyz/monorepo/pull/5447
+[#5495]: https://github.com/commonwarexyz/monorepo/pull/5495
+[#5496]: https://github.com/commonwarexyz/monorepo/pull/5496
+[#5508]: https://github.com/commonwarexyz/monorepo/pull/5508
+[#5519]: https://github.com/commonwarexyz/monorepo/pull/5519
+[#5524]: https://github.com/commonwarexyz/monorepo/pull/5524
+[#5526]: https://github.com/commonwarexyz/monorepo/pull/5526
+[#5527]: https://github.com/commonwarexyz/monorepo/pull/5527
+[#5529]: https://github.com/commonwarexyz/monorepo/pull/5529
+[#5530]: https://github.com/commonwarexyz/monorepo/pull/5530
+[#5535]: https://github.com/commonwarexyz/monorepo/pull/5535
+[#5539]: https://github.com/commonwarexyz/monorepo/pull/5539
+[#5540]: https://github.com/commonwarexyz/monorepo/pull/5540
+[#5543]: https://github.com/commonwarexyz/monorepo/pull/5543
+[#5545]: https://github.com/commonwarexyz/monorepo/pull/5545
+[#5551]: https://github.com/commonwarexyz/monorepo/pull/5551
+[#5555]: https://github.com/commonwarexyz/monorepo/pull/5555
+[#5562]: https://github.com/commonwarexyz/monorepo/pull/5562
+[#5572]: https://github.com/commonwarexyz/monorepo/pull/5572
+[#5574]: https://github.com/commonwarexyz/monorepo/pull/5574
+[#5575]: https://github.com/commonwarexyz/monorepo/pull/5575
+[#5577]: https://github.com/commonwarexyz/monorepo/pull/5577
+[#5580]: https://github.com/commonwarexyz/monorepo/pull/5580
+[#5588]: https://github.com/commonwarexyz/monorepo/pull/5588
+[#5591]: https://github.com/commonwarexyz/monorepo/pull/5591
+[#5597]: https://github.com/commonwarexyz/monorepo/pull/5597
+[#5600]: https://github.com/commonwarexyz/monorepo/pull/5600
+[#5601]: https://github.com/commonwarexyz/monorepo/pull/5601
+[#5603]: https://github.com/commonwarexyz/monorepo/pull/5603
+[#5605]: https://github.com/commonwarexyz/monorepo/pull/5605
+[#5606]: https://github.com/commonwarexyz/monorepo/pull/5606
+[#5607]: https://github.com/commonwarexyz/monorepo/pull/5607
+[#5608]: https://github.com/commonwarexyz/monorepo/pull/5608
+[#5610]: https://github.com/commonwarexyz/monorepo/pull/5610
+[#5611]: https://github.com/commonwarexyz/monorepo/pull/5611
+[#5612]: https://github.com/commonwarexyz/monorepo/pull/5612
+[#5613]: https://github.com/commonwarexyz/monorepo/pull/5613
+[#5614]: https://github.com/commonwarexyz/monorepo/pull/5614
+[#5615]: https://github.com/commonwarexyz/monorepo/pull/5615
+[#5619]: https://github.com/commonwarexyz/monorepo/pull/5619
+[#5622]: https://github.com/commonwarexyz/monorepo/pull/5622
+[#5627]: https://github.com/commonwarexyz/monorepo/pull/5627
+[#5633]: https://github.com/commonwarexyz/monorepo/pull/5633
+[#5642]: https://github.com/commonwarexyz/monorepo/pull/5642
+[#5644]: https://github.com/commonwarexyz/monorepo/pull/5644
+[#5647]: https://github.com/commonwarexyz/monorepo/pull/5647
+[#5649]: https://github.com/commonwarexyz/monorepo/pull/5649
+[#5654]: https://github.com/commonwarexyz/monorepo/pull/5654
+[#5657]: https://github.com/commonwarexyz/monorepo/pull/5657
+[#5663]: https://github.com/commonwarexyz/monorepo/pull/5663
+[#5664]: https://github.com/commonwarexyz/monorepo/pull/5664
+[#5665]: https://github.com/commonwarexyz/monorepo/pull/5665
+[#5671]: https://github.com/commonwarexyz/monorepo/pull/5671
+[#5677]: https://github.com/commonwarexyz/monorepo/pull/5677
+[#5687]: https://github.com/commonwarexyz/monorepo/pull/5687
+[#5691]: https://github.com/commonwarexyz/monorepo/pull/5691
+[#5695]: https://github.com/commonwarexyz/monorepo/pull/5695
+[#5706]: https://github.com/commonwarexyz/monorepo/pull/5706
+[#5708]: https://github.com/commonwarexyz/monorepo/pull/5708
+[#5713]: https://github.com/commonwarexyz/monorepo/pull/5713
+[#5719]: https://github.com/commonwarexyz/monorepo/pull/5719
+[#5724]: https://github.com/commonwarexyz/monorepo/pull/5724
+[#5753]: https://github.com/commonwarexyz/monorepo/pull/5753
+[#5761]: https://github.com/commonwarexyz/monorepo/pull/5761
+[#5763]: https://github.com/commonwarexyz/monorepo/pull/5763
+[#5766]: https://github.com/commonwarexyz/monorepo/pull/5766
+[#5770]: https://github.com/commonwarexyz/monorepo/pull/5770
+[#5772]: https://github.com/commonwarexyz/monorepo/pull/5772
+[#5773]: https://github.com/commonwarexyz/monorepo/pull/5773
+[#5774]: https://github.com/commonwarexyz/monorepo/pull/5774
+[#5780]: https://github.com/commonwarexyz/monorepo/pull/5780
+[#5783]: https://github.com/commonwarexyz/monorepo/pull/5783
+[#5784]: https://github.com/commonwarexyz/monorepo/pull/5784
+[#5785]: https://github.com/commonwarexyz/monorepo/pull/5785
+[#5786]: https://github.com/commonwarexyz/monorepo/pull/5786
+[#5787]: https://github.com/commonwarexyz/monorepo/pull/5787
+[#5791]: https://github.com/commonwarexyz/monorepo/pull/5791
+[#5792]: https://github.com/commonwarexyz/monorepo/pull/5792
+[#5793]: https://github.com/commonwarexyz/monorepo/pull/5793
+[#5794]: https://github.com/commonwarexyz/monorepo/pull/5794
+[#5795]: https://github.com/commonwarexyz/monorepo/pull/5795
+[#5804]: https://github.com/commonwarexyz/monorepo/pull/5804
+[#5810]: https://github.com/commonwarexyz/monorepo/pull/5810
+
+## v2026.10.1
+
+### Marshal
+
+The coding marshal's `shards::Mailbox` drops its public-key type parameter, so
+name it `Mailbox<B, C, H>`, including in `MarshaledConfig::shards`.
+`Mailbox::gather(commitment, round)` replaces `discovered` and `notarized`, and
+`proposed` is renamed to `disperse`. When certification is the first call to
+report a commitment to the shard engine, the engine can now check the shard the
+leader sent this validator, count it toward rebuilding the block, and relay it
+without learning the leader. The engine also no longer needs to know the leader
+to block the sender of a shard whose index is neither the sender's nor the
+engine's own. A node outside the participant set no longer receives a successful
+`subscribe_assigned_shard_verified` notification, so do not wait for one on such
+a node. Vote, certificate, and shard encodings are unchanged ([#5681]).
+
+`BlockProvider::subscribe_parent` now takes `bound: Option<Round>` after the
+block, and `AncestorStream::new` takes it before `fetch_duration`. Once a block
+finalized in that round or a later one is processed, a provider may stop
+fetching the parent. The subscription then completes only if the parent becomes
+available locally. Pass either of two rounds. The first is the round consensus
+assigned to the block the ancestry walk starts from. The second is the round of
+the consensus request the walk serves, such as the proposal being verified or
+built. Pass `None` only when every block the walk reaches has been checked
+against its own parent, as in certified or finalized ancestry.
+`CommitmentFallback::FetchByCommitment` and `Annotation::Untrusted` gain a
+`round: Option<Round>` field, and `Request::untrusted` takes the round as its
+third argument. A `round` of `None` leaves the request to be retired by height
+alone ([#5717]).
+
+Marshal now retires an ancestry walk's request for an uncertified block once
+marshal has processed a block finalized in the round the request carries or a
+later round. Marshal still retires the request once the processed height reaches
+the height the block's child claims for it. With stable leaders and optimistic
+validation, a leader could pick that height. A validator could then keep
+retrying a fetch that no peer can answer, until the chain reached that height.
+`Inline`, `Deferred`, and `glue::stateful` pass the round of the proposal or
+block they act on. `Mailbox::ancestry` passes the round of
+`DigestFallback::FetchByRound` and no round with `DigestFallback::Wait`, so
+start a `Wait` walk only from a block whose ancestry has been checked, such as a
+certified or finalized block. The coding marshal ignores `bound` and reads the
+parent's round from each child's consensus context ([#5717]).
+
+`Deferred` now checks that a newly proposed block names its consensus context's
+parent before the vote to notarize the block, instead of after the vote.
+`verify` answers `false` for a newly proposed block that names another parent.
+`certify` then answers `false` for that block without waiting for the parent.
+Certification requires the same parent, so no block that can be certified loses
+a vote. With stable leaders and optimistic validation, a validator that voted
+for a newly proposed block that names another parent could verify the block's
+child and then fetch and cache ancestors that no round of consensus named
+([#5715]).
+
+A vote journaled before the upgrade replays without `Deferred`'s parent check,
+and a validator on an earlier release still votes for a block that names another
+parent. A validator can therefore still fetch ancestors that no round of
+consensus named until every validator has upgraded and a view at or after the
+last view any of them voted on before upgrading has finalized. `Deferred` now
+relies on the vote-time check and no longer checks the parent link of the block
+it builds on. Until every validator has upgraded and such a view has finalized,
+an upgraded leader whose application returns a block from `Application::prepare`
+can build on a block that names another parent. That block never certifies, so
+the build is wasted. A leader that voted for the build under `Handoff::Vote`
+cannot propose again in that view ([#5715]).
+
+`Deferred` and coding `Marshaled` now stop verifying a block once certification
+is requested for a different block of its round. That request cancels a
+verification that is running or still waiting for its block or parent. The
+`Application::verify` docs now state that several calls can be outstanding for
+one round when its leader equivocates, and that an implementation must give each
+its own verdict without cancelling or replacing an earlier one ([#5682]).
+
+When the `view_retention` window reaches back past the start of the epoch of the
+previously witnessed finalization round, marshal now counts each view the window
+lacks in that epoch as one block height below the epoch instead of as one whole
+earlier epoch, and keeps the whole epoch containing the lowest such height.
+Where the `epocher` cannot place those heights, each earlier epoch still counts
+for one view. The first prune after upgrading destroys the caches of earlier
+epochs that the window no longer covers ([#5646]).
+
+Marshal no longer caches a block fetched by commitment when the block's height
+maps to an epoch later than the latest epoch its cache has recorded. Marshal
+still delivers the block. With stable leaders and optimistic validation, an
+ancestry walk that `Mailbox::ancestry` starts from a notarized coded block could
+fetch a parent that claims a height in a far later epoch. Caching that parent
+raised the latest recorded epoch. Neither pruning nor upgrading lowers that
+epoch, and startup probes every epoch from the oldest unpruned one up to it
+([#5717]).
+
+### DKG
+
+`SecretStore::put_dealing` and `get_dealing` each gain a `V: Variant` type
+parameter and take the dealing's public message as `public: &DealerPubMsg<V>`
+after the dealer. Add the type parameter and the argument to these two methods
+in every implementation, and include the public message in each private
+dealing's key. A validator loses the private dealings of the epoch in progress
+at the upgrade unless its store also reads the previous key when the new key
+finds nothing. The store needs that fallback until it prunes that epoch. The
+reshare store now asks the secret store for the private half of a journaled
+dealing, using the dealing's public message. It restores the dealing only when
+the secret store returns a private half. With the new key, a player no longer
+panics on every resume after interruptions leave only the public half of one
+dealing and only the private half of a different dealing from the same dealer. A
+dealer that follows the protocol does not send one player two different dealings
+in an epoch ([#5728]).
+
+A store that switches to the new key without reading its previous key as a
+fallback no longer finds the private dealings it wrote before the upgrade. After
+a rollback, the earlier release does not find the private dealings written
+since. With the fallback, a store returns for the earlier dealings what the
+earlier release returned. The `commonware-dkg` example's `Secrets` store now
+keys a dealing by a digest of its dealer and public message and has no fallback
+([#5728]).
+
+A validator that restarts without dealings it acknowledged in the current epoch
+finishes that epoch with no share for the next epoch once a log from the dealer
+of one of those dealings is included. Without that share, the validator cannot
+vote or deal in the next epoch. It gets a share again only from a later reshare
+that succeeds with it as a player. Until the dealing window closes, the
+validator also accepts a different dealing from a dealer it already
+acknowledged. That can let a faulty dealer make the validator panic each time it
+verifies the epoch's last block and so keep it from finishing the epoch. Dealers
+start sending dealings at an epoch's first block, so count as faulty each
+validator rolled back and each validator upgraded to a store that does not read
+its previous key as a fallback. Each counts as faulty from the end of the epoch
+it restarted in until it holds a share again ([#5728]).
+
+### Simplex
+
+Once Simplex has requested `certify` for a view, it no longer requests `verify`
+for that view before a restart. Under marshal's `Deferred`, that later `verify`
+could run the application's verification a second time. A validator whose
+`certify` request comes first therefore no longer casts a late notarize vote for
+that view or nullifies it early on a `false` verification verdict. That
+validator can still vote to finalize if certification succeeds before the view
+is nullified. The voter now also drops the receiver of a pending `verify` when a
+certificate for a conflicting proposal of the same view arrives ([#5681]).
+
+The `Automaton::verify` docs now state that consensus may drop the receiver
+before a verdict arrives. The `CertifiableAutomaton::certify` docs clarify that
+a round can carry conflicting payloads, so state must be keyed by `(round,
+payload)` and not by either alone, and that certification can be requested for a
+payload this participant was never asked to verify ([#5681]).
+
+### Crash Recovery
+
+Opening a paged blob for writing, as journals and the stores built on them do at
+startup, now clears a checksum slot that a torn write left on its partial last
+page. A torn shrink or append could leave part of a checksum in that slot, and a
+second torn write to the page after a restart could complete it, revalidating
+bytes that the shrink or the earlier recovery had discarded.
+`paged::Recovery::open` durably zeroes such a slot before opening completes,
+including on pages written by earlier releases. The page format is unchanged
+([#5660]).
+
+### Memory and Metrics
+
+Commonware's `futures` and `futures-util` dependencies now require at least
+0.3.34, including in downstream builds. Version 0.3.32 has a
+`FuturesUnordered::into_iter` leak that can retain task allocations when
+`glue::stateful` verification resumes after a finalization or prune ([#5583]).
+
+The resolver's `peer_performance` gauge drops a peer's series when the peer
+leaves the tracked set. When the DKG reshare actor prepares an epoch, it drops
+the `latest_share` series of peers outside that epoch's dealers and the
+`latest_ack` series of peers outside its players. A peer that keeps its role
+keeps its value ([#5528]).
+
+### Resolver
+
+The p2p resolver now tries pending requests in queue order when their deadlines
+match, with fresh requests still ahead of retries. Marshal's fresh requests for
+blocks by commitment that queue at the same instant behind a rate-limited peer
+are therefore tried in that order instead of digest order ([#5698]).
+
+The resolver's p2p and opaque engines now apply a verdict that a consumer has
+already sent, or the drop of the verdict's sender, before they add a fetch for
+the same key. A repeat fetch that the consumer issues afterwards for a
+subscriber retired by that verdict or drop could be lost, leaving its caller
+waiting, when the engine handled the repeat first. The deterministic runtime
+does not produce that order. The repeat now starts a new fetch, or receives that
+delivery's response while a later subscriber keeps the key in flight. The
+`Consumer::deliver` docs now state that a verdict does not retire a fetch issued
+after it. They also state that a fetch issued before the verdict for a delivered
+subscriber may be retired with that subscriber. `delivery::Tracker` gains
+`try_completion`. It takes the completion of a key's delivery if the consumer
+has already sent its verdict or dropped the verdict's sender, and returns `None`
+otherwise. `next_completion` reports the wait of a delivery taken this way as
+`Aborted` ([#5722]).
+
+### Cryptography
+
+The `lthash` docs no longer estimate at least 200 bits of security and instead
+describe a published collision attack on its 1024-element, 16-bit state, which
+puts collision resistance far below 128 bits. The attack needs colliding sets of
+at least 2^72 elements combined, so it does not apply while an adversary cannot
+get that many elements of its choosing into the sets being compared. The hash
+function is unchanged ([#5590]).
+
+### Testing
+
+With the `commonware-glue/test-utils` feature,
+`simulate::action::Crash::ProcessedHeight` now takes `participants:
+NonEmptyVec<P>` instead of `participant: P`, so wrap a single participant in a
+`NonEmptyVec`. `ProcessedHeight` crashes the listed validators together once all
+of them are running and report a processed height inside `heights`. The run
+fails if any listed validator reports a height past `heights` before the crash.
+`simulate::plan::Plan` now applies scheduled crashes, scheduled restarts, and
+`Crash::Random` ticks before it handles finalization updates, so a steady stream
+of updates no longer starves them. A run that configures scheduled or random
+crashes can therefore take longer ([#5726]).
+
+`commonware_runtime::mocks` adds `MutationFaults`, `MutationFaultContext`, and
+`MutationFaultBlob` for recovery tests. `MutationFaults::allow` lets a set
+number of mutating storage operations succeed and then fails every later one
+([#5673]). `MutationFaults::park_after` also lets a set number succeed, but then
+leaves every later one pending so that it never completes ([#5692]).
+
+[#5528]: https://github.com/commonwarexyz/monorepo/pull/5528
+[#5583]: https://github.com/commonwarexyz/monorepo/pull/5583
+[#5590]: https://github.com/commonwarexyz/monorepo/pull/5590
+[#5646]: https://github.com/commonwarexyz/monorepo/pull/5646
+[#5660]: https://github.com/commonwarexyz/monorepo/pull/5660
+[#5673]: https://github.com/commonwarexyz/monorepo/pull/5673
+[#5681]: https://github.com/commonwarexyz/monorepo/pull/5681
+[#5682]: https://github.com/commonwarexyz/monorepo/pull/5682
+[#5692]: https://github.com/commonwarexyz/monorepo/pull/5692
+[#5698]: https://github.com/commonwarexyz/monorepo/pull/5698
+[#5715]: https://github.com/commonwarexyz/monorepo/pull/5715
+[#5717]: https://github.com/commonwarexyz/monorepo/pull/5717
+[#5722]: https://github.com/commonwarexyz/monorepo/pull/5722
+[#5726]: https://github.com/commonwarexyz/monorepo/pull/5726
+[#5728]: https://github.com/commonwarexyz/monorepo/pull/5728
+
+## v2026.10.0
+
+<details>
+<summary>Rollback Support</summary>
+
+_These instructions do not cover changes to ALPHA primitives._
+
+To retain a path back to v2026.9.0:
+
+**Defer incompatible changes:**
+
+- **Transport versions:** Build every stream upgrader with `sake::Version::V0`
+  and `cups::Version::V0` over `ChaCha20Poly1305`, with the application
+  namespace unchanged. That is the v2026.9.0 wire protocol. Versions are not
+  negotiated, so a process on SAKE V1 or CUPS V1 cannot talk to a v2026.9.0
+  process. V0 keeps the previous handshake's weaker identity binding ([#5018]).
+- **Discovery payload limit:** Do not lower discovery's `max_message_size`
+  below its v2026.9.0 value. This release sizes gossip frames separately, but
+  the previous binary sizes them from this setting and rejects gossip that no
+  longer fits ([#4716]).
+
+_Storage changes are additive: marshal writes its round floor into the existing
+application metadata partition, and simplex journals a configured floor as an
+ordinary finalization. The previous binary ignores the extra entries and replays
+the finalization, and a later restart on this release raises a stale floor from
+the archives, so time spent on v2026.9.0 needs no cleanup before upgrading again
+([#5294], [#5314], [#5445])._
+
+</details>
+
+### Networking
+
+The `encrypted` stream module is replaced by the `Upgrader`, `Sender`, and
+`Receiver` traits, with `sake::Sake` implementing the transcript-producing
+`Handshake` and `cups::Cups<H, C>` combining a handshake with a `Cipher` into an
+encrypted message stream (`SakeCups<S, C>` names the supplied pair) ([#4829],
+[#5018]). The discovery and lookup configs take an upgrader in `handshake`
+instead of a signer in `crypto`, `max_handshake_age` and lookup's
+`synchrony_bound` move into `Sake` while discovery keeps its own
+`synchrony_bound` for gossip, and standalone callers wrap an upgrader in
+`stream::utils::Timeout` to bound the whole upgrade including bouncer admission
+([#4829], [#5018]). `authenticated::MAX_SIZE` is
+`authenticated::max_size::<U>()`, derived from `Upgrader::MAX_SIZE`, and a
+custom discovery transport must implement `discovery::Upgrader`, which also
+signs gossip under the authenticated identity ([#4829], [#5018]). The raw-frame
+helpers `stream::utils::codec::{send_frame, recv_frame}` return
+`utils::codec::Error` ([#5018]).
+
+Both protocol versions are explicit and must match across peers ([#5018]). SAKE
+V1 binds both identities before every signature, and CUPS V1 encrypts and
+authenticates each record's length before reading its body, and `Sake { version:
+sake::Version::V0, .. }` inside `Cups::new(.., cups::Version::V0)` with
+`ChaCha20Poly1305` reproduces the v2026.9.0 wire protocol ([#5018]). A CUPS
+receive error now permanently disables that receiver, and later `recv` calls
+return `cups::Error::StreamClosed` without reading, so discard the connection
+after any error ([#5285]).
+
+`commonware_p2p::max_message_size` computes an application payload limit from
+component bounds, `utils::mux::prefixed` adds the worst-case subchannel prefix,
+and discovery sizes its gossip frames separately so gossip no longer needs a
+share of the application limit ([#4716]). The discovery and lookup `recommended`
+and `local` constructors take a `mailbox_size: NonZeroUsize`, where 1000
+preserves the old capacity ([#4716]). Both networks reject an application
+payload above `max_message_size` even when it fits the frame, discovery accepts
+the initial greeting when `peer_gossip_max_count` is zero, queued dials recheck
+the peer's address policy before reserving a connection, and `Duration::MAX`
+block and cooldown settings no longer overflow ([#5286]). Inbound rate limiting
+consumes quota after waiting, so sustained traffic stays paced by the registered
+channel and control quotas, and the `messages_sent_total`,
+`messages_received_total`, and `messages_rate_limited_total` series are created
+at connection startup and can appear with zero values ([#4957]).
+
+The p2p codec wrappers take directional bounds, `Encode` for senders and
+`Decode` for receivers ([#5068]). `WrappedBackgroundReceiver::new` drops its
+`channel_capacity` argument and sizes the decoded mailbox from the wrapped
+receiver ([#5498]). It no longer caps pending decode jobs, so a slow decode
+strategy can accumulate queued work ([#5442]). The `Receiver` trait gained a
+required `capacity` method returning how many messages the receiver holds before
+it may drop arrivals, and a consumer that queues messages behind a receiver
+should hold at least that many ([#5498]). A simulated receiver reports one quota
+burst for each identity the tracked peer sets may hold, and mailboxes sized from
+that capacity allocate it up front, so give test channels a quota sized to their
+traffic rather than `Quota::per_second(NonZeroU32::MAX)` ([#5498]).
+
+`MuxHandle<S, R>` is `MuxHandle<S>`, `SubReceiver<R>` takes the peer public-key
+type as `SubReceiver<P>`, and mux constructors require the sender and receiver
+to share that type ([#5061]). `Muxer::new` and `Muxer::builder` drop their
+`mailbox_size` argument, and each subchannel holds `Receiver::capacity` messages
+([#5498]). The simulated network drains queued transmissions iteratively when a
+bandwidth cap is lifted, avoiding stack overflow on long queues ([#5230]), and
+its unused `SendFrameFailed`, `RecvFrameFailed`, `BindFailed`, `AcceptFailed`,
+`DialFailed`, and `PeerMissing` error variants are removed ([#5376]).
+
+### Toolchain and Platform Support
+
+x86-64 builds now require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or
+newer), SHA-NI and AVX-512 stay runtime-detected, AArch64 builds assume NEON,
+and only little-endian targets are supported ([#5064]).
+
+`commonware-runtime` lost the `iouring`, `iouring-network`, and
+`iouring-storage` Cargo features because the native io_uring runtime is
+available on Linux without them ([#4674], [#5461]), and its `bench` feature went
+with the buffer pool ([#5277]). `commonware-cryptography` lost `blake3-parallel`
+in favor of strategy-driven hashing ([#5188]). `commonware-broadcast`,
+`commonware-collector`, and `commonware-resolver` no longer enable
+`commonware-runtime/test-utils` from their production dependencies, so tests
+that relied on that must enable the runtime feature themselves ([#5398]). The
+curve25519 crate's `arbitrary` feature now implies `std` ([#4675]).
+
+### Buffers and Allocation
+
+The runtime buffer pool is gone: `BufferPool`, `BufferPoolConfig`,
+`BufferPooler`, the `with_network_buffer_pool_config` and
+`with_storage_buffer_pool_config` setters on the tokio and deterministic
+configs, `iobuf::PoolError`, and the six `*_buffer_pool_*` metric series are
+removed, and `IoBufMut::with_capacity` allocates exactly the requested size
+([#5277]). Construct page caches with `CacheRef::new(page_size, capacity)`
+instead of `from_pooler`, drop the pool argument from `buffer::Read::new`,
+`buffer::Write::new`, `p2p::utils::codec::wrap`, and `WrappedSender::new`,
+replace `encode_with_pool` with `EncodeExt::encode_iobufs`, and pass
+`IoBufsBuilder::new` an exact `usize` inline capacity ([#5277]). `coalesce`
+replaces the `coalesce_with_pool` variants, `IoBuf::into_mut_with_pool` becomes
+`IoBufMut::from`, which keeps the copying fallback, or `try_into_mut` for
+fallible zero-copy recovery, and `BufsMut::push` now requires a `'static` chunk
+([#5277]).
+
+`BufferPoolClassConfig`, `BufferPoolThreadCache`, `Error::Pool`, both
+`is_pooled` methods, and the `page_size` and `cache_line_size` host queries are
+removed as well, and `encode_with_pool_mut` is replaced by allocating an
+`IoBufMut` of `encode_size()` bytes and writing into it ([#5277]). Every engine
+and actor that carried a `BufferPooler` bound lost it, and the storage `Context`
+bound is now `Storage + Clock + Metrics` ([#5277]). Keep each persisted store's
+logical page size when constructing its cache ([#5277]). Tests using
+`mocks::MemoryStorage` switch to `mocks::Storage::new()` ([#4933], [#5277]).
+Aligned `IoBufMut` constructors expose exactly the requested capacity and no
+longer reserve an inline owner header ([#5275]). `IoBufs` and `IoBufsMut`
+collect from iterators and convert from fixed-size arrays without copying
+([#4894]).
+
+Asynchronous mutations of `buffer::Write` and `buffer::paged::Writer`, including
+`snapshot` and `replay`, consume the writer and return it on success, so rebind
+after each await and reopen after a failed or cancelled mutation ([#5041]).
+`start_sync` returns `Result<(Self, Handle<()>), Error>` and reports a failed
+initial flush directly instead of handing back an already-failed handle whose
+drop could let later writes damage an acknowledged prefix ([#4819], [#5041]).
+`Write::try_write_at` and `Writer::try_append` perform synchronous buffered
+writes when capacity allows, and `Writer::try_append_value` encodes a value
+directly into the write buffer ([#4821], [#4943], [#5041]).
+
+The live `Writer::resize` is replaced by a recovery phase: open
+`paged::Recovery` on a fresh blob handle, `truncate` to the retained prefix,
+which is made durable before the writer is published, and convert with
+`Writer::from` ([#4910]). `Writer::try_snapshot` captures a view without I/O
+once every full page is written ([#5232]), `read_ranges_into` reads ordered
+variable-size ranges into one destination ([#5403]), replay rejects a short
+interior page with `Error::InvalidChecksum` instead of returning a shortened
+view ([#5291]), and `recoverable_prefix_len_at_most` bounds forward validation
+by a requested length ([#4910]).
+
+`commonware-allocator` vendors mimalloc 3.5.3, installed through
+`mimalloc::MiMalloc::new(Config { ..Config::DEFAULT })` as the binary's global
+allocator ([#5275]). The configuration covers purging, reservations, huge-page
+policy, and arena limits and takes effect at the first allocation ([#5275]).
+Building it needs a C toolchain, and a binary loaded through `dlopen` needs the
+`local-dynamic-tls` feature ([#5275]). The runtime's new `mimalloc` feature
+exports `runtime_allocator_*` metrics from the tokio and io_uring runtimes when
+this allocator serves global allocations, without installing it ([#5275]).
+`Config::stats_merge_threshold` merges per-thread statistics after 4 MiB of
+allocation and freeing by default, bounding how far cross-thread frees let the
+reported allocated bytes lag, and zero disables threshold-based merging and
+permits unbounded drift in reported allocated bytes ([#5484]).
+
+### Encoding and Utilities
+
+Codec readers take `commonware_codec::Buf` and full decoders take `Input`: pass
+owned `Bytes`, `BytesMut`, `Vec<u8>`, or runtime buffers directly so retained
+byte fields share the input allocation, and wrap an intentionally borrowed slice
+in `Copying`, whose retained fields allocate and copy ([#4667]). `Viewing`
+borrows a `Bytes` for an independent cursor whose retained fields still share
+the storage ([#5512]). Custom `Read` implementations and decoding helpers must
+import and adopt `commonware_codec::Buf`, since the runtime's `Buf` re-export
+remains `bytes::Buf` for raw buffer implementations and I/O ([#4667]). Pass
+`IoBufMut` and `IoBufsMut` by value to full decoders, or freeze them before
+sequential `Read` calls ([#4667]). `Arc<T>` implements `Read` when `T` does
+([#4692]), and collection decoders no longer require cloneable keys or values
+([#4854]). `OwnedBytes` and `Buf::take_owned` let a reader return views in its
+own storage type, so an `IoBuf` field decoded from an `IoBuf` keeps the native
+owner ([#5301]), and `Buf::try_take_owned` reports a shortfall without advancing
+the cursor ([#5335]). `Lazy` decodes through a borrowed cursor and shares
+retained bytes with its input ([#5129]).
+
+`MaxEncodeSize` supplies `MAX_ENCODE_SIZE` for types with a fixed upper bound,
+with a blanket implementation for `FixedSize` types, and `Ingress` and `Address`
+implement it ([#4716]). `BitMap` and `Prunable` decode with `RangeCfg<u64>`
+instead of a maximum bit count, so replace `&max_bits` with
+`&(..=max_bits).into()` or use `RangeCfg::exact`, where the range bounds
+retained bits on `Prunable` ([#4771]). `BitMap::extend_from_bitmap` appends
+another bitmap, even one with a different chunk size ([#5134]).
+
+`commonware_utils::cache::Clock` is replaced by `cache::Cache`, a Clock2Q+ cache
+with bounded ghost-key history and the same method shapes, and keys no longer
+need `Clone` ([#4575]). `channel::tracked::Message::guard` holds a cloneable
+`Guard<B>` instead of `Arc<Guard<B>>`, and clones share one delivery lifetime
+([#5346]). `futures::try_join_all` preserves input order on success and returns
+an observed error without waiting for earlier pending futures ([#4728]), and
+`futures::{Shared, WeakShared}` let several waiters drive one future without a
+separate task ([#5267]). Dropping a `channel::ring` receiver releases its unread
+items and waker, and the channel runs waker callbacks outside its lock so a
+callback that drops a sender cannot deadlock ([#5499]).
+`sampling::WeightedIndex` draws indices in proportion to adjustable `u64`
+weights, uniformly, or without replacement ([#5494], [#5510]).
+
+`handles::Table` is a multimap from hashes to caller-owned handles whose lookup
+candidates must be checked against the original keys ([#5268]). It gained
+`reserve`, `prefetch`, `find_or_insert`, and `handles::partition` for splitting
+hashes among tables ([#5435]). `ordered::Map::from_parts`, `map_values`, and
+`map_values_into`, with fallible variants, assemble or transform maps while
+preserving key order ([#4895]). `range::contains_cyclic` replaces the ordered
+Any database's `span_contains` ([#4818]).
+
+`DurationExt` gained a required `as_millis_u64` ([#4829]).
+`IpAddrExt::is_global` now rejects `192.88.99.2`, `100:0:0:1::/64`, `3fff::/20`,
+and `5f00::/16` and accepts `2001:1::3` ([#5427]). The unused `sequence::Error`
+and `hostname::Error::InvalidUtf8` are removed ([#5376]).
+
+### Cryptography
+
+The `Hasher` trait takes a `Strategy` for `hash_pair` and the new `hash_many`,
+which hashes independent messages in input order, and gained a defaulted
+`hash_across` for strategy-driven hashing of one multipart message ([#4783],
+[#5188]). Pass `&Sequential` for serial execution, and request intra-message
+parallelism through `Blake3::hash_across` now that the `blake3-parallel` feature
+is gone ([#5188]). `Sha256::hash_many` uses AVX-512 for equal-length batches
+where available, the new `Sha512` accelerates batches with AVX-512 or AArch64
+SHA-512 instructions, and the new `Keccak256` hashes with Ethereum's Keccak
+padding ([#4783], [#5132], [#4825]). `Digested<T>` pairs a shared value with its
+digest, built by awaiting `Digested::compute(value, &strategy)` or through
+`precomputed` with a digest already computed from that exact value, and
+`Digestible::digest_across` is the strategy-aware hook ([#5201]).
+
+Signature batches moved from the removed `ed25519::Batch` and `bls12381::Batch`
+builders to `PublicKey::verify_batch`, which borrows namespaces, messages, keys,
+and signatures through a projection to `BatchEntry` that must return the same
+entry for the same index ([#5135]). `Transcript::add_to_batch` and
+`Summary::add_to_batch` went with the builders, so batch a summary signature as
+a `BatchEntry` with an empty namespace and the summary bytes as its message
+([#5135]). The curve25519 types now implement the shared `PrivateKey`, `Signer`,
+`PublicKey`, `Verifier`, and `BatchVerifier` traits, replacing their own
+`signing::BatchVerifier` ([#5132]). They reject an empty batch or one with more
+than `u32::MAX` entries before projecting ([#5288]), `key_exchange::PublicKey`
+gained hex `Debug` and `Display` ([#4675]), and signing, verification, and
+X25519 are faster on the SIMD and portable backends ([#5132], [#5154], [#5155]).
+
+`certificate::Scheme::me` returns `Option<Membership>`, where `Signer` carries
+signing material and `Member` is a committee position without it ([#5433]). Use
+`Membership::index` when any membership suffices and `Membership::signer` before
+signing ([#5433]). The `impl_certificate_*` macros add `Scheme::member`
+constructors for such members, and the direct `Generic::me` helpers are
+`signer_index` ([#5433]). `Scheme::optimistic_assemble` is a new required method
+that tries to authenticate a certificate from pending and already verified
+attestations before verifying the pending ones individually, returning their
+verification results on failure, and the public `verify_then_assemble` and
+`optimistic_assemble` helpers implement it ([#4800]). A successful result
+authenticates the certificate, not every pending attestation ([#4800]).
+`Generic` helpers accept `Subject` values directly, dropping their digest and
+strategy type parameters, and `feldman_desmedt::SignedDealerLog` is
+parameterized by the public key with an unchanged encoding ([#5350]).
+`certificate::Verifier::max_certificate_size` bounds a certificate for a
+participant count ([#4716]).
+
+The handshake moved to `handshake::sake`: `Context::new` takes a
+`sake::Version`, `dial_end` and `listen_end` return the secret `Transcript`
+instead of the removed `SendCipher` and `RecvCipher`, and the former
+`Error::HandshakeFailed` splits into `sake::Error::{InvalidSignature,
+InvalidEphemeralKey, InvalidConfirmation}` ([#5018]). `Version::V0` is
+byte-identical to the v2026.9.0 handshake, while `V1` commits both identities
+before every signature, which closes a key-substitution gap for schemes such as
+ECDSA ([#5018]). The new `Cipher` trait, with `ChaCha20Poly1305` as its
+implementation, seals and opens an ordered message sequence, consuming the
+cipher and returning it only on success ([#5018]).
+
+The Golden DKG `Output` no longer encodes its revealed-player set, so neither
+release decodes an output serialized by the other, and `golden::Info::round`
+exposes the configured round ([#5376]).
+`bls12381::primitives::Error::{NoInverse, DuplicateEval}` are removed ([#5376]).
+
+Reed-Solomon's `NoSimd` engine is `Scalar`, `Ssse3` is removed, and
+`DefaultEngine` picks the new AVX-512/GFNI `Avx512` engine, then AVX2, then
+scalar on x86 ([#4981], [#5064]). A `reed_solomon::Plan` captures the recovery
+work for fixed shard counts and received index sets, `Decoder::decode_with_plan`
+and `decode_with_recovery_plan` reuse it across contents and widths, and a
+mismatch returns `Error::PlanMismatch` without discarding received shards
+([#4981]). Construction and reset reject working buffers larger than one
+allocation with `Error::InvalidShardSize`, `RateEncoder::validate` and
+`RateDecoder::validate` are required, and shard bytes are unchanged ([#4981]).
+Small low-rate recovery and `commonware-math` polynomial recovery are faster
+([#4835], [#4832]).
+
+### Merkle Trees and Proofs
+
+MMR and MMB roots now commit to their tree family and bagging policy, including
+empty and single-peak trees, so every root changes along with the QMDB and
+authenticated-bitmap commitments derived from them ([#5310]). Stored leaf and
+node digests are unchanged, so this does not require rebuilding node journals,
+but pinned roots must be recomputed, witnesses that embed roots regenerated, and
+producers and verifiers of these commitments, including Solidity consumers,
+upgraded together ([#5310]). Custom families provide `Family::DOMAIN`, and
+`Bagging::domain` exposes the policy byte ([#5310]). Authenticated bitmap roots
+with a trailing partial chunk additionally bind the total bit length, so a
+partial-chunk proof cannot be relocated to another claimed chunk count
+([#4954]).
+
+Multiproofs require strictly increasing, unique locations ([#5323], [#5327]).
+MMR and MMB creation returns `DuplicateLocation` or `UnsortedLocation` and
+verification rejects reordered or repeated input it used to accept, including
+through QMDB's multiproof helpers ([#5327]), and BMT multiproofs return
+`UnsortedPosition` instead of sorting internally ([#5323]). Sort location and
+element pairs together and request each location once, and proof encodings are
+unchanged ([#5323], [#5327]).
+
+`merkle::{RangePlan, ElementPlan, multi_proof_positions}` expose the node reads
+a proof needs so a storage adapter can fetch them first and build from one
+snapshot ([#5162]). `merkle::verification::multi_proof` drops its `bagging`
+argument, and the verification functions infer the digest type instead of taking
+it explicitly ([#5162], [#5352]). `Mem::apply_batch` and the authenticated
+journal check the structure's size and peak digests against the batch's recorded
+chain states and reject incompatible history with `StaleBatch` before mutating,
+and merkleized batch `root` methods no longer take the base structure ([#4691]).
+Root-folding iterators require `DoubleEndedIterator` ([#4661]). Full and compact
+persisted trees replace `with_mem(f)` with `mem()`, which returns `&Mem`
+([#4579]). `merkle::Proof::max_encode_size(digests)` and
+`bmt::Proof::max_encode_size(siblings)` bound an encoded proof by its digest
+count ([#4716]).
+
+Persisted full Merkle trees gained `init_at_most` with an absolute leaf cap,
+validate and persist required pins before discarding history, and report a
+failed `start_sync` through a later `sync` even when nothing was appended
+([#4910]). `init_sync` persists locally recovered boundary pins before removing
+their source nodes, and an interrupted `init_sync` should be retried with the
+authoritative range and pins ([#4961]). Keep `Config::metadata_partition` fixed:
+a pruned node journal opened without its boundary metadata is treated as an
+interrupted destroy and cleared ([#5303]). `UnmerkleizedBitMap::dirty_chunks`
+was removed without replacement ([#4632]).
+
+### Runtime I/O
+
+Linux gained a native runtime: `iouring::Runner` and `iouring::Config` replace
+`tokio::Runner` and `tokio::Config` for applications that want io_uring, which
+requires Linux 6.1 or newer, and the tokio runtime no longer selects io_uring
+backends through features ([#4674], [#5461]). `Config::with_worker_threads`
+selects 1 to 64 workers, two by default including the calling thread, with
+dedicated and blocking tasks on additional threads and idle workers stealing
+queued tasks ([#5141], [#5243]). `with_global_queue_interval` sets how often a
+busy worker checks the global queue, and `with_ring_config` and
+`with_idle_spinner` configure ring capacity and idle spinning ([#4674],
+[#5141]). Keep task polls short so that a worker's I/O and timers can progress
+([#4858]).
+
+The runner reports active requests through one `runtime_pending_operations`
+gauge instead of the old `runtime_iouring_network_pending_operations` and
+`runtime_iouring_storage_pending_operations` series ([#4674]). Worker startup
+failures reach the panic hook, and under `panic = "abort"` they abort the
+process even with `with_catch_panics(true)` ([#5451]).
+
+`Blob` no longer requires `Clone`: share an open through `Arc`, and drop every
+owner before reopening the same name or the open fails with
+`Error::BlobAlreadyOpen`, although removing the blob allows a new one at that
+name ([#4933]). Reopening within a run waits for the previous open's outstanding
+I/O and makes the returned contents durable, dropping a blob never syncs it, and
+tokio and io_uring retain a failed durability operation across opens within one
+runtime, while a fresh runtime clears that record but still requires storage
+recovery ([#4933]). On macOS, storage startup synchronizes the root directory
+and the first open or scan of an inherited partition synchronizes its entries
+([#4909]). `Storage::scan` and partition removal distinguish a missing partition
+from other I/O failures, and `Storage::open_versioned` requires a nonempty
+version range ([#4887]).
+
+External `Blob` implementors gain two defaulted methods: `read_many` reads a
+list of ranges and streams indexed results as they complete, and
+`start_read_many` returns a handle whose buffers follow input order once the
+reads are accepted ([#5190], [#5232]). Batched page-cache reads submit missing
+pages together, overlapping readers can join in-flight reads, and tokio uses
+Linux native AIO for eligible uncached batches ([#5190], [#5267]). On Linux,
+`ReadOptions::DONT_CACHE` attempts `O_DIRECT` in both the tokio and io_uring
+backends, falling back to buffered reads when direct I/O cannot serve a request
+([#5343]). Callers need no alignment changes, but a direct open holds an extra
+descriptor and a returned view can retain a page-aligned allocation larger than
+the requested range ([#5343]).
+
+The new `BLOB_PAGE_SIZE` constant (4096) names the storage page, and metadata
+images no larger than it are overwritten in one write with their encoding
+unchanged ([#5164]).
+
+The tokio runtime registers cancellation before a task can run and observes
+panics through shutdown, including panics while dropping a task's future or an
+undelivered output, which resolve a waiting handle with `Error::Closed`
+([#5034]). A synchronous spawn factory that panics now closes its supervision
+node and the `runtime_tasks_running` gauge on both tokio and deterministic
+runtimes ([#4674]). `Runner::start` enters the tokio runtime while constructing
+the root future, so the factory can create tokio timers ([#5291]).
+`Handle::abort_on_drop` wraps a spawned task in an `AbortOnDrop` guard that
+cancels the task when dropped and offers `abort`, `join`, and an ordered
+`join_all` ([#4567]).
+
+Deterministic event and storage audits use CRC32C instead of SHA-256:
+`storage_audit` and the mock storage `audit` return four bytes and
+`Auditor::state` returns eight hex digits, so pinned audit values must be
+re-pinned ([#5269]). Concurrent syncs on the deterministic memory backend can no
+longer publish an older snapshot over newer durable data ([#4888]), and sleep
+and pacing futures refresh their wakers when moved between tasks ([#4859]).
+`telemetry::metrics::add_attribute` returns `()` instead of reporting whether
+the key was new ([#5380]). `Registered::detached` creates a metric handle
+without a registry entry, and `telemetry::metrics::Batched` accumulates counter
+and gauge updates and publishes them after a configured number of updates and on
+drop ([#5121], [#5434]).
+
+### Storage Ownership and Recovery
+
+Live `rewind` is gone from every journal ([#4910]). The contiguous, segmented,
+and authenticated journals and `Oversized` select a shorter history during
+initialization instead: drop existing handles and reopen through `init_at_most`,
+which takes a logical size for contiguous journals (pruned positions included),
+a section and byte end for segmented ones, and an index-byte end for `Oversized`
+([#4910]). `Glob::rewind` and `Glob::rewind_section` are removed without a
+public replacement ([#4910]). The bound is a cap, a partial boundary record
+rounds down, and a successful bounded open durably discards the suffix before
+returning a writer, so a later crash cannot resurrect it ([#4910], [#4961]).
+Bounded opens skip blobs and sections above the cap where the format allows and
+repair torn boundary pages before reading the retained prefix ([#4961],
+[#5304]). Suffix removal can begin before a bounded open fails, so an error does
+not promise the original suffix survives ([#4961]).
+
+Authenticated journal backings own their recovery: `Backing::init` is replaced
+by `recover` and an associated `Recovery` type implementing `BackingRecovery`,
+custom backings add `clear` and `span` and need a `Sync` configuration, and
+`from_components` takes a `NonZeroU64` apply batch size and rejects a Merkle
+tree ahead of its operation journal instead of rewinding it ([#4910], [#4961],
+[#4977]). `Oversized::init_with_metadata` takes its context by value ([#4961]),
+and `init_with_metadata_at_most` returns a replay to drain and finish with
+`finish_tracked` ([#4910]).
+
+`Contiguous::replay` takes an explicit `Range<u64>` and yields `Batch<T>` values
+with a `start` position and `items`, so replace `replay(start, ..)` with
+`replay(start..journal.bounds().end, ..)` and iterate each batch for position
+and item pairs ([#5232]). Batches are nonempty, consecutive, and never cross a
+blob boundary, and reads stay in flight while earlier batches decode ([#5232]).
+`Contiguous::Item` requires `Sync`, `read` no longer returns a `Sync` future,
+and `oversized::Record` requires `CodecFixedShared` ([#5352]). Archive `put`
+variants, `MultiArchive::put_multi` variants, and `Freezer::put` borrow their
+values, and archive values require `CodecShared` ([#4692]).
+
+`Metadata::destroy` removes the older copy first after observing any pending
+sync failure, so an interrupted destroy cannot revive a superseded generation
+([#5304]). The contiguous fixed journal records the existing clear-to-zero
+intent before removing data and immutable archives remove commit metadata before
+their backing stores, so for these two stores an interrupted destroy reopens
+through ordinary recovery or empty and can be retried ([#5303]). Contiguous
+journals report pending checkpoint or offset sync failures before destroying
+([#5304]), and `Oversized::init_with_checkpoint` clears value sections orphaned
+by an interrupted prune ([#5304]).
+
+Keep each store's layout settings fixed ([#5268], [#5303]). Immutable archive
+initialization rejects a committed partial-section bitmap whose length disagrees
+with `items_per_section`, and ordinal initialization rejects a complete section
+longer than `items_per_blob` ([#5303]). The prunable archive validates that each
+replayed record's index selects its own section ([#5268]). Ordinal recovery
+removes discarded sections before opening them, so a torn discarded section
+cannot block startup, and clears uncommitted records in batches ([#5004],
+[#5303]).
+
+The prunable archive indexes records by section and key handle, removes pruned
+keys immediately, and reports a `keys_tracked` gauge counting retained records
+(repeated keys included), replacing the `index_keys`, `index_items`, and
+`index_pruned_total` series of its former `index` child ([#5268]). A sparse
+section can allocate a position vector through its highest offset, so size
+sections with that cost in mind ([#5268]). The full Merkle tree's child metric
+contexts are `journal` and `metadata` instead of `merkle_journal` and
+`merkle_metadata` ([#4961]).
+
+The queue splits into a consuming `Queue` writer and a `Reader` returned
+together by `Queue::init`, replacing `queue::shared` and its cloneable writer:
+dequeue through `Reader::try_recv` or `recv`, acknowledge through `ack` or
+`ack_up_to`, call synchronous `reset` to return to the acknowledgement floor,
+and append through `enqueue` or `enqueue_bulk` ([#5041]). `enqueue` and `append`
+borrow their item ([#5380]). Commit publishes appends, sync samples the reader's
+acknowledgement floor for durable pruning, `Error::Unavailable` is gone because
+`recv` drains published items before returning `None` after a failed writer, and
+both handles must be dropped before reopening ([#5041]).
+
+Journal replay and appends copy less and reuse zstd contexts without changing
+stored encodings ([#4672], [#4719], [#4808], [#4821], [#4847], [#4943], [#4944],
+[#4959]). Keep compression's `None` or `Some(_)` choice for existing data
+([#4847], [#4944]).
+
+### Marshal
+
+Marshal reports a processed position as `Processed::{Block, Absent}`:
+`Floor::height` and `Mailbox::get_processed_height` are replaced by `processed`
+and `get_processed`, `get_anchor` returns the position with its stored backing
+block, and `Absent(H)` is backed by the floor block at `H + 1` ([#4979]).
+`Floor::round` is `cutoff`, returning `Cutoff::{Round, Epoch}` with an inclusive
+`covers` ([#5445]). Marshal persists the cutoff in its application metadata
+partition and keeps the newest finalization at or below the processed height
+across pruning, so an applied `Start::Floor` stays superseded after restart and
+provider retirement ([#5295], [#5314]). An epoch cutoff also suppresses later
+finalizations of a processed epoch-boundary block, which relies on consistent
+epoch mappings across validators ([#5445]). The added metadata entries are
+readable by v2026.9.0, which does not use them ([#5314]).
+
+Late finalizations for retained, already processed blocks are stored durably
+instead of dropped ([#5379]), pending floor anchors are also satisfied from the
+local buffer ([#5004]), and restart opens only epoch caches with existing
+partitions ([#5315]). Finalization-by-height and notarized-round deliveries
+without the required epoch coverage return `Outcome::Ignored` without
+validation, credit, or blame and retire without retry, so keep epocher and
+provider coverage for history still needed to advance, and the marshal resolver
+`Handler::deliver` returns `oneshot::Receiver<Outcome>` ([#5463]). Cache view
+retention spans epoch boundaries conservatively ([#5463]). The marshal resolver
+`Config` renames `fetch_retry_timeout` to `fetch_retry_delay` and gains
+`fetch_timeout` ([#5510]). `ancestry::BoxedAncestry::new` is public ([#5497]).
+An archive read error during a digest lookup stops the actor instead of reading
+as a missing block ([#5465]).
+
+`Block` requires `Heightable + Digestible + Encode` with decoding bounds only
+where needed, and `Arc` and `Digested` values implement it ([#4692], [#5201]).
+Standard marshal works on `Digested<B>`, which `Ancestry`, `Update::Block`, and
+parent subscriptions carry, `Application::propose` returns a digested block, and
+buffer lookups return `V::Block` without an outer `Arc` ([#4692], [#5201]).
+Custom block stores receive the digest and a borrowed block in `Blocks::put`,
+and `Certificates::put` borrows the finalization ([#4692]). Custom variants
+replace `block_cfg` with asynchronous `decode_block`, implement both `restore`
+and `restore_across`, replace `stored_commitment` with
+`stored_parent_commitment` and the inner conversions with `into_shared`, take
+`Digested` in `from_application_block` ([#5201]), and implement
+`max_backfill_block_size` and `max_buffer_payload_size` ([#4716]).
+
+Coding block fetches reuse an authenticated coding root through
+`ExpectedCommitment::{Trusted, Untrusted}`: replace `certified_block` with
+`certified` for a block this node certified or its authenticated ancestry, and
+use `untrusted` without that evidence, since a notarization alone is
+insufficient ([#4686]). The finalized constructors are `finalized_by_height` and
+`finalized_by_round` ([#4686]).
+
+Wire `Inline`, `Deferred`, or coding `Marshaled` as Simplex's reporter as well
+as its automaton and relay, passing the application's update reporter to the
+marshal actor separately ([#5208]). All validators must run the same standard
+wrapper within an epoch and switch at an epoch boundary, because `Inline` and
+`Deferred` give notarization different verification meanings ([#5067]).
+`BoundedBlock`, `simplex::max_payload_size`, and `marshal::max_payload_size`
+derive network limits from the committee size and application block bound
+([#4716]).
+
+The coding marshal replaces `CodedBlock::new` with asynchronous
+`CodedBlock::encode` over a `Digested` block and `new_trusted` with
+`precomputed`, removes `CodedBlockCfg` and direct `CodedBlock` decoding in favor
+of the variant decoder, and exposes the application value through `inner`,
+`inner_shared`, and `inner_digested` ([#5201]). Its shard config drops
+`shard_codec_cfg` ([#5035]), renames `block_codec_cfg` to `block_codec_config`,
+and derives the shard width from that bound, which every node must configure
+identically because an oversized shard blocks its sender ([#4716]). It also
+drops `background_channel_capacity` and sizes the decoded-shard mailbox from the
+network receiver's `Receiver::capacity` ([#5498]). The new `records:
+NonZeroUsize` caps retained commitment records and must be at least `2 * (max(1,
+optimistic_views) + 2)` ([#5035], [#5208]).
+
+The engine keeps one reconstruction job per record, checks only the pending
+shards needed to reach the threshold, and releases shard state after caching a
+block ([#5035]). `Mailbox::retire`, `Retirement`, and `Buffer::retire` are
+removed with record eviction, and the `erasure_decode_duration` histogram is
+`reconstruction_duration`, which now spans a whole successful reconstruction job
+including pending-shard checks ([#5035]). A committee member without a signing
+share still receives and gossips its shard ([#5433]).
+
+Buffered broadcast requires `Config::strategy` and sends, gets, and subscribes
+to `Digested<M>`, with `broadcast_shared` removed ([#5201]), and both it and the
+coding marshal keep pre-record buffers for primaries of every tracked peer set,
+so overlap raises memory within the existing per-peer limits ([#5227]). The
+collector's p2p engine stops once every mailbox handle is dropped ([#5153]).
+
+### Simplex
+
+Simplex can pipeline a term handoff through `CertifiableAutomaton::prepare`,
+which returns a `Handoff` for the incoming leader's first view: `Vote` relays
+and votes before the parent certifies, `Stage` relays early and holds the vote,
+and the default `Wait` builds after certification ([#5208]). Early voting trusts
+the outgoing leader to finish its term without equivocating, and a closed
+response forfeits the proposal opportunity ([#5208]). Custom electors declare
+`Elector::Mode`: `Scheduled` receives `()` and supports handoffs, `Dynamic`
+receives `Option<&S::Certificate>` as before, and `RoundRobinElector` is
+scheduled while `RandomElector` is dynamic ([#5208]). Relays must handle
+`Plan::Prepare`, and the marshal wrappers forward `prepare` so an application
+can opt in ([#5208]). The voter exposes `handoff_events` and `handoff_abandoned`
+counter families plus `notarization_latency_from_view_entry` and
+`finalization_latency_from_view_entry` histograms ([#5208]). Vote and
+certificate encodings and the built-in leader schedules are unchanged ([#5040],
+[#5208]).
+
+The voter journals a configured `Floor::Finalized` before participating, so an
+intact journal resumes from the highest floor or finalization it holds even when
+a later start supplies a lower floor ([#5294]). Vote admission buffers evidence
+farther ahead while local certification is pending, including the next term's
+early votes, and skipped views report and deduplicate votes with compact signer
+state when `track_historical_votes` is false ([#5294]). The voter drops a local
+build that conflicts with a certificate already held for the view instead of
+relaying it, and `Activity::Certification` is marked verified ([#5294]). The
+batcher assembles a certificate optimistically at quorum, retaining valid votes
+and blocking identified invalid senders after a fallback ([#4800]). Its
+`verified`, `verify_latency`, and `recover_latency` series are replaced by
+`processed` and `construct_latency`, with `construct_fallback` counting
+fallbacks, and `processed` and `batch_size` include rejected pending votes
+([#4800]).
+
+Background certificate repair waits for journal replay to finish and submits its
+fetches in batches ([#5372], [#5393]), and resolver delivery no longer panics
+under tracing when the queued delivery owns the last parent span ([#5097]).
+`simplex::types::VoteTracker` is no longer public ([#4955]), and the unused
+`simplex::types::{Backfiller, Request, Response}` are removed without changing
+the resolver's wire messages ([#4953]). A peer echo of the configured
+`Floor::Finalized` no longer repeats its startup report or triggers a
+floor-certificate broadcast ([#4956]). `Monitor::subscribe` returns an
+`IndexSubscription` ring receiver that may skip intermediate indices for a slow
+subscriber ([#5282]). `Config::fetch_timeout` is a `NonZeroDuration`, and the
+new `Config::fetch_retry_delay` sets the pause before an unresolved fetch is
+retried ([#5510]).
+
+The `certify` docs now state that certification does not imply finalization and
+that a repeated certification after restart leaves the proposal pending until it
+resolves ([#5373], [#5454]). `Automaton::verify` must reach the same verdict at
+every honest participant for the same context and payload ([#5501]). With stable
+leaders, optimistic validation can run it before the parent is fixed, so keep
+checks that depend on ancestry pending until it is known or leave them to
+`certify` ([#5501]). Aggregation signs and rebroadcasts heights it verified
+before joining the signing committee ([#4949]). `Reporters<A, R1, R2>` is
+`Reporters<R1, R2>` ([#5068]).
+
+### QMDB
+
+QMDB roots change with the Merkle root format above, and no setting keeps the
+v2026.9.0 format ([#5310]). Every family's `init` takes a `max_size:
+Option<Location<_>>`: `None` opens the latest state, and `Some(bound)` durably
+selects the latest retained commit at or below that operation count, replacing
+the removed `rewind` methods ([#4910]). Zero is rejected with
+`InvalidInitializationBound`, the recovered commitment should be checked when an
+exact checkpoint matters, and the selected commit's replay floor must still be
+retained or Any, Current, Immutable, and Store return `HistoricalFloorPruned`
+([#4910]). `apply_batch` returns the database alone, so compute an appended
+range from the sizes before and after if needed ([#5318]). Partitioned Any and
+Current initialization decodes replay in parallel when `init_concurrency`
+exceeds three, cancelling initialization aborts its snapshot tasks, and startup
+replay reads with `DONT_CACHE` ([#4567], [#4772]).
+
+Immutable and Keyless `merkleize`, including the compact variants, returns
+`Result` and rejects a database outside the batch chain or a dropped unapplied
+ancestor with `StaleBatch` ([#4932]), and batch reads return `StaleRead` when
+the database is outside their chain ([#4531]). Immutable batch reads omit values
+below the inherited inactivity floor, and Keyless batch reads return
+`BelowInactivityFloor` there ([#4531]). Keyless can return `ItemPruned` above
+that floor after recovery or sync when neither the database nor its batch chain
+retains the operation ([#4910]). `qmdb::batch_chain` is `qmdb::chain`,
+`Bounds::ancestors` holds `Commitment` values, and `AncestorBounds` is gone
+([#4531], [#4773]). Keyless batch reads return `LocationOutOfBounds` at or
+beyond the batch size, merkleized Keyless batches expose `size`, and `get_many`
+returns `LocationOutOfOrder` for duplicate or decreasing locations ([#5276],
+[#5362]).
+
+Any and Current merkleization and Store batch application take an explicit
+`floor::Policy`: `&mut floor::Proportional` gives the bounded-growth behavior,
+`Hold` keeps the inherited floor unless the final state is empty, `Bounded` caps
+entries decided and inactive locations skipped, and a custom `Policy` keeps,
+replaces, or evicts entries, with policy state provisional until the batch is
+applied ([#5133]). Replicas must use the same policy and policy state to produce
+identical operations and roots ([#5133]). `any::operation::Update` loses
+`STAGES_DELETES` and `STAGES_ANCESTORS`, and `update.cached()` becomes
+`Update::cached(|| &update)` ([#5133], [#5459]). Staged Any and Current writes
+supply one `Slot::{Keep, Put, Delete}` per staged read, sized by `Staged::len`,
+with repeated keys resolved by the last put or delete in slot order and unstaged
+mutations applied last ([#5459]).
+
+Ordered Any and Current databases and their merkleized batches gained strict
+`get_prev_key` and `get_next_key` lookups that accept absent keys and do not
+wrap ([#4818]). `stream_range` takes a standard range and returns a lazy stream
+synchronously, delivering read failures as items: replace
+`stream_range(start).await?` with `stream_range(start..)`, and use `keys(range)`
+for keys only ([#4837]). Ordered indexes and ordered QMDB constructors require
+an `OrderedTranslator` whose output preserves byte order ([#5449]). The cap
+translators qualify and `Hashed<T>` does not ([#5449]).
+`Config::init_cache_size` is `init_cache` on Any, Current, and Store ([#4773]),
+partitioned Any and Current implement `sync::Database` ([#4633]), index
+`get_many` accepts an iterator and `Unordered::LOOKUP_WARMS_UPDATE` lets a
+custom index opt out of warming probes ([#5441]), index `Cursor::{retain, find}`
+and `Unordered::{insert_and_retain, retain}` take `FnMut` predicates with
+`Cursor::retain` taking its predicate by value ([#5068]), and ordered parallel
+snapshot builds publish their index metrics in batches under unchanged names
+([#5434]).
+
+Immutable removes pruned positions from its snapshot through the new
+`index::immutable` module, dropping its `snapshot_keys` gauge ([#5280]), and no
+longer promises a readable value for a key written more than once, which its
+contract already forbade ([#5034]). Compact Immutable and Keyless drop their
+codec-configuration type parameter while keeping
+`CompactConfig::commit_codec_config` ([#5348]), and lose `strategy` and
+`last_commit_loc` ([#4579]). Keyless and Store lose `last_commit_loc` as well,
+so derive the last commit from `size() - 1` or `bounds().end - 1`, and Store
+also drops its public `steps` field and makes `inactivity_floor_loc` private
+behind its getter ([#4623]). Any and Current overlap snapshot updates with
+journal appends, which requires an `I: 'static` index type on `apply_batch`,
+reads move decoded values out instead of cloning, and update-only ordered
+batches skip ancestor neighbor scans ([#4677], [#4726], [#4820], [#5441]).
+
+Current proofs come in `constant` and `dynamic` forms: `OperationProof` lives in
+`current::proof::constant`, key-value and exclusion proofs in the `constant`
+submodule of `current::ordered::proof` or `current::unordered::proof`, and they
+verify through their own `verify` without a database type ([#4705]). Dynamic
+proofs decode with `(chunk_size, max_digests)`, `required_chunks` identifies the
+bitmap chunks a proof needs, and `RangeProof::verify_with_chunk_size` supports
+widths chosen at runtime ([#4705]). `verify_proof_and_extract_digests` drops its
+explicit digest type argument ([#5352]). `RangeProof::build` and constant
+`OperationProof::build` construct proofs from prefetched digests ([#5162]),
+proof generation batches its operation reads ([#4885]), and Current keeps
+graft-height operation roots in memory so merkleizing an already grafted chunk
+needs no storage read ([#4547]).
+
+### Stateful Applications and DKG
+
+`SyncPlan::with_floor` is the asynchronous, consuming `set_floor`, which
+persists the selected finalization before marshal starts, and `may_state_sync`,
+`sync_height`, and `should_state_sync` are `may_sync`, `completed`, and
+`should_sync` ([#4999]). `SyncPlan::partition_prefix` and
+`requires_state_sync_floor` are removed, so keep the configured prefix and use
+`plan.floor().is_some()` ([#4999]). `SyncPlan::init` takes its context by value
+([#4961]). `ManagedDb::init` and `DatabaseSet::init` take an optional expected
+sync target and replace the removed rewind operations: a managed database
+durably discards state beyond that target before returning and reports
+`InitError::TargetMismatch` when the recovered target differs ([#4910]).
+Finalization receipts survive live marshal floor changes, redelivered blocks are
+applied once, and replacement receipts wait for the same durability barrier as
+the original ([#4979]).
+
+`Stateful::init` is `Stateful::new`, and its `Config` gains a `strategy` used to
+compute proposal digests once ([#4999], [#5201]). Build `stateful::db::Anchor`
+with `Anchor::from_block(&digested)` instead of `From` on a raw block ([#5201]).
+`propose_duration` now also observes successful `Vote` and `Stage` handoff
+builds ([#5208]). `Stateful` and `Config` derive the signing scheme from
+`Application::SigningScheme`, `Application` and `Proposed` lose their blanket
+runtime bounds, and `StateSyncSet` moves its digest parameter onto `sync`
+([#5349]). An application may implement `prepare`, returning
+`Handoff<Proposed<Self, E>>`, to join term handoffs ([#5208]).
+
+`Application::verify` and `Application::apply` are replaced by
+`Application::process`, which takes the block's ancestry and a `Finality` of
+`Candidate` or `Finalized` and returns the merkleized state, or `None` for an
+invalid block ([#5497]). Concurrent requests for one block share a single call,
+a successful result is kept as pending state that answers later verifications of
+that block, and a failed call is repeated by the next request ([#5497]). A
+`Candidate` must pass every rule a vote depends on, while a `Finalized` block
+may skip checks that do not affect its state but must still produce it
+([#5497]). The stateful actor gained an `ancestor_fetch_duration` histogram, and
+`stateful::db::p2p::Config` renames `fetch_retry_timeout` to `fetch_retry_delay`
+and gains `fetch_timeout` ([#5497], [#5510]).
+
+The new `glue::transfers` module settles `u64` balance transfers over staged
+QMDB batches: implement `Transfer` and `Account`, use `Plan` to settle a block's
+body or `Selection` to admit candidates incrementally, and merkleize the
+returned slots ([#5435]). Each transfer entry carries a `Change` with a debit,
+credit, and optional effect, and a key listed more than once settles as one
+change with debits and credits summed and effects applied in the listed order
+([#5490]). Debits must fit starting balances and credits become spendable only
+in a later batch, and on a refused account effect or overflow `Plan` rejects the
+whole body while `Selection` drops the offending candidate ([#5435]). Simulation
+definitions provide `EngineDefinition::max_message_size` ([#4716]), custom
+monitors use unbounded senders and supply `FinalizationUpdate::height`, and the
+harness detects conflicting blocks at the same height or round ([#4949]).
+
+DKG probing takes `Config::floor`, the persisted state-sync finalization, so
+discovery cannot select an older epoch on restart, and startup proceeds from the
+later of the persisted and sampled floors by round ([#4999]). Boundary
+verification waits for a participating actor to finish its dealing window,
+`EpochInfoResponse` has only `Available` and `Unavailable` with an unavailable
+result leaving verification pending, `Fence::new()` starts with no ready epoch,
+`Fence::epoch` and `Gate::epoch` are removed with `Fence::mark` returning `()`,
+and a signer that synced past failed ceremonies recovers its newest stored share
+when it matches the carried polynomial ([#5328]). The reshare `current_epoch`
+and `current_round` gauges also advance while following, and `phase` starts at
+Setup ([#5328]). Restore marshal, application, and reshare partitions from the
+same point ([#5328]).
+
+The bootstrap engine and reshare actor no longer panic at startup when an
+epoch's inclusion window holds fewer blocks than the dealer quorum ([#5265]). A
+ceremony instead needs a quorum of dealers to each propose a finalized block
+within the window, and a reshare that falls short fails and carries the previous
+output forward, so configure epoch length, leader terms, and election together
+([#5265]). The registrar receives `SchemeInfo::Member` for a committee member
+without a signing share ([#5433]), DKG payloads and `ReshareBlock` use
+public-key types in place of signer types ([#5350]), the reshare
+`Config::batch_verifier` field and `BV` parameter are gone because the public
+key supplies `BatchVerifier` ([#5135]), and boundary catch-up and missing-block
+fetches can use any tracked peer, so the next committee can serve a node whose
+own committee has departed ([#5325], [#5494]). Payload-size helpers cover
+bootstrap, orchestration, resharing, and both probes, and custom `Directory`
+implementations supply `max_encode_size` ([#4716]).
+
+The one-shot bootstrap DKG can restart after its share or final block is
+persisted and keeps serving laggards, so keep bootstrap engines running until
+every participant completes, and use separate secret stores for bootstrap and
+resharing, copying only the epoch-zero share ([#4999]). Bootstrap and reshare
+configs require explicit `page_cache`, `write_buffer`, `replay_buffer`, and
+`mailbox_size` values, and bootstrap also requires `items_per_section`
+([#4999]). Keep the previous logical page sizes, 1024 for the bootstrap store
+and 4096 for the resharing journal, and bootstrap's previous `items_per_section`
+of 10 ([#4999]). The orchestrator's `SimplexConfig` takes `page_cache: CacheRef`
+instead of separate page-size and page-count fields ([#4999]), and the
+orchestrator `Config` loses `muxer_size` ([#5498]). The orchestrator's
+`fetch_timeout` is a `NonZeroDuration` with a new `fetch_retry_delay`, and the
+bootstrap config gains both fields ([#5510]).
+
+### Parallelism and SIMD
+
+`Strategy::manual` and `Manual` are removed, and `Strategy::spawn` may run a job
+before returning, so code that used `manual().spawn(..)` to force a handoff must
+not have the job wait on its caller ([#5442]). A consumer hands its partitioning
+to `run_batches`, `try_run_batches`, or `run_tiles`, which supply scoped
+`Batches` or `Tiles` (with `map_collect_vec` and `fill_collect_vec`) so the
+strategy decides the execution shape, including preparation and result assembly
+([#5442]). `Strategy::sort_unstable_by` is new with a default for existing
+strategies ([#5459]). The `test-utils` feature adds `mocks::explore`,
+`mocks::pooled`, and `mocks::Explorer`, with `explore` comparing serial, most
+parallel, and seeded executions of a consumer ([#5442]).
+
+`commonware-parallel` vendors its thread pool and no longer depends on the
+`rayon` crate: build pools for `Rayon::with_pool` with
+`commonware_parallel::rayon::ThreadPoolBuilder`, and `ThreadPool` and
+`ThreadPoolBuildError` now name the vendored types rather than the upstream
+crate, and the builder has no `spawn_handler` or `panic_handler` hooks
+([#5486]). A spawned strategy future keeps servicing pool work when polled on a
+pool worker and stays pending without blocking when polled elsewhere, fixing
+waits that could stall dependent work ([#5486]).
+
+`commonware-simd` composes operations through `Simd` and `Operation` with
+portable implementations and native AVX2, AVX-512, NEON, and Armv9 backends
+([#5204], [#5389]). `dispatch` detects CPU support at runtime with `std` and
+relies on compile-time target features without it, falling back to scalar
+execution when no native backend applies, `check_consistent` compares the
+emulated backends in tests, and `std` does not enable tokio ([#5204], [#5383],
+[#5389]). The operation set includes vector-indexed permutations, byte table
+lookups, 64-bit rotations and three-input XOR, and same-width casts between 8,
+32, and 64-bit lanes ([#5385], [#5386], [#5387], [#5388]).
+
+### State Sync
+
+`Source::serve` returns `Option<Feedback<ResponseOf<Self>>>` in place of a
+one-shot sender: `accept` reports a valid response, `reject` asks for another,
+and dropping the handle cancels without judging the candidate ([#4113]). The P2P
+sync actor keeps handling fetches, cancellations, and database attachment while
+local reads are pending, its `pending_requests` gauge and `fetch_requests`
+counter count callers rather than distinct keys, `deliveries` records whether a
+candidate reached a caller rather than proof acceptance, and `cancel_requests`
+is removed ([#4113]).
+
+`max_outstanding_requests` on the storage and glue sync configs is
+`NonZeroUsize` and includes the boundary request ([#5148]). `max_retained_roots`
+is removed from both: a request keeps its original verification root across
+target advances, fetched batches and usable boundary pins survive them, and only
+moving the lower bound cancels requests at or below it ([#5044], [#5150]). A
+boundary reply no longer overwrites a longer buffered batch at the same location
+([#5149]). Target updates and reached-target reports travel over
+`channel::ring`, so a slow observer skips superseded values instead of pausing
+sync, custom `StateSyncDb` implementations adopt the ring endpoints, and
+`SyncEngineConfig::update_channel_size` is gone ([#5282]).
+
+Compact Immutable and Keyless databases serve compact sync at any committed size
+whose witness their journal still holds, so `Db::prune` decides which historical
+targets remain servable ([#5146]). `qmdb::sync::max_response_size` and
+`glue::stateful::db::p2p::max_payload_size` bound a response from the operation
+count and encoded operation size ([#4716]).
+
+### Coding
+
+`commonware-coding` removed ZODA along with `PhasedScheme`, `PhasedAsScheme`,
+and `ValidatingScheme`, leaving `ReedSolomon` behind the `Scheme` trait
+([#5035]). A shard decodes with `(Config, usize)` instead of `CodecConfig`,
+where the length is the maximum input size and caps the shard width ([#5035]).
+`Scheme::check` takes a `Strategy` ([#5201]), the new defaulted
+`Scheme::check_many` checks a slice of shards and returns results in input order
+([#4783]), and `Scheme::max_shard_size` bounds an encoded shard for a config and
+input length ([#4716]). A checked shard is bound to the hasher that verified it,
+not only its digest type ([#5406]), and encoding rejects a payload whose shard
+width cannot fit its length prefix or whose codeword exceeds the platform
+allocation bound before allocating ([#5287]).
+
+### Resolver
+
+A fetch without targets may use any peer of the latest tracked peer set, primary
+or secondary ([#5494]). A targeted fetch uses only its targets in that set, and
+a target outside it waits until a later set includes it ([#5325], [#5494]). The
+first attempt for a key samples peers in proportion to their throughput scores,
+later attempts mix in uniform sampling as unresolved requests accumulate, a
+failed send or a rate-limited peer moves on to another eligible peer without
+changing scores, and a retry may pick the same peer again ([#5494], [#5510]).
+Only a response that resolves a delivered subscriber earns credit, scored as
+useful bytes per second, and the `peer_performance` gauge reports that score as
+the peer's sampling weight ([#5510]). Request IDs start at a random value on the
+first send, so a response delayed from before a restart is unlikely to match a
+new request and block an honest peer ([#5412]). The simplex, marshal, and
+stateful database resolvers queue peer requests up to their channel's
+`Receiver::capacity` instead of `mailbox_size` ([#5498]).
+
+Queued fetches are indexed by key, so coalescing a large pending batch no longer
+scans every pending key ([#5340]).
+`commonware_resolver::p2p::max_message_size::<Key>(largest_value)`, with
+`REQUEST_OVERHEAD` and `MAX_RESPONSE_OVERHEAD`, sizes the resolver's payload for
+the p2p limit ([#4716]). `p2p::Engine` drops its sender and receiver type
+parameters, which move to `Engine::start` ([#5068]). `Outcome::Complete` is now
+`Outcome::Resolved(Resolution::Complete)`, `Resolved(Resolution::Partial)`
+reports a valid response that resolved only some delivered subscribers and
+retries the key while crediting the peer, and `Ambiguous` is `Unresolved`, which
+retries without credit or penalty ([#5510]). The p2p resolver `Config` renames
+`timeout` to `fetch_timeout`, now a `NonZeroDuration`, and `fetch_retry_timeout`
+to `fetch_retry_delay`, the pause after an unresolved attempt before the key is
+retried ([#5510]).
+
+### Solidity Verifiers
+
+The `sol` Foundry project verifies BMT, MMR, and MMB inclusion, range, and
+multiproofs with memory and calldata entry points, selecting Keccak256 through
+`address(0)` or an external hash target such as the SHA-256 precompile
+([#4825]). QMDB libraries verify operation inclusion for Any, Immutable, and
+Keyless over MMR or MMB, and active membership, historical inclusion, ranges,
+and ordered-key exclusion for Current, taking the operation schema and bitmap
+chunk size as trusted inputs ([#4842]). BLS12-381 threshold and multisignature
+libraries verify certificates, with Simplex wrappers for notarizations,
+nullifications, and finalizations, on chains with EIP-2537 precompiles ([#4825],
+[#4845]). Callers supply uncompressed signature coordinates and authenticate the
+namespace and subject: threshold verification takes the trusted group key, while
+multisignature verification takes an ordered committee of distinct keys whose
+proofs of possession were checked at registration, a raw signer bitmap, and a
+minimum signer count ([#4825], [#4845]).
+
+### Examples and Deployer
+
+The `commonware-reshare` example is now `commonware-dkg` under `examples/dkg`
+([#4999]). Its `setup` only writes configuration, `bootstrap` runs the initial
+ceremony for the epoch-zero committee, and `validator` consumes its output, so
+run the ceremony, wait for every player to report completion, stop the bootstrap
+processes, then start validators ([#4999]). Secret material lives in the
+`bootstrap-secrets` and `secrets` runtime partitions instead of `secrets.json`,
+the namespace is `_COMMONWARE_EXAMPLES_DKG`, and `node.json` names its key
+`signer`, so start a fresh example network rather than migrating reshare data
+([#4829], [#4999]). Bridge, chat, flood, log, and dkg select SAKE V1 and CUPS V1
+with `ChaCha20Poly1305`, so upgrade communicating example processes together,
+including bridge indexers ([#5018]). `deployer` reports an error from a
+concurrent AWS batch without waiting for the batch's other operations ([#4728]).
+
+[#4113]: https://github.com/commonwarexyz/monorepo/pull/4113
+[#4531]: https://github.com/commonwarexyz/monorepo/pull/4531
+[#4547]: https://github.com/commonwarexyz/monorepo/pull/4547
+[#4567]: https://github.com/commonwarexyz/monorepo/pull/4567
+[#4575]: https://github.com/commonwarexyz/monorepo/pull/4575
+[#4579]: https://github.com/commonwarexyz/monorepo/pull/4579
+[#4623]: https://github.com/commonwarexyz/monorepo/pull/4623
+[#4632]: https://github.com/commonwarexyz/monorepo/pull/4632
+[#4633]: https://github.com/commonwarexyz/monorepo/pull/4633
+[#4661]: https://github.com/commonwarexyz/monorepo/pull/4661
+[#4667]: https://github.com/commonwarexyz/monorepo/pull/4667
+[#4672]: https://github.com/commonwarexyz/monorepo/pull/4672
+[#4674]: https://github.com/commonwarexyz/monorepo/pull/4674
+[#4675]: https://github.com/commonwarexyz/monorepo/pull/4675
+[#4677]: https://github.com/commonwarexyz/monorepo/pull/4677
+[#4686]: https://github.com/commonwarexyz/monorepo/pull/4686
+[#4691]: https://github.com/commonwarexyz/monorepo/pull/4691
+[#4692]: https://github.com/commonwarexyz/monorepo/pull/4692
+[#4705]: https://github.com/commonwarexyz/monorepo/pull/4705
+[#4716]: https://github.com/commonwarexyz/monorepo/pull/4716
+[#4719]: https://github.com/commonwarexyz/monorepo/pull/4719
+[#4726]: https://github.com/commonwarexyz/monorepo/pull/4726
+[#4728]: https://github.com/commonwarexyz/monorepo/pull/4728
+[#4771]: https://github.com/commonwarexyz/monorepo/pull/4771
+[#4772]: https://github.com/commonwarexyz/monorepo/pull/4772
+[#4773]: https://github.com/commonwarexyz/monorepo/pull/4773
+[#4783]: https://github.com/commonwarexyz/monorepo/pull/4783
+[#4800]: https://github.com/commonwarexyz/monorepo/pull/4800
+[#4808]: https://github.com/commonwarexyz/monorepo/pull/4808
+[#4818]: https://github.com/commonwarexyz/monorepo/pull/4818
+[#4819]: https://github.com/commonwarexyz/monorepo/pull/4819
+[#4820]: https://github.com/commonwarexyz/monorepo/pull/4820
+[#4821]: https://github.com/commonwarexyz/monorepo/pull/4821
+[#4825]: https://github.com/commonwarexyz/monorepo/pull/4825
+[#4829]: https://github.com/commonwarexyz/monorepo/pull/4829
+[#4832]: https://github.com/commonwarexyz/monorepo/pull/4832
+[#4835]: https://github.com/commonwarexyz/monorepo/pull/4835
+[#4837]: https://github.com/commonwarexyz/monorepo/pull/4837
+[#4842]: https://github.com/commonwarexyz/monorepo/pull/4842
+[#4845]: https://github.com/commonwarexyz/monorepo/pull/4845
+[#4847]: https://github.com/commonwarexyz/monorepo/pull/4847
+[#4854]: https://github.com/commonwarexyz/monorepo/pull/4854
+[#4858]: https://github.com/commonwarexyz/monorepo/pull/4858
+[#4859]: https://github.com/commonwarexyz/monorepo/pull/4859
+[#4885]: https://github.com/commonwarexyz/monorepo/pull/4885
+[#4887]: https://github.com/commonwarexyz/monorepo/pull/4887
+[#4888]: https://github.com/commonwarexyz/monorepo/pull/4888
+[#4894]: https://github.com/commonwarexyz/monorepo/pull/4894
+[#4895]: https://github.com/commonwarexyz/monorepo/pull/4895
+[#4909]: https://github.com/commonwarexyz/monorepo/pull/4909
+[#4910]: https://github.com/commonwarexyz/monorepo/pull/4910
+[#4932]: https://github.com/commonwarexyz/monorepo/pull/4932
+[#4933]: https://github.com/commonwarexyz/monorepo/pull/4933
+[#4943]: https://github.com/commonwarexyz/monorepo/pull/4943
+[#4944]: https://github.com/commonwarexyz/monorepo/pull/4944
+[#4949]: https://github.com/commonwarexyz/monorepo/pull/4949
+[#4953]: https://github.com/commonwarexyz/monorepo/pull/4953
+[#4954]: https://github.com/commonwarexyz/monorepo/pull/4954
+[#4955]: https://github.com/commonwarexyz/monorepo/pull/4955
+[#4956]: https://github.com/commonwarexyz/monorepo/pull/4956
+[#4957]: https://github.com/commonwarexyz/monorepo/pull/4957
+[#4959]: https://github.com/commonwarexyz/monorepo/pull/4959
+[#4961]: https://github.com/commonwarexyz/monorepo/pull/4961
+[#4977]: https://github.com/commonwarexyz/monorepo/pull/4977
+[#4979]: https://github.com/commonwarexyz/monorepo/pull/4979
+[#4981]: https://github.com/commonwarexyz/monorepo/pull/4981
+[#4999]: https://github.com/commonwarexyz/monorepo/pull/4999
+[#5004]: https://github.com/commonwarexyz/monorepo/pull/5004
+[#5018]: https://github.com/commonwarexyz/monorepo/pull/5018
+[#5034]: https://github.com/commonwarexyz/monorepo/pull/5034
+[#5035]: https://github.com/commonwarexyz/monorepo/pull/5035
+[#5040]: https://github.com/commonwarexyz/monorepo/pull/5040
+[#5041]: https://github.com/commonwarexyz/monorepo/pull/5041
+[#5044]: https://github.com/commonwarexyz/monorepo/pull/5044
+[#5061]: https://github.com/commonwarexyz/monorepo/pull/5061
+[#5064]: https://github.com/commonwarexyz/monorepo/pull/5064
+[#5067]: https://github.com/commonwarexyz/monorepo/pull/5067
+[#5068]: https://github.com/commonwarexyz/monorepo/pull/5068
+[#5097]: https://github.com/commonwarexyz/monorepo/pull/5097
+[#5121]: https://github.com/commonwarexyz/monorepo/pull/5121
+[#5129]: https://github.com/commonwarexyz/monorepo/pull/5129
+[#5132]: https://github.com/commonwarexyz/monorepo/pull/5132
+[#5133]: https://github.com/commonwarexyz/monorepo/pull/5133
+[#5134]: https://github.com/commonwarexyz/monorepo/pull/5134
+[#5135]: https://github.com/commonwarexyz/monorepo/pull/5135
+[#5141]: https://github.com/commonwarexyz/monorepo/pull/5141
+[#5146]: https://github.com/commonwarexyz/monorepo/pull/5146
+[#5148]: https://github.com/commonwarexyz/monorepo/pull/5148
+[#5149]: https://github.com/commonwarexyz/monorepo/pull/5149
+[#5150]: https://github.com/commonwarexyz/monorepo/pull/5150
+[#5153]: https://github.com/commonwarexyz/monorepo/pull/5153
+[#5154]: https://github.com/commonwarexyz/monorepo/pull/5154
+[#5155]: https://github.com/commonwarexyz/monorepo/pull/5155
+[#5162]: https://github.com/commonwarexyz/monorepo/pull/5162
+[#5164]: https://github.com/commonwarexyz/monorepo/pull/5164
+[#5188]: https://github.com/commonwarexyz/monorepo/pull/5188
+[#5190]: https://github.com/commonwarexyz/monorepo/pull/5190
+[#5201]: https://github.com/commonwarexyz/monorepo/pull/5201
+[#5204]: https://github.com/commonwarexyz/monorepo/pull/5204
+[#5208]: https://github.com/commonwarexyz/monorepo/pull/5208
+[#5227]: https://github.com/commonwarexyz/monorepo/pull/5227
+[#5230]: https://github.com/commonwarexyz/monorepo/pull/5230
+[#5232]: https://github.com/commonwarexyz/monorepo/pull/5232
+[#5243]: https://github.com/commonwarexyz/monorepo/pull/5243
+[#5265]: https://github.com/commonwarexyz/monorepo/pull/5265
+[#5267]: https://github.com/commonwarexyz/monorepo/pull/5267
+[#5268]: https://github.com/commonwarexyz/monorepo/pull/5268
+[#5269]: https://github.com/commonwarexyz/monorepo/pull/5269
+[#5275]: https://github.com/commonwarexyz/monorepo/pull/5275
+[#5276]: https://github.com/commonwarexyz/monorepo/pull/5276
+[#5277]: https://github.com/commonwarexyz/monorepo/pull/5277
+[#5280]: https://github.com/commonwarexyz/monorepo/pull/5280
+[#5282]: https://github.com/commonwarexyz/monorepo/pull/5282
+[#5285]: https://github.com/commonwarexyz/monorepo/pull/5285
+[#5286]: https://github.com/commonwarexyz/monorepo/pull/5286
+[#5287]: https://github.com/commonwarexyz/monorepo/pull/5287
+[#5288]: https://github.com/commonwarexyz/monorepo/pull/5288
+[#5291]: https://github.com/commonwarexyz/monorepo/pull/5291
+[#5294]: https://github.com/commonwarexyz/monorepo/pull/5294
+[#5295]: https://github.com/commonwarexyz/monorepo/pull/5295
+[#5301]: https://github.com/commonwarexyz/monorepo/pull/5301
+[#5303]: https://github.com/commonwarexyz/monorepo/pull/5303
+[#5304]: https://github.com/commonwarexyz/monorepo/pull/5304
+[#5310]: https://github.com/commonwarexyz/monorepo/pull/5310
+[#5314]: https://github.com/commonwarexyz/monorepo/pull/5314
+[#5315]: https://github.com/commonwarexyz/monorepo/pull/5315
+[#5318]: https://github.com/commonwarexyz/monorepo/pull/5318
+[#5323]: https://github.com/commonwarexyz/monorepo/pull/5323
+[#5325]: https://github.com/commonwarexyz/monorepo/pull/5325
+[#5327]: https://github.com/commonwarexyz/monorepo/pull/5327
+[#5328]: https://github.com/commonwarexyz/monorepo/pull/5328
+[#5335]: https://github.com/commonwarexyz/monorepo/pull/5335
+[#5340]: https://github.com/commonwarexyz/monorepo/pull/5340
+[#5343]: https://github.com/commonwarexyz/monorepo/pull/5343
+[#5346]: https://github.com/commonwarexyz/monorepo/pull/5346
+[#5348]: https://github.com/commonwarexyz/monorepo/pull/5348
+[#5349]: https://github.com/commonwarexyz/monorepo/pull/5349
+[#5350]: https://github.com/commonwarexyz/monorepo/pull/5350
+[#5352]: https://github.com/commonwarexyz/monorepo/pull/5352
+[#5362]: https://github.com/commonwarexyz/monorepo/pull/5362
+[#5372]: https://github.com/commonwarexyz/monorepo/pull/5372
+[#5373]: https://github.com/commonwarexyz/monorepo/pull/5373
+[#5376]: https://github.com/commonwarexyz/monorepo/pull/5376
+[#5379]: https://github.com/commonwarexyz/monorepo/pull/5379
+[#5380]: https://github.com/commonwarexyz/monorepo/pull/5380
+[#5383]: https://github.com/commonwarexyz/monorepo/pull/5383
+[#5385]: https://github.com/commonwarexyz/monorepo/pull/5385
+[#5386]: https://github.com/commonwarexyz/monorepo/pull/5386
+[#5387]: https://github.com/commonwarexyz/monorepo/pull/5387
+[#5388]: https://github.com/commonwarexyz/monorepo/pull/5388
+[#5389]: https://github.com/commonwarexyz/monorepo/pull/5389
+[#5393]: https://github.com/commonwarexyz/monorepo/pull/5393
+[#5398]: https://github.com/commonwarexyz/monorepo/pull/5398
+[#5403]: https://github.com/commonwarexyz/monorepo/pull/5403
+[#5406]: https://github.com/commonwarexyz/monorepo/pull/5406
+[#5412]: https://github.com/commonwarexyz/monorepo/pull/5412
+[#5427]: https://github.com/commonwarexyz/monorepo/pull/5427
+[#5433]: https://github.com/commonwarexyz/monorepo/pull/5433
+[#5434]: https://github.com/commonwarexyz/monorepo/pull/5434
+[#5435]: https://github.com/commonwarexyz/monorepo/pull/5435
+[#5441]: https://github.com/commonwarexyz/monorepo/pull/5441
+[#5442]: https://github.com/commonwarexyz/monorepo/pull/5442
+[#5445]: https://github.com/commonwarexyz/monorepo/pull/5445
+[#5449]: https://github.com/commonwarexyz/monorepo/pull/5449
+[#5451]: https://github.com/commonwarexyz/monorepo/pull/5451
+[#5454]: https://github.com/commonwarexyz/monorepo/pull/5454
+[#5459]: https://github.com/commonwarexyz/monorepo/pull/5459
+[#5461]: https://github.com/commonwarexyz/monorepo/pull/5461
+[#5463]: https://github.com/commonwarexyz/monorepo/pull/5463
+[#5465]: https://github.com/commonwarexyz/monorepo/pull/5465
+[#5484]: https://github.com/commonwarexyz/monorepo/pull/5484
+[#5486]: https://github.com/commonwarexyz/monorepo/pull/5486
+[#5490]: https://github.com/commonwarexyz/monorepo/pull/5490
+[#5494]: https://github.com/commonwarexyz/monorepo/pull/5494
+[#5497]: https://github.com/commonwarexyz/monorepo/pull/5497
+[#5498]: https://github.com/commonwarexyz/monorepo/pull/5498
+[#5499]: https://github.com/commonwarexyz/monorepo/pull/5499
+[#5501]: https://github.com/commonwarexyz/monorepo/pull/5501
+[#5510]: https://github.com/commonwarexyz/monorepo/pull/5510
+[#5512]: https://github.com/commonwarexyz/monorepo/pull/5512
+
 ## v2026.9.0
 
 <details>

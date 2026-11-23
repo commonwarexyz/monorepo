@@ -1,9 +1,9 @@
 //! Mock `Reporter` for tests: tracks participants/leaders, verifies activities,
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
-    Monitor, Viewable,
+    IndexSubscription, Monitor, Viewable,
     simplex::{
-        elector::{self, Elector as _},
+        elector::{self, Elector, Mode as _},
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
@@ -20,23 +20,21 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
-    channel::{
-        fallible::AsyncFallibleExt,
-        mpsc::{Receiver, Sender},
-    },
+    NZUsize,
+    channel::ring,
     ordered::{Quorum, Set},
     sync::Mutex,
 };
 use rand_core::CryptoRng;
 use std::{
     collections::{HashMap, HashSet},
-    hash::Hash,
     sync::Arc,
 };
 
 // Records which validators have participated in a given view/payload pair.
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<S, D> = HashMap<<S as Verifier>::PublicKey, HashMap<View, HashSet<Activity<S, D>>>>;
+type Finalizations<S, D> = HashMap<View, (Finalization<S, D>, usize)>;
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
@@ -60,13 +58,13 @@ pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<S>>>>,
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
-    pub finalizations: Arc<Mutex<HashMap<View, Finalization<S, D>>>>,
+    pub finalizations: Arc<Mutex<Finalizations<S, D>>>,
     pub faults: Arc<Mutex<Faults<S, D>>>,
     pub invalid_votes: Arc<Mutex<usize>>,
     pub invalid_certificates: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
-    subscribers: Arc<Mutex<Vec<Sender<View>>>>,
+    subscribers: Arc<Mutex<Vec<ring::Sender<View>>>>,
 }
 
 impl<E, S, L, D> Clone for Reporter<E, S, L, D>
@@ -74,7 +72,6 @@ where
     E: CryptoRng,
     S: Scheme,
     L: elector::Config<S>,
-    L::Elector: Clone,
     D: Digest,
 {
     fn clone(&self) -> Self {
@@ -106,7 +103,7 @@ where
     E: CryptoRng,
     S: Scheme,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let elector = cfg.elector.build(&cfg.participants);
@@ -141,7 +138,8 @@ where
         let next_round = Round::new(round.epoch(), next_view);
         let mut leaders = self.leaders.lock();
         leaders.entry(next_round.view()).or_insert_with(|| {
-            let leader = self.elector.elect(next_round, Some(certificate));
+            let input = <L::Elector as Elector<S>>::Mode::input(Some(certificate));
+            let leader = self.elector.elect(next_round, input);
             self.participants.key(leader).cloned().unwrap()
         });
     }
@@ -164,7 +162,7 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Activity = Activity<S, D>;
 
@@ -293,7 +291,11 @@ where
                 let encoded = finalization.encode();
                 Finalization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
-                self.finalizations.lock().insert(view, finalization.clone());
+                self.finalizations
+                    .lock()
+                    .entry(view)
+                    .or_insert_with(|| (finalization.clone(), 0))
+                    .1 += 1;
                 self.certified(
                     finalization.round(),
                     finalization.view().next(),
@@ -302,10 +304,9 @@ where
 
                 // Send message to subscribers
                 *self.latest.lock() = finalization.view();
-                let mut subscribers = self.subscribers.lock();
-                for subscriber in subscribers.iter_mut() {
-                    subscriber.try_send_lossy(finalization.view());
-                }
+                self.subscribers
+                    .lock()
+                    .retain(|subscriber| subscriber.send_lossy(finalization.view()));
             }
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
@@ -368,12 +369,12 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: Scheme,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Index = View;
 
-    async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
-        let (tx, rx) = commonware_utils::channel::mpsc::channel(128);
+    async fn subscribe(&mut self) -> (Self::Index, IndexSubscription<Self::Index>) {
+        let (tx, rx) = ring::channel(NZUsize!(1));
         self.subscribers.lock().push(tx);
         let latest = *self.latest.lock();
         (latest, rx)

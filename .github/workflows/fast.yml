@@ -5,19 +5,24 @@ on:
     branches: [ "main" ]
   pull_request:
   merge_group:
+  # Nightly toolchains are published around 01:05 to 01:15 UTC. A run on main after that saves
+  # the nightly build jobs' caches. 03:30 UTC is a quiet hour in both California and Europe, and
+  # avoids the top of the hour, when GitHub delays scheduled runs the most.
+  schedule:
+    - cron: "30 3 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-fast-${{ github.head_ref || github.ref_name || github.run_id }}
+  group: tests-fast-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# rust-cache keys include every CARGO* and RUST* variable, so tool versions use other names.
 env:
   CARGO_TERM_COLOR: always
-  CARGO_COOLDOWN_VERSION: 0.3.4
+  COOLDOWN_VERSION: 0.3.4
   UDEPS_VERSION: 0.1.57
-  NIGHTLY_VERSION: nightly-2026-06-21
   PANDOC_VERSION: 3.8.2.1
 
 jobs:
@@ -26,13 +31,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring"
-          - os: ubuntu-latest
-            flags: ""
-          - os: macos-latest
-            flags: ""
+        os: [ubuntu-latest, macos-latest]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -41,34 +40,32 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        components: clippy
-        additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-components: ${{ matrix.os == 'ubuntu-latest' && matrix.flags == '' && 'rustfmt,rustc-dev,llvm-tools-preview' || 'rustfmt' }}
-        additional-cache-key: ${{ matrix.flags || 'default' }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0
     - name: Install Dylint
-      if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
+      if: matrix.os == 'ubuntu-latest'
       run: |
-        cargo install cargo-dylint --version 6.0.0 --locked
-        cargo install dylint-link --version 6.0.0 --locked
+        cargo install cargo-dylint --version 6.3.0 --locked
+        cargo install dylint-link --version 6.3.0 --locked
+    - name: Install pinned lint toolchains
+      run: just install-lint-toolchains
     - name: Fmt
       run: just check-fmt
     - name: Lint
-      run: just clippy ${{ matrix.flags }}
+      run: just clippy
     - name: Dylint
-      if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
+      if: matrix.os == 'ubuntu-latest'
       run: just dylint
     - name: Check docs
-      run: just check-docs ${{ matrix.flags }}
+      run: just check-docs
     - name: Test docs
-      run: just test-docs ${{ matrix.flags }}
+      run: just test-docs
 
   Lint-Gate:
     name: "Lints"
@@ -76,12 +73,6 @@ jobs:
     needs: [Lint, lint-toml, zepter]
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check lint results
         run: |
           if [ "${{ needs.Lint.result }}" != "success" ]; then
@@ -98,21 +89,17 @@ jobs:
           fi
           echo "All lints passed!"
 
-  Tests:
-    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/2)"
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+  # The fast and slow nextest profiles only select which tests run, so one build of each
+  # operating system's test binaries, on a larger runner, serves all of its partitions.
+  Tests-Build:
+    name: "Tests (os: ${{ matrix.os }}) (build)"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        partition: [1, 2]
-        flags:
-          - "--features commonware-runtime/iouring"
-          - ""
-        exclude:
-          # Only run io_uring features on Ubuntu
-          - os: macos-latest
-            flags: "--features commonware-runtime/iouring"
+        include:
+          - { os: ubuntu-latest, runner: ubuntu-latest-16 }
+          - { os: macos-latest, runner: macos-latest-5 }
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -123,21 +110,83 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}
-        rust-cache-save: ${{ matrix.partition == 1 }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-    - name: Install just & nextest
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+    - name: Install nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: just@1.43.0,cargo-nextest@0.9.133
+        tool: cargo-nextest@0.9.133
+    - name: Build and archive tests
+      run: cargo nextest archive --archive-file "$RUNNER_TEMP/tests.tar.zst"
+    - name: Upload tests
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      with:
+        name: tests-${{ matrix.os }}
+        path: ${{ runner.temp }}/tests.tar.zst
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 1
+        overwrite: true
+
+  # Coverage runs every Linux test outside the fuzz crates, slow ones included, so the slow
+  # partitions here run only on macOS. All partitions share one matrix, so the first failing
+  # partition cancels the others.
+  Tests:
+    name: "Tests (os: ${{ matrix.os }}, suite: ${{ matrix.shard.suite }}) (partition: ${{ matrix.shard.partition }}/${{ matrix.shard.partitions }})"
+    needs: Tests-Build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        shard:
+          - { suite: fast, profile: default, partition: 1, partitions: 2 }
+          - { suite: fast, profile: default, partition: 2, partitions: 2 }
+        include:
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 1, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 2, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 3, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 4, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 5, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 6, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 7, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 8, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 9, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 10, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 11, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 12, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 13, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 14, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 15, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 16, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 17, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 18, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 19, partitions: 20 } }
+          - { os: macos-latest, shard: { suite: slow, profile: slow, partition: 20, partitions: 20 } }
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
+    - name: Install nextest
+      uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      with:
+        tool: cargo-nextest@0.9.133
+    - name: Download tests
+      uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+      with:
+        name: tests-${{ matrix.os }}
+        path: ${{ runner.temp }}
     - name: Run tests
-      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
+      run: >-
+        cargo-nextest nextest run --archive-file "$RUNNER_TEMP/tests.tar.zst"
+        --workspace-remap "$GITHUB_WORKSPACE" --profile ${{ matrix.shard.profile }}
+        --partition slice:${{ matrix.shard.partition }}/${{ matrix.shard.partitions }} --verbose
 
   Tests-Subset:
-    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\", sde: \"${{ matrix.sde }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) }}\")"
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('native, else sde -{0}', matrix.sde) || matrix.qemu && format('native, else qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")${{ matrix.partition && format(' (partition: {0})', matrix.partition) || '' }}"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -149,18 +198,161 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
-          # Run the crates with AVX-512 paths on an emulated Ice Lake server, which has every feature they use.
+          # The allocator metrics and the mimalloc integration test only
+          # compile with the feature, which the workspace test build leaves off.
+          - os: ubuntu-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/mimalloc"
+          # The block-count regression test only reaches the 16-bit limit with
+          # the largest slice.
+          - os: ubuntu-latest
+            package: commonware-allocator
+            flags: "--features commonware-allocator/large-objects-4mb"
+          # Ice Lake-SP has SHA-NI, AVX-512, IFMA, VNNI, GFNI, VAES, and VPCLMULQDQ. SDE emulates
+          # AVX-512 slowly on runners without it, so the SDE rows split their tests in two.
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: icx
-            cpu-features: "avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
-          # Skylake servers have AVX-512 without IFMA, GFNI, or VPCLMULQDQ, so paths that need those fall back.
+            simd-backend: x86_v4c
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
+            partition: 1/2
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            sde: icx
+            simd-backend: x86_v4c
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
+            partition: 2/2
+            skip-cache-save: true
+          # Skylake-SP has AVX-512 without SHA-NI, IFMA, VNNI, GFNI, VAES, or VPCLMULQDQ.
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: skx
-            cpu-features: "avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            sde: skx
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx avx512f avx512bw avx512vl"
+            partition: 2/2
+            skip-cache-save: true
+          # Zen 2 has AVX2 and SHA-NI without AVX-512, VAES, or VPCLMULQDQ. QEMU emulates it on
+          # every runner without that exact feature set, so the full row splits its tests in two.
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: EPYC-Rome
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx sha"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: EPYC-Rome
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx sha"
+            partition: 2/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
+            rustflags: "-C target-feature=+avx2,+sha"
+            static-features: "avx2 sha !avx512f"
+            qemu: EPYC-Rome
+            cpu-features: "avx2 bmi2 adx sha"
+          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512. Its full row splits its
+          # tests in two as well.
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: Broadwell
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx"
+            partition: 1/2
+            skip-cache-save: true
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: Broadwell
+            simd-backend: x86_v3
+            cpu-features: "avx2 bmi2 adx"
+            partition: 2/2
+            skip-cache-save: true
+          # Neoverse N2 has SHA-3 and SVE2.
+          - os: ubuntu-26.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: neoverse-n2
+            simd-backend: arm_v9
+            cpu-features: "neon sha2 sha3 sve sve2"
+          - os: ubuntu-26.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
+            rustflags: "-C target-feature=+sha2,+sve2"
+            static-features: "sha2 sve2 !sha3"
+            qemu: neoverse-n2
+            cpu-features: "neon sha2 sha3 sve sve2"
+          # Neoverse N1 has SHA-2 without SHA-3 or SVE.
+          - os: ubuntu-26.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
+            qemu: neoverse-n1
+            simd-backend: neon
+            cpu-features: "neon sha2"
+            skip-cache-save: true
+          - os: ubuntu-26.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
+            static-features: "!sha2 !sha3 !sve2"
+            qemu: neoverse-n1
+            cpu-features: "neon sha2"
+          # Isolate SIMD so other packages cannot re-enable std.
+          - os: ubuntu-latest
+            package: commonware-simd
+            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib"
+            rustflags: "-C target-feature=+avx512f,+avx512bw,+gfni,+avx512ifma,+sha"
+            static-features: "avx512f avx512bw gfni avx512ifma sha"
+            sde: icx
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
+            simd-backend: x86_v4c
+          - os: ubuntu-latest
+            package: commonware-simd
+            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib"
+            rustflags: "-C target-feature=+avx2"
+            static-features: "avx2 !avx512f"
+            qemu: Broadwell
+            cpu-features: "avx2 bmi2 adx"
+            simd-backend: x86_v3
+          - os: ubuntu-26.04-arm
+            package: commonware-simd
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
+            rustflags: "-C target-feature=+neon,+sha2,+sve,+sve2"
+            static-features: "neon sha2 sve sve2"
+            qemu: neoverse-n2
+            cpu-features: "neon sha2 sha3 sve sve2"
+            simd-backend: arm_v9
+          - os: ubuntu-26.04-arm
+            package: commonware-simd
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
+            rustflags: "-C target-feature=+neon,+sha2"
+            static-features: "neon sha2 !sve !sve2"
+            qemu: neoverse-n1
+            cpu-features: "neon sha2"
+            simd-backend: neon
+          - os: ubuntu-26.04-arm
+            package: commonware-simd
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"
+            static-features: "neon !sha2 !sve !sve2"
+            qemu: neoverse-n1
+            cpu-features: "neon sha2"
+            simd-backend: scalar
           # Test each package with a std feature without std, one package at a time.
           - os: ubuntu-latest
             package: all
@@ -174,17 +366,32 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        additional-cache-key: ${{ matrix.flags || 'default' }}${{ matrix.rustflags }}
+        # Rows that differ only in the emulated CPU build the same target, so one of them saves.
+        rust-cache-save: ${{ !matrix.skip-cache-save }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
+    # A row that names an emulated CPU runs natively when the runner matches its `cpu-features`
+    # exactly over the features the check knows, and under the emulator otherwise.
+    - name: Check native CPU features
+      if: ${{ matrix.sde || matrix.qemu }}
+      id: native
+      run: |
+        rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
+        if "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}; then
+          echo "supported=true" >> "$GITHUB_OUTPUT"
+          echo "This runner matches the listed CPU features, so the tests run natively."
+        else
+          echo "This runner does not match the listed CPU features, so the tests run under the emulator."
+        fi
     - name: Install Intel SDE
-      if: ${{ matrix.sde }}
+      if: ${{ matrix.sde && steps.native.outputs.supported != 'true' }}
       env:
         SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
         SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
@@ -193,20 +400,54 @@ jobs:
         echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum -c -
         mkdir -p "$RUNNER_TEMP/sde"
         tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
-        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --" >> "$GITHUB_ENV"
+        emulator="$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --"
+        echo "EMULATOR=$emulator" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$emulator" >> "$GITHUB_ENV"
+    - name: Install QEMU
+      if: ${{ matrix.qemu && steps.native.outputs.supported != 'true' }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-user
+        emulator="qemu-$(uname -m) -cpu ${{ matrix.qemu }}"
+        runner="CARGO_TARGET_$(uname -m | tr '[:lower:]' '[:upper:]')_UNKNOWN_LINUX_GNU_RUNNER"
+        echo "EMULATOR=$emulator" >> "$GITHUB_ENV"
+        echo "$runner=$emulator" >> "$GITHUB_ENV"
     - name: Check emulated CPU features
-      if: ${{ matrix.sde }}
+      if: ${{ matrix.cpu-features }}
       run: |
         rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
-        $CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}
+        $EMULATOR "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}
+    - name: Configure rustflags
+      if: ${{ matrix.rustflags }}
+      run: |
+        rustflags="CARGO_TARGET_$(uname -m | tr '[:lower:]' '[:upper:]')_UNKNOWN_LINUX_GNU_RUSTFLAGS"
+        echo "$rustflags=${!rustflags:+${!rustflags} }${{ matrix.rustflags }}" >> "$GITHUB_ENV"
+    - name: Check static CPU features
+      if: ${{ matrix.static-features }}
+      run: |
+        cfg=$(rustc --print cfg --target "$(uname -m)-unknown-linux-gnu" ${{ matrix.rustflags }})
+        unexpected=()
+        for arg in ${{ matrix.static-features }}; do
+          feature="${arg#!}"
+          grep -qx "target_feature=\"$feature\"" <<< "$cfg" && found=true || found=false
+          [ "$arg" = "$feature" ] && expected=true || expected=false
+          echo "$feature: $found"
+          [ "$found" = "$expected" ] || unexpected+=("$arg")
+        done
+        if [ ${#unexpected[@]} -ne 0 ]; then
+          echo "unexpected static CPU features: ${unexpected[*]}"
+          exit 1
+        fi
     - name: Run no-std tests
       if: ${{ matrix.no-std }}
       run: just test-no-std --verbose
     - name: Run subset tests
       if: ${{ !matrix.no-std }}
-      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
+      env:
+        COMMONWARE_SIMD_EXPECT_BACKEND: ${{ matrix.simd-backend }}
+      run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose ${{ matrix.partition && format('--partition slice:{0}', matrix.partition) || '' }}
     - name: Run subset doc tests
-      if: ${{ !matrix.sde && !matrix.no-std }}
+      if: ${{ !matrix.sde && !matrix.qemu && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
   Stability:
@@ -226,11 +467,13 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.level }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        # The level only changes how workspace crates are checked, so every level
+        # restores the same dependencies and one of them saves.
+        rust-cache-save: ${{ matrix.level == 'BETA' }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -252,11 +495,11 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        additional-toolchain: nightly-tools
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -270,12 +513,6 @@ jobs:
     needs: [Tests, Tests-Subset, Stability, Unstable-Public]
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
@@ -296,6 +533,22 @@ jobs:
           fi
           echo "All tests passed!"
 
+  # The macOS slow tests run in the Tests job from the same build as the fast tests, and Coverage
+  # runs the Linux slow tests. Branch protection requires this check alongside Fast-Tests.
+  Slow-Tests-Gate:
+    name: "Slow-Tests"
+    runs-on: ubuntu-latest
+    needs: Tests
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.Tests.result }}" != "success" ]; then
+            echo "Tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All tests passed successfully!"
+
   Dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -307,11 +560,11 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        additional-toolchain: nightly-tools
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & cargo-udeps
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -338,7 +591,7 @@ jobs:
     - name: Install just & cargo-cooldown
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: just@1.43.0,cargo-cooldown@${{ env.CARGO_COOLDOWN_VERSION }}
+        tool: just@1.43.0,cargo-cooldown@${{ env.COOLDOWN_VERSION }}
     - name: Check dependency cooldown
       env:
         COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -357,10 +610,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -410,10 +663,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         targets: wasm32-unknown-unknown
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build cryptography
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build cryptography-curve25519
@@ -443,8 +696,17 @@ jobs:
       uses: ./.github/actions/setup
       with:
         rust-cache-enabled: false
+        targets: aarch64-unknown-none-softfloat,x86_64-unknown-none
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
+    # Soft-float targets lack the vector baseline, so SIMD must build and dispatch to scalar.
+    - name: Check SIMD fallback on soft-float targets
+      run: |
+        for target in aarch64-unknown-none-softfloat x86_64-unknown-none; do
+          cargo check -p commonware-simd --no-default-features --lib --target "$target"
+        done
+      env:
+        RUSTFLAGS: -D warnings
 
   lint-toml:
     name: Lint Cargo.toml Files
@@ -461,6 +723,8 @@ jobs:
         tool: just@1.43.0
     - name: Install UV
       uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+      with:
+        cache-dependency-glob: .github/scripts/lint_cargo_toml.py
     - name: Check Cargo.toml formatting
       run: just fix-toml-fmt && git diff --exit-code
 
@@ -502,6 +766,7 @@ jobs:
     name: "Build (toolchain: ${{ matrix.toolchain }}, partition: ${{ matrix.partition.name }})"
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    continue-on-error: ${{ matrix.toolchain == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
@@ -509,21 +774,18 @@ jobs:
           - msrv
           - stable
           - nightly
-        # commonware-runtime dominates the feature powerset (~80% of all
-        # combinations), so it is split into four partitions that fix the
-        # loom and tokio-console features on or off and enumerate the
-        # powerset of the remaining features. The union of the runtime
-        # partitions and `rest` (every other crate) is identical to the
-        # full workspace powerset (`just hack check`).
+        # commonware-runtime has the largest feature powerset of any crate,
+        # so it is checked apart from `rest` (every other crate), in two
+        # partitions that fix the tokio-console feature on or off and
+        # enumerate the powerset of the remaining features. tokio-console
+        # changes tokio's features, so each partition builds one tokio
+        # variant. The union of the runtime partitions and `rest` is
+        # identical to the full workspace powerset (`just hack check`).
         partition:
           - name: runtime-0
-            args: -p commonware-runtime --features loom,tokio-console
+            args: -p commonware-runtime --features tokio-console
           - name: runtime-1
-            args: -p commonware-runtime --features loom --exclude-features tokio-console
-          - name: runtime-2
-            args: -p commonware-runtime --features tokio-console --exclude-features loom
-          - name: runtime-3
-            args: -p commonware-runtime --exclude-features loom,tokio-console
+            args: -p commonware-runtime --exclude-features tokio-console
           - name: rest
             args: --workspace --exclude commonware-runtime
     steps:
@@ -546,10 +808,10 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
           rust-cache-save: ${{ matrix.partition.name == 'rest' }}
-          sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-          sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-          sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-          sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          kache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+          kache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+          kache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          kache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - name: Install just & cargo-hack
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
@@ -558,6 +820,11 @@ jobs:
         run: rustc --version
       - name: Check feature powerset
         run: RUSTFLAGS="-D warnings" just hack ${{ matrix.partition.args }} check
+      - name: Report nightly failure
+        if: failure() && matrix.toolchain == 'nightly'
+        run: |
+          echo "::warning::Floating nightly failed; investigate the compiler compatibility failure."
+          echo "Floating nightly failed for ${{ matrix.partition.name }}. Review this job's logs and investigate before the next stable release." >> "$GITHUB_STEP_SUMMARY"
 
   Build-Gate:
     name: "Builds"
@@ -565,12 +832,6 @@ jobs:
     needs: build
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check build results
         run: |
           if [ "${{ needs.build.result }}" != "success" ]; then

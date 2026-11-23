@@ -3,7 +3,9 @@ use crate::algebra::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
-use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{
+    Buf, EncodeSize, MaxEncodeSize, RangeCfg, Read, Write, util::max_items_size,
+};
 use commonware_parallel::Strategy;
 use commonware_utils::{TryCollect, non_empty_vec, ordered::Map, vec::NonEmptyVec};
 use core::{
@@ -197,6 +199,14 @@ impl<K: EncodeSize> EncodeSize for Poly<K> {
     }
 }
 
+impl<K: MaxEncodeSize> Poly<K> {
+    /// Returns an upper bound on the encoded size of a polynomial with at most `coefficients`
+    /// coefficients.
+    pub fn max_encode_size(coefficients: usize) -> usize {
+        max_items_size(coefficients, K::MAX_ENCODE_SIZE)
+    }
+}
+
 impl<K: Write> Write for Poly<K> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.coeffs.write(buf);
@@ -344,7 +354,7 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
     }
 }
 
-impl<R: Sync, K: Space<R> + Send> Space<R> for Poly<K> {
+impl<R: Sync, K: Space<R>> Space<R> for Poly<K> {
     fn msm(polys: &[Self], scalars: &[R], strategy: &impl Strategy) -> Self {
         if polys.len() < MIN_POINTS_FOR_MSM {
             return msm_naive(polys, scalars);
@@ -433,7 +443,7 @@ impl<I: PartialEq, F: Ring> Interpolator<I, F> {
     }
 }
 
-impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
+impl<I: Ord, F: Field> Interpolator<I, F> {
     /// Create a new interpolator, given an association from indices to evaluation points.
     ///
     /// If an index appears multiple times, the implementation is free to use

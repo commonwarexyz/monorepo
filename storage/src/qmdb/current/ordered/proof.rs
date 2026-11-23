@@ -1,21 +1,24 @@
 //! Ordered current proofs with fixed-size or runtime-sized bitmap chunks.
 
-use super::{COMMIT_CONTEXT, KEY_VALUE_CONTEXT};
 use crate::{
     merkle::Graftable,
     qmdb::{
-        any::{
-            ValueEncoding,
-            ordered::{Operation, Update},
-        },
+        any::ordered::{Operation, Update},
         current::proof::operation::Proof as OperationProof,
         operation::Key,
+        value::ValueEncoding,
     },
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::range::contains_cyclic;
+
+/// Wire tag for [ExclusionProof::KeyValue].
+pub const KEY_VALUE_CONTEXT: u8 = 0;
+
+/// Wire tag for [ExclusionProof::Commit].
+pub const COMMIT_CONTEXT: u8 = 1;
 
 /// Proofs with fixed-size bitmap chunks.
 pub mod constant {
@@ -57,7 +60,7 @@ impl<F: Graftable, K: Key, D: Digest, C: AsRef<[u8]>> KeyValueProof<F, K, D, C> 
     where
         H: Hasher<Digest = D>,
         V: ValueEncoding,
-        Operation<F, K, V>: Codec,
+        Operation<F, K, V>: Encode,
     {
         let op = Operation::<F, K, V>::Update(Update {
             key,
@@ -138,7 +141,7 @@ where
     V: ValueEncoding,
     D: Digest,
     C: AsRef<[u8]>,
-    Operation<F, K, V>: Codec,
+    Operation<F, K, V>: Encode,
 {
     /// Return true if the proof authenticates that `key` does not exist in the database with
     /// the provided `root`.
@@ -153,10 +156,7 @@ where
             }
             Self::Commit(op_proof, metadata) => {
                 // An empty database's commit floor equals the commit operation's location
-                (
-                    op_proof,
-                    Operation::CommitFloor(metadata.clone(), op_proof.loc),
-                )
+                (op_proof, Operation::Commit(metadata.clone(), op_proof.loc))
             }
         };
 

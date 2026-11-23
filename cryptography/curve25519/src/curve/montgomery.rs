@@ -8,17 +8,18 @@ use zeroize::Zeroizing;
 /// `v^2 = u^3 + A*u^2 + u`.
 const A24: F = F([121665, 0, 0, 0, 0]);
 
-/// The X25519 function of [RFC 7748]: multiplies the point with u-coordinate `u` by `scalar`.
+/// The X25519 function of [RFC 7748]: writes to `out` the u-coordinate of the point with
+/// u-coordinate `u` multiplied by `scalar`.
 ///
-/// The scalar is clamped before use, and bit 255 of `u` is ignored, both per the RFC. The
-/// output is the u-coordinate of the resulting point, or all zeros when that point is the
-/// identity, which happens exactly when the input point has low order.
+/// The scalar is clamped before use, and bit 255 of `u` is ignored, both per the RFC. The output
+/// is all zeros when the resulting point is the identity, which happens exactly when the input
+/// point has low order.
 ///
 /// The Montgomery ladder performs the same field operations for every scalar, selecting
 /// values with masks rather than secret-dependent branches or indexing.
 ///
 /// [RFC 7748]: https://www.rfc-editor.org/rfc/rfc7748#section-5
-pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
+pub fn x25519(scalar: &[u8; 32], u: &[u8; 32], out: &mut [u8; 32]) {
     let mut scalar = Zeroizing::new(*scalar);
     // Clearing the three low bits makes the scalar a multiple of the cofactor, 8. Forcing bit
     // 254 on and bit 255 off gives every scalar the same bit length.
@@ -64,7 +65,7 @@ pub fn x25519(scalar: &[u8; 32], u: &[u8; 32]) -> [u8; 32] {
     let z2 = F::conditional_select(&z2, &z3, swap);
     // When the result is the identity, z2 is zero, and so is its "inverse" z2^(p - 2), making
     // the output all zeros.
-    x2.mul(z2.invert()).to_bytes()
+    *out = x2.mul(z2.invert()).to_bytes();
 }
 
 #[cfg(test)]
@@ -77,7 +78,8 @@ mod tests {
         let mut k = hex!("0x0900000000000000000000000000000000000000000000000000000000000000");
         let mut u = k;
         for i in 1..=1000 {
-            let next = x25519(&k, &u);
+            let mut next = [0; 32];
+            x25519(&k, &u, &mut next);
             u = k;
             k = next;
             if i == 1 {

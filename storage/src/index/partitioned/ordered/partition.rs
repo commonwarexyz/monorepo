@@ -9,7 +9,13 @@
 //! run of equal keys. Collisions are rare for well-distributed translated keys, so most runs have
 //! length one. The index's insertion path appends new values to the end of an existing run.
 
+use super::SPILL_THRESHOLD;
+use commonware_utils::prefetch;
 use std::ops::Range;
+
+/// The most cache lines [`Partition::prefetch_arrays`] requests per array. Partitions hold a few
+/// dozen entries at large key counts, so this covers a typical partition whole.
+const PREFETCH_LINES: usize = 8;
 
 /// A single partition's values as sorted parallel arrays keyed by translated key.
 pub(super) struct Partition<K, V> {
@@ -37,6 +43,14 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The number of stored entries (values, counting collisions).
     pub(super) const fn len(&self) -> usize {
         self.keys.len()
+    }
+
+    /// Prefetch up to [PREFETCH_LINES] cache lines of each of the keys and values arrays ahead of a
+    /// search and update of this partition. This reads the partition's header, so it should follow
+    /// an earlier hint for that header.
+    pub(super) fn prefetch_arrays(&self) {
+        prefetch::prefetch_lines(self.keys.as_ptr(), self.keys.len(), PREFETCH_LINES);
+        prefetch::prefetch_lines(self.vals.as_ptr(), self.vals.len(), PREFETCH_LINES);
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
@@ -106,13 +120,23 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         &self.vals[self.run_range(key)]
     }
 
+    /// Prefetch every cache line of the partition's keys (see [prefetch::prefetch_lines]), up to
+    /// the first `SPILL_THRESHOLD` of them. Only a caller-held cursor grows an array past that,
+    /// until the partition's next mutation spills it.
+    pub(super) fn prefetch_keys(&self) {
+        prefetch::prefetch_lines(
+            self.keys.as_ptr(),
+            self.keys.len().min(SPILL_THRESHOLD),
+            usize::MAX,
+        );
+    }
+
     /// The value at array index `idx`.
     pub(super) fn value_at(&self, idx: usize) -> &V {
         &self.vals[idx]
     }
 
     /// Iterate every value held by the partition (in array order, all runs).
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn values_iter(&self) -> std::slice::Iter<'_, V> {
         self.vals.iter()
     }

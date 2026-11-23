@@ -11,9 +11,13 @@
 
 use commonware_macros::stability_scope;
 
+stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), any(test, feature = "fuzz"))) {
+    pub mod fuzz;
+});
+
 stability_scope!(BETA {
-    use commonware_codec::{Codec, Encode};
-    use commonware_cryptography::Digestible;
+    use commonware_codec::{Encode, Read};
+    use commonware_cryptography::{Digestible, Digested};
     use std::sync::Arc;
 
     pub mod simplex;
@@ -62,10 +66,11 @@ stability_scope!(BETA {
 
     /// Block is the interface for a block in the blockchain.
     ///
-    /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
-    /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
-    /// the same block.
-    pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
+    /// A block type that is also decoded, such as an application block received over the wire or
+    /// read from storage, must use a canonical encoding. Every byte sequence `bytes` accepted by
+    /// the decoder must satisfy `encode(decode(bytes)) == bytes`, and decoders must reject
+    /// alternate encodings of the same block.
+    pub trait Block: Heightable + Digestible + Encode {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
     }
@@ -73,6 +78,18 @@ stability_scope!(BETA {
     impl<B: Block> Block for Arc<B> {
         fn parent(&self) -> Self::Digest {
             self.as_ref().parent()
+        }
+    }
+
+    impl<B: Block> Heightable for Digested<B> {
+        fn height(&self) -> Height {
+            self.inner().height()
+        }
+    }
+
+    impl<B: Block> Block for Digested<B> {
+        fn parent(&self) -> Self::Digest {
+            self.inner().parent()
         }
     }
 
@@ -92,11 +109,27 @@ stability_scope!(BETA {
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
     }
+
+    impl<B: CertifiableBlock> CertifiableBlock for Digested<B> {
+        type Context = B::Context;
+
+        fn context(&self) -> Self::Context {
+            self.inner().context()
+        }
+    }
+
+    /// A block that bounds its encoded size under a codec configuration.
+    pub trait BoundedBlock: Block + Read {
+        /// Returns an upper bound on the encoded size of any block [`Read::read_cfg`] admits under
+        /// `cfg`, using each encoded type's maximum width.
+        fn max_encode_size(cfg: &Self::Cfg) -> usize;
+    }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    use crate::marshal::ancestry::Ancestry;
     use commonware_actor::Feedback;
-    use commonware_cryptography::{Digest, PublicKey};
-    use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+    use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
+    use commonware_utils::channel::{fallible::OneshotExt, oneshot, ring};
     use std::future::Future;
 
     pub mod marshal;
@@ -150,6 +183,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Verify the payload is valid.
         ///
+        /// Honest participants must agree on validity for the same `(context, payload)`.
+        ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
         /// retry the same request. After a restart, however, consensus may request verification
@@ -165,6 +200,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
         /// for temporary inability to decide.
         ///
+        /// Consensus may drop the receiver before a verdict arrives, once it has no use for one.
+        ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
         fn verify(
@@ -174,25 +211,134 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
+    /// An application's response to a handoff proposal request.
+    ///
+    /// `Handoff<()>` is the same decision without a payload, and [`map`](Self::map) attaches one.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Handoff<D> {
+        /// Relay the candidate and cast the proposer's notarize vote without waiting for the
+        /// parent to certify.
+        ///
+        /// This trusts the outgoing leader not to equivocate and to complete its term, since
+        /// the proposal is usable only if every uncertified view it builds on certifies.
+        ///
+        /// Validators buffer the early vote only once it is inside their admission window, which
+        /// always includes the next term start from the parent's term (see
+        /// [Optimistic Validation](crate::simplex#optimistic-validation)), and consensus does not
+        /// resend it. If the quorum needs a validator whose window does not reach the vote yet, the
+        /// incoming term times out.
+        Vote(D),
+        /// Relay the candidate and withhold the proposer's notarize vote until its parent
+        /// certifies or finalizes.
+        ///
+        /// The relay commits to nothing: only the vote names a proposal. If the parent is
+        /// replaced before it certifies, the proposer can relay another candidate for the same
+        /// view.
+        ///
+        /// A relay may defer sending the candidate until consensus requests the broadcast that
+        /// precedes the proposer's vote.
+        Stage(D),
+        /// Request an ordinary proposal after the parent certifies.
+        Wait,
+    }
+
+    impl<D> Handoff<D> {
+        /// Returns whether this response declines to build.
+        pub const fn is_wait(&self) -> bool {
+            matches!(self, Self::Wait)
+        }
+
+        /// Applies `f` to the payload, keeping the decision.
+        pub fn map<T>(self, f: impl FnOnce(D) -> T) -> Handoff<T> {
+            match self {
+                Self::Vote(payload) => Handoff::Vote(f(payload)),
+                Self::Stage(payload) => Handoff::Stage(f(payload)),
+                Self::Wait => Handoff::Wait,
+            }
+        }
+    }
+
     /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
     ///
     /// This trait is required by consensus implementations (like Simplex) that support a certification
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
-        /// Determine whether a verified payload is safe to commit.
+        /// Prepare a payload for a term-start proposal whose parent is not yet certified.
+        ///
+        /// Returning [`Handoff::Vote`] or [`Handoff::Stage`] commits the application to
+        /// the same verification and certification obligations as returning a payload from
+        /// [`Automaton::propose`].
+        ///
+        /// With [`Handoff::Wait`], consensus issues an ordinary [`Automaton::propose`] for the same
+        /// context once the parent certifies, unless it has already voted to nullify this view or
+        /// has left it.
+        ///
+        /// Consensus requests the relay of a [`Handoff::Stage`] candidate as soon as it arrives.
+        ///
+        /// Closing the response forfeits the local proposal opportunity for this view once the
+        /// parent certifies or finalizes, and the view then times out as a missing proposal.
+        ///
+        /// A replacement parent can supersede the request's parent before it certifies. Consensus
+        /// then drops the request and can request a proposal on the replacement, unless it has
+        /// voted to nullify this view or has left it.
+        ///
+        /// Return the receiver promptly and do any work behind it. Parent certification does not
+        /// cancel this request, and while the response is pending, consensus requests no other
+        /// proposal for this view.
+        ///
+        /// Consensus drops the receiver when it abandons the context, so stop pending work when
+        /// the receiver closes.
+        ///
+        /// Consensus also drops the receiver once the parent can no longer be built on before it
+        /// certifies, as after a nullification in the parent's term, or once it votes to nullify
+        /// the view it is waiting in, at or below the parent. An application that verifies other
+        /// blocks only after this build completes could otherwise keep that parent or view from
+        /// certifying. The request then waits as if the application had returned
+        /// [`Handoff::Wait`].
+        ///
+        /// # Request Contract
+        ///
+        /// Per view and per process, with at most `f` faulty validators, consensus calls this
+        /// method at most twice and [`Automaton::propose`] at most once. It skips this method when
+        /// the parent is already certified. A second call follows only when the outgoing leader
+        /// equivocated at the parent view and its other block there was notarized, replacing the
+        /// parent this node voted for. A restart resets these counts.
+        fn prepare(
+            &mut self,
+            _context: Self::Context,
+        ) -> impl Future<Output = oneshot::Receiver<Handoff<Self::Digest>>> + Send
+        {
+            #[allow(clippy::async_yields_async)]
+            async move {
+                let (sender, receiver) = oneshot::channel();
+                sender.send_lossy(Handoff::Wait);
+                receiver
+            }
+        }
+
+        /// Determine whether a notarized payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
         /// applications to associate certification with the correct verification context. The
-        /// same payload may appear in multiple rounds, so implementations must key any state
-        /// on `(round, payload)` rather than `payload` alone.
+        /// same payload may appear in multiple rounds, and a round may carry conflicting
+        /// payloads, so implementations must key any state on `(round, payload)` rather than on
+        /// either alone.
+        ///
+        /// Certification can be requested while [`Automaton::verify`] for the same payload is
+        /// still outstanding, after consensus has dropped that request's receiver, or for a
+        /// payload this participant was never asked to verify. Once certification is requested
+        /// for a round, [`Automaton::verify`] is not requested for that round until a restart.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
         /// certification as concluded and will not retry the same request. After a restart,
         /// however, consensus may request certification for the same `(round, payload)` again
-        /// if the result was not durably recorded before shutdown.
+        /// if the result was not durably recorded before shutdown. Until that repeated request
+        /// resolves, the proposal is pending again, exactly as before the first request
+        /// completed, so consensus may still verify or build upon proposals that build upon
+        /// it. A `false` result takes effect once consensus records it.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that
@@ -207,6 +353,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The decision returned by `certify` must be deterministic and consistent across
         /// all honest participants to ensure liveness.
+        ///
+        /// # Finality
+        ///
+        /// A certified payload may never be finalized. A competing payload can also certify in
+        /// another round, even when every participant is honest. Only treat a payload as final
+        /// once the [`Reporter`] receives a finalization for it or one of its descendants.
         fn certify(
             &mut self,
             _round: Round,
@@ -257,6 +409,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn report(&mut self, activity: Self::Activity) -> Feedback;
     }
 
+    /// Alias for the subscription type returned by [`Monitor::subscribe`].
+    ///
+    /// Each value is the latest index, so a subscriber that falls behind skips intermediate indices.
+    pub type IndexSubscription<I> = ring::Receiver<I>;
+
     /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.
     ///
     /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
@@ -268,27 +425,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Index is the type used to indicate the in-progress consensus decision.
         type Index;
 
-        /// Create a channel that will receive updates when the latest index (also provided) changes.
+        /// Returns the latest index and a subscription that yields the newest index whenever it
+        /// has changed.
         fn subscribe(
             &mut self,
-        ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
+        ) -> impl Future<Output = (Self::Index, IndexSubscription<Self::Index>)> + Send;
     }
-});
-stability_scope!(ALPHA {
-    pub mod aggregation;
-});
-stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
-    use commonware_cryptography::certificate::Scheme;
-    use commonware_runtime::{Clock, Metrics, Spawner};
-    use rand_core::Rng;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
-    pub trait Application<E>: Clone + Send + 'static
-    where
-        E: Rng + Spawner + Metrics + Clock,
-    {
+    pub trait Application<E>: Clone + Send + 'static {
         /// The signing scheme used by the application.
         type SigningScheme: Scheme;
 
@@ -298,11 +444,64 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         type Context: Epochable;
 
         /// The block type produced by the application's builder.
+        ///
+        /// The builder hands marshal a [`Digested`] block, so the application computes the digest
+        /// of a block it built exactly once, on its own strategy, before returning it.
         type Block: Block;
 
-        /// Per-proposal input handed to [`propose`](Self::propose). Applications
-        /// that need no input set this to `()`.
+        /// Per-proposal input handed to [`prepare`](Self::prepare) and
+        /// [`propose`](Self::propose). Applications that need no input set this to `()`.
         type Input: Send;
+
+        /// Build a block on a parent that has not yet certified, or decline with
+        /// [`Handoff::Wait`].
+        ///
+        /// The marshal calls this in place of [`Self::propose`] for a term-start proposal whose
+        /// parent is uncertified, with the same `ancestry` and after the same checks. It
+        /// re-proposes the epoch boundary block and declines a parent it cannot build on with
+        /// [`Handoff::Wait`], in both cases without calling this method. The default declines.
+        ///
+        /// With [`Handoff::Vote`] or [`Handoff::Stage`], the marshal keeps the returned block for
+        /// relay as it would a proposal. With [`Handoff::Wait`], consensus waits for parent
+        /// certification before requesting [`Self::propose`] for the same context, unless it has
+        /// voted to nullify the context's view or has left it. The decision is final for the
+        /// request.
+        ///
+        /// With deferred or coded verification, a prepared build can start before this node
+        /// has verified the parent's contents. The parent may later fail certification,
+        /// which discards the candidate.
+        ///
+        /// Parent certification does not cancel a prepared build. Consensus cancels it once the
+        /// parent can no longer be built on before it certifies, as after a nullification in the
+        /// parent's term, or once it votes to nullify the view it is waiting in, at or below the
+        /// parent. Unless it has voted to nullify the proposal's view or has left it, it then
+        /// requests an ordinary proposal for the same context if the parent certifies, or can
+        /// request a proposal on a replacement parent once one is selectable.
+        ///
+        /// [`Handoff::Vote`] trusts the outgoing consensus leader not to equivocate and to
+        /// complete its term (see [`Handoff::Vote`]). The context names the parent by view and
+        /// digest, and its leader field names the incoming leader, not the outgoing one. Identify
+        /// the outgoing leader from the elector's schedule or authenticated metadata for the
+        /// parent's consensus round. A verified parent block can name an earlier proposer in its
+        /// embedded context, as with an epoch-boundary reproposal. If that identity or trust is
+        /// uncertain, return [`Handoff::Stage`], which can relay the block before the parent
+        /// certifies but withholds the vote.
+        ///
+        /// This future may be cancelled before it completes. Implementations must be
+        /// cancellation-safe.
+        ///
+        /// If readiness is uncertain, return [`Handoff::Wait`].
+        ///
+        /// A wrapper around another application must forward this method, since the default
+        /// would otherwise replace the inner application's choice with [`Handoff::Wait`].
+        fn prepare(
+            &mut self,
+            _context: (E, Self::Context),
+            _ancestry: impl Ancestry<Self::Block>,
+            _input: Self::Input,
+        ) -> impl Future<Output = Handoff<Digested<Self::Block>>> + Send {
+            async { Handoff::Wait }
+        }
 
         /// Build a new block on top of the provided parent ancestry. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
@@ -316,7 +515,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-        ) -> impl Future<Output = Option<Self::Block>> + Send;
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         ///
@@ -330,6 +529,10 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// or the consensus engine cancels the request. Abstaining is not represented by a
         /// special return value.
         ///
+        /// The consensus engine may have several calls outstanding, including calls for
+        /// conflicting blocks that an equivocating proposer built for the same context. Each call
+        /// gets its own verdict and must not cancel or replace an earlier one.
+        ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
         fn verify(
@@ -338,4 +541,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             ancestry: impl Ancestry<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
+});
+stability_scope!(ALPHA {
+    pub mod aggregation;
 });

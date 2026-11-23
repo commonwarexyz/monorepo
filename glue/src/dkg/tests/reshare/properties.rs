@@ -1,6 +1,4 @@
-use super::harness::{
-    CommitteeSchedule, Registration, RegistrationRole, ValidatorState, final_height,
-};
+use super::harness::{CommitteeSchedule, Registration, ValidatorState, final_height};
 use crate::{
     dkg::{
         ReshareBlock,
@@ -13,8 +11,10 @@ use crate::{
 };
 use commonware_codec::{Encode as _, FixedSize};
 use commonware_consensus::types::{Epoch, Height};
-use commonware_cryptography::{bls12381::primitives::variant::MinPk, ed25519, transcript::Summary};
-use commonware_utils::sync::Mutex;
+use commonware_cryptography::{
+    bls12381::primitives::variant::MinPk, certificate::Membership, ed25519, transcript::Summary,
+};
+use commonware_utils::{ordered::Quorum as _, sync::Mutex};
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 #[derive(Clone)]
@@ -79,7 +79,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for SignerRegistered {
                 state
                     .registrations()
                     .iter()
-                    .any(|registration| registration.role == RegistrationRole::Signer)
+                    .any(|registration| registration.signs())
             });
             if found {
                 Ok(())
@@ -158,7 +158,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for BoundaryEpochInfos {
                             "missing finalized boundary block at height {height}"
                         ));
                     };
-                    match block.payload() {
+                    match block.inner().payload() {
                         Some(Payload::EpochInfo(info)) if info.epoch == Epoch::new(epoch + 1) => {
                             if info.outcome == EpochOutcome::Success {
                                 if expect_failure {
@@ -307,7 +307,7 @@ async fn boundary_info(
         let Some(block) = state.marshal.get_block(height).await else {
             continue;
         };
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             return Err(format!(
                 "boundary at height {height} did not carry epoch info"
             ));
@@ -409,7 +409,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for FailedCeremonyCarryOver {
                             "state-synced node missing boundary block at height {height}"
                         ));
                     };
-                    let Some(Payload::EpochInfo(info)) = block.payload() else {
+                    let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
                         return Err(format!(
                             "boundary at height {height} did not carry epoch info"
                         ));
@@ -447,19 +447,14 @@ impl Property<ed25519::PublicKey, ValidatorState> for FailedCeremonyCarryOver {
             }
 
             for state in states {
-                let expected = if previous
+                let expected = previous
                     .output
                     .players()
-                    .position(state.public_key())
-                    .is_some()
-                {
-                    RegistrationRole::Signer
-                } else {
-                    RegistrationRole::Verifier
-                };
+                    .index(state.public_key())
+                    .map(Membership::Signer);
                 let registrations = state.registrations();
                 let registered = registrations.iter().any(|registration| {
-                    registration.epoch == expected_epoch && registration.role == expected
+                    registration.epoch == expected_epoch && registration.membership == expected
                 });
                 if !registered {
                     return Err(format!(
@@ -556,7 +551,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for SchemesRegistered {
                     "missing finalized boundary block at height {height}"
                 ));
             };
-            let Some(Payload::EpochInfo(info)) = block.payload() else {
+            let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
                 return Err(format!(
                     "boundary at height {height} did not carry epoch info"
                 ));
@@ -568,11 +563,11 @@ impl Property<ed25519::PublicKey, ValidatorState> for SchemesRegistered {
                 ));
             }
             for public_key in &self.public_keys {
-                let expected = if info.output.players().position(public_key).is_some() {
-                    RegistrationRole::Signer
-                } else {
-                    RegistrationRole::Verifier
-                };
+                let expected = info
+                    .output
+                    .players()
+                    .index(public_key)
+                    .map(Membership::Signer);
                 let Some(registrations) = states
                     .iter()
                     .find(|state| state.public_key() == public_key)
@@ -581,7 +576,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for SchemesRegistered {
                     return Err(format!("node {public_key} was not active at shutdown"));
                 };
                 let registered = registrations.iter().any(|registration| {
-                    registration.epoch == self.epoch && registration.role == expected
+                    registration.epoch == self.epoch && registration.membership == expected
                 });
                 if !registered {
                     return Err(format!(
@@ -644,10 +639,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for StateSyncedSigner {
                 .get(&self.public_key)
                 .into_iter()
                 .flatten()
-                .any(|registration| {
-                    registration.role == RegistrationRole::Signer
-                        && registration.epoch >= self.min_epoch
-                });
+                .any(|registration| registration.signs() && registration.epoch >= self.min_epoch);
             if signed {
                 Ok(())
             } else {

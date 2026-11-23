@@ -1,0 +1,261 @@
+//! `setup` subcommand: generate validator directories and network config.
+
+use crate::{
+    config::{self, NetworkConfig, NodeConfig, PeerConfig},
+    types::{BLOCKS_PER_EPOCH, MAX_PARTICIPANTS, Participants},
+};
+use clap::Args;
+use commonware_consensus::types::Epoch;
+use commonware_cryptography::{Signer, ed25519::PrivateKey};
+use commonware_math::algebra::Random;
+use commonware_utils::{Faults as _, N3f1};
+use rand::rngs::StdRng;
+use std::{
+    fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::PathBuf,
+};
+
+/// Generate every validator directory with node and network config.
+#[derive(Args)]
+pub struct Setup {
+    /// Directory where validator subdirectories will be generated.
+    #[arg(long, default_value = "./data")]
+    pub node_dir: PathBuf,
+
+    /// Total number of validators to generate.
+    #[arg(long, default_value_t = 6)]
+    pub peers: usize,
+
+    /// Number of validators in each epoch committee.
+    #[arg(long, default_value_t = 4)]
+    pub committee_size: usize,
+
+    /// First local P2P port assigned to validator-0.
+    #[arg(long, default_value_t = 3000)]
+    pub base_port: u16,
+
+    /// IP address used for generated listen and dial addresses.
+    #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+    pub host: IpAddr,
+}
+
+/// Generate the validator directories and print the commands to run next.
+pub fn run(args: Setup) {
+    run_inner(args).expect("setup failed");
+}
+
+fn run_inner(args: Setup) -> anyhow::Result<()> {
+    validate(&args)?;
+    if args.node_dir.exists() && args.node_dir.read_dir()?.next().is_some() {
+        anyhow::bail!(
+            "refusing to write into non-empty directory: {}",
+            args.node_dir.display()
+        );
+    }
+    fs::create_dir_all(&args.node_dir)?;
+
+    let mut rng = rand::make_rng::<StdRng>();
+    let signers = (0..args.peers)
+        .map(|_| PrivateKey::random(&mut rng))
+        .collect::<Vec<_>>();
+    let peers = signers
+        .iter()
+        .enumerate()
+        .map(|(i, signer)| {
+            let port = port(&args, i)?;
+            Ok(PeerConfig {
+                public_key: signer.public_key(),
+                dial: SocketAddr::new(args.host, port),
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let network = NetworkConfig {
+        participants: signers.iter().map(|signer| signer.public_key()).collect(),
+        committee_size: args.committee_size,
+        peers,
+    };
+
+    for (i, signer) in signers.into_iter().enumerate() {
+        let node_dir = args.node_dir.join(format!("validator-{i}"));
+        fs::create_dir_all(&node_dir)?;
+        let node = NodeConfig {
+            signer,
+            listen: SocketAddr::new(args.host, port(&args, i)?),
+            dial: SocketAddr::new(args.host, port(&args, i)?),
+        };
+        config::write_json(&node_dir.join("node.json"), &node)?;
+        config::write_json(&node_dir.join("network.json"), &network)?;
+    }
+
+    print_commands(&args, &network)?;
+    Ok(())
+}
+
+fn validate(args: &Setup) -> anyhow::Result<()> {
+    if args.peers == 0 {
+        anyhow::bail!("peers must not be zero");
+    }
+    if args.peers > MAX_PARTICIPANTS.get() as usize {
+        anyhow::bail!("peers exceeds max supported participants");
+    }
+    if args.committee_size == 0 {
+        anyhow::bail!("committee size must not be zero");
+    }
+    if args.committee_size > args.peers {
+        anyhow::bail!("committee size exceeds peer count");
+    }
+    if u64::from(N3f1::quorum(args.committee_size)) > dealer_log_slots() {
+        anyhow::bail!("committee quorum exceeds available dealer log slots");
+    }
+    port(args, args.peers - 1)?;
+    Ok(())
+}
+
+const fn dealer_log_slots() -> u64 {
+    let blocks = BLOCKS_PER_EPOCH.get();
+    blocks.saturating_sub(blocks / 2 + 1)
+}
+
+fn port(args: &Setup, i: usize) -> anyhow::Result<u16> {
+    let offset = u16::try_from(i)?;
+    args.base_port
+        .checked_add(offset)
+        .ok_or_else(|| anyhow::anyhow!("base port plus peer index overflows u16"))
+}
+
+fn print_commands(args: &Setup, network: &NetworkConfig) -> anyhow::Result<()> {
+    println!("Run bootstrap with:");
+    println!(
+        "mprocs {}",
+        commands(args, "bootstrap", bootstrap_indexes(network)?)
+    );
+    println!(
+        "Once every bootstrap logs \"bootstrap complete\", stop them all and run the cluster with:"
+    );
+    println!("mprocs {}", commands(args, "validator", 0..args.peers));
+    Ok(())
+}
+
+fn bootstrap_indexes(network: &NetworkConfig) -> anyhow::Result<Vec<usize>> {
+    let players = Participants::new(network)?.get(Epoch::zero());
+    Ok(network
+        .participants
+        .iter()
+        .enumerate()
+        .filter_map(|(i, participant)| {
+            players
+                .iter()
+                .any(|player| player == participant)
+                .then_some(i)
+        })
+        .collect())
+}
+
+fn commands(args: &Setup, command: &str, indexes: impl IntoIterator<Item = usize>) -> String {
+    indexes
+        .into_iter()
+        .map(|i| {
+            format!(
+                "\"cargo run --bin commonware-dkg -- {command} --node-dir {}\"",
+                args.node_dir.join(format!("validator-{i}")).display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_writes_only_node_and_network_configs() {
+        let node_dir =
+            std::env::temp_dir().join(format!("commonware-dkg-setup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&node_dir);
+        run_inner(Setup {
+            node_dir: node_dir.clone(),
+            peers: 3,
+            committee_size: 2,
+            base_port: 4100,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        })
+        .unwrap();
+
+        let first = node_dir.join("validator-0");
+        let node = NodeConfig::load(&first).unwrap();
+        let network = NetworkConfig::load(&first).unwrap();
+        assert_eq!(network.participants.len(), 3);
+        assert_eq!(network.committee_size, 2);
+        assert_eq!(node.listen.port(), 4100);
+
+        // Genesis and secret material come only from `bootstrap`.
+        let mut files = std::fs::read_dir(&first)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        files.sort();
+        assert_eq!(files, ["network.json", "node.json"]);
+        let _ = std::fs::remove_dir_all(node_dir);
+    }
+
+    #[test]
+    fn setup_rejects_bad_committee_size() {
+        let args = Setup {
+            node_dir: PathBuf::from("unused"),
+            peers: 2,
+            committee_size: 3,
+            base_port: 3000,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+        assert!(validate(&args).is_err());
+    }
+
+    #[test]
+    fn setup_rejects_committee_without_enough_dealer_log_slots() {
+        let args = Setup {
+            node_dir: PathBuf::from("unused"),
+            peers: 47,
+            committee_size: 47,
+            base_port: 3000,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+        assert!(validate(&args).is_err());
+    }
+
+    #[test]
+    fn bootstrap_commands_only_include_epoch_zero_players() {
+        let mut rng = rand::make_rng::<StdRng>();
+        let participants = (0..4)
+            .map(|_| PrivateKey::random(&mut rng).public_key())
+            .collect::<Vec<_>>();
+        let network = NetworkConfig {
+            participants,
+            committee_size: 2,
+            peers: Vec::new(),
+        };
+
+        assert_eq!(bootstrap_indexes(&network).unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn setup_rejects_non_empty_directory() {
+        let node_dir = std::env::temp_dir().join(format!(
+            "commonware-dkg-setup-non-empty-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&node_dir);
+        std::fs::create_dir_all(&node_dir).unwrap();
+        std::fs::write(node_dir.join("sentinel"), b"keep").unwrap();
+        let result = run_inner(Setup {
+            node_dir: node_dir.clone(),
+            peers: 1,
+            committee_size: 1,
+            base_port: 3000,
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        });
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(node_dir);
+    }
+}

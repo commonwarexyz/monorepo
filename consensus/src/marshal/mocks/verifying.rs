@@ -4,44 +4,52 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{CertifiableBlock, Epochable, marshal::ancestry::Ancestry};
+use crate::{
+    Block, CertifiableBlock, Epochable, Handoff, Heightable, marshal::ancestry::Ancestry,
+    types::Height,
+};
+use commonware_cryptography::{Digested, Digestible};
+use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use std::{marker::PhantomData, sync::Arc};
+use futures::StreamExt;
+use std::{future::pending, marker::PhantomData, sync::Arc};
 
 /// A mock application that implements `Application` for testing.
 ///
 /// This mock:
 /// - Returns the configured block (if any) from `propose()`
 /// - Returns a configurable result from `verify()`
+/// - Rejects blocks matching an optional predicate in `verify()`
 #[derive(Clone)]
 pub struct MockVerifyingApp<B, S> {
     /// The block returned by `propose`. If `None`, `propose` returns `None`.
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
+    /// The decision `prepare` attaches to a built block. `Wait` declines without building.
+    handoff: Handoff<()>,
+    /// Shared by clones so that only the first proposal build waits on the gate.
+    proposal_gate: Arc<Mutex<Option<ProposalGate>>>,
+    /// Blocks for which `verify` returns false.
+    pub reject: Option<fn(&B) -> bool>,
     _phantom: PhantomData<S>,
 }
 
 impl<B, S> MockVerifyingApp<B, S> {
     /// Create a new mock verifying application.
     pub fn new() -> Self {
-        Self {
-            propose_result: None,
-            verify_result: true,
-            _phantom: PhantomData,
-        }
+        Self::default()
     }
 
     /// Create a new mock verifying application with a fixed verify result.
     pub fn with_verify_result(verify_result: bool) -> Self {
         Self {
-            propose_result: None,
             verify_result,
-            _phantom: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -50,6 +58,32 @@ impl<B, S> MockVerifyingApp<B, S> {
         self.propose_result = Some(block);
         self
     }
+
+    /// Configure the blocks for which `verify` returns false.
+    pub fn with_reject(mut self, reject: fn(&B) -> bool) -> Self {
+        self.reject = Some(reject);
+        self
+    }
+
+    /// Configure the decision `prepare` attaches to a built block.
+    pub const fn with_handoff(mut self, handoff: Handoff<()>) -> Self {
+        self.handoff = handoff;
+        self
+    }
+
+    /// Blocks the first proposal build until cancellation. Returns a receiver that
+    /// signals when the build starts and one that errors when the build is cancelled.
+    pub fn with_proposal_gate(mut self) -> (Self, oneshot::Receiver<()>, oneshot::Receiver<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (dropped, dropped_rx) = oneshot::channel();
+        self.proposal_gate = Arc::new(Mutex::new(Some(ProposalGate { started, dropped })));
+        (self, started_rx, dropped_rx)
+    }
+}
+
+struct ProposalGate {
+    started: oneshot::Sender<()>,
+    dropped: oneshot::Sender<()>,
 }
 
 impl<B, S> Default for MockVerifyingApp<B, S> {
@@ -57,6 +91,9 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
+            handoff: Handoff::Wait,
+            proposal_gate: Arc::default(),
+            reject: None,
             _phantom: PhantomData,
         }
     }
@@ -64,29 +101,59 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
 
 impl<B, S> crate::Application<deterministic::Context> for MockVerifyingApp<B, S>
 where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
 {
     type Block = B;
     type Context = B::Context;
     type SigningScheme = S;
     type Input = ();
 
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        if self.handoff.is_wait() {
+            return Handoff::Wait;
+        }
+        let decision = self.handoff;
+        self.propose(context, ancestry, input)
+            .await
+            .map_or(Handoff::Wait, |block| decision.map(|()| block))
+    }
+
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
-        self.propose_result.clone()
+    ) -> Option<Digested<Self::Block>> {
+        let gate = self.proposal_gate.lock().take();
+        if let Some(gate) = gate {
+            // Cancelling this future drops the sender, which errors the receiver.
+            let _dropped = gate.dropped;
+            gate.started.send_lossy(());
+            pending::<()>().await;
+        }
+        match self.propose_result.clone() {
+            Some(block) => Some(Digested::compute(block, &Sequential).await),
+            None => None,
+        }
     }
 
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
+        if let (Some(reject), Some(block)) = (self.reject, ancestry.peek())
+            && reject(block.inner())
+        {
+            return false;
+        }
         self.verify_result
     }
 }
@@ -121,9 +188,9 @@ impl<B, S> GatedVerifyingApp<B, S> {
 
 impl<B, S> crate::Application<deterministic::Context> for GatedVerifyingApp<B, S>
 where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
 {
     type Block = B;
     type Context = B::Context;
@@ -135,7 +202,7 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         None
     }
 
@@ -154,5 +221,160 @@ where
             .expect("release receiver missing");
         let _ = release.await;
         true
+    }
+}
+
+/// An event a [`RecordingVerifyingApp`] observed for one block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verification<D> {
+    /// Verification of the block started.
+    Started(D),
+    /// Verification of the block was cancelled before it resolved.
+    Cancelled(D),
+}
+
+/// A verifying mock application whose `verify()` never resolves. It records, by block digest,
+/// when each verification starts and when it is cancelled.
+#[derive(Clone)]
+pub struct RecordingVerifyingApp<B: Digestible, S> {
+    observed: Arc<Mutex<Vec<Verification<B::Digest>>>>,
+    _phantom: PhantomData<S>,
+}
+
+impl<B: Digestible, S> RecordingVerifyingApp<B, S> {
+    /// Creates an application that has observed nothing.
+    pub fn new() -> Self {
+        Self {
+            observed: Arc::default(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Returns what the application and its clones have observed, in order.
+    pub fn observed(&self) -> Vec<Verification<B::Digest>> {
+        self.observed.lock().clone()
+    }
+}
+
+impl<B: Digestible, S> Default for RecordingVerifyingApp<B, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Records the cancellation of a verification that is dropped before it resolves.
+struct Cancellation<D: Copy> {
+    digest: D,
+    observed: Arc<Mutex<Vec<Verification<D>>>>,
+}
+
+impl<D: Copy> Drop for Cancellation<D> {
+    fn drop(&mut self) {
+        self.observed
+            .lock()
+            .push(Verification::Cancelled(self.digest));
+    }
+}
+
+impl<B, S> crate::Application<deterministic::Context> for RecordingVerifyingApp<B, S>
+where
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
+{
+    type Block = B;
+    type Context = B::Context;
+    type SigningScheme = S;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        _ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
+    ) -> Option<Digested<Self::Block>> {
+        None
+    }
+
+    async fn verify(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        // Record that verification of the block at the head of the ancestry has started.
+        let digest = ancestry
+            .peek()
+            .expect("ancestry must start at the block under verification")
+            .digest();
+        self.observed.lock().push(Verification::Started(digest));
+
+        // Never resolve. The guard records the cancellation of this digest when it is dropped,
+        // which happens only when the caller drops this future.
+        let _cancellation = Cancellation {
+            digest,
+            observed: self.observed.clone(),
+        };
+        pending().await
+    }
+}
+
+/// A mock application that reads the ancestry it is given block by block. It accepts a block
+/// only if that ancestry reaches the height-zero block, and it never builds one.
+#[derive(Clone)]
+pub struct WalkingVerifyingApp<B: Digestible, S> {
+    /// The digest of each block the application and its clones have read, in order.
+    pub blocks: Arc<Mutex<Vec<B::Digest>>>,
+    _phantom: PhantomData<S>,
+}
+
+impl<B: Digestible, S> Default for WalkingVerifyingApp<B, S> {
+    fn default() -> Self {
+        Self {
+            blocks: Arc::default(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<B: Block, S> WalkingVerifyingApp<B, S> {
+    /// Reads `ancestry` until it ends and returns whether it reached the height-zero block.
+    async fn walk(&self, mut ancestry: impl Ancestry<B>) -> bool {
+        while let Some(block) = ancestry.next().await {
+            self.blocks.lock().push(block.digest());
+            if block.height() == Height::zero() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl<B, S> crate::Application<deterministic::Context> for WalkingVerifyingApp<B, S>
+where
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
+{
+    type Block = B;
+    type Context = B::Context;
+    type SigningScheme = S;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
+    ) -> Option<Digested<Self::Block>> {
+        self.walk(ancestry).await;
+        None
+    }
+
+    async fn verify(
+        &mut self,
+        _context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        self.walk(ancestry).await
     }
 }

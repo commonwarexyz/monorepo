@@ -1,11 +1,13 @@
-//! Shared types for the DKG module.
+//! Epoch artifacts, participant sets, and wire messages of the DKG protocol.
 
 use crate::dkg::network::Directory;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    PublicKey, Signer,
+    PublicKey,
     bls12381::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Output, PlayerAck, SignedDealerLog},
         primitives::{
@@ -16,39 +18,88 @@ use commonware_cryptography::{
     },
 };
 use commonware_p2p::TrackedPeers;
-use commonware_utils::{Faults as _, N3f1, ordered::Set, sequence::Unit};
-use std::num::{NonZeroU32, NonZeroU64};
+use commonware_utils::{Widen, ordered::Set, sequence::Unit};
+use std::num::NonZeroU32;
 use thiserror::Error;
 
-/// Information required to construct an epoch-scoped threshold scheme that may
-/// or may not be capable of signing messages.
+/// Returns the codec's participant cap for committees of at most `participants` members.
+///
+/// # Panics
+///
+/// Panics if `participants` is zero or exceeds `u32::MAX`.
+pub(crate) fn max_participants(participants: usize) -> NonZeroU32 {
+    u32::try_from(participants)
+        .ok()
+        .and_then(NonZeroU32::new)
+        .expect("participants must be non-zero and fit in u32")
+}
+
+/// Material for an epoch-scoped threshold scheme and this node's role in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemeInfo<V: Variant, P: PublicKey> {
-    /// Information required for constructing a verifier scheme.
+    /// Material for a verifier outside the committee.
     Verifier {
-        /// The participants.
+        /// Players of the epoch's threshold output.
         participants: Set<P>,
-        /// The public group polynomial.
+        /// Public group polynomial.
         sharing: Sharing<V>,
     },
-    /// Information required for constructing a signer scheme.
-    Signer {
-        /// The participants.
+    /// Material for a committee member without a signing share.
+    Member {
+        /// Players of the epoch's threshold output.
         participants: Set<P>,
-        /// The public group polynomial.
+        /// Public group polynomial.
         sharing: Sharing<V>,
-        /// A BLS [`Share`].
+        /// This node's identity key, one of `participants`.
+        public_key: P,
+    },
+    /// Material for a committee member that also signs with `share`.
+    Signer {
+        /// Players of the epoch's threshold output.
+        participants: Set<P>,
+        /// Public group polynomial.
+        sharing: Sharing<V>,
+        /// This node's secret share.
         share: Share,
     },
 }
 
-/// Result of a completed DKG/reshare epoch.
+impl<V: Variant, P: PublicKey> SchemeInfo<V, P> {
+    /// Describes the scheme for the node identified by `public_key`: a signer when it holds
+    /// `share`, a member when it is one of `participants` without a share, and a verifier
+    /// otherwise.
+    pub fn new(
+        public_key: &P,
+        participants: Set<P>,
+        sharing: Sharing<V>,
+        share: Option<Share>,
+    ) -> Self {
+        match share {
+            Some(share) => Self::Signer {
+                participants,
+                sharing,
+                share,
+            },
+            None if participants.position(public_key).is_some() => Self::Member {
+                participants,
+                sharing,
+                public_key: public_key.clone(),
+            },
+            None => Self::Verifier {
+                participants,
+                sharing,
+            },
+        }
+    }
+}
+
+/// Result of a DKG or reshare ceremony.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum EpochOutcome {
-    /// The epoch produced a new public output.
+    /// The ceremony produced a new public output.
     Success,
-    /// The epoch failed and carried the previous public state forward.
+    /// The ceremony failed, and the previous public output carries forward.
     Failure,
 }
 
@@ -62,10 +113,8 @@ impl Write for EpochOutcome {
     }
 }
 
-impl EncodeSize for EpochOutcome {
-    fn encode_size(&self) -> usize {
-        1
-    }
+impl FixedSize for EpochOutcome {
+    const SIZE: usize = u8::SIZE;
 }
 
 impl Read for EpochOutcome {
@@ -91,39 +140,33 @@ pub struct Participants<P: PublicKey> {
     pub next_players: Set<P>,
 }
 
-/// Errors produced while validating DKG/reshare participants.
+/// Reasons [`Participants::validate`] rejects a participant set.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParticipantsError {
-    /// No dealers were provided.
+    /// The dealer set is empty.
     #[error("dealers must not be empty")]
     EmptyDealers,
-    /// No players were provided.
+    /// The player set is empty.
     #[error("players must not be empty")]
     EmptyPlayers,
-    /// A participant set exceeds the configured maximum.
+    /// A participant set (dealers, players, or next players) has `actual` members, more than
+    /// `max`.
     #[error("too many participants: {actual} > {max}")]
     TooManyParticipants { actual: usize, max: usize },
-    /// Round-zero reshare dealers differ from the previous output players.
+    /// In reshare round zero, the dealers are not exactly the previous output's players.
     #[error("round-zero reshare dealers must equal previous output players")]
     InitialReshareDealers,
-    /// A later reshare dealer does not own a previous share.
+    /// In a later reshare round, a dealer is not one of the previous output's players.
     #[error("reshare dealer is not a previous player")]
     UnknownReshareDealer,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct EpochCapacityError {
-    available: u64,
-    required: u64,
-}
-
 impl<P: PublicKey> Participants<P> {
-    /// Builds the peer set used by the DKG channel.
+    /// Returns the peers to activate for this epoch: the dealers as primary peers, and the
+    /// players and next players as secondary peers.
     ///
-    /// Dealers are the primary tracked peers because they send protocol data in the
-    /// current round. Current and next players are tracked as secondary peers so the
-    /// actor keeps enough connectivity to receive its own messages and prepare the
-    /// next epoch without allowing next players to act as dealers.
+    /// Dealers send the epoch's dealings. Players and next players are tracked for the
+    /// connectivity needed to receive dealings and to prepare the next epoch.
     pub fn tracked_peers(&self) -> TrackedPeers<P> {
         TrackedPeers::new(
             self.dealers.clone(),
@@ -131,12 +174,14 @@ impl<P: PublicKey> Participants<P> {
         )
     }
 
-    /// Checks that a participant snapshot is usable for the requested reshare round.
+    /// Checks that the participants are usable for `round`.
     ///
-    /// Reshare requires non-empty dealer and player sets, caps every participant set
-    /// at `max_participants`, and verifies that reshare dealers are authorized by the
-    /// previous epoch output. Round zero must start from exactly the previous player
-    /// set. Later rounds may use any subset of previous players as dealers.
+    /// Returns [`ParticipantsError::EmptyDealers`] or [`ParticipantsError::EmptyPlayers`]
+    /// for an empty set, and [`ParticipantsError::TooManyParticipants`] if any set exceeds
+    /// `max_participants`. With a `previous` output, round zero requires the dealers to
+    /// equal its players ([`ParticipantsError::InitialReshareDealers`]), and later rounds
+    /// require every dealer to be one of its players
+    /// ([`ParticipantsError::UnknownReshareDealer`]). Returns `Ok(())` otherwise.
     pub fn validate<V: Variant>(
         &self,
         max_participants: NonZeroU32,
@@ -182,39 +227,6 @@ impl<P: PublicKey> Participants<P> {
 
         Ok(())
     }
-
-    pub(crate) fn validate_epoch_capacity<V: Variant>(
-        &self,
-        blocks_per_epoch: NonZeroU64,
-        previous: Option<&Output<V, P>>,
-    ) -> Result<(), EpochCapacityError> {
-        let available = dealer_log_slots(blocks_per_epoch);
-        let required = self.required_dealer_logs(previous);
-        if available < required {
-            return Err(EpochCapacityError {
-                available,
-                required,
-            });
-        }
-        Ok(())
-    }
-
-    fn required_dealer_logs<V: Variant>(&self, previous: Option<&Output<V, P>>) -> u64 {
-        let dealer_quorum = u64::from(N3f1::quorum(self.dealers.len()));
-        let previous_quorum = previous
-            .map(|previous| u64::from(previous.quorum::<N3f1>()))
-            .unwrap_or_default();
-        dealer_quorum.max(previous_quorum)
-    }
-}
-
-const fn dealer_log_slots(blocks_per_epoch: NonZeroU64) -> u64 {
-    let blocks = blocks_per_epoch.get();
-    // Shorter epochs do not leave a usable dealing-to-inclusion window.
-    if blocks < 4 {
-        return 0;
-    }
-    blocks.saturating_sub(blocks / 2 + 1)
 }
 
 impl<P: PublicKey> Write for Participants<P> {
@@ -251,6 +263,7 @@ mod tests {
     use crate::dkg::network::Addresses;
     use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{
+        Signer as _,
         bls12381::{
             dkg::feldman_desmedt::deal,
             primitives::{sharing::Mode, variant::MinPk},
@@ -258,7 +271,7 @@ mod tests {
         ed25519,
     };
     use commonware_p2p::Address;
-    use commonware_utils::{NZU32, NZU64, TestRng};
+    use commonware_utils::{N3f1, NZU32, TestRng};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn keys(count: u64) -> Set<ed25519::PublicKey> {
@@ -304,6 +317,51 @@ mod tests {
             )
             .expect("decode addressed epoch info");
         assert_eq!(decoded, info);
+    }
+
+    /// A node's role follows its share and its place among the players: a player with a share
+    /// signs, a player without one is a member, and any other node is a verifier.
+    #[test]
+    fn scheme_info_names_the_node_role() {
+        let keys = keys(4);
+        let (output, shares) =
+            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, keys.clone())
+                .expect("trusted deal must succeed");
+        let sharing = output.public().clone();
+        let player = keys
+            .iter()
+            .nth(1)
+            .expect("keys must hold four players")
+            .clone();
+        let share = shares
+            .get_value(&player)
+            .cloned()
+            .expect("player must hold a share");
+        let outsider = ed25519::PrivateKey::from_seed(99).public_key();
+
+        assert_eq!(
+            SchemeInfo::new(&player, keys.clone(), sharing.clone(), Some(share.clone())),
+            SchemeInfo::Signer {
+                participants: keys.clone(),
+                sharing: sharing.clone(),
+                share,
+            }
+        );
+        assert_eq!(
+            SchemeInfo::new(&player, keys.clone(), sharing.clone(), None),
+            SchemeInfo::Member {
+                participants: keys.clone(),
+                sharing: sharing.clone(),
+                public_key: player,
+            }
+        );
+        assert_eq!(
+            SchemeInfo::new(&outsider, keys.clone(), sharing.clone(), None),
+            SchemeInfo::Verifier {
+                participants: keys,
+                sharing,
+            }
+        );
     }
 
     #[test]
@@ -381,85 +439,6 @@ mod tests {
             .is_err()
         );
     }
-
-    fn participants(count: u64) -> Participants<ed25519::PublicKey> {
-        let keys = keys(count);
-        Participants {
-            dealers: keys.clone(),
-            players: keys,
-            next_players: Set::default(),
-        }
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_insufficient_bootstrap_slots() {
-        assert_eq!(
-            participants(2).validate_epoch_capacity::<MinPk>(NZU64!(4), None),
-            Err(EpochCapacityError {
-                available: 1,
-                required: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_accepts_exact_bootstrap_slots() {
-        assert!(
-            participants(2)
-                .validate_epoch_capacity::<MinPk>(NZU64!(5), None)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_short_epoch_with_single_dealer() {
-        assert_eq!(
-            participants(1).validate_epoch_capacity::<MinPk>(NZU64!(3), None),
-            Err(EpochCapacityError {
-                available: 0,
-                required: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_insufficient_reshare_slots() {
-        let players = keys(4);
-        let (previous, _) =
-            deal::<MinPk, _, N3f1>(TestRng::new(0), Mode::NonZeroCounter, players.clone())
-                .expect("trusted deal");
-
-        assert_eq!(
-            Participants {
-                dealers: players.clone(),
-                players,
-                next_players: Set::default(),
-            }
-            .validate_epoch_capacity(NZU64!(6), Some(&previous)),
-            Err(EpochCapacityError {
-                available: 2,
-                required: 3,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_accepts_exact_reshare_slots() {
-        let players = keys(4);
-        let (previous, _) =
-            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, players.clone())
-                .expect("trusted deal");
-
-        assert!(
-            Participants {
-                dealers: players.clone(),
-                players,
-                next_players: Set::default(),
-            }
-            .validate_epoch_capacity(NZU64!(7), Some(&previous))
-            .is_ok()
-        );
-    }
 }
 
 #[cfg(feature = "arbitrary")]
@@ -476,27 +455,21 @@ where
     }
 }
 
-/// Canonical public epoch artifact.
+/// The public description of an epoch.
 ///
-/// This is the public truth needed to start an epoch: the latest public output,
-/// the participant sets not already carried by that output, and the transport
-/// [`Directory`] for every peer of the epoch. The genesis block carries the
-/// [`EpochInfo`] for epoch 0; the final block of each epoch carries the
-/// [`EpochInfo`] for the following epoch. The reshare actor never invents this;
-/// it reads it back from finalized block ancestry.
-///
-/// Because the directory rides in the artifact, a node recovering through a
-/// certificate-backed route (a finalized boundary block, a
-/// [`probe`](crate::dkg::probe) artifact, or persisted
-/// [`state_sync`](crate::dkg::state_sync) material) can activate the epoch's
-/// peers without access to application state.
+/// It holds the epoch's threshold output, the participant sets that output does not
+/// carry, and the transport [`Directory`] for every peer of the epoch. Genesis carries the
+/// [`EpochInfo`] for epoch 0, and the final block of each epoch carries the [`EpochInfo`]
+/// for the next. See [Peer Activation](crate::dkg#peer-activation) for how the directory is
+/// used.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
-    /// Whether or not the reshare ceremony in this epoch was successful.
+    /// Outcome of the ceremony that produced this artifact (on
+    /// [`EpochOutcome::Failure`], `output` is the previous output carried forward).
     pub outcome: EpochOutcome,
     /// Epoch this artifact describes.
     pub epoch: Epoch,
-    /// Latest public DKG output.
+    /// Public threshold output whose players are this epoch's dealers.
     pub output: Output<V, P>,
     /// Peers that receive shares in this epoch.
     pub players: Set<P>,
@@ -508,7 +481,23 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
-    /// Reconstructs the complete participant snapshot for this epoch.
+    /// Returns an upper bound on the encoded size of an artifact whose participant sets each hold
+    /// at most `max_participants` participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        let participants: usize = Widen::widen(max_participants.get());
+        let set = Set::<P>::max_encode_size(participants);
+
+        // The directory names the union of the output's players, the players, and the next
+        // players.
+        let directory = D::max_encode_size(3 * participants);
+        Output::<V, P>::max_encode_size(max_participants)
+            + EpochOutcome::MAX_ENCODE_SIZE
+            + Epoch::MAX_ENCODE_SIZE
+            + set * 2
+            + directory
+    }
+
+    /// Returns the epoch's participants, with the output's players as dealers.
     pub fn participants(&self) -> Participants<P> {
         Participants {
             dealers: self.output.players().clone(),
@@ -605,21 +594,17 @@ where
     }
 }
 
-/// A public artifact published by the reshare actor into a block.
-///
-/// During the dealing and inclusion window of an epoch the actor publishes
-/// finalized dealer logs. The final block of an epoch instead carries the
-/// canonical [`EpochInfo`] for the following epoch.
-#[allow(clippy::large_enum_variant)]
-pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
-    /// A finalized signed dealer log for inclusion mid-epoch.
-    DealerLog(SignedDealerLog<V, C>),
-    /// The canonical public epoch artifact for the next epoch, carried by the
-    /// final block of the current epoch.
-    EpochInfo(EpochInfo<V, C::PublicKey, D>),
+/// A public reshare artifact carried by an application block.
+pub enum Payload<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
+    /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
+    /// final block.
+    DealerLog(SignedDealerLog<V, P>),
+    /// An epoch's [`EpochInfo`]: epoch zero's in genesis (and in a one-shot DKG's final
+    /// block), and otherwise the next epoch's in the final block of the current epoch.
+    EpochInfo(EpochInfo<V, P, D>),
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Clone for Payload<V, P, D> {
     fn clone(&self) -> Self {
         match self {
             Self::DealerLog(log) => Self::DealerLog(log.clone()),
@@ -628,7 +613,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, 
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> PartialEq for Payload<V, P, D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::DealerLog(a), Self::DealerLog(b)) => a == b,
@@ -638,9 +623,9 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V,
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Eq for Payload<V, C, D> {}
+impl<V: Variant, P: PublicKey, D: Directory<P>> Eq for Payload<V, P, D> {}
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Write for Payload<V, P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::DealerLog(log) => {
@@ -655,7 +640,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, 
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::DealerLog(log) => log.encode_size(),
@@ -664,7 +649,17 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Payload<V, P, D> {
+    /// Returns an upper bound on the encoded size of a payload for at most `max_participants`
+    /// participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        let log = SignedDealerLog::<V, P>::max_encode_size(max_participants);
+        let info = EpochInfo::<V, P, D>::max_encode_size(max_participants);
+        log.max(info) + u8::SIZE
+    }
+}
+
+impl<V: Variant, P: PublicKey, D: Directory<P>> Read for Payload<V, P, D> {
     /// Maximum entries accepted in each participant set and maximum supported
     /// sharing mode version.
     type Cfg = (NonZeroU32, ModeVersion);
@@ -679,11 +674,10 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> arbitrary::Arbitrary<'_>
-    for Payload<V, C, D>
+impl<V: Variant, P: PublicKey, D: Directory<P>> arbitrary::Arbitrary<'_> for Payload<V, P, D>
 where
-    SignedDealerLog<V, C>: for<'a> arbitrary::Arbitrary<'a>,
-    EpochInfo<V, C::PublicKey, D>: for<'a> arbitrary::Arbitrary<'a>,
+    SignedDealerLog<V, P>: for<'a> arbitrary::Arbitrary<'a>,
+    EpochInfo<V, P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(if u.arbitrary::<bool>()? {
@@ -694,11 +688,11 @@ where
     }
 }
 
-/// Wire message type for DKG protocol communication.
+/// Point-to-point message of a DKG or reshare ceremony.
 pub enum Message<V: Variant, P: PublicKey> {
-    /// A dealer message containing public and private components for a player.
+    /// A dealer's public and private messages for one player.
     Dealer(DealerPubMsg<V>, DealerPrivMsg),
-    /// A player acknowledgment sent back to a dealer.
+    /// A player's acknowledgement to a dealer.
     Ack(PlayerAck<P>),
 }
 
@@ -724,6 +718,16 @@ impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
             Self::Dealer(pub_msg, priv_msg) => pub_msg.encode_size() + priv_msg.encode_size(),
             Self::Ack(ack) => ack.encode_size(),
         }
+    }
+}
+
+impl<V: Variant, P: PublicKey> Message<V, P> {
+    /// Returns an upper bound on the encoded size of a message for at most `max_participants`
+    /// participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        let dealer =
+            DealerPubMsg::<V>::max_encode_size(max_participants) + DealerPrivMsg::MAX_ENCODE_SIZE;
+        dealer.max(PlayerAck::<P>::MAX_ENCODE_SIZE) + u8::SIZE
     }
 }
 
@@ -774,8 +778,8 @@ mod conformance {
         CodecConformance<Participants<ed25519::PublicKey>>,
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey>> => 8192,
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
-        CodecConformance<Payload<MinSig, ed25519::PrivateKey>> => 8192,
-        CodecConformance<Payload<MinSig, ed25519::PrivateKey, Addresses<ed25519::PublicKey>>> => 8192,
+        CodecConformance<Payload<MinSig, ed25519::PublicKey>> => 8192,
+        CodecConformance<Payload<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
         CodecConformance<Message<MinSig, ed25519::PublicKey>>,
     }
 }

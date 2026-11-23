@@ -3,10 +3,14 @@ name = "commonware-cryptography-fuzz"
 version.workspace = true
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
+
+[lints.cargo]
+unused_dependencies = "allow"
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
@@ -15,7 +19,7 @@ blst = { workspace = true, features = ["no-threads"] }
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std", "arbitrary", "fuzz"] }
 commonware-math.workspace = true
-commonware-parallel = { workspace = true, features = ["std"] }
+commonware-parallel = { workspace = true, features = ["std", "test-utils"] }
 commonware-utils = { workspace = true, features = ["std"] }
 crc.workspace = true
 ed25519-consensus.workspace = true
@@ -163,6 +167,13 @@ bench = false
 [[bin]]
 name = "keccak256_hasher"
 path = "fuzz_targets/keccak256_hasher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sha512_hasher"
+path = "fuzz_targets/sha512_hasher.rs"
 test = false
 doc = false
 bench = false

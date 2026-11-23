@@ -77,6 +77,23 @@
 //! attestation's signer index), and a signer gains nothing by relabeling its own ack that it could
 //! not achieve by signing the item directly in the target epoch. Integrations that perform
 //! per-epoch accounting from [types::Activity] should not treat the epoch as signed intent.
+//!
+//! ## Message Sizes
+//!
+//! Each payload the engine sends is the encoding of one [types::TipAck], and the engine adds no
+//! framing. `S` and `D` are the scheme and item digest given to [max_payload_size]:
+//!
+//! ```text
+//! TipAck:
+//!
+//! +----------------------+-----------------------+------------------+----------------------+
+//! | tip (varint, 1-10)   | height (varint, 1-10) | digest (D::SIZE) | epoch (varint, 1-10) |
+//! +----------------------+-----------------------+------------------+----------------------+
+//! | signer (varint, 1-5) | signature (S::Signature::SIZE)                                  |
+//! +----------------------+-----------------------------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] sums every box at its widest.
 
 pub mod scheme;
 pub mod types;
@@ -87,6 +104,8 @@ cfg_if::cfg_if! {
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
+        mod limits;
+        pub use limits::max_payload_size;
         mod metrics;
         mod safe_tip;
 
@@ -97,7 +116,7 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Engine, mocks};
+    use super::{Config, Engine, max_payload_size, mocks};
     use crate::{
         aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
@@ -109,10 +128,13 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        max_message_size,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock, Quota, Runner, Spawner, Supervisor as _,
+        Clock, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
@@ -213,7 +235,7 @@ mod tests {
         }
     }
 
-    /// Initialize a simulated network environment.
+    /// Initialize a simulated network sized from [max_payload_size].
     async fn initialize_simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
@@ -225,7 +247,7 @@ mod tests {
         let (network, mut oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: max_message_size([max_payload_size::<S, Sha256Digest>()]),
                 max_peers_per_set: NZUsize!(fixture.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -301,7 +323,7 @@ mod tests {
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             );
@@ -407,6 +429,115 @@ mod tests {
     }
 
     test_for_all_fixtures!(slow all_online);
+
+    /// Test that an admitted validator certifies heights it verified before joining.
+    #[test_traced("INFO")]
+    fn test_admitted_signer_certifies_pending_heights() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Rotate one member of a four-validator committee. The fifth participant
+            // starts outside the committee and joins in the next epoch.
+            let mut rng = test_rng();
+            let fixture = ed25519::fixture(&mut rng, TEST_NAMESPACE, 5);
+            let epoch = Epoch::new(111);
+            let next_epoch = Epoch::new(112);
+            let former: commonware_utils::ordered::Set<PublicKey> =
+                fixture.participants[..4].to_vec().try_into().unwrap();
+            let current: commonware_utils::ordered::Set<PublicKey> =
+                fixture.participants[1..].to_vec().try_into().unwrap();
+            let (oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
+
+            // Start the joining validator first and keep one current member offline.
+            // All three running validators must contribute their acks to reach quorum.
+            let admitted = mocks::Monitor::new(epoch);
+            let mut admitted_reporter = None;
+
+            for index in [4, 1, 2] {
+                let participant = &fixture.participants[index];
+                let context = context
+                    .child("participant")
+                    .with_attribute("public_key", participant);
+                let provider = mocks::Provider::new();
+                if index == 4 {
+                    provider.register(
+                        epoch,
+                        ed25519::Scheme::verifier(TEST_NAMESPACE, former.clone()),
+                    );
+                }
+                provider.register(
+                    next_epoch,
+                    ed25519::Scheme::signer(
+                        TEST_NAMESPACE,
+                        current.clone(),
+                        fixture.private_keys[index].clone(),
+                    )
+                    .unwrap(),
+                );
+                let monitor = if index == 4 {
+                    admitted.clone()
+                } else {
+                    mocks::Monitor::new(next_epoch)
+                };
+                let (reporter, mailbox) = mocks::Reporter::new(
+                    context.child("reporter"),
+                    ed25519::Scheme::verifier(TEST_NAMESPACE, current.clone()),
+                );
+                reporter.start();
+                if index == 4 {
+                    admitted_reporter = Some(mailbox.clone());
+                }
+
+                // Fill a two-height window before admission so progress requires
+                // signing both existing digests under the new committee.
+                let journal_page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+                let engine = Engine::new(
+                    context.child("engine"),
+                    Config {
+                        monitor,
+                        provider,
+                        automaton: mocks::Application::new(mocks::Strategy::Correct),
+                        reporter: mailbox,
+                        blocker: oracle.control(participant.clone()),
+                        priority_acks: false,
+                        rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(50)),
+                        epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                        window: std::num::NonZeroU64::new(2).unwrap(),
+                        activity_timeout: HeightDelta::new(10),
+                        journal_partition: format!("admission-{index}"),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
+                        journal_compression: Some(3),
+                        journal_page_cache,
+                        strategy: Sequential,
+                    },
+                );
+                engine.start(registrations.remove(participant).unwrap());
+
+                // Wait for both digests to be verified without signing authority
+                // before changing epochs or starting peers that could send acks.
+                if index == 4 {
+                    while !context
+                        .encode()
+                        .lines()
+                        .any(|line| line.contains("digest_duration_count") && line.ends_with(" 2"))
+                    {
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                    admitted.update(next_epoch);
+                }
+            }
+
+            // Both pending heights must certify at the joining validator, requiring
+            // it to count its own newly signed acks as well as those from its peers.
+            let mut mailbox = admitted_reporter.unwrap();
+            for height in [Height::zero(), Height::new(1)] {
+                while mailbox.get(height).await.is_none() {
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+            }
+        });
+    }
 
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)
@@ -528,11 +659,7 @@ mod tests {
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
-                                journal_page_cache: CacheRef::from_pooler(
-                                    &context,
-                                    PAGE_SIZE,
-                                    PAGE_CACHE_SIZE,
-                                ),
+                                journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                                 strategy: Sequential,
                             },
                         );
@@ -671,11 +798,7 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
-                                &context,
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
+                            journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             strategy: Sequential,
                         },
                     );
@@ -756,11 +879,7 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
-                                &context,
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
+                            journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             strategy: Sequential,
                         },
                     );
@@ -1054,11 +1173,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         strategy: Sequential,
                     },
                 );

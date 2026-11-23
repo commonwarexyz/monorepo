@@ -166,7 +166,8 @@ pub trait SystemTimeExt {
     fn epoch_millis(&self) -> u64;
 
     /// Adds a random `Duration` to the current time between `0` and `jitter * 2` and returns the
-    /// resulting `SystemTime`. The random duration is generated using the provided `context`.
+    /// resulting `SystemTime`, saturating at the platform maximum. The random duration is
+    /// generated using the provided `context`.
     fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime;
 
     /// Returns the maximum representable [SystemTime] on this platform.
@@ -187,7 +188,7 @@ impl SystemTimeExt for SystemTime {
     }
 
     fn add_jittered(&self, rng: &mut impl Rng, jitter: Duration) -> SystemTime {
-        *self + rng.random_range(Duration::default()..=jitter * 2)
+        self.saturating_add_ext(rng.random_range(Duration::default()..=jitter * 2))
     }
 
     fn limit() -> SystemTime {
@@ -331,6 +332,19 @@ mod tests {
             assert!(new_time <= time + (jitter * 2));
         }
         assert!(below && above);
+    }
+
+    #[test]
+    fn test_add_jittered_saturates() {
+        let mut rng = test_rng();
+        let time = SystemTime::limit() - Duration::from_secs(1);
+        let jitter = Duration::from_secs(60);
+
+        for _ in 0..100 {
+            let new_time = time.add_jittered(&mut rng, jitter);
+            assert!(new_time >= time);
+            assert!(new_time <= SystemTime::limit());
+        }
     }
 
     #[test]

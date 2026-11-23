@@ -52,7 +52,7 @@ mod delivery;
 pub(crate) mod durability;
 mod finalized;
 mod floor;
-pub use floor::{Floor, Processed};
+pub use floor::{Cutoff, Floor, Processed};
 mod staged;
 mod stream;
 
@@ -61,4 +61,4 @@ pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
 
 mod subscriptions;
 mod variant;
-pub use variant::{Buffer, ExpectedCommitment, Retirement, Variant};
+pub use variant::{Buffer, ExpectedCommitment, Variant};

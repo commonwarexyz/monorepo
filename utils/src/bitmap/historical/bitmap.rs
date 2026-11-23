@@ -13,14 +13,14 @@ mod private {
 /// Trait for valid bitmap type states [Clean], [Dirty].
 pub trait State: private::Sealed + Sized + Send + Sync {}
 
-/// Clean bitmap type state - bitmap has no pending mutations.
+/// Clean bitmap type state. The bitmap has no pending mutations.
 #[derive(Clone, Debug)]
 pub struct Clean;
 
 impl private::Sealed for Clean {}
 impl State for Clean {}
 
-/// Dirty bitmap type state - bitmap has pending mutations not yet committed.
+/// Dirty bitmap type state. The bitmap has pending mutations not yet committed.
 ///
 /// # De-duplication and Cancellation
 ///
@@ -30,18 +30,18 @@ impl State for Clean {}
 ///
 /// ```text
 /// Example 1: push + pop = no-op
-///   push(true)  → appended_bits=[true], projected_len=11
-///   pop()       → appended_bits=[], projected_len=10
+///   push(true)  -> appended_bits=[true], projected_len=11
+///   pop()       -> appended_bits=[], projected_len=10
 ///   Result: dirty state unchanged from base
 ///
 /// Example 2: set_bit + set_bit = last write wins
-///   set_bit(5, true)   → modified_bits={5: true}
-///   set_bit(5, false)  → modified_bits={5: false}
+///   set_bit(5, true)   -> modified_bits={5: true}
+///   set_bit(5, false)  -> modified_bits={5: false}
 ///   Result: only final value recorded
 ///
 /// Example 3: set_bit + pop = cancels modification
-///   set_bit(9, true)  → modified_bits={9: true}
-///   pop()             → modified_bits={} (removed), projected_len=9
+///   set_bit(9, true)  -> modified_bits={9: true}
+///   pop()             -> modified_bits={} (removed), projected_len=9
 ///   Result: bit 9 no longer exists, modification discarded
 /// ```
 ///
@@ -112,7 +112,7 @@ pub(super) struct CommitDiff<const N: usize> {
 /// Commit numbers must be strictly monotonically increasing and < u64::MAX.
 #[derive(Clone, Debug)]
 pub struct BitMap<const N: usize, S: State = Clean> {
-    /// The current/HEAD state - the one and only full bitmap.
+    /// The current/HEAD state. This is the only full bitmap.
     current: Prunable<N>,
 
     /// Historical commits: commit_number -> reverse diff from that commit.
@@ -334,39 +334,6 @@ impl<const N: usize> CleanBitMap<N> {
         self.commits.clear();
     }
 
-    /// Push bits to extend the bitmap to target length.
-    fn push_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
-        while state.len() < target_len {
-            let remaining = target_len - state.len();
-            let next_bit = state.len() % Prunable::<N>::CHUNK_SIZE_BITS;
-
-            // If we're at a chunk boundary and need at least a full chunk, push an entire chunk
-            if next_bit == 0 && remaining >= Prunable::<N>::CHUNK_SIZE_BITS {
-                state.push_chunk(&[0u8; N]);
-            } else {
-                // Otherwise push individual bits
-                state.push(false);
-            }
-        }
-    }
-
-    /// Pop bits to shrink the bitmap to target length.
-    /// Optimized to pop entire chunks when possible.
-    fn pop_to_length(&self, state: &mut Prunable<N>, target_len: u64) {
-        while state.len() > target_len {
-            let excess = state.len() - target_len;
-            let next_bit = state.len() % Prunable::<N>::CHUNK_SIZE_BITS;
-
-            // If at chunk boundary and we need to remove at least a full chunk, pop entire chunk
-            if next_bit == 0 && excess >= Prunable::<N>::CHUNK_SIZE_BITS {
-                state.pop_chunk();
-            } else {
-                // Otherwise pop individual bits
-                state.pop();
-            }
-        }
-    }
-
     /// Apply a reverse diff to transform newer_state into the previous state (in-place).
     ///
     /// Algorithm:
@@ -395,9 +362,9 @@ impl<const N: usize> CleanBitMap<N> {
 
         // Phase 2: Adjust bitmap structure to target length
         if newer_state.len() < target_len {
-            self.push_to_length(newer_state, target_len);
-        } else if newer_state.len() > target_len {
-            self.pop_to_length(newer_state, target_len);
+            newer_state.extend_to(target_len);
+        } else {
+            newer_state.truncate(target_len);
         }
 
         // Phase 3: Update chunk data
@@ -412,7 +379,7 @@ impl<const N: usize> CleanBitMap<N> {
                     newer_state.set_chunk_by_index(chunk_index, old_data);
                 }
                 ChunkDiff::Added => {
-                    // Chunk didn't exist in target - already handled by pop_to_length.
+                    // Chunk didn't exist in target, so phase 2 already removed it.
                     // We can break here because there are no more modifications to apply.
                     // Added can only occur after all Modified. If we encounter Added, we know
                     // there are no Removed. (diff.chunk_diffs can't have both Added and Removed.)
@@ -672,14 +639,11 @@ impl<const N: usize> DirtyBitMap<N> {
             // Popping from appended region: remove from appended_bits vector.
             self.state.appended_bits.pop().unwrap()
         } else {
-            // Popping from base region: check if it was modified.
-            if let Some(&modified_value) = self.state.modified_bits.get(&bit) {
-                self.state.modified_bits.remove(&bit);
-                modified_value
-            } else {
-                // Not modified, return original value.
-                self.current.get_bit(bit)
-            }
+            // Popping from base region: return the modified value, or the original if unmodified.
+            self.state
+                .modified_bits
+                .remove(&bit)
+                .unwrap_or_else(|| self.current.get_bit(bit))
         }
     }
 
@@ -785,9 +749,7 @@ impl<const N: usize> DirtyBitMap<N> {
         // Shrink to length before appends (handles net pops)
         let target_len_before_appends =
             self.state.projected_len - self.state.appended_bits.len() as u64;
-        while self.current.len() > target_len_before_appends {
-            self.current.pop();
-        }
+        self.current.truncate(target_len_before_appends);
         // Grow by appending new bits
         for &bit in &self.state.appended_bits {
             self.current.push(bit);
@@ -922,10 +884,10 @@ impl<const N: usize> DirtyBitMap<N> {
                 let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
 
                 if self.state.projected_len > chunk_start_bit {
-                    // Chunk spans the new length boundary → partially kept (Modified)
+                    // Chunk spans the new length boundary -> partially kept (Modified)
                     ChunkDiff::Modified(old_chunk)
                 } else {
-                    // Chunk is completely beyond the new length → fully removed (Removed)
+                    // Chunk is completely beyond the new length -> fully removed (Removed)
                     ChunkDiff::Removed(old_chunk)
                 }
             });

@@ -155,6 +155,8 @@
 
 use commonware_consensus::simplex::scheme::bls12381_threshold::standard as bls12381_threshold;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
+use commonware_utils::NZUsize;
+use std::num::NonZeroUsize;
 pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 #[doc(hidden)]
@@ -171,3 +173,5 @@ pub const CONSENSUS_SUFFIX: &[u8] = b"_CONSENSUS";
 pub const INDEXER_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_BRIDGE_INDEXER";
 #[doc(hidden)]
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
+#[doc(hidden)]
+pub const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1_000);

@@ -1,9 +1,10 @@
 //! Benchmarks for the Reed-Solomon encoder, decoder, rates, and engines.
 
+use commonware_allocator::mimalloc;
 #[cfg(target_arch = "aarch64")]
 use commonware_cryptography::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use commonware_cryptography::reed_solomon::engine::{Avx2, Avx512, Ssse3};
+use commonware_cryptography::reed_solomon::engine::{Avx2, Avx512};
 use commonware_cryptography::reed_solomon::{
     Decoder, Encoder, SHARD_CHUNK_BYTES,
     engine::{DefaultEngine, Engine, GF_ORDER, Naive, Scalar, ShardsRefMut},
@@ -15,6 +16,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 /// Shard size in bytes used by every benchmark.
 const SHARD_BYTES: usize = 1024;
@@ -381,9 +385,6 @@ fn benchmarks_engine(c: &mut Criterion) {
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
-        if is_x86_feature_detected!("ssse3") {
-            benchmarks_engine_one(c, "ssse3", Ssse3::new());
-        }
         if is_x86_feature_detected!("avx2") {
             benchmarks_engine_one(c, "avx2", Avx2::new());
         }
@@ -467,4 +468,5 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
 criterion_group!(benches_main, benchmarks_main);
 criterion_group!(benches_rate, benchmarks_rate);
 criterion_group!(benches_engine, benchmarks_engine);
+
 criterion_main!(benches_main, benches_rate, benches_engine);

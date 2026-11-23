@@ -3,7 +3,7 @@
 //! For portability and consistency between architectures,
 //! the length of the [Bytes] must fit within a [u32].
 
-use crate::{Buf, BufsMut, EncodeSize, Error, RangeCfg, Read, Write, util::at_least};
+use crate::{Buf, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 use bytes::{BufMut, Bytes};
 
 impl Write for Bytes {
@@ -38,8 +38,7 @@ impl Read for Bytes {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
-        at_least(buf, len)?;
-        Ok(buf.copy_to_bytes(len))
+        buf.try_take_owned(len).map_err(|_| Error::EndOfBuffer)
     }
 }
 
@@ -74,6 +73,14 @@ mod tests {
             assert!(matches!(
                 Bytes::decode_cfg(value.encode(), &(len + 1..).into()),
                 Err(Error::InvalidLength(_))
+            ));
+
+            // Failure for a payload shorter than its length prefix
+            let encoded = value.encode();
+            let truncated = encoded.slice(..encoded.len() - 1);
+            assert!(matches!(
+                Bytes::decode_cfg(truncated, &(len..=len).into()),
+                Err(Error::EndOfBuffer)
             ));
         }
     }

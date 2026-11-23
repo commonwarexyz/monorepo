@@ -12,7 +12,6 @@ use commonware_runtime::BufMut;
 ///
 /// Used to interact with the indexer's storage of blocks and finality certificates.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
 pub enum Inbound<D: Digest> {
     /// Request to store a new block in the indexer's storage.
     PutBlock(PutBlock<D>),

@@ -3,25 +3,24 @@ name = "commonware-stream-fuzz"
 version.workspace = true
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
+
+[lints.cargo]
+unused_dependencies = "allow"
 
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
-commonware-stream.workspace = true
+commonware-stream = { workspace = true, features = ["arbitrary"] }
 commonware-utils.workspace = true
 futures.workspace = true
 libfuzzer-sys.workspace = true
-
-[target.'cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies.chacha20poly1305]
-workspace = true
-default-features = false
-features = ["getrandom"]
 
 [[bin]]
 name = "transport"

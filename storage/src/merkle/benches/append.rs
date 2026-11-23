@@ -1,16 +1,18 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
 use commonware_utils::test_rng;
 use criterion::{BatchSize, Criterion, criterion_group};
-use futures::executor::block_on;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
-#[cfg(not(full_bench))]
-const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(full_bench)]
-const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
+fn n_leaves() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[10_000, 100_000],
+    }
+}
 
 fn make_elements(n: usize) -> Vec<sha256::Digest> {
     let mut elements = Vec::with_capacity(n);
@@ -22,24 +24,22 @@ fn make_elements(n: usize) -> Vec<sha256::Digest> {
 }
 
 fn bench_append_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {
             b.iter_batched(
                 || make_elements(n),
                 |elements| {
-                    block_on(async {
-                        let h = StandardHasher::<Sha256>::new(ForwardFold);
-                        let mut mem = Mem::<F, _>::new();
-                        let batch = {
-                            let mut batch = mem.new_batch();
-                            for digest in &elements {
-                                batch = batch.add(&h, digest);
-                            }
-                            batch.merkleize(&mem, &h)
-                        };
-                        mem.apply_batch(&batch).unwrap();
-                        mem
-                    })
+                    let h = StandardHasher::<Sha256>::new(ForwardFold);
+                    let mut mem = Mem::<F, _>::new();
+                    let batch = {
+                        let mut batch = mem.new_batch();
+                        for digest in &elements {
+                            batch = batch.add(&h, digest);
+                        }
+                        batch.merkleize(&mem, &h)
+                    };
+                    mem.apply_batch(&batch).unwrap();
+                    mem
                 },
                 BatchSize::LargeInput,
             );

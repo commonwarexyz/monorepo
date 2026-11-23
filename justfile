@@ -1,8 +1,17 @@
 set positional-arguments := true
 
-env_nightly_version := env("NIGHTLY_VERSION", "nightly")
-nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
+clippy_version := `sed -n 's/^clippy = "\(.*\)"/\1/p' .github/toolchains.toml`
+rustfmt_version := `sed -n 's/^rustfmt = "\(.*\)"/\1/p' .github/toolchains.toml`
+tools_nightly_version := `sed -n 's/^nightly = "\(.*\)"/\1/p' .github/toolchains.toml`
+dylint_version := `sed -n 's/^channel = "\(.*\)"/\1/p' .github/toolchains.toml`
+
+env_nightly_version := env("NIGHTLY_VERSION", tools_nightly_version)
+use_rustup := if env("COMMONWARE_NO_RUSTUP", "") == "" { "true" } else { "false" }
+nightly_version := if use_rustup == "true" { if env_nightly_version != "" { "+" + env_nightly_version } else { "" } } else { "" }
 rustfmt := env("RUSTFMT", "rustfmt")
+clippy_toolchain := if use_rustup == "true" { "+" + clippy_version } else { "" }
+rustfmt_toolchain := if use_rustup == "true" { if env("RUSTFMT", "") == "" { "+" + rustfmt_version } else { "" } } else { "" }
+dylint_toolchain := if use_rustup == "true" { "+" + dylint_version } else { "" }
 partition := "1/1"
 
 alias f := fix-fmt
@@ -22,9 +31,14 @@ build *args='':
 # Runs pre-flight lints + tests before making a pull-request
 pre-pr: lint test-docs test
 
+# Install the pinned tools used by CI and local lint checks
+install-lint-toolchains:
+    if [ "{{ use_rustup }}" = "true" ]; then rustup toolchain install {{ clippy_version }} --profile minimal --component clippy; fi
+    if [ "{{ use_rustup }}" = "true" ]; then rustup toolchain install {{ rustfmt_version }} --profile minimal --component rustfmt; fi
+
 # Fixes the formatting of the workspace
 fix-fmt *args='':
-    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ nightly_version }} --edition 2024 {{ args }}
+    find . -path ./target -prune -o -name '*.rs' -type f -print0 | xargs -0 {{ rustfmt }} {{ rustfmt_toolchain }} --edition 2024 {{ args }}
 
 # Fixes the formatting of the `Cargo.toml` files in the workspace
 fix-toml-fmt:
@@ -40,11 +54,11 @@ check-fmt:
 
 # Run clippy lints
 clippy *args='':
-    cargo clippy --all-targets $@ -- -D warnings
+    cargo {{ clippy_toolchain }} clippy --all-targets $@ -- -D warnings
 
 # Fix clippy lints
 fix-clippy *args='':
-    cargo clippy --all-targets --fix --allow-dirty $@
+    cargo {{ clippy_toolchain }} clippy --all-targets --fix --allow-dirty $@
 
 # Runs all lints (fmt, clippy, docs, features, toml, custom, publish order, and stability)
 lint: check-fmt check-toml-fmt clippy check-docs check-features dylint check-publish-order check-stability
@@ -55,15 +69,28 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 # Tests benchmarks in a given crate.
 #
 # `partition` is "N/M", run partition N of M, where bench binaries are hash-distributed across M jobs.
-test-benches crate test_flags='' lint_flags='':
+test-benches crate test_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
-    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
-    echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
-    binaries=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p' | python3 .github/scripts/hash_partition.py {{ partition }})
+    build=$(cargo test --color never --message-format=json-render-diagnostics --benches -p {{ crate }} {{ test_flags }} --no-run)
+    all=$(echo "$build" | jq -r 'select(.reason == "compiler-artifact") | select(.target.kind | index("bench")) | select(.executable != null) | .target.name')
+    if [ -z "$all" ]; then
+        echo "error: no benchmark binaries found for {{ crate }}" >&2
+        exit 1
+    fi
+    binaries=$(echo "$all" | python3 .github/scripts/hash_partition.py {{ partition }})
+    output=$(mktemp)
     for bench in $binaries; do
-        cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
+        cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose | tee -a "$output"
     done
+    # A partition can hold only binaries that print no benchmark names, such as size reports.
+    if grep -q '^Testing ' "$output"; then
+        python3 .github/scripts/lint_benchmark_names.py "$output"
+    fi
+
+# Run benchmarks with their large inputs (e.g. just bench-full -p commonware-storage --bench index)
+bench-full *args:
+    COMMONWARE_BENCH_FULL=1 cargo bench "$@"
 
 # Run the Gungraun benchmark tracking suite
 benchmark-tracking mode='generate' *args='':
@@ -118,6 +145,21 @@ benchmark-tracking mode='generate' *args='':
 
 # Run tests
 test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Outside CI, skip the io_uring tests when io_uring is unavailable, as in
+    # containers with the default seccomp profile or under QEMU user emulation.
+    if [ "$(uname -s)" = Linux ] && [ -z "${CI:-}" ] && ! error=$(python3 .github/scripts/check_io_uring.py); then
+        # The check prints why io_uring is unavailable, so no output means python3 itself failed.
+        [ -n "$error" ] || exit 1
+        echo "warning: io_uring is unavailable ($error), skipping tests whose names contain 'iouring'" >&2
+        echo "warning: to run them in a container, allow io_uring_setup, io_uring_enter, and io_uring_register in its seccomp profile" >&2
+        separator=false
+        for arg in "$@"; do
+            if [ "$arg" = -- ]; then separator=true; fi
+        done
+        if $separator; then set -- "$@" --skip iouring; else set -- "$@" -- --skip iouring; fi
+    fi
     cargo nextest run "$@"
 
 # Run loom tests
@@ -159,8 +201,14 @@ cooldown:
     ./.github/scripts/check_dependency_cooldown.sh
 
 # Run custom Dylint lints
-dylint:
-    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
+#
+# Enables `commonware-utils/analysis`, which a benchmark requires, so that `benchmark_allocator` checks it.
+dylint: install-dylint-toolchain
+    cargo {{ dylint_toolchain }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
+
+# Install the compiler and components pinned for the custom lints (skipped when COMMONWARE_NO_RUSTUP is set)
+install-dylint-toolchain:
+    if [ "{{ use_rustup }}" = "true" ]; then rustup toolchain install {{ dylint_version }} --profile minimal --component rustc-dev --component llvm-tools-preview; fi
 
 # Run all fuzz tests in a given directory.
 #
@@ -172,9 +220,15 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     if [ -z "$targets" ]; then
         exit 0
     fi
-    # Build every target in one cargo invocation before fuzzing. Each target is
+    # Build this partition's targets in one cargo invocation before fuzzing. Each target is
     # its own sanitizer-instrumented binary, so building inside the run loop
     # serializes the links against the fuzz sessions while most cores sit idle.
+    # cargo-fuzz builds one target or all of them, so until this recipe exits the
+    # manifest lists only this partition's targets.
+    manifest={{fuzz_dir}}/Cargo.toml
+    cp "$manifest" "$manifest.orig"
+    trap 'mv "$manifest.orig" "$manifest"' EXIT
+    python3 .github/scripts/keep_fuzz_targets.py "$manifest" $targets
     cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
@@ -189,9 +243,13 @@ hack *args='':
 udeps:
     cargo {{ nightly_version }} udeps --all-targets
 
-# Run miri tests on a given module
-miri module *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ module }} {{ args }}
+# Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
+miri *args='':
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo {{ nightly_version }} miri nextest run --profile miri --lib --no-tests=warn {{ args }}
+
+# Like `miri`, under Tree Borrows with the leak check off, for crates whose dependencies fail `miri` (crossbeam-epoch)
+miri-lenient *args='':
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-tree-borrows -Zmiri-ignore-leaks" cargo {{ nightly_version }} miri nextest run --profile miri --lib --no-tests=warn {{ args }}
 
 # Run zepter feature checks
 check-features:
@@ -203,14 +261,20 @@ fix-features:
 
 # Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
 test-conformance *args='':
-    just _conformance check {{ args }}
+    just check-conformance-fixtures {{ args }}
+    just test --features arbitrary --profile conformance {{ args }}
+
+# Check that every conformance fixture still has a test (optionally for specific crates: just check-conformance-fixtures -p commonware-codec)
+check-conformance-fixtures *args='':
+    just _conformance-fixtures check {{ args }}
 
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
-    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance prune {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance-fixtures prune {{ args }}
 
 [private]
-_conformance mode *args='':
+_conformance-fixtures mode *args='':
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -218,20 +282,11 @@ _conformance mode *args='':
     trap 'rm -f "$inventory"' EXIT
 
     cargo nextest list --features arbitrary --profile conformance --message-format json {{ args }} > "$inventory"
-
-    if [[ "{{ mode }}" == "check" ]]; then
-        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- check < "$inventory"
-    fi
-
-    just test --features arbitrary --profile conformance {{ args }}
-
-    if [[ "{{ mode }}" == "prune" ]]; then
-        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- prune < "$inventory"
-    fi
+    cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- {{ mode }} < "$inventory"
 
 # Find public items missing stability annotations.
 unstable-public *args='':
-    ./scripts/find_unstable_public.sh {{ args }}
+    NIGHTLY_VERSION="{{ env_nightly_version }}" ./scripts/find_unstable_public.sh {{ args }}
 
 # Check stability builds. Optionally specify level (1-4 or BETA/GAMMA/DELTA/EPSILON) and/or crate (-p <crate>).
 # ALPHA (level 0) is the default state and doesn't require a cfg flag.
@@ -284,6 +339,7 @@ check-stability *args='':
     # Save and clear RUSTC_WRAPPER so Cargo doesn't nest it outside the workspace
     # wrapper (which breaks sccache). The wrapper script invokes it internally.
     export COMMONWARE_RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
+    export NIGHTLY_VERSION="{{ env_nightly_version }}"
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
             echo "Checking commonware_stability_${name}..."

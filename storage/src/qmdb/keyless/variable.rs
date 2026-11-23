@@ -4,7 +4,7 @@
 
 use crate::{
     journal::contiguous::variable::{self, Config as JournalConfig},
-    qmdb::{any::value::VariableEncoding, keyless::operation::Operation as BaseOperation},
+    qmdb::{keyless::operation::Operation as BaseOperation, value::VariableEncoding},
 };
 
 /// Keyless operation for variable-length values.
@@ -12,10 +12,10 @@ pub type Operation<F, V> = BaseOperation<F, VariableEncoding<V>>;
 
 /// A keyless authenticated database for variable-length data.
 pub type Db<F, E, V, H, S> =
-    super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
+    super::Db<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
-pub type CompactDb<F, E, V, H, C, S> = super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size [keyless](super) authenticated db.
 pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
@@ -37,7 +37,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -46,20 +46,14 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: crate::merkle::full::Config {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+            merkle: crate::journal::authenticated::Config {
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: JournalConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -70,18 +64,12 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 
     type TestDb<F> = Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type TestCompactDb<F> = CompactDb<
-        F,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type TestCompactDb<F> = CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
@@ -92,7 +80,7 @@ mod tests {
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
-        let cfg = db_config(suffix, &context);
+        let cfg = db_config(suffix);
         TestDb::init(context, cfg, None).await.unwrap()
     }
 
@@ -105,12 +93,11 @@ mod tests {
                 partition: "compact-keyless-variable-witness".into(),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                codec_config: ((0..=10000usize).into(), ()),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((0..=10000usize).into(), ()),
         };
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
@@ -118,7 +105,7 @@ mod tests {
     fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
         Box::new(|ctx, cap| {
             Box::pin(async move {
-                let cfg = db_config("partition", &ctx);
+                let cfg = db_config("partition");
                 TestDb::init(ctx, cfg, Some(cap)).await
             })
         })
@@ -143,6 +130,7 @@ mod tests {
         test_keyless_variable_replay_with_trailing_appends => run_replay_with_trailing_appends, reopen_indexed;
         test_keyless_variable_get_out_of_bounds => run_get_out_of_bounds, db;
         test_keyless_variable_get_pruned => run_get_pruned, db;
+        test_keyless_variable_get_pruned_above_floor => run_get_pruned_above_floor, bounded_floor;
         test_keyless_variable_metadata => run_metadata, db;
         test_keyless_variable_pruning => run_pruning, reopen;
         test_keyless_variable_batch_get => run_batch_get, db;
@@ -166,35 +154,32 @@ mod tests {
         test_keyless_variable_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
-        test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, reopen;
-        test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
+        test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, db;
+        test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;
         test_keyless_variable_bounded_initialization_restores_floor =>
             run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_variable_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
         test_keyless_variable_bounded_initialization_after_reopen_with_floor =>
             run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
-        test_keyless_variable_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
-        test_keyless_variable_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
+        test_keyless_variable_chained_floor_regression_rejected => run_chained_floor_regression_rejected, db;
+        test_keyless_variable_chained_floor_beyond_commit_rejected => run_chained_floor_beyond_commit_rejected, db;
         test_keyless_variable_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
         test_keyless_variable_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
         test_keyless_variable_commit_after_sync_recovery => run_commit_after_sync_recovery, reopen_indexed;
         test_keyless_variable_get_many => run_get_many, db;
         test_keyless_variable_partial_ancestor_commit => run_partial_ancestor_commit, db;
         test_keyless_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, db;
+        test_keyless_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
+        test_keyless_variable_merkleize_across_prune => run_merkleize_across_prune, db;
+        test_keyless_variable_stale_fork_refuses => run_stale_fork_refuses, db;
+        test_keyless_variable_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, db;
+        test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
-    /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
-    /// `historical_proof` for sizes in that leading interval must report `HistoricalFloorPruned`
-    /// (the floor metadata is gone) rather than the misleading `UnexpectedData` (which sounds like
-    /// data corruption).
-    ///
-    /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
-    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <=
-    /// 8) and retains blob 1 ([7, 14)). `bounds.start = 7` is a non-commit op (an Append), and the
-    /// previous commit at location 4 was pruned. `historical_proof(op_count=8, ...)` asks for the
-    /// state just before the first retained commit, which has no retained governing floor.
+    /// Distinguish a pruned commit from a retained append at the pruning boundary.
     #[test_traced("INFO")]
-    fn test_keyless_variable_historical_proof_floor_pruned() {
+    fn test_keyless_variable_historical_proof_across_prune() {
         use crate::merkle::Location;
         deterministic::Runner::default().start(|ctx| async move {
             let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
@@ -209,8 +194,9 @@ mod tests {
                         ));
                 }
                 let new_commit_loc = db.bounds().end + 3;
-                let merkleized = batch.merkleize(&db, None, new_commit_loc).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                let batch = batch.with_inactivity_floor(new_commit_loc);
+                let merkleized = batch.merkleize(&db).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
@@ -219,23 +205,26 @@ mod tests {
             let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
-            // op_count = first retained commit (= state just before that commit). Expected:
-            // HistoricalFloorPruned, NOT UnexpectedData.
+            // Size 5 ends at the pruned commit at 4. Size 8 ends at the retained append at 7.
             let result = db
-                .historical_proof(Location::new(8), bounds.start, NZU64!(5))
+                .historical_proof(Location::new(5), Location::new(4), NZU64!(1))
                 .await;
             assert!(
-                !matches!(result, Err(Error::UnexpectedData(_))),
-                "must not surface as UnexpectedData; got {result:?}",
+                matches!(
+                    result,
+                    Err(Error::Journal(crate::journal::Error::ItemPruned(4)))
+                ),
+                "expected ItemPruned(4), got {result:?}"
             );
+            let result = db
+                .historical_proof(Location::new(8), bounds.start, NZU64!(1))
+                .await;
             assert!(
-                matches!(result, Err(Error::HistoricalFloorPruned(loc)) if loc == Location::new(8)),
-                "expected HistoricalFloorPruned(8), got {result:?}",
+                matches!(result, Err(Error::NotCommitBoundary(size)) if size == Location::new(8)),
+                "expected NotCommitBoundary(8), got {result:?}"
             );
 
-            // Sanity: a commit-boundary size whose floor is retained still works. First retained
-            // commit at 8 declares some floor; op_count=9 is the post-commit size whose governing
-            // floor is the one declared at op 8.
+            // Size 9 ends at the first retained commit.
             db.historical_proof(Location::new(9), Location::new(8), NZU64!(1))
                 .await
                 .expect("commit-boundary historical_proof should succeed");
@@ -256,26 +245,27 @@ mod tests {
         let v2 = b"world".to_vec();
         let metadata = b"metadata".to_vec();
 
-        let floor = db.inactivity_floor_loc();
         let retained = db
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
-            .merkleize(&db, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .merkleize(&db)
             .await
             .unwrap();
         let compact_batch = compact
             .new_batch()
             .append(v1)
             .append(v2)
-            .merkleize(&compact, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .merkleize(&compact)
             .await
             .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
+        let db = db.apply_batch(retained).await.unwrap();
+        let compact = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 

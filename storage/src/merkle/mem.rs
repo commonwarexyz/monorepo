@@ -5,8 +5,8 @@
 //! `mmr::mem::Mmr` and `mmb::mem::Mmb` via type aliases.
 
 use crate::merkle::{
-    Error, Family, Location, Position, Proof, Readable, batch, hasher::Hasher,
-    proof as merkle_proof,
+    Error, Family, Location, MAX_PINNED_NODES, Position, Proof, RangePlan, Readable, batch,
+    hasher::Hasher,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -14,7 +14,7 @@ use alloc::{
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use core::ops::Range;
+use core::{iter, ops::Range};
 
 /// Configuration for initializing a [`Mem`].
 pub struct Config<F: Family, D: Digest> {
@@ -153,8 +153,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ) -> Result<D, Error<F>> {
         let size = self.size();
         let leaves = Location::try_from(size).expect("invalid merkle size");
-        // A u64 leaf count has at most 64 peaks, so a fixed buffer avoids a heap allocation.
-        let mut peaks = [Position::<F>::default(); 64];
+        let mut peaks = [Position::<F>::default(); MAX_PINNED_NODES];
         let mut count = 0;
         for (pos, _) in F::peaks(size) {
             peaks[count] = pos;
@@ -193,6 +192,11 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Return a new iterator over the peaks.
     pub fn peak_iterator(&self) -> impl Iterator<Item = (Position<F>, u32)> + use<F, D> {
         F::peaks(self.size())
+    }
+
+    /// Return the digests of the peaks, oldest first.
+    pub(crate) fn peaks(&self) -> impl Iterator<Item = D> + '_ {
+        F::peaks(self.size()).map(|(pos, _)| *self.get_node_unchecked(pos))
     }
 
     /// Return the requested node if it is either retained or present in the pinned_nodes map, and
@@ -338,14 +342,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
         range: Range<Location<F>>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
-        merkle_proof::build_range_proof(
-            hasher,
-            self.leaves(),
-            inactive_peaks,
-            range,
-            |pos| self.get_node(pos),
-            Error::ElementPruned,
-        )
+        RangePlan::new(self.leaves(), range)?
+            .build(hasher, inactive_peaks, |pos| self.get_node(pos))
     }
 
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.
@@ -356,12 +354,43 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .collect()
     }
 
+    /// Move the pruning boundary of a structure that retains no nodes forward to `leaves`, pinning
+    /// `peaks`. Together with the nodes already pinned, which stay pinned, they must include every
+    /// node [`Family::nodes_to_pin`] returns for `leaves`.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn skip_to(
+        &mut self,
+        leaves: Location<F>,
+        peaks: impl IntoIterator<Item = (Position<F>, D)>,
+    ) -> Result<(), Error<F>> {
+        let pos = Position::try_from(leaves)?;
+        if !self.nodes.is_empty() || pos < self.pruning_boundary {
+            return Err(Error::DataCorrupted("skip requires a pruned structure"));
+        }
+        self.pruning_boundary = pos;
+        self.pinned_nodes.extend(peaks);
+        debug_assert!(
+            F::nodes_to_pin(leaves).all(|pos| self.pinned_nodes.contains_key(&pos)),
+            "skip must pin every peak"
+        );
+        Ok(())
+    }
+
+    /// Drop every retained node and pinned node except the peaks at the current size and `keep`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a peak at the current size is neither retained nor pinned.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn compact(&mut self, keep: &BTreeMap<Position<F>, D>) {
+        self.prune_to_loc(self.leaves());
+        self.pinned_nodes.extend(keep);
+    }
+
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
     #[cfg(feature = "std")]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
-        for (pos, node) in pinned_nodes {
-            self.pinned_nodes.insert(pos, node);
-        }
+        self.pinned_nodes.extend(pinned_nodes);
     }
 
     /// Return the nodes this structure currently has pinned.
@@ -398,6 +427,45 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
     }
 
+    /// Check that `batch` can be applied and return the index of the first retained ancestor to
+    /// replay.
+    ///
+    /// The structure's size and peaks must match the state before the oldest retained ancestor
+    /// (before the batch itself when none is retained) or the state after a retained ancestor. A
+    /// batch applies once: a structure already at its tip is stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AncestorDropped`] if no state matches and the structure's size is at least
+    /// the chain's fork size but less than the size before the oldest retained ancestor, and
+    /// [`Error::StaleBatch`] if no state matches otherwise.
+    pub(crate) fn validate_batch<S: Strategy>(
+        &self,
+        batch: &batch::MerkleizedBatch<F, D, S>,
+    ) -> Result<usize, Error<F>> {
+        let size = self.size();
+        let at = |tip, peaks: &[D]| size == tip && self.peaks().eq(peaks.iter().copied());
+        let oldest = batch.ancestors.first().unwrap_or(&batch.data);
+        if at(oldest.parent_size, &oldest.parent_peaks) {
+            return Ok(0);
+        }
+        for (i, ancestor) in batch.ancestors.iter().enumerate().rev() {
+            if at(ancestor.size(), &ancestor.tip_peaks) {
+                return Ok(i + 1);
+            }
+        }
+        if (batch.base_size..oldest.parent_size).contains(&size) {
+            return Err(Error::AncestorDropped {
+                expected: batch.size(),
+                actual: size,
+            });
+        }
+        Err(Error::StaleBatch {
+            expected: batch.base_size,
+            actual: size,
+        })
+    }
+
     /// Apply a merkleized batch. Already-committed ancestors are skipped automatically.
     ///
     /// Pruning this structure after the batch was merkleized does not invalidate the batch: prune
@@ -405,82 +473,26 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if the structure has diverged from the batch's ancestor chain
-    /// and [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
-    /// merkleized.
+    /// Returns [`Error::AncestorDropped`] if the structure needs nodes appended by an unapplied
+    /// ancestor that was dropped before the batch was merkleized. Returns [`Error::StaleBatch`] if
+    /// the structure is otherwise at none of the states recorded by the batch's chain. The
+    /// structure is unchanged on error.
     pub fn apply_batch<S: Strategy>(
         &mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<(), Error<F>> {
-        let skip_ancestors = if self.size() == batch.base_size {
-            false
-        } else if self.size() > batch.base_size && self.size() < batch.size() {
-            true
-        } else if self.size() == batch.size() && batch.appended.is_empty() {
-            // All ancestors committed and this batch has overwrites only (no appends).
-            true
-        } else {
-            return Err(Error::StaleBatch {
-                expected: batch.base_size,
-                actual: self.size(),
-            });
-        };
-
-        if self.size() < batch.ancestor_base_size {
-            return Err(Error::AncestorDropped {
-                expected: batch.size(),
-                actual: self.size(),
-            });
-        }
-
-        // Apply ancestor batches in root-to-tip order. Already-committed
-        // batches (whose appended nodes are already in the Mem) are skipped
-        // by tracking a running position through the retained ancestor suffix.
-        let mut batch_pos = *batch.ancestor_base_size;
-        for (appended, overwrites) in batch
-            .ancestor_appended
+        let start = self.validate_batch(batch)?;
+        for data in batch.ancestors[start..]
             .iter()
-            .zip(&batch.ancestor_overwrites)
+            .chain(iter::once(&batch.data))
         {
-            batch_pos += appended.len() as u64;
-            // Overwrite-only ancestors don't advance batch_pos, so they can't be
-            // distinguished from their predecessor by size. Use strict < to
-            // avoid skipping them at the boundary. Re-applying committed
-            // overwrites is harmless (idempotent).
-            let committed = if appended.is_empty() {
-                skip_ancestors && batch_pos < *self.size()
-            } else {
-                skip_ancestors && batch_pos <= *self.size()
-            };
-            if committed {
-                continue;
-            }
-            for (&pos, &digest) in overwrites.iter() {
+            for (&pos, &digest) in &data.overwrites {
                 self.overwrite(pos, digest);
             }
-            for &digest in appended.iter() {
-                self.nodes.push_back(digest);
-            }
+            self.nodes.extend(&data.appended);
         }
 
-        // Apply this batch's own data.
-        for (&pos, &digest) in batch.overwrites.iter() {
-            self.overwrite(pos, digest);
-        }
-        for &digest in batch.appended.iter() {
-            self.nodes.push_back(digest);
-        }
-
-        // Detect missing ancestor data. If an uncommitted ancestor was dropped
-        // before this batch was merkleized, its appended nodes are absent and the
-        // Mem ends up smaller than expected. This does not catch dropped
-        // overwrite-only ancestors (they don't change the size).
-        if self.size() != batch.size() {
-            return Err(Error::AncestorDropped {
-                expected: batch.size(),
-                actual: self.size(),
-            });
-        }
+        assert_eq!(self.size(), batch.size());
 
         Ok(())
     }
@@ -507,7 +519,7 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner as _, Strategizer, deterministic};
+    use commonware_runtime::{Runner as _, Strategizer};
     use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
@@ -552,158 +564,165 @@ mod tests {
     }
 
     fn validity<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut mem = Mem::<F, D>::new();
-            for i in 0u64..256 {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = Mem::<F, D>::new();
+        for i in 0u64..256 {
+            assert!(
+                mem.size().is_valid_size(),
+                "size should be valid at step {i}"
+            );
+            let old_size = mem.size();
+            let batch = mem
+                .new_batch()
+                .add(&hasher, &i.to_be_bytes())
+                .merkleize(&mem, &hasher);
+            mem.apply_batch(&batch).unwrap();
+            for size in *old_size + 1..*mem.size() {
                 assert!(
-                    mem.size().is_valid_size(),
-                    "size should be valid at step {i}"
+                    !Position::<F>::new(size).is_valid_size(),
+                    "size {size} should not be valid"
                 );
-                let old_size = mem.size();
-                let batch = mem
-                    .new_batch()
-                    .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&mem, &hasher);
-                mem.apply_batch(&batch).unwrap();
-                for size in *old_size + 1..*mem.size() {
-                    assert!(
-                        !Position::<F>::new(size).is_valid_size(),
-                        "size {size} should not be valid"
-                    );
-                }
             }
-        });
+        }
+    }
+
+    /// Skipping a pruned structure ahead, pinning a reference's new peaks, reproduces the
+    /// reference's root, and compacting keeps only its peaks.
+    fn skip_to_then_compact<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let reference = build_raw::<F>(&hasher, 20);
+        let mut mem = build_raw::<F>(&hasher, 7);
+        mem.prune_all();
+        let start = mem.size();
+        let leaves = Location::new(20);
+        let peaks: Vec<_> = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= start)
+            .map(|pos| (pos, reference.get_node(pos).unwrap()))
+            .collect();
+        mem.skip_to(leaves, peaks).unwrap();
+        assert_eq!(mem.size(), reference.size());
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+        mem.compact(&BTreeMap::new());
+        assert_eq!(mem.pinned_nodes, reference.nodes_to_pin(leaves));
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+
+        // A structure with retained nodes, or a move backward, is rejected.
+        assert!(build_raw::<F>(&hasher, 7).skip_to(leaves, []).is_err());
+        assert!(mem.skip_to(Location::new(7), []).is_err());
     }
 
     fn prune_all_then_append<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut mem = Mem::<F, D>::new();
-            for i in 0u64..256 {
-                mem.prune_all();
-                let batch = mem
-                    .new_batch()
-                    .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&mem, &hasher);
-                mem.apply_batch(&batch).unwrap();
-                assert_eq!(*mem.leaves(), i + 1);
-            }
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = Mem::<F, D>::new();
+        for i in 0u64..256 {
+            mem.prune_all();
+            let batch = mem
+                .new_batch()
+                .add(&hasher, &i.to_be_bytes())
+                .merkleize(&mem, &hasher);
+            mem.apply_batch(&batch).unwrap();
+            assert_eq!(*mem.leaves(), i + 1);
+        }
     }
 
     fn range_proof_out_of_bounds<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mem = Mem::<F, D>::new();
-            assert!(matches!(
-                mem.range_proof(&hasher, Location::new(0)..Location::new(1), 0),
-                Err(Error::RangeOutOfBounds(_))
-            ));
-            let mem = build::<F>(&hasher, 10);
-            assert!(matches!(
-                mem.range_proof(&hasher, Location::new(5)..Location::new(11), 0),
-                Err(Error::RangeOutOfBounds(_))
-            ));
-            assert!(
-                mem.range_proof(&hasher, Location::new(5)..Location::new(10), 0)
-                    .is_ok()
-            );
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mem = Mem::<F, D>::new();
+        assert!(matches!(
+            mem.range_proof(&hasher, Location::new(0)..Location::new(1), 0),
+            Err(Error::RangeOutOfBounds(_))
+        ));
+        let mem = build::<F>(&hasher, 10);
+        assert!(matches!(
+            mem.range_proof(&hasher, Location::new(5)..Location::new(11), 0),
+            Err(Error::RangeOutOfBounds(_))
+        ));
+        assert!(
+            mem.range_proof(&hasher, Location::new(5)..Location::new(10), 0)
+                .is_ok()
+        );
     }
 
     fn proof_out_of_bounds<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mem = Mem::<F, D>::new();
-            assert!(matches!(
-                mem.proof(&hasher, Location::new(0), 0),
-                Err(Error::LeafOutOfBounds(_))
-            ));
-            let mem = build::<F>(&hasher, 10);
-            assert!(matches!(
-                mem.proof(&hasher, Location::new(10), 0),
-                Err(Error::LeafOutOfBounds(_))
-            ));
-            assert!(mem.proof(&hasher, Location::new(9), 0).is_ok());
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mem = Mem::<F, D>::new();
+        assert!(matches!(
+            mem.proof(&hasher, Location::new(0), 0),
+            Err(Error::LeafOutOfBounds(_))
+        ));
+        let mem = build::<F>(&hasher, 10);
+        assert!(matches!(
+            mem.proof(&hasher, Location::new(10), 0),
+            Err(Error::LeafOutOfBounds(_))
+        ));
+        assert!(mem.proof(&hasher, Location::new(9), 0).is_ok());
     }
 
     fn init_pinned_nodes_validation<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
+        let hasher: H = Standard::new(ForwardFold);
 
-            assert!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![],
-                })
-                .is_ok()
-            );
+        assert!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
+            .is_ok()
+        );
 
-            assert!(matches!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(8),
-                    pinned_nodes: vec![],
-                }),
-                Err(Error::InvalidPinnedNodes)
-            ));
+        assert!(matches!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(8),
+                pinned_nodes: vec![],
+            }),
+            Err(Error::InvalidPinnedNodes)
+        ));
 
-            assert!(matches!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![hasher.digest(b"dummy")],
-                }),
-                Err(Error::InvalidPinnedNodes)
-            ));
+        assert!(matches!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![hasher.digest(b"dummy")],
+            }),
+            Err(Error::InvalidPinnedNodes)
+        ));
 
-            let mem = build::<F>(&hasher, 50);
-            let prune_loc = Location::<F>::new(25);
-            let pinned_nodes = mem.node_digests_to_pin(prune_loc);
-            assert!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: prune_loc,
-                    pinned_nodes,
-                })
-                .is_ok()
-            );
-        });
+        let mem = build::<F>(&hasher, 50);
+        let prune_loc = Location::<F>::new(25);
+        let pinned_nodes = mem.node_digests_to_pin(prune_loc);
+        assert!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: prune_loc,
+                pinned_nodes,
+            })
+            .is_ok()
+        );
     }
 
     fn root_stable_under_pruning<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut reference = Mem::<F, D>::new();
-            let mut pruned = Mem::<F, D>::new();
-            for i in 0u64..200 {
-                let element = hasher.digest(&i.to_be_bytes());
-                let cs = reference
-                    .new_batch()
-                    .add(&hasher, &element)
-                    .merkleize(&reference, &hasher);
-                reference.apply_batch(&cs).unwrap();
-                let cs = pruned
-                    .new_batch()
-                    .add(&hasher, &element)
-                    .merkleize(&pruned, &hasher);
-                pruned.apply_batch(&cs).unwrap();
-                pruned.prune_all();
-                assert_eq!(
-                    plain_root(&pruned, &hasher),
-                    plain_root(&reference, &hasher)
-                );
-            }
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut reference = Mem::<F, D>::new();
+        let mut pruned = Mem::<F, D>::new();
+        for i in 0u64..200 {
+            let element = hasher.digest(&i.to_be_bytes());
+            let cs = reference
+                .new_batch()
+                .add(&hasher, &element)
+                .merkleize(&reference, &hasher);
+            reference.apply_batch(&cs).unwrap();
+            let cs = pruned
+                .new_batch()
+                .add(&hasher, &element)
+                .merkleize(&pruned, &hasher);
+            pruned.apply_batch(&cs).unwrap();
+            pruned.prune_all();
+            assert_eq!(
+                plain_root(&pruned, &hasher),
+                plain_root(&reference, &hasher)
+            );
+        }
     }
 
     fn do_batch_update<F: Family, S: Strategy>(hasher: &H, mut mem: Mem<F, D>, strategy: S) {
@@ -737,12 +756,9 @@ mod tests {
     }
 
     fn batch_update_leaf<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mem = build::<F>(&hasher, 200);
-            do_batch_update(&hasher, mem, Sequential);
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mem = build::<F>(&hasher, 200);
+        do_batch_update(&hasher, mem, Sequential);
     }
 
     fn batch_parallel_update_leaf<F: Family>() {
@@ -784,7 +800,7 @@ mod tests {
                 .proof(&hasher, Location::new(i), 0)
                 .unwrap_or_else(|e| panic!("loc={i}: {e:?}"));
             assert!(
-                proof.verify_element_inclusion(&hasher, &i.to_be_bytes(), Location::new(i), &root),
+                proof.verify_element_inclusion(&hasher, Location::new(i), &i.to_be_bytes(), &root),
                 "loc={i}: proof should verify"
             );
         }
@@ -805,7 +821,7 @@ mod tests {
                     let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
 
                     assert!(
-                        proof.verify_range_inclusion(&hasher, &elements, range.start, &root),
+                        proof.verify_range_inclusion(&hasher, range.start, &elements, &root),
                         "n={n}, range={start}..{end}: range proof should verify"
                     );
                 }
@@ -868,8 +884,8 @@ mod tests {
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
-                    &loc.to_be_bytes(),
                     Location::new(loc),
+                    &loc.to_be_bytes(),
                     &root
                 ),
                 "loc={loc}: proof should verify after append on pruned structure"
@@ -902,8 +918,8 @@ mod tests {
         assert!(
             proof.verify_element_inclusion(
                 &hasher,
-                b"updated-5",
                 Location::new(5),
+                b"updated-5",
                 &plain_root(&mem, &hasher)
             ),
             "updated leaf should verify with new data"
@@ -912,8 +928,8 @@ mod tests {
         assert!(
             !proof.verify_element_inclusion(
                 &hasher,
-                &5u64.to_be_bytes(),
                 Location::new(5),
+                &5u64.to_be_bytes(),
                 &plain_root(&mem, &hasher)
             ),
             "old data should not verify"
@@ -924,8 +940,8 @@ mod tests {
             assert!(
                 p.verify_element_inclusion(
                     &hasher,
-                    &i.to_be_bytes(),
                     Location::new(i),
+                    &i.to_be_bytes(),
                     &plain_root(&mem, &hasher)
                 ),
                 "leaf {i} should still verify with original data"
@@ -952,8 +968,8 @@ mod tests {
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
-                    b"new-value",
                     Location::new(update_loc),
+                    b"new-value",
                     &plain_root(&mem, &hasher)
                 ),
                 "update at {update_loc} should verify"
@@ -1005,16 +1021,16 @@ mod tests {
         let proof = mem.proof(&hasher, Location::new(3), 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
-            b"updated-3",
             Location::new(3),
+            b"updated-3",
             &plain_root(&mem, &hasher)
         ));
 
         let proof = mem.proof(&hasher, Location::new(8), 0).unwrap();
         assert!(proof.verify_element_inclusion(
             &hasher,
-            &100u64.to_be_bytes(),
             Location::new(8),
+            &100u64.to_be_bytes(),
             &plain_root(&mem, &hasher)
         ));
     }
@@ -1059,8 +1075,8 @@ mod tests {
         assert!(
             proof.verify_element_inclusion(
                 &hasher,
-                b"updated-0",
                 Location::new(0),
+                b"updated-0",
                 &plain_root(&mem, &hasher)
             ),
             "updated leaf should verify"
@@ -1094,8 +1110,8 @@ mod tests {
                     assert!(
                         proof.verify_element_inclusion(
                             &hasher,
-                            b"new",
                             Location::new(update_loc),
+                            b"new",
                             &plain_root(&m, &hasher)
                         ),
                         "n={n} prune={prune_to} update={update_loc}: proof should verify"
@@ -1184,8 +1200,8 @@ mod tests {
 
         // Only the live, uncommitted suffix is retained, and its position starts
         // immediately after the committed ancestor.
-        assert_eq!(c.ancestor_appended.len(), 1);
-        assert_eq!(c.ancestor_base_size, mem.size());
+        assert_eq!(c.ancestors.len(), 1);
+        assert_eq!(c.ancestors[0].parent_size, mem.size());
 
         drop(b);
         mem.apply_batch(&c).unwrap();
@@ -1224,9 +1240,9 @@ mod tests {
             .unwrap()
             .merkleize(&mem, &hasher);
 
-        assert_eq!(c.ancestor_appended.len(), 1);
-        assert!(c.ancestor_appended[0].is_empty());
-        assert_eq!(c.ancestor_base_size, mem.size());
+        assert_eq!(c.ancestors.len(), 1);
+        assert!(c.ancestors[0].appended.is_empty());
+        assert_eq!(c.ancestors[0].parent_size, mem.size());
 
         drop(b);
         mem.apply_batch(&c).unwrap();
@@ -1294,6 +1310,59 @@ mod tests {
         );
     }
 
+    /// Applying a chain's tip after any prefix of the chain has been applied must replay exactly
+    /// the remaining changes, even when several chain states have the same size. Applying the tip
+    /// again must fail with `StaleBatch` and leave the state unchanged.
+    fn apply_batch_from_each_chain_state<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        for append in [false, true] {
+            let base = build_raw::<F>(&hasher, 10);
+            let a = base
+                .new_batch()
+                .add(&hasher, b"a")
+                .merkleize(&base, &hasher);
+            let b = a
+                .new_batch()
+                .update_leaf(&hasher, Location::new(0), b"b")
+                .unwrap()
+                .merkleize(&base, &hasher);
+            let empty = b.new_batch().merkleize(&base, &hasher);
+            let c = empty
+                .new_batch()
+                .update_leaf(&hasher, Location::new(9), b"c")
+                .unwrap()
+                .merkleize(&base, &hasher);
+            let d = c
+                .new_batch()
+                .update_leaf(&hasher, Location::new(0), b"d")
+                .unwrap();
+            let d = if append { d.add(&hasher, b"d") } else { d };
+            let d = d.merkleize(&base, &hasher);
+            let chain = [a, b, empty, c, d];
+            let tip = chain.last().unwrap();
+            let root = tip.root(&hasher, 0).unwrap();
+            let mut expected = base.clone();
+            for batch in &chain {
+                expected.apply_batch(batch).unwrap();
+            }
+
+            for applied in 0..=chain.len() {
+                let mut actual = base.clone();
+                for batch in &chain[..applied] {
+                    actual.apply_batch(batch).unwrap();
+                }
+                let result = actual.apply_batch(tip);
+                if applied == chain.len() {
+                    assert!(matches!(result, Err(Error::StaleBatch { .. })));
+                } else {
+                    result.unwrap();
+                }
+                let context = format!("append={append} applied={applied}");
+                assert_same_state(&hasher, &actual, &expected, root, &context);
+            }
+        }
+    }
+
     /// Assert `actual` is observably identical to `expected` and has the given root.
     fn assert_same_state<F: Family>(
         hasher: &H,
@@ -1340,7 +1409,7 @@ mod tests {
                         };
                         batch.merkleize(&mem, &hasher)
                     };
-                    let root = batch.root(&mem, &hasher, 0).unwrap();
+                    let root = batch.root(&hasher, 0).unwrap();
                     let case = format!("n={n} update={update_loc} append={append}");
 
                     for prune_to in (update_loc + 1)..=n {
@@ -1363,8 +1432,8 @@ mod tests {
 
     /// Pruning between applying a parent and applying its child must not drop overwrites below
     /// the new boundary, whether they belong to the child or to an unapplied overwrite-only
-    /// ancestor in between. An applied overwrite-only parent leaves the size unchanged, so the
-    /// child cannot tell it was applied and re-applies it, which must not change the state.
+    /// ancestor in between. An applied overwrite-only parent leaves the size unchanged, and the
+    /// child must still apply on top of it.
     fn apply_batch_chain_after_prune_matches_prune_after_apply<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for n in 1..=12u64 {
@@ -1408,7 +1477,7 @@ mod tests {
                             };
                             batch.merkleize(&mem, &hasher)
                         };
-                        let root = child.root(&mem, &hasher, 0).unwrap();
+                        let root = child.root(&hasher, 0).unwrap();
                         let case = format!(
                             "n={n} update={update_loc} parent_append={parent_append} \
                              middle={middle} append={append}"
@@ -1436,6 +1505,130 @@ mod tests {
         }
     }
 
+    /// A retained child of one fork must be rejected once a sibling fork of the same length has
+    /// been applied, for every base size from 0 to 7. The structure's size then lies inside the
+    /// child's chain, so only the recorded peaks show that its history differs.
+    fn apply_batch_rejects_sibling_fork_at_interior_size<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        for n in 0..8u64 {
+            let mut mem = build_raw::<F>(&hasher, n);
+            let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
+            let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
+            let sibling = mem
+                .new_batch()
+                .add(&hasher, b"a-prime")
+                .merkleize(&mem, &hasher);
+            mem.apply_batch(&sibling).unwrap();
+            let root = plain_root(&mem, &hasher);
+            let size = mem.size();
+
+            assert!(
+                matches!(mem.apply_batch(&b), Err(Error::StaleBatch { .. })),
+                "n={n}: a child of the losing fork must be rejected"
+            );
+            assert_eq!(
+                mem.size(),
+                size,
+                "n={n}: a rejected batch must leave the size unchanged"
+            );
+            assert_eq!(plain_root(&mem, &hasher), root, "n={n}");
+        }
+    }
+
+    /// Applying an overwrite-only sibling leaves the size unchanged, so the other fork's batches
+    /// must be rejected by their recorded peaks.
+    fn apply_batch_rejects_overwrite_sibling<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = build_raw::<F>(&hasher, 8);
+        let a = mem
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"a")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        let b = a
+            .new_batch()
+            .update_leaf(&hasher, Location::new(1), b"b")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        let sibling = mem
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"a-prime")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        mem.apply_batch(&sibling).unwrap();
+        let root = plain_root(&mem, &hasher);
+
+        assert!(matches!(mem.apply_batch(&b), Err(Error::StaleBatch { .. })));
+        assert!(matches!(mem.apply_batch(&a), Err(Error::StaleBatch { .. })));
+        assert_eq!(plain_root(&mem, &hasher), root);
+
+        // The chain still applies to a structure at the state it was forked from.
+        let mut fresh = build_raw::<F>(&hasher, 8);
+        fresh.apply_batch(&a).unwrap();
+        fresh.apply_batch(&b).unwrap();
+        assert_eq!(plain_root(&fresh, &hasher), b.root(&hasher, 0).unwrap());
+    }
+
+    /// Dropping an overwrite-only ancestor before its grandchild is merkleized leaves the
+    /// grandchild without that ancestor's writes. Applying the grandchild at the chain's fork
+    /// state must then fail with `StaleBatch` and leave the structure unchanged.
+    fn apply_batch_rejects_dropped_overwrite_only_ancestor<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = build_raw::<F>(&hasher, 8);
+        let a = mem
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"a")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
+        let c = b.new_batch().add(&hasher, b"c");
+        drop(a);
+        let c = c.merkleize(&mem, &hasher);
+        let root = plain_root(&mem, &hasher);
+        let size = mem.size();
+
+        assert!(matches!(mem.apply_batch(&c), Err(Error::StaleBatch { .. })));
+        assert_eq!(mem.size(), size);
+        assert_eq!(plain_root(&mem, &hasher), root);
+    }
+
+    /// A child of empty ancestors must require the state after the last ancestor with writes, even
+    /// once that ancestor has been dropped. The child applies after those writes are committed and
+    /// is rejected with `StaleBatch` otherwise.
+    fn apply_batch_after_empty_ancestors<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        for commit in [false, true] {
+            let mut mem = build_raw::<F>(&hasher, 8);
+            let a = mem
+                .new_batch()
+                .update_leaf(&hasher, Location::new(0), b"a")
+                .unwrap()
+                .merkleize(&mem, &hasher);
+            let b = a.new_batch().merkleize(&mem, &hasher);
+            let c = b.new_batch().merkleize(&mem, &hasher);
+            if commit {
+                mem.apply_batch(&a).unwrap();
+            }
+            drop(a);
+            let d = c.new_batch().add(&hasher, b"d").merkleize(&mem, &hasher);
+            let expected_root = d.root(&hasher, 0).unwrap();
+            drop(b);
+            drop(c);
+            let root = plain_root(&mem, &hasher);
+            let size = mem.size();
+            let result = mem.apply_batch(&d);
+            if commit {
+                result.unwrap();
+                assert_eq!(mem.size(), d.size());
+                assert_eq!(plain_root(&mem, &hasher), expected_root);
+            } else {
+                assert!(matches!(result, Err(Error::StaleBatch { .. })));
+                assert_eq!(mem.size(), size);
+                assert_eq!(plain_root(&mem, &hasher), root);
+            }
+        }
+    }
+
     fn split_root_matches_recompute<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let plain = build::<F>(&hasher, 49);
@@ -1455,8 +1648,6 @@ mod tests {
         let _ = Bagging::ForwardFold;
     }
 
-    // --- MMR tests ---
-
     #[test]
     fn mmr_empty() {
         empty::<crate::mmr::Family>();
@@ -1464,6 +1655,10 @@ mod tests {
     #[test]
     fn mmr_validity() {
         validity::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmr::Family>();
     }
     #[test]
     fn mmr_prune_all_then_append() {
@@ -1546,6 +1741,10 @@ mod tests {
         apply_batch_detects_dropped_ancestor::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_apply_batch_from_each_chain_state() {
+        apply_batch_from_each_chain_state::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
     }
@@ -1558,11 +1757,25 @@ mod tests {
         apply_batch_chain_after_prune_matches_prune_after_apply::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_apply_batch_rejects_sibling_fork_at_interior_size() {
+        apply_batch_rejects_sibling_fork_at_interior_size::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_rejects_overwrite_sibling() {
+        apply_batch_rejects_overwrite_sibling::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_rejects_dropped_overwrite_only_ancestor() {
+        apply_batch_rejects_dropped_overwrite_only_ancestor::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_after_empty_ancestors() {
+        apply_batch_after_empty_ancestors::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_split_root_matches_recompute() {
         split_root_matches_recompute::<crate::mmr::Family>();
     }
-
-    // --- MMB tests ---
 
     #[test]
     fn mmb_empty() {
@@ -1571,6 +1784,10 @@ mod tests {
     #[test]
     fn mmb_validity() {
         validity::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_prune_all_then_append() {
@@ -1661,6 +1878,10 @@ mod tests {
         apply_batch_after_committed_ancestor_dropped_with_overwrite::<crate::mmb::Family>();
     }
     #[test]
+    fn mmb_apply_batch_from_each_chain_state() {
+        apply_batch_from_each_chain_state::<crate::mmb::Family>();
+    }
+    #[test]
     fn mmb_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmb::Family>();
     }
@@ -1671,6 +1892,22 @@ mod tests {
     #[test]
     fn mmb_apply_batch_chain_after_prune_matches_prune_after_apply() {
         apply_batch_chain_after_prune_matches_prune_after_apply::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_rejects_sibling_fork_at_interior_size() {
+        apply_batch_rejects_sibling_fork_at_interior_size::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_rejects_overwrite_sibling() {
+        apply_batch_rejects_overwrite_sibling::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_rejects_dropped_overwrite_only_ancestor() {
+        apply_batch_rejects_dropped_overwrite_only_ancestor::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_after_empty_ancestors() {
+        apply_batch_after_empty_ancestors::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_split_root_matches_recompute() {

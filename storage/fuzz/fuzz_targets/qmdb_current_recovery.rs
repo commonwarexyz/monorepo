@@ -13,15 +13,14 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    Runner, Supervisor as _,
-    buffer::paged::CacheRef,
-    deterministic::{self, Context},
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
-    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::current::{VariableConfig, unordered::variable::Db as Current},
+    journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
+    merkle::{Graftable, Location, mmb, mmr},
+    qmdb::{
+        current::unordered::variable::{Config, Db as Current},
+        value::VariableEncoding,
+    },
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
@@ -54,15 +53,12 @@ enum CurrentOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    /// Page size for buffer pool.
+    /// Page size for the page cache.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
-    /// Number of pages in the buffer pool cache.
+    /// Number of pages in the page cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    /// Items per blob for the Merkle journal.
-    #[arbitrary(with = bounded_items)]
-    merkle_items_per_blob: u64,
     /// Items per section for the operations log.
     #[arbitrary(with = bounded_items)]
     log_items_per_blob: u64,
@@ -94,37 +90,28 @@ struct FuzzInput {
 struct ConfigParams {
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    merkle_items_per_blob: u64,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
     replay_buffer: NonZeroUsize,
 }
 
-fn make_config(
-    ctx: &Context,
-    suffix: &str,
-    params: ConfigParams,
-) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+fn make_config(suffix: &str, params: ConfigParams) -> Config<TwoCap, ((), ()), Sequential> {
     let ConfigParams {
         page_size,
         page_cache_size,
-        merkle_items_per_blob,
         log_items_per_blob,
         write_buffer,
         replay_buffer,
     } = params;
-    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
-    VariableConfig {
-        merkle_config: MerkleConfig {
-            journal_partition: format!("crash-merkle-journal-{suffix}"),
-            metadata_partition: format!("crash-merkle-metadata-{suffix}"),
-            items_per_blob: NZU64!(merkle_items_per_blob),
-            write_buffer,
+    let page_cache = CacheRef::new(page_size, page_cache_size);
+    Config {
+        merkle: MerkleConfig {
+            partition: format!("crash-merkle-metadata-{suffix}"),
             replay_buffer,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: commonware_storage_fuzz::low_resident_height(),
         },
-        journal_config: VConfig {
+        log: VConfig {
             partition: format!("crash-log-{suffix}"),
             items_per_section: NZU64!(log_items_per_blob),
             write_buffer,
@@ -137,7 +124,7 @@ fn make_config(
         translator: TwoCap,
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -205,12 +192,12 @@ async fn commit_pending<F: Graftable>(
     // Merkleize only reads and hashes, and reads are never fault-injected, so an
     // error here is a real bug rather than a legal crash trigger.
     let merkleized = batch
-        .merkleize(&db, None)
+        .merkleize(&db)
         .await
         .expect("merkleize failed without any mutable operation");
     let post_root = merkleized.root();
     let db = match db.apply_batch(merkleized).await {
-        Ok((db, _)) => db,
+        Ok(db) => db,
         Err(_) => {
             return Err(failure_states(
                 pending,
@@ -240,7 +227,6 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let params = ConfigParams {
         page_size: NonZeroU16::new(input.page_size).unwrap(),
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
-        merkle_items_per_blob: input.merkle_items_per_blob,
         log_items_per_blob: input.log_items_per_blob,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         replay_buffer: NonZeroUsize::new(input.replay_buffer).unwrap(),
@@ -261,7 +247,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&ctx, &suffix, params), None)
+            let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&suffix, params), None)
                 .await
                 .expect("initial init failed");
 
@@ -373,7 +359,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             Db::<F>::init(
                 ctx.child("faulted_recovery"),
-                make_config(&ctx, &recovery_suffix, params),
+                make_config(&recovery_suffix, params),
                 None,
             )
             .await
@@ -387,13 +373,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let db: Db<F> = Db::init(
-                ctx.child("recovered"),
-                make_config(&ctx, &suffix, params),
-                None,
-            )
-            .await
-            .expect("recovery failed");
+            let db: Db<F> = Db::init(ctx.child("recovered"), make_config(&suffix, params), None)
+                .await
+                .expect("recovery must succeed");
 
             // Read every observed key in one batch so the result must match one atomic
             // snapshot, and require the recovered root to match the root recorded at
@@ -401,9 +383,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             // the instance's own root would let a self-consistent rebuild bug pass.
             let root = db.root();
             let keys = known_keys.iter().copied().map(Key::new).collect::<Vec<_>>();
-            let key_refs = keys.iter().collect::<Vec<_>>();
             let recovered = db
-                .get_many(&key_refs)
+                .get_many(&keys)
                 .await
                 .expect("whole-snapshot read failed on recovered data");
             let matches_allowed = allowed_states.iter().any(|(state, expected_root)| {
@@ -424,12 +405,13 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .zip(recovered)
                 .filter_map(|(key, value)| value.map(|value| (key, value)))
             {
-                let proof = db
-                    .key_value_proof(key.clone())
+                let (proof, proved_value) = db
+                    .key_value_proof(&key)
                     .await
                     .expect("proof generation failed for a recovered key");
+                assert_eq!(proved_value, value);
                 assert!(
-                    Db::<F>::verify_key_value_proof(key, value, &proof, &root),
+                    proof.verify::<Sha256, VariableEncoding<Value>, _>(key, proved_value, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -444,7 +426,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                     .await
                     .expect("range proof generation failed after recovery");
                 assert!(
-                    Db::<F>::verify_range_proof(&proof, loc, &ops, &chunks, &root),
+                    proof.verify::<Sha256, _, _>(loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }
@@ -455,10 +437,10 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let batch = db
                 .new_batch()
                 .write(test_key, Some(test_value))
-                .merkleize(&db, None)
+                .merkleize(&db)
                 .await
                 .expect("post-recovery merkleize failed");
-            let (db, _) = db
+            let db = db
                 .apply_batch(batch)
                 .await
                 .expect("post-recovery apply_batch failed");

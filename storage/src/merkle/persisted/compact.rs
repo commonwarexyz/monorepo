@@ -7,17 +7,17 @@
 //! `(leaf_count, pinned_nodes)` snapshot has the same root and the same future append
 //! behavior as the original.
 //!
-//! Nodes created by appends are retained only until the structure is pruned to its frontier or
-//! reset to a snapshot; after that they are no longer readable.
+//! Nodes created by appends are retained only until the structure is pruned to its frontier.
+//! After that they are no longer readable.
 
 use crate::merkle::{
     Error, Family, Location, batch,
     hasher::Hasher,
     mem::{Config as MemConfig, Mem},
 };
+use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_utils::sync::RwLock;
 use std::sync::Arc;
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
@@ -38,10 +38,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Add a run of pre-computed leaf digests, in order.
-    pub(crate) fn add_leaf_digests(self, digests: impl IntoIterator<Item = D>) -> Self {
+    /// Add `items` as leaves in order, encoding and hashing them across the strategy.
+    pub(crate) fn add_many<Item: Write + Sync>(
+        self,
+        hasher: &impl Hasher<F, Digest = D>,
+        items: &[Item],
+    ) -> Self {
         Self {
-            inner: self.inner.add_leaf_digests(digests),
+            inner: self.inner.add_many(hasher, items),
         }
     }
 
@@ -69,12 +73,12 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// A Merkle structure that retains only the state required to continue appending.
 ///
-/// The [`Mem`] is held as an [`Arc`] behind the lock so `snapshot` can hand a zero-copy,
-/// immutable view to jobs running off the calling task. Mutations go through
-/// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
-/// otherwise, so a snapshot never observes later mutations.
+/// The [`Mem`] is held as an [`Arc`] so `snapshot` can hand a zero-copy, immutable view to
+/// jobs running off the calling task. Mutations go through [`Arc::make_mut`]: they are
+/// in-place while no snapshot is alive and copy-on-write otherwise, so a snapshot never
+/// observes later mutations.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
-    inner: RwLock<Arc<Mem<F, D>>>,
+    mem: Arc<Mem<F, D>>,
     strategy: S,
 }
 
@@ -82,79 +86,54 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Create an empty `Merkle`.
     pub fn new(strategy: S) -> Self {
         Self {
-            inner: RwLock::new(Arc::new(Mem::new())),
+            mem: Arc::new(Mem::new()),
             strategy,
         }
     }
 
-    /// Create a `Merkle` from a compact state snapshot.
+    /// Create a `Merkle` with no retained nodes from its compact state.
     pub(crate) fn from_compact_state(
         strategy: S,
         leaves: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        Ok(Self {
-            inner: RwLock::new(Arc::new(mem)),
-            strategy,
-        })
-    }
-
-    /// Build a [`Mem`] with no retained nodes from a compact state snapshot.
-    fn mem_from_compact_state(
-        leaves: Location<F>,
-        pinned_nodes: Vec<D>,
-    ) -> Result<Mem<F, D>, Error<F>> {
         if !leaves.is_valid() {
             return Err(Error::LocationOverflow(leaves));
         }
         if pinned_nodes.len() != F::nodes_to_pin(leaves).count() {
             return Err(Error::InvalidPinnedNodes);
         }
-        if leaves == 0 {
-            Ok(Mem::new())
+        let mem = if leaves == 0 {
+            Mem::new()
         } else {
             Mem::init(MemConfig {
                 nodes: vec![],
                 pruning_boundary: leaves,
                 pinned_nodes,
-            })
-        }
-    }
-
-    /// Replace the in-memory tree with one rebuilt from a compact state snapshot, discarding
-    /// the current state.
-    pub(crate) fn reset_to(
-        &self,
-        leaves: Location<F>,
-        pinned_nodes: Vec<D>,
-    ) -> Result<(), Error<F>> {
-        let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        *self.inner.write() = Arc::new(mem);
-        Ok(())
+            })?
+        };
+        Ok(Self {
+            mem: Arc::new(mem),
+            strategy,
+        })
     }
 
     /// Discard all retained nodes except the pinned frontier.
-    pub(crate) fn prune_to_frontier(&self) {
-        Arc::make_mut(&mut *self.inner.write()).prune_all();
+    pub(crate) fn prune_to_frontier(&mut self) {
+        Arc::make_mut(&mut self.mem).prune_all();
     }
 
-    /// Hash `element` and append it as a single leaf, mutating in place.
-    ///
-    /// The batch is built under a read lock and applied under a write lock, so the caller
-    /// must have exclusive ownership of the db.
+    /// Hash `element` and append it as a single leaf.
     pub(crate) fn append_leaf(
-        &self,
+        &mut self,
         hasher: &impl Hasher<F, Digest = D>,
         element: &[u8],
     ) -> Result<(), Error<F>> {
-        let batch = {
-            let inner = self.inner.read();
-            UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
-                .add(hasher, element)
-                .merkleize(&inner, hasher)
-        };
-        Arc::make_mut(&mut *self.inner.write()).apply_batch(&batch)
+        let batch = self
+            .new_batch()
+            .add(hasher, element)
+            .merkleize(&self.mem, hasher);
+        self.apply_batch(&batch)
     }
 
     /// Return the root digest of the current state.
@@ -163,12 +142,12 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
-        self.inner.read().root(hasher, inactive_peaks)
+        self.mem.root(hasher, inactive_peaks)
     }
 
     /// Return the number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
-        self.inner.read().leaves()
+        self.mem.leaves()
     }
 
     /// Return a reference to the merkleization strategy.
@@ -176,39 +155,33 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         &self.strategy
     }
 
-    /// Borrow the in-memory [`Mem`].
-    ///
-    /// The closure runs under the tree's read lock, which is not re-entrant: do not call other
-    /// methods of this [`Merkle`] from within it.
-    pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
-        let inner = self.inner.read();
-        f(&inner)
+    /// The in-memory [`Mem`].
+    pub fn mem(&self) -> &Mem<F, D> {
+        &self.mem
     }
 
     /// Return a zero-copy, immutable snapshot of the in-memory [`Mem`].
     ///
     /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
     /// alive. Use this to move committed node fallback into a job running off the calling task;
-    /// prefer [`Merkle::with_mem`] when a borrow suffices.
+    /// prefer [`Merkle::mem()`] when a borrow suffices.
     pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
-        Arc::clone(&self.inner.read())
+        Arc::clone(&self.mem)
     }
 
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
-        let inner = self.inner.read();
-        UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
+        UnmerkleizedBatch::wrap(self.mem.new_batch_with_strategy(self.strategy.clone()))
     }
 
     /// Create an owned merkleized batch representing the current state.
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        let inner = self.inner.read();
-        batch::MerkleizedBatch::from_mem_with_strategy(&inner, self.strategy.clone())
+        batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
     }
 
     /// Apply a merkleized batch to the in-memory structure.
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
-        Arc::make_mut(self.inner.get_mut()).apply_batch(batch)
+        Arc::make_mut(&mut self.mem).apply_batch(batch)
     }
 }
 
@@ -228,7 +201,7 @@ mod tests {
             for v in values {
                 b = b.add(&hasher, v);
             }
-            merkle.with_mem(|mem| b.merkleize(mem, &hasher))
+            b.merkleize(merkle.mem(), &hasher)
         };
         merkle.apply_batch(&batch).unwrap();
     }
@@ -236,14 +209,13 @@ mod tests {
     fn pinned_nodes<F: Family>(
         merkle: &TestMerkle<F>,
     ) -> Vec<<Sha256 as commonware_cryptography::Hasher>::Digest> {
-        merkle.with_mem(|mem| {
-            F::nodes_to_pin(mem.leaves())
-                .map(|pos| *mem.get_node_unchecked(pos))
-                .collect()
-        })
+        let mem = merkle.mem();
+        F::nodes_to_pin(mem.leaves())
+            .map(|pos| *mem.get_node_unchecked(pos))
+            .collect()
     }
 
-    fn assert_reset_to_round_trip<F: Family>() {
+    fn assert_compact_state_round_trip<F: Family>() {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let mut merkle = TestMerkle::<F>::new(Sequential);
         append(&mut merkle, &[b"a", b"b", b"c"]);
@@ -255,10 +227,9 @@ mod tests {
         merkle.prune_to_frontier();
         assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
 
-        // A fresh tree reset to the snapshot reproduces the same state.
-        let mut restored = TestMerkle::<F>::new(Sequential);
-        append(&mut restored, &[b"x"]);
-        restored.reset_to(leaves, pinned_nodes.clone()).unwrap();
+        // A Merkle rebuilt from the compact state has the same root and leaf count.
+        let mut restored =
+            TestMerkle::<F>::from_compact_state(Sequential, leaves, pinned_nodes).unwrap();
         assert_eq!(restored.root(&hasher, 0).unwrap(), root);
         assert_eq!(restored.leaves(), leaves);
 
@@ -269,39 +240,34 @@ mod tests {
             restored.root(&hasher, 0).unwrap(),
             merkle.root(&hasher, 0).unwrap()
         );
-
-        // from_compact_state builds the same tree as reset_to.
-        let from_state =
-            TestMerkle::<F>::from_compact_state(Sequential, leaves, pinned_nodes).unwrap();
-        assert_eq!(from_state.root(&hasher, 0).unwrap(), root);
     }
 
     #[test]
-    fn test_reset_to_round_trip_mmr() {
-        assert_reset_to_round_trip::<mmr::Family>();
+    fn test_compact_state_round_trip_mmr() {
+        assert_compact_state_round_trip::<mmr::Family>();
     }
 
     #[test]
-    fn test_reset_to_round_trip_mmb() {
-        assert_reset_to_round_trip::<mmb::Family>();
+    fn test_compact_state_round_trip_mmb() {
+        assert_compact_state_round_trip::<mmb::Family>();
     }
 
     #[test]
-    fn test_reset_to_rejects_invalid_snapshot() {
+    fn test_from_compact_state_rejects_invalid_snapshot() {
         let mut merkle = TestMerkle::<mmr::Family>::new(Sequential);
         append(&mut merkle, &[b"a", b"b"]);
         let leaves = merkle.leaves();
 
         // Wrong pinned-node count.
         assert!(matches!(
-            merkle.reset_to(leaves, vec![]),
+            TestMerkle::<mmr::Family>::from_compact_state(Sequential, leaves, vec![]),
             Err(Error::InvalidPinnedNodes)
         ));
 
         // Leaf count beyond the family maximum.
         let too_many = mmr::Family::MAX_LEAVES + 1;
         assert!(matches!(
-            merkle.reset_to(too_many, vec![]),
+            TestMerkle::<mmr::Family>::from_compact_state(Sequential, too_many, vec![]),
             Err(Error::LocationOverflow(loc)) if loc == too_many
         ));
     }

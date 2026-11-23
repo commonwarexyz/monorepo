@@ -1,11 +1,16 @@
-use crate::types::{Height, Round};
+use crate::{
+    marshal::core::Cutoff,
+    types::{Height, Round},
+};
 use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::Digest;
-use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
+use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, Outcome, p2p::Producer};
 use commonware_runtime::Metrics;
-use commonware_utils::{Span, channel::oneshot};
+use commonware_utils::{Span, channel::oneshot, max};
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -29,8 +34,8 @@ pub(crate) enum Message<D: Digest> {
         delivery: Delivery<Key<D>, Annotation>,
         /// The value being delivered.
         value: Bytes,
-        /// A channel to send the result of the delivery.
-        response: oneshot::Sender<bool>,
+        /// A channel to send the disposition of the delivery.
+        response: oneshot::Sender<Outcome>,
     },
     /// A request to produce a value for a given key.
     Produce {
@@ -146,13 +151,13 @@ impl<D: Digest> Consumer for Handler<D> {
     type Key = Key<D>;
     type Value = Bytes;
     type Subscriber = Annotation;
-    type Outcome = bool;
+    type Outcome = Outcome;
 
     fn deliver(
         &mut self,
         delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<Outcome> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Deliver {
             delivery,
@@ -196,19 +201,29 @@ pub enum Annotation {
     Notarization { round: Round },
     /// A block requested by commitment without certification evidence.
     ///
-    /// The expected height is local pruning metadata and should only be
-    /// supplied when the caller has a validated height bound. It must not make
-    /// a commitment-matching response invalid. A matching block above this
-    /// bound is delivered but not cached.
+    /// The expected height and the round are local pruning metadata. Neither
+    /// makes a commitment-matching response invalid. A matching block above
+    /// the height is delivered but not cached.
+    ///
+    /// The height is read from the block above the requested one. Until that
+    /// block has been checked against its own parent, the height is only its
+    /// claim. The round, when the requester knows one, is a consensus round
+    /// that ends the requester's need for the block. The request is retired
+    /// once the processed height reaches the height or the processed round
+    /// floor covers the round.
     ///
     /// Commitment material is recomputed unless another subscriber supplies
     /// certification evidence.
-    Untrusted { height: Height },
+    Untrusted {
+        height: Height,
+        round: Option<Round>,
+    },
     /// A block requested by commitment that this node certified, or an ancestor
     /// of one.
     ///
     /// Certification binds the block and its ancestors to their commitments,
-    /// so deliveries reuse commitment material. Height bounds match
+    /// so deliveries reuse commitment material. It also checks their heights,
+    /// so the request needs no round. Height bounds match
     /// [`Untrusted`](Annotation::Untrusted).
     Certified { height: Height },
     /// A block requested by commitment for the finalized chain.
@@ -262,7 +277,11 @@ pub(crate) enum RequestKind<D: Digest> {
     /// Fetch a finalization for a height.
     Finalized { height: Height },
     /// Fetch a block by commitment without certification evidence.
-    Untrusted { commitment: D, height: Height },
+    Untrusted {
+        commitment: D,
+        height: Height,
+        round: Option<Round>,
+    },
     /// Fetch a block this node certified, or an ancestor of one, by commitment.
     Certified { commitment: D, height: Height },
     /// Fetch a finalized-chain block by commitment when its height is known.
@@ -294,11 +313,20 @@ impl<D: Digest> Request<D> {
 
     /// Fetch a block by commitment without certification evidence.
     ///
+    /// `round`, when the requester knows one, is a consensus round that ends
+    /// the requester's need for the block. The request is retired once the
+    /// processed height reaches `height` or the processed round floor covers
+    /// `round`.
+    ///
     /// Commitment material is recomputed unless another subscriber supplies
     /// certification evidence.
-    pub const fn untrusted(commitment: D, height: Height) -> Self {
+    pub const fn untrusted(commitment: D, height: Height, round: Option<Round>) -> Self {
         Self {
-            kind: RequestKind::Untrusted { commitment, height },
+            kind: RequestKind::Untrusted {
+                commitment,
+                height,
+                round,
+            },
         }
     }
 
@@ -344,12 +372,14 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    pub(crate) fn above_round_floor(&self, floor: Round) -> bool {
+    pub(crate) const fn above_round_floor(&self, cutoff: Cutoff) -> bool {
         match self.kind {
-            RequestKind::Notarized { round } | RequestKind::FinalizedByRound { round, .. } => {
-                round > floor
-            }
-            RequestKind::Untrusted { .. }
+            RequestKind::Notarized { round }
+            | RequestKind::FinalizedByRound { round, .. }
+            | RequestKind::Untrusted {
+                round: Some(round), ..
+            } => !cutoff.covers(round),
+            RequestKind::Untrusted { round: None, .. }
             | RequestKind::Certified { .. }
             | RequestKind::Finalized { .. }
             | RequestKind::FinalizedByHeight { .. } => true,
@@ -365,9 +395,14 @@ impl<D: Digest> Request<D> {
                 Key::Finalized { height },
                 Annotation::Finalized(Finalized::ByHeight { height }),
             ),
-            RequestKind::Untrusted { commitment, height } => {
-                (Key::Block(commitment), Annotation::Untrusted { height })
-            }
+            RequestKind::Untrusted {
+                commitment,
+                height,
+                round,
+            } => (
+                Key::Block(commitment),
+                Annotation::Untrusted { height, round },
+            ),
             RequestKind::Certified { commitment, height } => {
                 (Key::Block(commitment), Annotation::Certified { height })
             }
@@ -406,7 +441,9 @@ pub(crate) fn above_height_floor<D: Digest>(
         (Key::Finalized { height: requested }, _) => *requested > height,
         (
             Key::Block(_),
-            Annotation::Untrusted { height: requested }
+            Annotation::Untrusted {
+                height: requested, ..
+            }
             | Annotation::Certified { height: requested }
             | Annotation::Finalized(Finalized::ByHeight { height: requested }),
         ) => *requested > height,
@@ -417,15 +454,20 @@ pub(crate) fn above_height_floor<D: Digest>(
 /// Returns a predicate that keeps resolver requests above the processed round floor.
 ///
 /// Unrelated requests are retained. Round-bound requests are pruned once the
-/// processed round reaches them.
+/// processed round floor covers them.
 pub(crate) fn above_round_floor<D: Digest>(
-    round: Round,
+    cutoff: Cutoff,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
     move |request, annotation| match (request, annotation) {
-        (Key::Notarized { round: requested }, _) => *requested > round,
-        (Key::Block(_), Annotation::Finalized(Finalized::ByRound { round: requested })) => {
-            *requested > round
-        }
+        (Key::Notarized { round: requested }, _) => !cutoff.covers(*requested),
+        (
+            Key::Block(_),
+            Annotation::Finalized(Finalized::ByRound { round: requested })
+            | Annotation::Untrusted {
+                round: Some(requested),
+                ..
+            },
+        ) => !cutoff.covers(*requested),
         _ => true,
     }
 }
@@ -467,6 +509,15 @@ impl<D: Digest> EncodeSize for Key<D> {
             Self::Notarized { round } => round.encode_size(),
         }
     }
+}
+
+impl<D: Digest> MaxEncodeSize for Key<D> {
+    // A subject and the widest of a commitment, a height, and a round.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            max(D::SIZE, Height::MAX_ENCODE_SIZE),
+            Round::MAX_ENCODE_SIZE,
+        );
 }
 
 impl<D: Digest> Span for Key<D> {}
@@ -699,6 +750,25 @@ mod tests {
     }
 
     #[test]
+    fn test_key_max_encode_size() {
+        // The limit is the widest encoding of any variant at its widest value.
+        let widest = [
+            Key::<D>::Block(Sha256::hash(&[b"test"])),
+            Key::<D>::Finalized {
+                height: Height::new(u64::MAX),
+            },
+            Key::<D>::Notarized {
+                round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+            },
+        ]
+        .iter()
+        .map(|key| key.encode().len())
+        .max()
+        .unwrap();
+        assert_eq!(Key::<D>::MAX_ENCODE_SIZE, widest);
+    }
+
+    #[test]
     fn test_subject_decode_rejects_invalid_enum_tag() {
         let bad = [3u8];
         let mut buf = commonware_codec::Copying(&bad);
@@ -749,9 +819,15 @@ mod tests {
         };
         let fresh_untrusted = Annotation::Untrusted {
             height: Height::new(101),
+            round: None,
         };
         let stale_untrusted = Annotation::Untrusted {
             height: Height::new(100),
+            round: None,
+        };
+        let stale_untrusted_at_later_round = Annotation::Untrusted {
+            height: Height::new(100),
+            round: Some(Round::new(Epoch::new(333), View::new(150))),
         };
 
         let predicate = above_height_floor(floor);
@@ -782,11 +858,12 @@ mod tests {
         assert!(!predicate(&block, &stale_finalized));
         assert!(!predicate(&block, &stale_certified));
         assert!(!predicate(&block, &stale_untrusted));
+        assert!(!predicate(&block, &stale_untrusted_at_later_round));
     }
 
     #[test]
     fn test_round_floor_predicate() {
-        let floor = Round::new(Epoch::new(1), View::new(10));
+        let cutoff = Cutoff::Round(Round::new(Epoch::new(1), View::new(10)));
         let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
         let higher_notarized = Key::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(11)),
@@ -797,8 +874,12 @@ mod tests {
         let finalized = Key::<D>::Finalized {
             height: Height::new(100),
         };
+        let untrusted = |round| Annotation::Untrusted {
+            height: Height::new(100),
+            round,
+        };
 
-        let predicate = above_round_floor(floor);
+        let predicate = above_round_floor(cutoff);
         assert!(predicate(
             &higher_notarized,
             &Annotation::Notarization {
@@ -817,6 +898,11 @@ mod tests {
                 round: Round::new(Epoch::new(1), View::new(11)),
             })
         ));
+        assert!(predicate(
+            &block,
+            &untrusted(Some(Round::new(Epoch::new(1), View::new(11))))
+        ));
+        assert!(predicate(&block, &untrusted(None)));
         assert!(!predicate(
             &same_notarized,
             &Annotation::Notarization {
@@ -827,6 +913,53 @@ mod tests {
             &block,
             &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(10)),
+            })
+        ));
+        assert!(!predicate(
+            &block,
+            &untrusted(Some(Round::new(Epoch::new(1), View::new(10))))
+        ));
+    }
+
+    #[test]
+    fn test_epoch_round_floor_predicate() {
+        let predicate = above_round_floor::<D>(Cutoff::Epoch(Epoch::new(1)));
+        let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
+        let notarized = |round| {
+            (
+                Key::<D>::Notarized { round },
+                Annotation::Notarization { round },
+            )
+        };
+        let by_round = |round| Annotation::Finalized(Finalized::ByRound { round });
+        let untrusted = |round| Annotation::Untrusted {
+            height: Height::new(100),
+            round: Some(round),
+        };
+
+        // Every round of the covered epoch is pruned, through its last view.
+        for round in [
+            Round::new(Epoch::new(1), View::zero()),
+            Round::new(Epoch::new(1), View::new(u64::MAX)),
+        ] {
+            let (key, annotation) = notarized(round);
+            assert!(!predicate(&key, &annotation));
+            assert!(!predicate(&block, &by_round(round)));
+            assert!(!predicate(&block, &untrusted(round)));
+        }
+
+        // The next epoch's first round and height-bound requests are retained.
+        let next = Round::new(Epoch::new(2), View::zero());
+        let (key, annotation) = notarized(next);
+        assert!(predicate(&key, &annotation));
+        assert!(predicate(&block, &by_round(next)));
+        assert!(predicate(&block, &untrusted(next)));
+        assert!(predicate(
+            &Key::<D>::Finalized {
+                height: Height::new(100),
+            },
+            &Annotation::Finalized(Finalized::ByHeight {
+                height: Height::new(100),
             })
         ));
     }

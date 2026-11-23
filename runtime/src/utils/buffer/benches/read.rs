@@ -1,9 +1,7 @@
 //! Benchmark read performance at random offsets.
 
 use super::{CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE, create_append, destroy_append};
-use commonware_runtime::{
-    BufferPooler, Runner, Storage, buffer::paged::CacheRef, deterministic, tokio,
-};
+use commonware_runtime::{Runner, Storage, buffer::paged::CacheRef, deterministic, tokio};
 use commonware_utils::{NZUsize, TestRng};
 use criterion::Criterion;
 use rand::RngExt as _;
@@ -16,7 +14,7 @@ const TOTAL_SIZE: usize = PAGE_SIZE_USIZE * TOTAL_PAGES;
 fn bench_backend<R>(c: &mut Criterion, backend: &str, read_size: usize)
 where
     R: Runner + Default,
-    R::Context: Storage + BufferPooler,
+    R::Context: Storage,
 {
     c.bench_function(
         &format!("{}/backend={backend} size={read_size}", module_path!()),
@@ -26,13 +24,13 @@ where
 
                 let executor = R::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(CACHE_SIZE));
 
                     // Setup: populate the blob
                     let mut append = create_append(&ctx, &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];
-                    append.append(&data).await.unwrap();
-                    append.sync().await.unwrap();
+                    (append, _) = append.append(&data).await.unwrap();
+                    append = append.sync().await.unwrap();
                     drop(append);
 
                     // Benchmark: random reads

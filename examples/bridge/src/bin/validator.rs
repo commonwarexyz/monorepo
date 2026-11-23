@@ -1,7 +1,7 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE, P2P_SUFFIX,
-    application,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAILBOX_SIZE, MAX_MESSAGE_SIZE,
+    P2P_SUFFIX, application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -12,21 +12,26 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    ChaCha20Poly1305, Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
-    ed25519,
+    ed25519, sha256,
 };
 use commonware_formatting::from_hex;
-use commonware_p2p::{Manager as _, authenticated};
+use commonware_p2p::{Manager as _, authenticated, max_message_size};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
-use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{self, Sake},
+    utils::Timeout,
+};
+use commonware_utils::{NZDuration, NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -161,28 +166,41 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_handshake = StreamConfig::new(
-        Timeout::new(
-            Handshake {
+    let indexer_upgrader = Timeout::new(
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
                 signer: signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
+                version: sake::Version::V1,
             },
-            Duration::from_secs(5),
+            cups::Version::V1,
         ),
-        INDEXER_NAMESPACE,
-        MAX_MESSAGE_SIZE,
+        Duration::from_secs(5),
     );
 
-    // Configure network
+    // Configure the network, sized for consensus messages
+    let participants = u32::try_from(validators.len()).expect("validator count must fit in u32");
+    let payload = simplex::max_payload_size::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
+        participants,
+    );
     let p2p_cfg = authenticated::discovery::Config::local(
-        Handshake::new(signer),
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        max_message_size([payload]),
+        MAILBOX_SIZE,
     );
 
     // Start context
@@ -192,8 +210,15 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = indexer_handshake
-            .dial(context.child("dialer"), indexer, stream, sink)
+        let indexer = indexer_upgrader
+            .dial(
+                context.child("dialer"),
+                INDEXER_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                indexer,
+                stream,
+                sink,
+            )
             .await
             .expect("Failed to upgrade connection with indexer");
 
@@ -251,13 +276,14 @@ fn main() {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: ViewDelta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(11),
                     budget: simplex::SkipBudget::Participants,
                 },
-                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,

@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Decode, DecodeExt, Encode, EncodeSize, Error, IsUnit, RangeCfg, Read, Write,
+    Decode, DecodeExt, Encode, EncodeSize, Error, IsUnit, RangeCfg, Read, U256, Write,
     varint::{SInt, UInt},
 };
 use libfuzzer_sys::fuzz_target;
@@ -109,7 +109,7 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 fn roundtrip_primitive<T, X>(v: T)
 where
     X: IsUnit,
-    T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
+    T: Encode + PartialEq + DecodeExt<X> + std::fmt::Debug,
 {
     let encoded = v.encode();
     assert_eq!(v.encode_size(), encoded.len());
@@ -145,7 +145,7 @@ fn roundtrip_map<K, V>(
     k_cfg: K::Cfg,
     v_cfg: V::Cfg,
 ) where
-    K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Ord + Hash + std::fmt::Debug,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
     HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
         + std::fmt::Debug
@@ -164,7 +164,7 @@ fn roundtrip_map<K, V>(
 
 fn roundtrip_set<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
 where
-    K: Write + EncodeSize + Read + Clone + Hash + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Hash + Eq + std::fmt::Debug,
     HashSet<K>:
         Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
@@ -181,7 +181,7 @@ fn roundtrip_btree_map<K, V>(
     k_cfg: K::Cfg,
     v_cfg: V::Cfg,
 ) where
-    K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Ord + std::fmt::Debug,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
     BTreeMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
         + std::fmt::Debug
@@ -199,7 +199,7 @@ fn roundtrip_btree_map<K, V>(
 
 fn roundtrip_btree_set<K>(set: &BTreeSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
 where
-    K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Ord + std::fmt::Debug,
     BTreeSet<K>:
         Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
@@ -213,7 +213,7 @@ where
 
 fn roundtrip_vec<T>(vec: Vec<T>)
 where
-    T: Encode + Decode + PartialEq + DecodeExt<()> + std::fmt::Debug,
+    T: Encode + PartialEq + DecodeExt<()> + std::fmt::Debug,
 {
     let input_len = vec.len();
     let encoded_vec = vec.encode();
@@ -239,7 +239,7 @@ where
 
 fn roundtrip_option<T>(opt: Option<T>)
 where
-    T: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
     Option<T>: Decode<Cfg = T::Cfg>,
 {
     let encoded = opt.encode();
@@ -250,9 +250,9 @@ where
 
 fn roundtrip_tuple_2<T1, T2>(tuple: (T1, T2))
 where
-    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    (T1, T2): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg)> + PartialEq + std::fmt::Debug + EncodeSize,
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    (T1, T2): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg)> + PartialEq + std::fmt::Debug,
 {
     let encoded = tuple.encode();
     assert_eq!(tuple.encode_size(), encoded.len());
@@ -262,14 +262,10 @@ where
 
 fn roundtrip_tuple_3<T1, T2, T3>(tuple: (T1, T2, T3))
 where
-    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    (T1, T2, T3): Encode
-        + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)>
-        + PartialEq
-        + std::fmt::Debug
-        + EncodeSize,
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    (T1, T2, T3): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)> + PartialEq + std::fmt::Debug,
 {
     let encoded = tuple.encode();
     assert_eq!(tuple.encode_size(), encoded.len());
@@ -286,7 +282,7 @@ fn roundtrip_usize(v: usize) {
 
 fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
     let mut buf = Vec::new();
-    for _ in 0..continuation_bytes.min(20) {
+    for _ in 0..continuation_bytes.min(40) {
         buf.put_u8(0xFF);
     }
     buf.put_u8(last_byte);
@@ -294,6 +290,7 @@ fn roundtrip_overflow(continuation_bytes: u8, last_byte: u8) {
     let _ = UInt::<u32>::decode(buf.clone());
     let _ = UInt::<u64>::decode(buf.clone());
     let _ = UInt::<u128>::decode(buf.clone());
+    let _ = UInt::<U256>::decode(buf.clone());
     // Also test signed varint overflow
     let _ = SInt::<i16>::decode(buf.clone());
     let _ = SInt::<i32>::decode(buf.clone());
@@ -365,6 +362,7 @@ enum FuzzInput<'a> {
     UVarInt32(u32),
     UVarInt64(u64),
     UVarInt128(u128),
+    UVarInt256([u64; 4]),
 
     // Signed varints (ZigZag encoding)
     SVarInt16(i16),
@@ -380,6 +378,7 @@ enum FuzzInput<'a> {
     U32(u32),
     U64(u64),
     U128(u128),
+    U256([u64; 4]),
     I8(i8),
     I16(i16),
     I32(i32),
@@ -425,6 +424,7 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::UVarInt32(v) => roundtrip_primitive(UInt(v)),
         FuzzInput::UVarInt64(v) => roundtrip_primitive(UInt(v)),
         FuzzInput::UVarInt128(v) => roundtrip_primitive(UInt(v)),
+        FuzzInput::UVarInt256(v) => roundtrip_primitive(UInt(U256::from_limbs(v))),
         // Signed varints
         FuzzInput::SVarInt16(v) => roundtrip_primitive(SInt(v)),
         FuzzInput::SVarInt32(v) => roundtrip_primitive(SInt(v)),
@@ -442,6 +442,7 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::U32(v) => roundtrip_primitive(v),
         FuzzInput::U64(v) => roundtrip_primitive(v),
         FuzzInput::U128(v) => roundtrip_primitive(v),
+        FuzzInput::U256(v) => roundtrip_primitive(U256::from_limbs(v)),
         FuzzInput::I8(v) => roundtrip_primitive(v),
         FuzzInput::I16(v) => roundtrip_primitive(v),
         FuzzInput::I32(v) => roundtrip_primitive(v),

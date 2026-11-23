@@ -29,9 +29,9 @@ use tracing::debug;
 
 /// The discovery phase of [`Probe`](super::Probe).
 ///
-/// Solicits peers' latest finalizations and selects the highest floor from a peer sample. By
-/// construction it has no marshal and never serves finalizations. Once a marshal is attached
-/// (after the floor has been consumed), it hands off to [`Service`].
+/// Solicits peers' latest finalizations and selects the floor from a peer sample. It never answers
+/// requests. See the [module documentation](crate::stateful::probe#lifecycle) for when it hands
+/// off to [`Service`].
 pub(super) struct Discovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -49,7 +49,7 @@ where
     pub(super) blocker: B,
     pub(super) retry_timeout: NonZeroDuration,
     pub(super) sample: Sample<S, V::Commitment>,
-    pub(super) floor_subscribers: Vec<oneshot::Sender<Finalization<S, V::Commitment>>>,
+    pub(super) subscribers: Vec<oneshot::Sender<Finalization<S, V::Commitment>>>,
 }
 
 impl<E, S, D, V, T, P, B> Discovery<E, S, D, V, T, P, B>
@@ -62,8 +62,10 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    /// Runs the discovery loop until the actor shuts down or, once a marshal is attached after
-    /// the floor is consumed, hands off to [`Service`] (running it to completion in place).
+    /// Runs discovery until a marshal is attached and no subscriber awaits a floor, then runs
+    /// [`Service`] in place.
+    ///
+    /// Returns early if the actor stops or the mailbox or network receiver closes.
     pub(super) async fn run(
         mut self,
         sender: &mut impl Sender<PublicKey = P>,
@@ -75,18 +77,13 @@ where
         select_loop! {
             self.context,
             on_start => {
-                self.floor_subscribers.retain(|s| !s.is_closed());
+                self.subscribers.retain(|s| !s.is_closed());
 
-                // Hand off to service once a marshal is attached and no floor seeker is left
-                // waiting. Dropping all subscribers cancels discovery; if marshal is attached
-                // after that, the node becomes a source and serves without a cached floor. A
-                // joiner must keep its subscription alive until the floor is consumed.
-                if marshal.is_some() && self.floor_subscribers.is_empty() {
+                if marshal.is_some() && self.subscribers.is_empty() {
                     break;
                 }
 
-                // Arm the retry timer only while actively searching for a floor.
-                let retry = if self.sample.floor().is_none() && !self.floor_subscribers.is_empty() {
+                let retry = if self.sample.floor().is_none() && !self.subscribers.is_empty() {
                     Either::Left(self.context.sleep_until(deadline))
                 } else {
                     Either::Right(future::pending())
@@ -105,9 +102,9 @@ where
                         response.send_lossy(floor.clone());
                     }
                     None => {
-                        let should_request = self.floor_subscribers.is_empty();
-                        self.floor_subscribers.push(response);
-                        if should_request {
+                        let solicit = self.subscribers.is_empty();
+                        self.subscribers.push(response);
+                        if solicit {
                             self.request_latest(sender);
                             deadline = self.context.current() + self.retry_timeout.get();
                         }
@@ -121,10 +118,9 @@ where
                 debug!("network receiver closed, shutting down");
                 return;
             } => {
-                // Once a floor has been selected or a peer has contributed this request
-                // round, skip its replies before decoding or verifying to avoid useless
-                // certificate work.
-                if !self.sample.pending(&peer) {
+                // Skip unawaited replies before decoding, so duplicates cost no certificate work
+                // and are never blocked.
+                if !self.sample.awaits(&peer) {
                     continue;
                 }
 
@@ -142,16 +138,15 @@ where
                     }
                 };
 
-                let Some((peer, finalization)) = self.verify_finalization(peer, finalization)
-                else {
+                if !self.verify_finalization(&peer, &finalization) {
                     continue;
-                };
-                if self.floor_subscribers.is_empty() {
+                }
+                if self.subscribers.is_empty() {
                     self.sample.reset();
                     continue;
                 }
                 self.sample.record(peer, finalization);
-                self.try_select_floor();
+                self.select();
             },
             _ = retry => {
                 debug!(reason = "deadline elapsed", "re-requesting finalizations");
@@ -160,8 +155,6 @@ where
             },
         }
 
-        // Transition: a marshal was attached after the floor was discovered and consumed. Run
-        // the service phase to completion in place.
         Service {
             context: self.context,
             mailbox: self.mailbox,
@@ -173,8 +166,11 @@ where
         .await;
     }
 
-    /// Decodes a [`Finalization`] from a message, using the claimed [`Epoch`] within
-    /// the [`Proposal`] to look up the appropriate certificate scheme for decoding.
+    /// Decodes a reply, reading its certificate with the codec config of the [`Epoch`] claimed by
+    /// its [`Proposal`].
+    ///
+    /// Returns `Ok(None)` for a request, for a finalization below the minimum epoch, and for an
+    /// epoch with no known scheme. Returns an error if the message is malformed.
     fn decode_finalization(
         &self,
         mut message: impl Buf,
@@ -187,45 +183,51 @@ where
         if proposal.epoch() < self.sample.minimum_epoch() {
             return Ok(None);
         }
-        let Some(certificate_codec_config) = self.certificate_codec_config(proposal.epoch()) else {
+        let Some(scoped) = self.provider.scoped(proposal.epoch()) else {
             return Ok(None);
         };
-        let certificate = S::Certificate::decode_cfg(&mut message, &certificate_codec_config)?;
+        let certificate =
+            S::Certificate::decode_cfg(&mut message, &scoped.certificate_codec_config())?;
         Ok(Some(Finalization {
             proposal,
             certificate,
         }))
     }
 
-    /// Verifies a [`Finalization`] from `peer`.
+    /// Returns whether `finalization` from `peer` may join the sample.
     ///
-    /// Peers outside the solicited participant set or sending invalid finalizations are blocked.
-    /// If no scheme is available for the finalization's epoch, the payload is ignored without
-    /// blocking because it cannot be judged.
+    /// Blocks `peer` if it is not a participant of the minimum epoch's committee or if
+    /// `finalization` does not verify under its own epoch's scheme. Returns `false` without
+    /// blocking if either scheme is unavailable, because the reply cannot be judged.
     fn verify_finalization(
         &mut self,
-        peer: P,
-        finalization: Finalization<S, V::Commitment>,
-    ) -> Option<(P, Finalization<S, V::Commitment>)> {
-        let response_epoch = finalization.epoch();
-        let sample_scheme = self.provider.scheme(self.sample.minimum_epoch())?;
-        if sample_scheme.participants().position(&peer).is_none() {
-            commonware_p2p::block!(self.blocker, peer, "finalization sent by non-participant");
-            return None;
+        peer: &P,
+        finalization: &Finalization<S, V::Commitment>,
+    ) -> bool {
+        let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
+            return false;
+        };
+        if scheme.participants().position(peer).is_none() {
+            commonware_p2p::block!(
+                self.blocker,
+                peer.clone(),
+                "finalization sent by non-participant"
+            );
+            return false;
         }
 
-        // Verify against the certificate scheme for the finalization's epoch. If no verifier is
-        // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let scoped = self.provider.scoped(response_epoch)?;
+        let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
+            return false;
+        };
         if !finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy) {
-            commonware_p2p::block!(self.blocker, peer, "invalid finalization");
-            return None;
+            commonware_p2p::block!(self.blocker, peer.clone(), "invalid finalization");
+            return false;
         }
-        Some((peer, finalization))
+        true
     }
 
-    /// Attempts to select the highest finalization from a sample of distinct peers.
-    fn try_select_floor(&mut self) {
+    /// Selects the floor once the sample resolves and delivers it to every waiting subscriber.
+    fn select(&mut self) {
         let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
             return;
         };
@@ -239,12 +241,13 @@ where
             return;
         };
 
-        self.floor_subscribers.drain(..).for_each(|subscriber| {
+        self.subscribers.drain(..).for_each(|subscriber| {
             subscriber.send_lossy(floor.clone());
         });
     }
 
-    /// Clears any pending responses and requests the current committee's latest [`Finalization`].
+    /// Starts a new request round: clears the sample and solicits the minimum epoch's committee
+    /// (nothing is sent if that epoch has no known scheme).
     fn request_latest(&mut self, sender: &mut impl Sender<PublicKey = P>) {
         self.sample.reset();
         let Some(scheme) = self.provider.scheme(self.sample.minimum_epoch()) else {
@@ -255,15 +258,5 @@ where
             wire::Message::<S, V>::Request.encode(),
             false,
         );
-    }
-
-    /// Returns the certificate codec config for `epoch`.
-    fn certificate_codec_config(
-        &self,
-        epoch: Epoch,
-    ) -> Option<<S::Certificate as commonware_codec::Read>::Cfg> {
-        self.provider
-            .scoped(epoch)
-            .map(|scoped| scoped.certificate_codec_config())
     }
 }

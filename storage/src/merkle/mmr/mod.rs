@@ -24,8 +24,10 @@
 //!
 //! The _root digest_ (or just _root_) of an MMR is computed by _bagging_ peaks according to a
 //! specification provided by the user. For example, if "full forward" is specified, the root digest
-//! is computed as `Hash(leaves || fold(peaks))`, where `fold` left-folds peak digests in decreasing
-//! order of height.
+//! is computed as `Hash(family || bagging || leaves || fold(peaks))`, where `family` is the MMR's
+//! [`Family::DOMAIN`](crate::merkle::Family::DOMAIN) tag, `bagging` is the policy's
+//! [`Bagging::domain`](crate::merkle::Bagging::domain) tag, and `fold` left-folds peak digests in
+//! decreasing order of height.
 //!
 //! # Examples
 //!
@@ -49,8 +51,9 @@
 //! Location 0   1 2   3  4   5  6   7  8   9 10
 //! ```
 //!
-//! The full-forward bagged root hash in this example is computed as `Hash(11 || fold(peak1, peak2,
-//! peak3))`:
+//! The full-forward bagged root hash in this example is computed as
+//! `Hash(family || bagging || 11 || fold(peak1, peak2, peak3))`, where `family` is the MMR tag (0)
+//! and `bagging` is the forward-fold tag (0):
 //!
 //! ```text
 //! peak1 = Hash(14,                                            // tallest peak
@@ -64,7 +67,7 @@
 //! peak3 = Hash(18, element_10)                                // shortest peak
 //!
 //! fold  = Hash(Hash(peak1 || peak2) || peak3)
-//! root  = Hash(11 || fold)                                    // 11 = leaf count
+//! root  = Hash(family || bagging || 11 || fold)               // 11 = leaf count
 //! ```
 
 pub mod batch;
@@ -79,7 +82,7 @@ cfg_if::cfg_if! {
 }
 
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
-use crate::merkle::{self, Family as _, Graftable};
+use crate::merkle::{self, Graftable};
 pub use crate::merkle::{Readable, hasher};
 pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 use commonware_cryptography::Digest;
@@ -103,6 +106,8 @@ pub type Error = merkle::Error<Family>;
 pub struct Family;
 
 impl merkle::Family for Family {
+    const DOMAIN: u8 = 0;
+
     /// Maximum valid position: the largest MMR size for 2^62 leaves is `2^63 - 1`.
     const MAX_NODES: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1
 
@@ -218,6 +223,28 @@ impl merkle::Family for Family {
         }
         true
     }
+
+    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
+        let leaf_pos = Self::location_to_position(leaf_start);
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+
+        leaf_pos.checked_add(shift - 2).expect("position overflow")
+    }
+
+    fn leftmost_leaf(pos: Position, height: u32) -> Location {
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+        let leftmost_pos = pos.checked_sub(shift - 2).expect("position underflow");
+
+        Self::position_to_location(leftmost_pos).expect("leftmost descendant must be a leaf")
+    }
+
+    fn birth_offset(height: u32) -> u64 {
+        1u64.checked_shl(height).expect("height excessively large")
+    }
 }
 
 impl Graftable for Family {
@@ -243,36 +270,12 @@ impl Graftable for Family {
 
         core::iter::once((root_pos, grafting_height))
     }
-
-    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
-        let leaf_pos = Self::location_to_position(leaf_start);
-        let shift = 1u64
-            .checked_shl(height + 1)
-            .expect("height excessively large");
-
-        leaf_pos
-            .checked_add(shift)
-            .and_then(|v| v.checked_sub(2))
-            .expect("position overflow")
-    }
-
-    fn leftmost_leaf(pos: Position, height: u32) -> Location {
-        let shift = 1u64
-            .checked_shl(height + 1)
-            .expect("height excessively large");
-        let leftmost_pos = pos
-            .checked_add(2)
-            .and_then(|v| v.checked_sub(shift))
-            .expect("position underflow or overflow");
-
-        Self::position_to_location(leftmost_pos).expect("leftmost descendant must be a leaf")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::Bagging::ForwardFold;
+    use crate::merkle::{Bagging::ForwardFold, Family as _};
     use commonware_cryptography::Sha256;
 
     const MAX_NODES: Position = <Family as crate::merkle::Family>::MAX_NODES;
@@ -861,9 +864,22 @@ mod tests {
                     *pos, next_pos,
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
                 );
+                assert_eq!(
+                    leftmost + Family::birth_offset(h),
+                    leaf_idx + 1,
+                    "height-{h} birth_offset mismatch at leaf {leaf_idx}"
+                );
                 next_pos += 1;
             }
         }
+    }
+
+    #[test]
+    fn test_birth_offset() {
+        assert_eq!(Family::birth_offset(0), 1);
+        assert_eq!(Family::birth_offset(3), 8);
+        // The root of a full 2^62-leaf MMR is the tallest node that can exist.
+        assert_eq!(Family::birth_offset(62), *Family::MAX_LEAVES);
     }
 
     #[test]

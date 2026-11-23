@@ -5,21 +5,23 @@ use crate::dkg::{
     fence::Gate,
     network::{Directory, Manager},
     orchestrator::{Mailbox, mailbox::Message},
-    state_sync::{self, Plan as StateSyncPlan},
-    types::{EpochInfo, Payload},
+    state_sync::{self, BlsVariant as DkgVariant, Checkpoint, Plan as StateSyncPlan},
+    types::EpochInfo,
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, Heightable, Relay,
+    CertifiableAutomaton, Heightable, Relay, Reporter,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
-        self, Floor, ForwardPolicy, Plan, SkipPolicy, elector::Config as Elector, scheme,
-        types::Context,
+        self, Floor, ForwardPolicy, Plan, SkipPolicy,
+        elector::Config as Elector,
+        scheme,
+        types::{Activity, Context},
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, PublicKey, Signer,
+    Digest, PublicKey,
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
@@ -30,32 +32,27 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
+use commonware_utils::{
+    Acknowledgement, NonZeroDuration, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec,
+};
 use rand_core::CryptoRng;
 use std::{
-    marker::PhantomData,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
-    sync::Arc,
+    num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-struct Channels<C, S, R>
-where
-    C: Verifier,
-    S: Sender<PublicKey = C::PublicKey>,
-    R: Receiver<PublicKey = C::PublicKey>,
-{
-    vote: MuxHandle<S, R>,
-    vote_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
-    certificate: MuxHandle<S, R>,
-    certificate_backup: mpsc::Receiver<(Channel, P2pMessage<C::PublicKey>)>,
-    resolver: MuxHandle<S, R>,
+struct Channels<S: Sender> {
+    vote: MuxHandle<S>,
+    vote_backup: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
+    certificate: MuxHandle<S>,
+    certificate_backup: mpsc::Receiver<(Channel, P2pMessage<S::PublicKey>)>,
+    resolver: MuxHandle<S>,
 }
 
 struct ActiveEpoch {
@@ -63,6 +60,7 @@ struct ActiveEpoch {
     handle: Handle<()>,
 }
 
+// Replacing the active epoch aborts the previous engine.
 impl Drop for ActiveEpoch {
     fn drop(&mut self) {
         self.handle.abort();
@@ -89,7 +87,11 @@ where
     info: EpochInfo<V, P, Dir>,
 }
 
-/// Simplex configuration applied to each epoch engine.
+/// Simplex settings applied to every epoch engine.
+///
+/// Each field is passed to the [`simplex::Config`] field of the same name, which
+/// documents its constraints. An invalid configuration panics when the
+/// orchestrator enters an epoch.
 #[derive(Clone)]
 pub struct SimplexConfig<L> {
     /// Leader election configuration.
@@ -104,23 +106,25 @@ pub struct SimplexConfig<L> {
     /// Number of bytes to buffer when writing consensus journal blobs.
     pub write_buffer: NonZeroUsize,
 
-    /// Page size used by the consensus journal page cache.
-    pub page_cache_page_size: NonZeroU16,
-
-    /// Number of pages retained by the consensus journal page cache.
-    pub page_cache_pages: NonZeroUsize,
+    /// Page cache for the consensus journals.
+    pub page_cache: CacheRef,
 
     /// Time to wait for a leader proposal in a view.
     pub leader_timeout: Duration,
 
     /// Time to wait for certification progress before attempting to skip a view.
+    /// Must be greater than `leader_timeout`.
     pub certification_timeout: Duration,
 
     /// Time to wait before retrying a nullify broadcast while stuck in a view.
     pub timeout_retry: Duration,
 
     /// Time to wait for a peer to respond to a resolver request.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
+
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
+    pub fetch_retry_delay: Duration,
 
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
@@ -128,12 +132,8 @@ pub struct SimplexConfig<L> {
     /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
     pub skip: SkipPolicy,
 
-    /// Track individual votes after certification.
-    ///
-    /// By default, full vote evidence is released when the corresponding certificate
-    /// is constructed or received, making later conflict reporting and peer blocking
-    /// best effort. Enabling this retains each recorded vote until its round is
-    /// pruned, increasing memory usage.
+    /// Whether to retain individual votes after certification (see
+    /// [`simplex::Config::track_historical_votes`]).
     pub track_historical_votes: bool,
 
     /// Policy for proactively forwarding certified blocks.
@@ -141,29 +141,28 @@ pub struct SimplexConfig<L> {
 }
 
 /// Configuration for the [`Actor`].
-pub struct Config<B, M, P, MV, DV, A, L, T>
+pub struct Config<B, M, P, MV, A, L, T>
 where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer:
-        Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-    DV: BlsVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
 {
     /// Network blocker shared with each epoch consensus engine.
     pub oracle: B,
 
-    /// P2P manager used to track the active consensus peer set.
+    /// Peer manager that activates each epoch's peers.
     pub manager: M,
 
     /// Provider of epoch-scoped consensus signing schemes.
+    ///
+    /// The actor panics if the provider has no scheme for an epoch it enters.
     pub provider: P,
 
     /// Marshal mailbox used to report consensus output and read finalized blocks.
     pub marshal: MarshalMailbox<P::Scheme, MV>,
 
-    /// Application automaton and relay used by each epoch consensus engine.
+    /// Application automaton, relay, and reporter used by each epoch consensus engine.
     pub application: A,
 
     /// Strategy for parallel verification and signing work.
@@ -172,23 +171,14 @@ where
     /// Simplex settings applied to every epoch engine.
     pub simplex: SimplexConfig<L>,
 
-    /// Gate for waiting for the signature scheme to be configured prior to
-    /// entering an epoch.
+    /// The actor enters an epoch only after this gate reaches it.
     pub gate: Gate,
 
-    /// Shared DKG state-sync startup recovery plan.
-    pub state_sync: StateSyncPlan<
-        P::Scheme,
-        MV::Commitment,
-        DV,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    /// State-sync startup plan shared with the reshare actor and the probe.
+    pub state_sync: StateSyncPlan<P::Scheme, MV>,
 
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
-
-    /// Maximum number of messages to buffer in each network muxer.
-    pub muxer_size: usize,
 
     /// Maximum number of finalized-block reports to buffer.
     pub mailbox_size: NonZeroUsize,
@@ -197,10 +187,11 @@ where
     pub partition_prefix: String,
 }
 
-/// Consensus engine orchestrator.
-pub struct Actor<E, B, M, P, MV, DV, C, A, L, T, ACK = Exact>
+/// Runs one Simplex engine per epoch (see the
+/// [module docs](crate::dkg::orchestrator)).
+pub struct Actor<E, B, M, P, MV, A, L, T, ACK = Exact>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -209,9 +200,7 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
-    DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -219,7 +208,7 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
@@ -234,23 +223,15 @@ where
     strategy: T,
     simplex: SimplexConfig<L>,
     gate: Gate,
-    state_sync: StateSyncPlan<
-        P::Scheme,
-        MV::Commitment,
-        DV,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    state_sync: StateSyncPlan<P::Scheme, MV>,
     blocks_per_epoch: NonZeroU64,
-    muxer_size: usize,
     partition_prefix: String,
-    page_cache_ref: CacheRef,
     latest_epoch: Gauge,
-    _payload: PhantomData<(DV, C)>,
 }
 
-impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
+impl<E, B, M, P, MV, A, L, T, ACK> Actor<E, B, M, P, MV, A, L, T, ACK>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -259,9 +240,7 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
-    DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -269,26 +248,21 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
 {
-    /// Build an orchestrator and the mailbox that receives finalized blocks.
+    /// Creates an orchestrator and the mailbox that receives finalized blocks.
     ///
     /// The returned [`Mailbox`] should be installed as a marshal reporter. The
-    /// actor uses those finalized-block reports to advance epochs after it is
-    /// spawned with [`Actor::start`].
+    /// actor advances epochs from those reports once started with
+    /// [`Actor::start`].
     pub fn new(
         context: E,
-        config: Config<B, M, P, MV, DV, A, L, T>,
+        config: Config<B, M, P, MV, A, L, T>,
     ) -> (Self, Mailbox<MV::ApplicationBlock, ACK>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
-        let page_cache_ref = CacheRef::from_pooler(
-            &context,
-            config.simplex.page_cache_page_size,
-            config.simplex.page_cache_pages,
-        );
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
 
         (
@@ -305,20 +279,18 @@ where
                 gate: config.gate,
                 state_sync: config.state_sync,
                 blocks_per_epoch: config.blocks_per_epoch,
-                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
-                page_cache_ref,
                 latest_epoch,
-                _payload: PhantomData,
             },
             Mailbox::new(sender),
         )
     }
 
-    /// Spawn the orchestrator with the consensus network channels.
+    /// Spawns the orchestrator on the vote, certificate, and resolver channels,
+    /// which it multiplexes by epoch.
     ///
-    /// Vote, certificate, and resolver channels are multiplexed by epoch
-    /// inside the actor.
+    /// See [Failures](crate::dkg::orchestrator#failures) for when the returned
+    /// task exits or panics.
     pub fn start<S, R>(
         mut self,
         votes: (S, R),
@@ -332,12 +304,8 @@ where
         spawn_cell!(self.context, self.run(votes, certificates, resolver,))
     }
 
-    /// Run the actor event loop.
-    ///
-    /// The loop owns one active Simplex engine at a time. It listens for
-    /// finalized boundary blocks from marshal and for backup vote and
-    /// certificate traffic from future epochs, which is used only to ask
-    /// marshal for the missing boundary finalization.
+    /// Drives epoch consensus from finalized blocks and future-epoch traffic
+    /// until shutdown.
     async fn run<S, R>(
         mut self,
         (vote_sender, vote_receiver): (S, R),
@@ -424,7 +392,7 @@ where
                         .handle_finalized(
                             &epocher,
                             &mut active,
-                            block,
+                            block.height(),
                             acknowledgement,
                             &mut channels,
                         )
@@ -437,15 +405,11 @@ where
         }
     }
 
-    /// Resolve the first epoch this process should run.
+    /// Resolves the startup epoch from state-sync material if the plan resolves
+    /// to any, then from the recovered epoch's checkpoint, and otherwise from the
+    /// epoch's boundary block.
     ///
-    /// Normal startup resolves from marshal's local boundary blocks. State-sync
-    /// startup and recovery are exceptions: the node may know a recent public
-    /// boundary from `dkg::probe` without having the previous boundary block in
-    /// local marshal storage.
-    ///
-    /// Returns `None` when startup data cannot be fetched from marshal, which
-    /// requires the orchestrator to shut down.
+    /// Returns `None` if no source can supply the epoch.
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
@@ -453,12 +417,16 @@ where
         ResolvedStart<
             P::Scheme,
             MV::Commitment,
-            DV,
+            DkgVariant<MV>,
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
     > {
-        let recovered_epoch = state_sync::recovered_epoch(&self.marshal, epocher).await;
+        let recovered_epoch = self
+            .marshal
+            .get_processed()
+            .await
+            .map(|processed| state_sync::recovered_epoch(processed, epocher));
         if let Some(state_sync) = self
             .state_sync
             .resolve(
@@ -474,28 +442,23 @@ where
             });
         }
 
-        self.resolve_boundary(recovered_epoch.unwrap_or_else(Epoch::zero), epocher)
-            .await
+        let epoch = recovered_epoch.unwrap_or_else(Epoch::zero);
+        if let Some(checkpoint) = self.state_sync.checkpoint(epoch).await {
+            return Some(ResolvedStart {
+                epoch,
+                floor: Floor::Genesis(checkpoint.commitment()),
+                info: checkpoint.info(),
+            });
+        }
+
+        self.resolve_boundary(epoch, epocher).await
     }
 
-    /// Resolve a locally recovered epoch from marshal's finalized boundary block.
+    /// Resolves `epoch` from the finalized boundary block that carries its
+    /// [`EpochInfo`] and records the epoch's checkpoint.
     ///
-    /// Ordinary restarts should not re-enter the configured bootstrap epoch if
-    /// marshal has already delivered finalized blocks to the application. The
-    /// processed height names the next block marshal will deliver; from that
-    /// height we derive the active epoch, then read the boundary block that
-    /// carried that epoch's public [`EpochInfo`]. That boundary block supplies
-    /// both the Simplex floor commitment and the peer set to track for the
-    /// recovered epoch.
-    ///
-    /// This is intentionally not used for state-sync startup: during one-time
-    /// state sync, marshal is anchored at the probe-sampled floor while the
-    /// previous epoch boundary block is not locally available yet. In that
-    /// startup path, the probe artifact is the trusted source of boundary
-    /// epoch info.
-    ///
-    /// Returns `None` when the boundary block cannot be fetched from marshal,
-    /// which requires the orchestrator to shut down.
+    /// Returns `None` if marshal cannot supply the block. Panics if the block
+    /// carries no [`EpochInfo`] or one for another epoch.
     async fn resolve_boundary(
         &mut self,
         epoch: Epoch,
@@ -504,7 +467,7 @@ where
         ResolvedStart<
             P::Scheme,
             MV::Commitment,
-            DV,
+            DkgVariant<MV>,
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
@@ -513,22 +476,40 @@ where
             .previous()
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
+
+        // Read the optional certificate first so shutdown between requests fails the block lookup
+        // before we record a checkpoint.
+        let finalization = self.marshal.get_finalization(height).await;
         let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
-        let commitment = MV::commitment(&boundary);
-        let block = MV::into_shared(boundary);
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
-            panic!("boundary block {height} missing epoch info");
-        };
-        if info.epoch != epoch {
-            panic!(
-                "boundary block {height} carries epoch info for {}, expected {epoch}",
-                info.epoch
-            );
-        }
 
+        let checkpoint = Checkpoint::new(boundary, finalization);
+        let commitment = checkpoint.commitment();
+        let info = checkpoint.info();
+        assert_eq!(
+            info.epoch, epoch,
+            "boundary block {height} carries the wrong epoch"
+        );
+
+        // An acknowledgement can advance marshal past the boundary. Persist the checkpoint
+        // first, keeping every epoch a restart from the processed height could still need.
+        let retained_from = self
+            .marshal
+            .get_processed()
+            .await
+            .map_or_else(Epoch::zero, |processed| {
+                state_sync::recovered_epoch(processed, epocher)
+            });
+        self.state_sync
+            .record(
+                self.context.as_present().child("checkpoint"),
+                epoch,
+                checkpoint,
+                retained_from,
+            )
+            .await;
         Some(ResolvedStart {
             epoch,
             floor: Floor::Genesis(commitment),
@@ -536,36 +517,27 @@ where
         })
     }
 
-    /// Start the consensus channel muxers and return handles used to open
-    /// epoch-specific subchannels.
-    ///
-    /// The vote mux includes a backup receiver so the orchestrator can detect
-    /// messages for epochs it has not registered locally.
+    /// Starts the consensus muxers and returns their epoch-scoped channel handles.
     fn create_channels<S, R>(
         &self,
         (vote_sender, vote_receiver): (S, R),
         (certificate_sender, certificate_receiver): (S, R),
         (resolver_sender, resolver_receiver): (S, R),
-    ) -> Channels<P::Scheme, S, R>
+    ) -> Channels<S>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let (mux, vote, vote_backup) = Muxer::builder(
-            self.context.child("vote_mux"),
-            vote_sender,
-            vote_receiver,
-            self.muxer_size,
-        )
-        .with_backup()
-        .build();
+        let (mux, vote, vote_backup) =
+            Muxer::builder(self.context.child("vote_mux"), vote_sender, vote_receiver)
+                .with_backup()
+                .build();
         mux.start();
 
         let (mux, certificate, certificate_backup) = Muxer::builder(
             self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
-            self.muxer_size,
         )
         .with_backup()
         .build();
@@ -575,7 +547,6 @@ where
             self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
-            self.muxer_size,
         );
         mux.start();
 
@@ -588,13 +559,9 @@ where
         }
     }
 
-    /// Handle traffic for an epoch whose vote or certificate subchannel is not
-    /// registered.
-    ///
-    /// Messages from past or current epochs are ignored. A future-epoch
-    /// message is evidence that peers have crossed an epoch boundary locally,
-    /// so the actor hints marshal to fetch the current epoch's boundary
-    /// finalization from the sender.
+    /// Asks `from` for the finalization of `our_epoch`'s final block if
+    /// `their_epoch` is later (see
+    /// [Catching Up](crate::dkg::orchestrator#catching-up)).
     fn handle_backup(
         &self,
         epocher: &FixedEpocher,
@@ -622,49 +589,46 @@ where
             .hint_finalized(boundary_height, NonEmptyVec::new(from));
     }
 
-    /// Handle one finalized block delivered by marshal.
+    /// Handles a finalized block and returns whether the actor keeps running.
     ///
-    /// Non-boundary blocks are acknowledged immediately. A boundary block must
-    /// carry the next epoch's public [`Payload::EpochInfo`]; once it does, the
-    /// actor stops the current Simplex engine and enters the next epoch using
-    /// that public peer set.
-    async fn handle_finalized<S, R>(
+    /// Acknowledges any block below the active epoch's final block
+    /// immediately. For the final block, records the next epoch's checkpoint,
+    /// enters the next epoch, and acknowledges the block once the new engine
+    /// has started. Returns `false` if marshal cannot supply the block or the
+    /// next epoch cannot be entered. Panics if the block is above the active
+    /// epoch's final block (marshal skipped the final block) or if the final
+    /// block does not carry the next epoch's [`EpochInfo`].
+    async fn handle_finalized<S>(
         &mut self,
         epocher: &FixedEpocher,
         active: &mut ActiveEpoch,
-        block: Arc<MV::ApplicationBlock>,
+        height: Height,
         acknowledgement: ACK,
-        channels: &mut Channels<P::Scheme, S, R>,
+        channels: &mut Channels<S>,
     ) -> bool
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let height = block.height();
         let current = active.epoch;
-        if epocher.last(current) != Some(height) {
+        let last = epocher
+            .last(current)
+            .expect("active epoch should be covered by epoch strategy");
+        assert!(
+            height <= last,
+            "finalized block skips the final block of epoch {current}"
+        );
+        if height != last {
             acknowledgement.acknowledge();
             return true;
         }
 
         let next_epoch = current.next();
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
-            panic!("boundary block of epoch {current} missing EpochInfo");
-        };
-        if info.epoch != next_epoch {
-            panic!(
-                "boundary block of epoch {current} carries epoch info for wrong epoch (got: {}, expected: {next_epoch})",
-                info.epoch
-            );
-        }
-
-        let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+        let Some(start) = self.resolve_boundary(next_epoch, epocher).await else {
             return false;
         };
-        let floor = Floor::Genesis(MV::commitment(&boundary));
-
-        let next = self.enter_epoch(next_epoch, floor, &info, channels).await;
+        let next = self
+            .enter_epoch(next_epoch, start.floor, &start.info, channels)
+            .await;
         let next = match next {
             Ok(next) => next,
             Err(EnterEpochError::GateClosed) => {
@@ -690,26 +654,26 @@ where
         true
     }
 
-    /// Enter an epoch and return the active engine handle.
+    /// Waits for the gate to reach `epoch`, activates its peers, and starts its
+    /// Simplex engine.
     ///
-    /// This is the only path that tracks consensus peers, opens epoch-scoped
-    /// mux subchannels, constructs the Simplex engine, and updates the current
-    /// epoch metric. Callers must abort the previous [`ActiveEpoch`] before
-    /// replacing it with the returned value.
-    async fn enter_epoch<S, R>(
+    /// Returns an error if the runtime stops or the gate closes before the gate
+    /// reaches `epoch`, if peer activation fails, or if a muxer has stopped.
+    /// Panics if the provider has no scheme for `epoch`. The previous engine
+    /// keeps running until the caller drops its [`ActiveEpoch`].
+    async fn enter_epoch<S>(
         &mut self,
         epoch: Epoch,
         floor: Floor<P::Scheme, MV::Commitment>,
         info: &EpochInfo<
-            DV,
+            DkgVariant<MV>,
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
-        channels: &mut Channels<P::Scheme, S, R>,
+        channels: &mut Channels<S>,
     ) -> Result<ActiveEpoch, EnterEpochError<M::Error>>
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         // Shutdown is polled first so a stop signal wins over an
         // already-marked gate.
@@ -745,7 +709,7 @@ where
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
-                reporter: self.marshal.clone(),
+                reporter: self.application.clone(),
                 strategy: self.strategy.clone(),
                 partition: format!("{}_consensus_{epoch}", self.partition_prefix),
                 mailbox_size: self.simplex.mailbox_size,
@@ -753,11 +717,12 @@ where
                 floor,
                 replay_buffer: self.simplex.replay_buffer,
                 write_buffer: self.simplex.write_buffer,
-                page_cache: self.page_cache_ref.clone(),
+                page_cache: self.simplex.page_cache.clone(),
                 leader_timeout: self.simplex.leader_timeout,
                 certification_timeout: self.simplex.certification_timeout,
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
+                fetch_retry_delay: self.simplex.fetch_retry_delay,
                 view_retention: self.simplex.view_retention,
                 skip: self.simplex.skip,
                 forward: self.simplex.forward,
@@ -765,9 +730,8 @@ where
             },
         );
 
-        // Each epoch is registered exactly once, so a registration failure
-        // means the muxer has stopped: the vote, certificate, and resolver
-        // muxers all exit with this context, which is a clean-stop condition.
+        // Each epoch registers once, so a registration failure means the muxers
+        // stopped with this context.
         let Ok(vote) = channels.vote.register(epoch.get()).await else {
             return Err(EnterEpochError::MuxClosed);
         };

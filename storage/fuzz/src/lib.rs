@@ -6,10 +6,13 @@ use commonware_runtime::{
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
+use commonware_storage::journal::authenticated::ResidentHeight;
 use commonware_utils::{Probability, probability};
 use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
 use std::{fmt::Debug, future::Future};
+
+pub mod floor;
 
 /// Check strict, non-wrapping neighbors against the model's live keys.
 pub fn assert_ordered_neighbors<K: Ord + Debug>(
@@ -178,6 +181,11 @@ pub fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> arbitrary::Result<us
 /// Generate an item count in `1..=64`.
 pub fn bounded_items(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
     u.int_in_range(1..=64)
+}
+
+/// A low resident height, so small databases rebuild digests from their operations.
+pub const fn low_resident_height() -> ResidentHeight {
+    ResidentHeight::new(2).unwrap()
 }
 
 /// Generate a buffer size in `1..=2048`.

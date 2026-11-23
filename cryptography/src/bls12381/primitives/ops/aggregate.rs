@@ -199,7 +199,6 @@ pub fn combine_public_keys<'a, V, I>(public_keys: NonEmpty<I>) -> PublicKey<V>
 where
     V: Variant,
     I: Iterator<Item = &'a V::Public>,
-    V::Public: 'a,
 {
     let mut p = PublicKey::zero();
     for pk in public_keys {
@@ -219,7 +218,6 @@ pub fn combine_signatures<'a, V, I>(signatures: NonEmpty<I>) -> Signature<V>
 where
     V: Variant,
     I: Iterator<Item = &'a V::Signature>,
-    V::Signature: 'a,
 {
     let mut s = Signature::zero();
     for sig in signatures {
@@ -311,8 +309,8 @@ mod tests {
     };
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, non_empty, test_rng, union_unique};
+    use commonware_parallel::mocks::explore;
+    use commonware_utils::{non_empty, test_rng, union_unique};
 
     fn blst_aggregate_verify_same_message<'a, V, I>(
         public: I,
@@ -322,7 +320,6 @@ mod tests {
     where
         V: Variant,
         I: IntoIterator<Item = &'a V::Public>,
-        V::Public: 'a,
     {
         match V::MESSAGE {
             G1_MESSAGE => {
@@ -491,16 +488,11 @@ mod tests {
 
         let aggregate_sig = aggregate::combine_signatures::<V, _>(non_empty![@signatures.iter()]);
 
-        let combined_msg =
-            aggregate::combine_messages::<V, _>(non_empty![@messages.iter()], &Sequential);
+        let combined_msg = explore(|strategy| {
+            aggregate::combine_messages::<V, _>(non_empty![@messages.iter()], strategy)
+        });
         aggregate::verify_same_signer::<V>(&public, &combined_msg, &aggregate_sig)
             .expect("Aggregated signature should be valid");
-
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        let combined_msg_parallel =
-            aggregate::combine_messages::<V, _>(non_empty![@messages.iter()], &parallel);
-        aggregate::verify_same_signer::<V>(&public, &combined_msg_parallel, &aggregate_sig)
-            .expect("Aggregated signature should be valid with parallelism");
 
         let payload_msgs: Vec<_> = messages
             .iter()

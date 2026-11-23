@@ -191,8 +191,8 @@ pub(crate) mod tests {
     }
 
     impl BufsMut for TrackingWriteBuf {
-        fn push(&mut self, bytes: impl Into<Bytes>) {
-            let bytes = bytes.into();
+        fn push(&mut self, chunk: impl Into<Bytes> + 'static) {
+            let bytes = chunk.into();
             self.inner.extend_from_slice(&bytes);
             self.pushed.push(bytes);
         }

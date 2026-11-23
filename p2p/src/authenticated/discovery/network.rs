@@ -1,7 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
-    Handshake,
+    Upgrader,
     actors::{dialer, listener, spawner, tracker},
     config::Config,
 };
@@ -12,16 +12,16 @@ use crate::{
         channels::{self, Channels},
         discovery::types::{Info, InfoVerifier},
         max_size, router,
+        stream::Config as StreamConfig,
     },
     sizing::max_retained_peers,
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
-use commonware_stream::{Config as StreamConfig, utils::Timeout};
-use commonware_utils::{SystemTimeExt, ordered::Set, union};
+use commonware_stream::utils::Timeout;
+use commonware_utils::{SystemTimeExt, Widen, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -36,29 +36,24 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    H: Handshake,
-> {
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> {
     context: ContextCell<E>,
-    cfg: Config<H>,
+    cfg: Config<U>,
     max_frame_size: u32,
     max_peer_set_size: u64,
 
-    channels: Channels<H::PublicKey>,
-    tracker: tracker::Actor<E, H::PublicKey>,
-    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
-    info_verifier: InfoVerifier<H::PublicKey>,
+    channels: Channels<U::PublicKey>,
+    tracker: tracker::Actor<E, U::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<U::PublicKey>,
+    info_verifier: InfoVerifier<U::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
-    Network<E, H>
-{
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
     ///
-    /// * `cfg` - Configuration for the network.
+    /// * `cfg`: Configuration for the network.
     ///
     /// # Returns
     ///
@@ -67,20 +62,31 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
-        // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
+    /// Panics if the configured payload limit or the peer discovery message bound exceeds the
+    /// stream limit, or if capacity arithmetic overflows.
+    pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+        // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
         assert!(
-            cfg.max_message_size <= max_size::<H>(),
+            cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
-        let max_frame_size = cfg
+        let data_frame = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
-        let max_peer_set_size =
-            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+
+        // Peer discovery messages share each connection's stream with application data, so the
+        // frame carries the larger of an application payload at the limit and the gossip message
+        // bound. The payload limit alone bounds application data, so peers whose gossip sizes
+        // differ admit the same application payloads.
+        let gossip = u32::try_from(cfg.max_gossip_size()).expect("gossip size must fit in u32");
+        assert!(
+            gossip <= U::MAX_SIZE,
+            "largest peer discovery message exceeds stream limit"
+        );
+        let max_frame_size = data_frame.max(gossip);
+        let max_peer_set_size: u64 = Widen::widen(cfg.max_peers_per_set.get());
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
@@ -127,7 +133,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
@@ -150,10 +156,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Parameters
     ///
-    /// * `channel` - Unique identifier for the channel.
-    /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
+    /// * `channel`: Unique identifier for the channel.
+    /// * `rate`: Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
+    ///
     /// # Backpressure
     ///
     /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for
@@ -163,6 +170,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// The mailbox holds one quota burst for every identity allowed by the derived retained-peer
     /// bound. This includes honest traffic since protocol events can synchronize honest senders,
     /// but does not cover receiver stalls or sustained ingress above the receiver's drain rate.
+    /// The returned receiver reports this capacity through [`crate::Receiver::capacity`].
     ///
     /// Outbound send invocations from all channels share one router mailbox. The final mailbox
     /// capacity is [`Config::mailbox_size`] plus every registered channel's derived inbound
@@ -186,14 +194,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
-    #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<H::PublicKey, E>,
-        channels::Receiver<H::PublicKey>,
+        channels::Sender<U::PublicKey, E>,
+        channels::Receiver<U::PublicKey>,
     ) {
         let context = self
             .context
@@ -225,8 +232,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 
     async fn run(
         self,
-        router: router::Actor<E, H::PublicKey>,
-        router_mailbox: router::Mailbox<H::PublicKey>,
+        router: router::Actor<E, U::PublicKey>,
+        router_mailbox: router::Mailbox<U::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
@@ -241,6 +248,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
+                max_message_size: self.cfg.max_message_size,
                 max_peer_set_size: self.max_peer_set_size,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
@@ -315,11 +323,11 @@ mod tests {
     use super::*;
     use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
-    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
     use commonware_utils::NZUsize;
-    use std::{net::SocketAddr, time::Duration};
+    use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
 
     #[test]
     fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {
@@ -331,13 +339,22 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                StreamHandshake::new(signer.clone()),
+                Cups::<_, ChaCha20Poly1305>::new(
+                    Sake {
+                        signer: signer.clone(),
+                        synchrony_bound: Duration::from_secs(5),
+                        max_handshake_age: Duration::from_secs(10),
+                        version: sake::Version::V1,
+                    },
+                    cups::Version::V1,
+                ),
                 b"discovery-test",
                 address,
                 address,
                 Vec::new(),
                 NZUsize!(2),
-                1024,
+                64 * 1024,
+                NZUsize!(1_000),
             );
             let timestamp = context.current().epoch_millis();
             let (network, mut oracle) = Network::new(context.child("network"), cfg);
@@ -359,7 +376,7 @@ mod tests {
                     .is_ok()
             );
 
-            // Check that the greeting uses the handshake's identity and the gossip namespace.
+            // Check that the greeting uses the upgrader's identity and the gossip namespace.
             network.tracker.start();
             oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
             let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();
@@ -374,5 +391,37 @@ mod tests {
             assert_eq!(greeting.timestamp, timestamp);
             assert_eq!(greeting.signature, signer.sign(namespace, &message));
         });
+    }
+
+    /// The payload limit stays the configured value on every node and only the frame grows to
+    /// carry peer gossip, so nodes whose peer-set capacities differ admit the same payloads.
+    #[test]
+    fn test_gossip_sizes_frame_not_payload_limit() {
+        const MAX_MESSAGE_SIZE: u32 = 0;
+        let make_config = |max_peers_per_set: NonZeroUsize| Config {
+            max_peers_per_set,
+            ..Config::test(
+                PrivateKey::from_seed(0),
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                Vec::new(),
+                MAX_MESSAGE_SIZE,
+            )
+        };
+
+        // The gossip message bound for each capacity exceeds the data frame at the payload
+        // limit and grows with capacity.
+        let data_frame: usize = Widen::widen(MAX_MESSAGE_SIZE + MAX_PAYLOAD_OVERHEAD);
+        let capacities = [NZUsize!(2), NZUsize!(200_000)];
+        let sizes = capacities.map(|capacity| make_config(capacity).max_gossip_size());
+        assert!(data_frame < sizes[0] && sizes[0] < sizes[1]);
+
+        // Each network keeps the configured payload limit and sizes its frame for its own gossip.
+        for (capacity, size) in capacities.into_iter().zip(sizes) {
+            deterministic::Runner::default().start(|context| async move {
+                let (network, _) = Network::new(context.child("network"), make_config(capacity));
+                assert_eq!(network.cfg.max_message_size, MAX_MESSAGE_SIZE);
+                assert_eq!(network.max_frame_size, u32::try_from(size).unwrap());
+            });
+        }
     }
 }

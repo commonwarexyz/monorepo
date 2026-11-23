@@ -1,6 +1,7 @@
 [package]
 name = "commonware-codec"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -19,6 +20,7 @@ std = [
 	"bytes/std",
 	"commonware-macros/std",
 	"rand_chacha?/std",
+	"ruint/std",
 	"thiserror/std",
 ]
 arbitrary = [
@@ -26,8 +28,10 @@ arbitrary = [
 	"dep:commonware-conformance",
 	"dep:rand_chacha",
 	"dep:rand_core",
+	"ruint/arbitrary",
 	"std",
 ]
+fuzz = [ "arbitrary/derive", "dep:arbitrary" ]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
@@ -39,7 +43,21 @@ commonware-macros.workspace = true
 paste.workspace = true
 rand_chacha = { workspace = true, optional = true }
 rand_core = { workspace = true, optional = true }
+ruint.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
+arbitrary = { workspace = true, features = ["derive"] }
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
+commonware-invariants.workspace = true
+criterion.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+
+[lib]
+bench = false
+
+[[bench]]
+name = "codec"
+harness = false
+path = "src/benches/bench.rs"
+required-features = [ "std" ]

@@ -74,13 +74,12 @@ struct Inner<E: Context, V: Codec> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
-    /// See [Glob::init].
+    /// See [Recovery::init_bounded].
     async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
-                pool: context.storage_buffer_pool().clone(),
             },
         };
         let manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
@@ -113,11 +112,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             buf
         };
 
-        // Write to blob
+        // Write to blob, taking the writer only when the entry does not fit in its buffer
         let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size();
-        writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+        if !writer.try_write_at(offset, &buf) {
+            // Return the writer to the manager only after the owned write succeeds.
+            let writer = self.manager.take(section).await?;
+            let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+            self.manager.put(section, writer);
+        }
 
         Ok((offset, entry_size))
     }
@@ -156,7 +160,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             let decompressed = frame::decompress(compressed_data)?;
             V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
         } else {
-            // Share one Bytes owner instead of boxing the pooled IoBuf owner for every field
+            // Byte fields decoded from the frame share one `Bytes` owner.
             V::decode_cfg(Bytes::from(buf.slice(..data_len)), &self.codec_config)
                 .map_err(Error::Codec)?
         };
@@ -191,23 +195,32 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::inject].
     #[cfg(test)]
     async fn inject(&mut self, section: u64, offset: u64, buf: Vec<u8>) -> Result<(), Error> {
-        let writer = self.manager.get_or_create(section).await?;
-        writer.write_at(offset, buf).await.map_err(Error::Runtime)
+        let writer = self.manager.take(section).await?;
+        let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+        self.manager.put(section, writer);
+        Ok(())
     }
 
     /// See [Glob::sync].
-    async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        self.manager.sync(sections).await
+    async fn sync(mut self: Box<Self>, sections: impl crate::Sections) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync(sections).await?;
+        Ok(self)
     }
 
     /// See [Glob::start_sync].
-    async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(sections).await
+    async fn start_sync(
+        mut self: Box<Self>,
+        sections: impl crate::Sections,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let (manager, handle) = self.manager.start_sync(sections).await?;
+        self.manager = manager;
+        Ok((self, handle))
     }
 
     /// See [Glob::sync_all].
-    async fn sync_all(&mut self) -> Result<(), Error> {
-        self.manager.sync_all().await
+    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync_all().await?;
+        Ok(self)
     }
 
     /// See [Glob::size].
@@ -216,13 +229,20 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// Truncate an initialization-owned suffix.
-    async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.truncate_pending(section, size).await
+    async fn truncate_pending(
+        mut self: Box<Self>,
+        section: u64,
+        size: u64,
+    ) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.truncate_pending(section, size).await?;
+        Ok(self)
     }
 
     /// See [Glob::prune].
-    async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        self.manager.prune(min).await
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
+        let (manager, pruned) = self.manager.prune(min).await?;
+        self.manager = manager;
+        Ok((self, pruned))
     }
 
     /// See [Glob::pruned].
@@ -246,8 +266,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Glob::remove_section].
-    async fn remove_section(&mut self, section: u64) -> Result<bool, Error> {
-        self.manager.remove_section(section).await
+    async fn remove_section(mut self: Box<Self>, section: u64) -> Result<(Box<Self>, bool), Error> {
+        let (manager, removed) = self.manager.remove_section(section).await?;
+        self.manager = manager;
+        Ok((self, removed))
     }
 
     /// See [Glob::destroy].
@@ -278,11 +300,6 @@ impl<E: Context, V: CodecShared> std::fmt::Debug for Glob<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Glob<E, V> {
-    /// Initialize blob storage, opening existing section blobs.
-    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Recovery::init(context, cfg, u64::MAX).await?.into())
-    }
-
     /// Append value to section.
     ///
     /// The returned offset is the byte offset where the entry was written.
@@ -314,7 +331,7 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Sync the given `sections` to disk (flushes write buffers).
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
+        self.0 = self.0.sync(sections).await?;
         Ok(self)
     }
 
@@ -326,13 +343,14 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
-        let handle = self.0.start_sync(sections).await?;
+        let (inner, handle) = self.0.start_sync(sections).await?;
+        self.0 = inner;
         Ok((self, handle))
     }
 
     /// Sync all sections to disk.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
-        self.0.sync_all().await?;
+        self.0 = self.0.sync_all().await?;
         Ok(self)
     }
 
@@ -343,7 +361,8 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Prune sections before min.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min).await?;
+        let (inner, pruned) = self.0.prune(min).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 
@@ -372,7 +391,8 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 
     /// Remove a specific section. Returns true if the section existed and was removed.
     pub async fn remove_section(mut self, section: u64) -> Result<(Self, bool), Error> {
-        let removed = self.0.remove_section(section).await?;
+        let (inner, removed) = self.0.remove_section(section).await?;
+        self.0 = inner;
         Ok((self, removed))
     }
 
@@ -383,19 +403,22 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
 }
 
 /// Owns value sections until paired initialization has finished.
-pub(crate) struct Recovery<E: Context, V: Codec>(Box<Inner<E, V>>);
-
-impl<E: Context, V: CodecShared> From<Recovery<E, V>> for Glob<E, V> {
-    /// Publish every value section after paired recovery.
-    fn from(recovery: Recovery<E, V>) -> Self {
-        Self(recovery.0)
-    }
-}
+pub struct Recovery<E: Context, V: Codec>(Box<Inner<E, V>>);
 
 impl<E: Context, V: CodecShared> Recovery<E, V> {
+    /// Open every value section under initialization ownership.
+    pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        Self::init_bounded(context, cfg, u64::MAX).await
+    }
+
     /// Open value sections through `ceiling` under paired initialization ownership. Later sections
-    /// stay closed until paired recovery removes them.
-    pub(crate) async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
+    /// stay closed, and paired recovery must remove them with [Self::truncate] before
+    /// [Self::finish] publishes the glob.
+    pub(crate) async fn init_bounded(
+        context: E,
+        cfg: Config<V::Cfg>,
+        ceiling: u64,
+    ) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg, ceiling).await?)))
     }
 
@@ -413,18 +436,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// Truncates the section to the given size and removes all sections after it. A shorter
     /// length is durable when this returns.
     pub(crate) async fn truncate(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0.truncate_pending(section, size).await?;
-        Ok(self)
-    }
-
-    /// Truncate only the given section to a specific size.
-    ///
-    /// Other sections are unaffected. A shorter length is durable when this returns.
-    pub(crate) async fn truncate_section(mut self, section: u64, size: u64) -> Result<Self, Error> {
-        self.0
-            .manager
-            .truncate_pending_section(section, size)
-            .await?;
+        self.0 = self.0.truncate_pending(section, size).await?;
         Ok(self)
     }
 
@@ -433,7 +445,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         mut self,
         sizes: &BTreeMap<u64, u64>,
     ) -> Result<Self, Error> {
-        self.0.manager.truncate_pending_sections(sizes).await?;
+        self.0.manager = self.0.manager.truncate_pending_sections(sizes).await?;
         Ok(self)
     }
 
@@ -449,14 +461,20 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 
     /// Make repaired value sections durable.
     pub(crate) async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
+        self.0 = self.0.sync(sections).await?;
         Ok(self)
     }
 
     /// Remove an orphaned value section.
     pub(crate) async fn remove_section(mut self, section: u64) -> Result<Self, Error> {
-        self.0.remove_section(section).await?;
+        let (inner, _) = self.0.remove_section(section).await?;
+        self.0 = inner;
         Ok(self)
+    }
+
+    /// Publish every value section after paired recovery.
+    pub fn finish(self) -> Glob<E, V> {
+        Glob(self.0)
     }
 }
 
@@ -494,20 +512,15 @@ mod tests {
     use commonware_utils::{NZUsize, probability};
     use rand::Rng as _;
 
-    impl<E: crate::Context, V: CodecShared> Glob<E, V> {
-        pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
-            let (context, partition, factory) = self.0.manager.test_configuration();
-            (
-                context,
-                Config {
-                    partition,
-                    write_buffer: factory.capacity,
-                    compression: self.0.compression,
-                    codec_config: self.0.codec_config.clone(),
-                },
-            )
-        }
+    /// Open every value section.
+    async fn init_glob<E: crate::Context, V: CodecShared>(
+        context: E,
+        cfg: Config<V::Cfg>,
+    ) -> Result<Glob<E, V>, Error> {
+        Ok(Recovery::init(context, cfg).await?.finish())
+    }
 
+    impl<E: crate::Context, V: CodecShared> Glob<E, V> {
         async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
             let (context, partition, factory) = self.0.manager.test_configuration();
             let cfg = Config {
@@ -517,9 +530,11 @@ mod tests {
                 codec_config: self.0.codec_config.clone(),
             };
             _ = self.sync_all().await?;
-            let pending = Recovery::init(context, cfg, u64::MAX).await?;
-            let pending = pending.truncate_section(section, end).await?;
-            Ok(pending.into())
+            let pending = Recovery::init(context, cfg).await?;
+            let pending = pending
+                .truncate_sections(&BTreeMap::from([(section, end)]))
+                .await?;
+            Ok(pending.finish())
         }
     }
 
@@ -536,7 +551,7 @@ mod tests {
     fn test_glob_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = init_glob(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -568,7 +583,7 @@ mod tests {
                 codec_config: (..).into(),
                 write_buffer: NZUsize!(1024),
             };
-            let glob: Glob<_, Bytes> = Glob::init(context.child("storage"), cfg)
+            let glob: Glob<_, Bytes> = init_glob(context.child("storage"), cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -591,7 +606,7 @@ mod tests {
     fn test_glob_multiple_values() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let mut glob: Glob<_, i32> = init_glob(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -626,7 +641,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
             };
-            let glob: Glob<_, [u8; 100]> = Glob::init(context.child("storage"), cfg)
+            let glob: Glob<_, [u8; 100]> = init_glob(context.child("storage"), cfg)
                 .await
                 .expect("Failed to init glob");
 
@@ -655,7 +670,7 @@ mod tests {
                 codec_config: ((..).into(), ()),
                 write_buffer: NZUsize!(1024),
             };
-            let mut glob: Glob<_, Vec<u8>> = Glob::init(context.child("first"), cfg.clone())
+            let mut glob: Glob<_, Vec<u8>> = init_glob(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to init glob");
 
@@ -689,7 +704,7 @@ mod tests {
             drop(glob);
 
             // Persisted entries keep the same bytes and values.
-            let glob: Glob<_, Vec<u8>> = Glob::init(context.child("second"), cfg)
+            let glob: Glob<_, Vec<u8>> = init_glob(context.child("second"), cfg)
                 .await
                 .expect("Failed to reinit glob");
             let writer = glob.0.manager.get(1).unwrap().unwrap();
@@ -707,7 +722,7 @@ mod tests {
     fn test_glob_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let mut glob: Glob<_, i32> = init_glob(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -733,9 +748,7 @@ mod tests {
             assert!(glob.get(2, 0, 8).await.is_err());
 
             // Sections 3-5 should still exist
-            assert!(glob.0.manager.blobs.contains_key(&3));
-            assert!(glob.0.manager.blobs.contains_key(&4));
-            assert!(glob.0.manager.blobs.contains_key(&5));
+            assert_eq!(glob.sections().collect::<Vec<_>>(), [3, 4, 5]);
 
             glob.destroy().await.expect("Failed to destroy");
         });
@@ -745,7 +758,7 @@ mod tests {
     fn test_glob_checksum_mismatch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = init_glob(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -755,12 +768,13 @@ mod tests {
             let mut glob = glob.sync(1).await.expect("Failed to sync");
 
             // Corrupt the data by writing directly to the underlying blob
-            let writer = glob.0.manager.blobs.get_mut(&1).unwrap();
-            writer
+            let writer = glob.0.manager.take(1).await.unwrap();
+            let writer = writer
                 .write_at(offset, vec![0xFF, 0xFF, 0xFF, 0xFF])
                 .await
                 .expect("Failed to corrupt");
-            writer.sync().await.expect("Failed to sync");
+            let writer = writer.sync().await.expect("Failed to sync");
+            glob.0.manager.put(1, writer);
 
             // Get should fail with checksum mismatch
             let result = glob.get(1, offset, size).await;
@@ -774,7 +788,7 @@ mod tests {
     fn test_glob_truncate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let mut glob: Glob<_, i32> = init_glob(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -829,7 +843,7 @@ mod tests {
             let ((kept, offset, size), checkpoint) =
                 executor.start_and_recover(move |context| async move {
                     let mut glob: Glob<_, i32> =
-                        Glob::init(context.child("first"), cfg()).await.unwrap();
+                        init_glob(context.child("first"), cfg()).await.unwrap();
                     let mut kept = 0;
                     for value in 1..=3 {
                         let (offset, size);
@@ -868,7 +882,7 @@ mod tests {
             // Recovery may retain or lose the replacement, but cannot restore the discarded suffix.
             deterministic::Runner::from(checkpoint).start(move |context| async move {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-                let glob: Glob<_, i32> = Glob::init(context.child("second"), cfg()).await.unwrap();
+                let glob: Glob<_, i32> = init_glob(context.child("second"), cfg()).await.unwrap();
                 let end = if retained {
                     offset + u64::from(size)
                 } else {
@@ -895,7 +909,7 @@ mod tests {
             let cfg = test_cfg();
 
             // Create and populate glob
-            let glob: Glob<_, i32> = Glob::init(context.child("first"), cfg.clone())
+            let glob: Glob<_, i32> = init_glob(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to init glob");
 
@@ -905,7 +919,7 @@ mod tests {
             drop(glob);
 
             // Reopen and verify
-            let glob: Glob<_, i32> = Glob::init(context.child("second"), cfg)
+            let glob: Glob<_, i32> = init_glob(context.child("second"), cfg)
                 .await
                 .expect("Failed to reinit glob");
 
@@ -920,7 +934,7 @@ mod tests {
     fn test_glob_get_invalid_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = init_glob(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 
@@ -947,7 +961,7 @@ mod tests {
     fn test_glob_get_wrong_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let glob: Glob<_, i32> = Glob::init(context.child("storage"), test_cfg())
+            let glob: Glob<_, i32> = init_glob(context.child("storage"), test_cfg())
                 .await
                 .expect("Failed to init glob");
 

@@ -7,6 +7,27 @@
 //! - Broadcasting messages to all peers
 //! - Serving cached messages on-demand
 //!
+//! # Message Sizes
+//!
+//! ```text
+//! Broadcast message:
+//! +------------------------+
+//! | message (encoded size) |
+//! +------------------------+
+//! ```
+//!
+//! Each payload the engine sends is the encoding of one message broadcast through its [Mailbox].
+//! The engine adds no framing, so a broadcast message must fit the network's configured
+//! `max_message_size`, less the subchannel prefix on a
+//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
+//!
+//! # Ingress
+//!
+//! A background receiver decodes inbound messages with [`Config::strategy`] and blocks peers
+//! whose messages fail to decode with [`Config::blocker`]. Decoded messages wait in an inbox
+//! sized to the network receiver's [`capacity`](commonware_p2p::Receiver::capacity) and are
+//! dropped when it is full.
+//!
 //! # Message Caching
 //!
 //! The engine receives messages from other peers and caches them. The cache is a bounded queue of
@@ -18,9 +39,10 @@
 //!
 //! # Peer Management
 //!
-//! Only peers in `latest.primary` may buffer messages (see [commonware_p2p::Provider]). When a peer
-//! is no longer in `latest.primary`, its buffered messages are evicted unless buffered by any other
-//! primary peer.
+//! Only primary peers of a tracked peer set (`all.primary`, see [commonware_p2p::Provider]) may
+//! buffer messages. When a peer is no longer a primary of any tracked set, its buffered messages
+//! are evicted unless buffered by any other primary peer. A peer that only leaves the latest set
+//! keeps its messages through the overlap window.
 
 mod config;
 pub use config::Config;
@@ -42,25 +64,29 @@ mod tests {
         Feedback,
         mailbox::{Overflow, Policy},
     };
-    use commonware_codec::RangeCfg;
+    use commonware_codec::{Encode as _, RangeCfg};
     use commonware_cryptography::{
-        Digestible, Hasher, Sha256, Signer as _,
+        Digested, Digestible, Hasher, Sha256, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
-        simulated::{Link, Network, Oracle, Receiver, Sender},
+        Manager as _, Receiver as _, Recipients, Sender as _, TrackedPeers,
+        simulated::{Control, Link, Manager, Network, Oracle, Receiver, Sender},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{NZUsize, Probability, probability};
+    use commonware_utils::{NZU32, NZUsize, Probability, probability};
+    use futures::FutureExt as _;
     use std::{
         collections::{BTreeMap, VecDeque},
-        num::NonZeroU32,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -78,7 +104,7 @@ mod tests {
     const NETWORK_SPEED_WITH_BUFFER: Duration = Duration::from_millis(200);
 
     /// Default rate limit set high enough to not interfere with normal operation
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     type Registrations = BTreeMap<
         PublicKey,
@@ -87,6 +113,50 @@ mod tests {
             Receiver<PublicKey>,
         ),
     >;
+
+    type TestManager = Manager<PublicKey, deterministic::Context>;
+    type TestControl = Control<PublicKey, deterministic::Context>;
+    type TestEngine = Engine<
+        deterministic::Context,
+        PublicKey,
+        TestMessage,
+        TestManager,
+        TestControl,
+        Sequential,
+    >;
+
+    /// Returns the engine configuration for `peer` on the simulated network behind `oracle`.
+    fn config(
+        peer: &PublicKey,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+    ) -> Config<PublicKey, RangeCfg<usize>, TestManager, TestControl, Sequential> {
+        Config {
+            public_key: peer.clone(),
+            mailbox_size: NZUsize!(1024),
+            deque_size: CACHE_SIZE,
+            priority: false,
+            codec_config: RangeCfg::from(..),
+            peer_provider: oracle.manager(),
+            blocker: oracle.control(peer.clone()),
+            strategy: Sequential,
+        }
+    }
+
+    /// Message that counts how often its digest is computed.
+    #[derive(Clone)]
+    struct CountingMessage {
+        value: u64,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Digestible for CountingMessage {
+        type Digest = <Sha256 as Hasher>::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Sha256::hash(&[&self.value.to_be_bytes()])
+        }
+    }
 
     async fn initialize_simulation(
         context: deterministic::Context,
@@ -226,6 +296,202 @@ mod tests {
     }
 
     #[test]
+    fn policy_coalesces_duplicate_broadcasts_and_merges_recipients() {
+        // Use one digest across broadcasts with different recipients.
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = TestMessage::shared(b"duplicate broadcast");
+        let message = Digested::precomputed(message.clone(), message.digest());
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+
+        // Queue duplicates for the first peer, then add the second peer to the same broadcast.
+        for _ in 0..1_000 {
+            <Message<PublicKey, TestMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::One(first.clone()),
+                    message: message.clone(),
+                },
+            );
+        }
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::Some(vec![second.clone()]),
+                message: message.clone(),
+            },
+        );
+
+        // Draining must yield one broadcast with each recipient exactly once.
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        assert_eq!(drained.len(), 1);
+        let Message::Broadcast { recipients, .. } = drained.pop_front().unwrap() else {
+            panic!("coalesced entry must be a broadcast");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients must merge into Recipients::Some");
+        };
+        assert_eq!(recipients, vec![first, second]);
+
+        // Queue repeated broadcasts addressed to all peers.
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        for _ in 0..1_000 {
+            <Message<PublicKey, TestMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::All,
+                    message: message.clone(),
+                },
+            );
+        }
+
+        // Coalescing must yield one broadcast addressed to all peers.
+        let mut count = 0;
+        overflow.drain(|message| {
+            count += usize::from(matches!(
+                message,
+                Message::Broadcast {
+                    recipients: Recipients::All,
+                    ..
+                }
+            ));
+            None
+        });
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn policy_coalesces_at_first_broadcast_position() {
+        // Queue a broadcast, an unrelated get, then a duplicate of the broadcast.
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = TestMessage::shared(b"first position");
+        let message = Digested::precomputed(message.clone(), message.digest());
+        let other = TestMessage::shared(b"unrelated get");
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(first.clone()),
+                message: message.clone(),
+            },
+        );
+        let (responder, _receiver) = commonware_utils::channel::oneshot::channel();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Get {
+                digest: other.digest(),
+                responder,
+            },
+        );
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(second.clone()),
+                message,
+            },
+        );
+
+        // Draining must yield the merged broadcast before the get.
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        assert_eq!(drained.len(), 2);
+        let Some(Message::Broadcast { recipients, .. }) = drained.pop_front() else {
+            panic!("coalesced broadcast must keep the first broadcast's position");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients must merge into Recipients::Some");
+        };
+        assert_eq!(recipients, vec![first, second]);
+        assert!(matches!(drained.pop_front(), Some(Message::Get { .. })));
+    }
+
+    #[test]
+    fn policy_reuses_carried_digests_of_overflow_broadcasts() {
+        /// Number of distinct broadcasts that the overflow queue must retain.
+        const MESSAGES: usize = 1_000;
+
+        // Track digest calls across overflow insertion and draining.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut overflow = <Message<PublicKey, CountingMessage> as Policy>::Overflow::default();
+        let recipient = PrivateKey::from_seed(1).public_key();
+
+        // Supply digests directly so fixture construction does not increment the counter.
+        for value in 0..MESSAGES as u64 {
+            let message = CountingMessage {
+                value,
+                calls: Arc::clone(&calls),
+            };
+            let digest = Sha256::hash(&[&value.to_be_bytes()]);
+            <Message<PublicKey, CountingMessage> as Policy>::handle(
+                &mut overflow,
+                Message::Broadcast {
+                    recipients: Recipients::One(recipient.clone()),
+                    message: Digested::precomputed(message, digest),
+                },
+            );
+        }
+
+        // All broadcasts must drain without recomputing a message digest.
+        let mut drained = 0;
+        overflow.drain(|_| {
+            drained += 1;
+            None
+        });
+        assert_eq!(drained, MESSAGES);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rejected_broadcast_remains_indexed_for_coalescing() {
+        // Start with one pending broadcast addressed to the first peer.
+        let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
+        let message = TestMessage::shared(b"rejected broadcast");
+        let message = Digested::precomputed(message.clone(), message.digest());
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(first.clone()),
+                message: message.clone(),
+            },
+        );
+
+        // Simulate a full mailbox, then extend the rejected broadcast's recipients.
+        overflow.drain(Some);
+        <Message<PublicKey, TestMessage> as Policy>::handle(
+            &mut overflow,
+            Message::Broadcast {
+                recipients: Recipients::One(second.clone()),
+                message,
+            },
+        );
+
+        // Accepting the drain must yield one broadcast addressed to both peers.
+        let mut drained = VecDeque::new();
+        overflow.drain(|message| {
+            drained.push_back(message);
+            None
+        });
+        assert_eq!(drained.len(), 1);
+        let Some(Message::Broadcast { recipients, .. }) = drained.pop_front() else {
+            panic!("coalesced broadcast must be retained");
+        };
+        let Recipients::Some(recipients) = recipients else {
+            panic!("distinct recipients must merge into Recipients::Some");
+        };
+        assert_eq!(recipients, vec![first, second]);
+    }
+
+    #[test]
     fn policy_drain_continues_until_rejected_message() {
         let mut overflow = <Message<PublicKey, TestMessage> as Policy>::Overflow::default();
         let first = TestMessage::shared(b"first");
@@ -351,25 +617,17 @@ mod tests {
         oracle: &Oracle<PublicKey, deterministic::Context>,
         registrations: &mut Registrations,
     ) -> BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>> {
+        // Start each peer and retain its mailbox for test traffic.
         let mut mailboxes = BTreeMap::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let context = context.child("peer").with_attribute("public_key", &peer);
-            let config = Config {
-                public_key: peer.clone(),
-                mailbox_size: NZUsize!(1024),
-                deque_size: CACHE_SIZE,
-                priority: false,
-                codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
-            };
-            let (engine, engine_mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context, config);
-            mailboxes.insert(peer.clone(), engine_mailbox);
+            let (engine, engine_mailbox) = TestEngine::new(context, config(&peer, oracle));
+            mailboxes.insert(peer, engine_mailbox);
             engine.start(network);
         }
 
         // Let each engine run until it applies the peer set from `initialize_simulation` so
-        // `latest_primary_peers` is populated before any broadcast.
+        // `primary_peers` is populated before any broadcast.
         context.sleep(A_JIFFY).await;
         mailboxes
     }
@@ -388,7 +646,10 @@ mod tests {
             let first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
             assert!(
                 first_mailbox
-                    .broadcast(Recipients::All, message.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(message.clone(), message.digest())
+                    )
                     .accepted()
             );
 
@@ -401,14 +662,17 @@ mod tests {
                 let digest = message.digest();
                 let receiver = mailbox.subscribe(digest);
                 let received_message = receiver.await.ok();
-                assert_eq!(received_message.unwrap().as_ref(), &message);
+                assert_eq!(received_message.unwrap().inner(), &message);
             }
 
             // Send another message
             let message = TestMessage::shared(b"hello world again");
             assert!(
                 first_mailbox
-                    .broadcast(Recipients::All, message.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(message.clone(), message.digest())
+                    )
                     .accepted()
             );
 
@@ -422,7 +686,7 @@ mod tests {
                 let digest = message.digest();
                 let receiver = mailbox.get(digest).await;
                 if let Some(receiver) = receiver {
-                    assert_eq!(receiver.as_ref(), &message);
+                    assert_eq!(receiver.inner(), &message);
                     found += 1;
                 }
             }
@@ -455,17 +719,24 @@ mod tests {
             let receiver_before = mailbox_a.subscribe(digest_m1);
 
             // Broadcast the message
-            assert!(mailbox_a.broadcast(Recipients::All, m1.clone()).accepted());
+            assert!(
+                mailbox_a
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(m1.clone(), m1.digest())
+                    )
+                    .accepted()
+            );
 
             // Wait for the pre-broadcast retrieval to complete
             let msg_before = receiver_before
                 .await
                 .expect("Pre-broadcast retrieval failed");
-            assert_eq!(msg_before.as_ref(), &m1);
+            assert_eq!(msg_before.inner(), &m1);
 
             // Attempt immediate retrieval after broadcasting
             let receiver_after = mailbox_a.get(digest_m1).await;
-            assert_eq!(receiver_after.as_deref(), Some(&m1));
+            assert_eq!(receiver_after.as_ref().map(Digested::inner), Some(&m1));
 
             // Perform a second retrieval after the broadcast
             let receiver_after = mailbox_a.subscribe(digest_m1);
@@ -478,7 +749,7 @@ mod tests {
             let duration = context.current().duration_since(start).unwrap();
 
             // Verify the second retrieval matches the original message
-            assert_eq!(msg_after.as_ref(), &m1);
+            assert_eq!(msg_after.inner(), &m1);
 
             // Verify the second retrieval was instant (less than 10ms)
             assert!(duration < A_JIFFY, "get not instant");
@@ -499,12 +770,15 @@ mod tests {
             let digest = message.digest();
             assert!(
                 mailbox
-                    .broadcast_shared(Recipients::All, Arc::clone(&message))
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(Arc::clone(&message), digest),
+                    )
                     .accepted()
             );
 
             let cached = mailbox.get(digest).await.expect("message should be cached");
-            assert!(Arc::ptr_eq(&message, &cached));
+            assert!(Arc::ptr_eq(&message, &cached.inner_shared()));
         });
     }
 
@@ -527,7 +801,10 @@ mod tests {
                 // Broadcast the message
                 assert!(
                     first_mailbox
-                        .broadcast(Recipients::All, message.clone())
+                        .broadcast(
+                            Recipients::All,
+                            Digested::precomputed(message.clone(), message.digest())
+                        )
                         .accepted()
                 );
                 context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
@@ -568,7 +845,10 @@ mod tests {
             let first_mailbox = mailboxes.get(peers.first().unwrap()).unwrap().clone();
             assert!(
                 first_mailbox
-                    .broadcast(Recipients::All, message.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(message.clone(), message.digest())
+                    )
                     .accepted()
             );
 
@@ -582,7 +862,7 @@ mod tests {
             let start = context.current();
             let received = receiver.await.expect("failed to get cached message");
             let duration = context.current().duration_since(start).unwrap();
-            assert_eq!(received.as_ref(), &message);
+            assert_eq!(received.inner(), &message);
             assert!(duration < A_JIFFY, "get not instant",);
         });
     }
@@ -612,7 +892,10 @@ mod tests {
             // Broadcast the message
             assert!(
                 mailbox1
-                    .broadcast(Recipients::All, message.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(message.clone(), message.digest())
+                    )
                     .accepted()
             );
 
@@ -621,7 +904,7 @@ mod tests {
 
             // Check receiver1 gets the message, receiver2 was dropped
             let received = receiver.await.expect("receiver1 should get message");
-            assert_eq!(received.as_ref(), &message);
+            assert_eq!(received.inner(), &message);
         });
     }
 
@@ -643,7 +926,10 @@ mod tests {
             for message in messages.iter() {
                 assert!(
                     mailbox
-                        .broadcast(Recipients::All, message.clone())
+                        .broadcast(
+                            Recipients::All,
+                            Digested::precomputed(message.clone(), message.digest())
+                        )
                         .accepted()
                 );
             }
@@ -655,7 +941,7 @@ mod tests {
             let peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             for msg in messages.iter().skip(1) {
                 let result = peer_mailbox.subscribe(msg.digest()).await.unwrap();
-                assert_eq!(result.as_ref(), msg);
+                assert_eq!(result.inner(), msg);
             }
 
             // Check first message times out
@@ -686,11 +972,25 @@ mod tests {
             // Create and broadcast message M1 from A
             let m1 = TestMessage::shared(b"message M1");
             let digest_m1 = m1.digest();
-            assert!(mailbox_a.broadcast(Recipients::All, m1.clone()).accepted());
+            assert!(
+                mailbox_a
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(m1.clone(), m1.digest())
+                    )
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Broadcast M1 from C
-            assert!(mailbox_c.broadcast(Recipients::All, m1.clone()).accepted());
+            assert!(
+                mailbox_c
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(m1.clone(), m1.digest())
+                    )
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // M1 is now in A's and C's deques in B's engine
@@ -701,14 +1001,21 @@ mod tests {
                 new_messages_a.push(TestMessage::shared(format!("A{i}").as_bytes()));
             }
             for msg in &new_messages_a {
-                assert!(mailbox_a.broadcast(Recipients::All, msg.clone()).accepted());
+                assert!(
+                    mailbox_a
+                        .broadcast(
+                            Recipients::All,
+                            Digested::precomputed(msg.clone(), msg.digest())
+                        )
+                        .accepted()
+                );
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Verify B can still get M1 (in C's deque)
             let receiver = mailbox_b.subscribe(digest_m1);
             let received = receiver.await.expect("M1 should be retrievable");
-            assert_eq!(received.as_ref(), &m1);
+            assert_eq!(received.inner(), &m1);
 
             // Peer C broadcasts 10 new messages to evict M1 from C's deque
             let mut new_messages_c = Vec::with_capacity(CACHE_SIZE);
@@ -716,7 +1023,14 @@ mod tests {
                 new_messages_c.push(TestMessage::shared(format!("C{i}").as_bytes()));
             }
             for msg in &new_messages_c {
-                assert!(mailbox_c.broadcast(Recipients::All, msg.clone()).accepted());
+                assert!(
+                    mailbox_c
+                        .broadcast(
+                            Recipients::All,
+                            Digested::precomputed(msg.clone(), msg.digest())
+                        )
+                        .accepted()
+                );
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
@@ -748,7 +1062,10 @@ mod tests {
             let msg = TestMessage::shared(b"selective-broadcast");
             assert!(
                 sender_mb
-                    .broadcast(Recipients::One(target_peer.clone()), msg.clone())
+                    .broadcast(
+                        Recipients::One(target_peer.clone()),
+                        Digested::precomputed(msg.clone(), msg.digest())
+                    )
                     .accepted()
             );
 
@@ -761,7 +1078,7 @@ mod tests {
                 .clone()
                 .get(msg.digest())
                 .await;
-            assert_eq!(got_target.as_deref(), Some(&msg));
+            assert_eq!(got_target.as_ref().map(Digested::inner), Some(&msg));
 
             // Non-target peer should not retrieve the message.
             let got_other = mailboxes
@@ -771,6 +1088,69 @@ mod tests {
                 .get(msg.digest())
                 .await;
             assert!(got_other.is_none());
+        });
+    }
+
+    #[test_traced]
+    fn test_overflow_coalesces_duplicate_broadcasts() {
+        /// Number of queued broadcasts of the same message to the first recipient.
+        const DUPLICATES: usize = 16;
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|context| async move {
+            // Keep raw receivers for both recipients to count the copies they get.
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 3, probability!(1.0)).await;
+            let sender = peers[0].clone();
+            let first = peers[1].clone();
+            let second = peers[2].clone();
+            let network = registrations.remove(&sender).unwrap();
+            let (_, mut first_receiver) = registrations.remove(&first).unwrap();
+            let (_, mut second_receiver) = registrations.remove(&second).unwrap();
+
+            // Give the sender a one-slot inbox and fill it before its engine starts.
+            let mut sender_config = config(&sender, &oracle);
+            sender_config.mailbox_size = NZUsize!(1);
+            let (engine, mailbox) = TestEngine::new(context.child("sender"), sender_config);
+            let message = TestMessage::shared(b"coalesced");
+            let subscription = mailbox.subscribe(message.digest());
+
+            // Queue duplicate broadcasts to the first recipient, then one to the second.
+            let broadcast = Digested::precomputed(message.clone(), message.digest());
+            for _ in 0..DUPLICATES {
+                assert!(
+                    mailbox
+                        .broadcast(Recipients::One(first.clone()), broadcast.clone())
+                        .accepted()
+                );
+            }
+            assert!(
+                mailbox
+                    .broadcast(Recipients::One(second.clone()), broadcast)
+                    .accepted()
+            );
+
+            // The coalesced broadcast must resolve the subscription and reach each recipient once.
+            engine.start(network);
+            let received = subscription
+                .await
+                .expect("subscriber must receive the queued broadcast");
+            assert_eq!(received.inner(), &message);
+            for receiver in [&mut first_receiver, &mut second_receiver] {
+                let (from, bytes) = receiver
+                    .recv()
+                    .await
+                    .expect("recipient must stay connected");
+                assert_eq!(from, sender);
+                assert_eq!(bytes, message.encode().as_ref());
+            }
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+            for receiver in [&mut first_receiver, &mut second_receiver] {
+                assert!(
+                    receiver.recv().now_or_never().is_none(),
+                    "recipient must receive the broadcast once"
+                );
+            }
         });
     }
 
@@ -797,25 +1177,55 @@ mod tests {
             let digest = dup.digest();
 
             // broadcast from both senders
-            assert!(mb0.broadcast(Recipients::All, dup.clone()).accepted());
-            assert!(mb1.broadcast(Recipients::All, dup.clone()).accepted());
+            assert!(
+                mb0.broadcast(
+                    Recipients::All,
+                    Digested::precomputed(dup.clone(), dup.digest())
+                )
+                .accepted()
+            );
+            assert!(
+                mb1.broadcast(
+                    Recipients::All,
+                    Digested::precomputed(dup.clone(), dup.digest())
+                )
+                .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // observer must get it now
-            assert_eq!(obs.get(digest).await.as_deref(), Some(&dup));
+            assert_eq!(
+                obs.get(digest).await.as_ref().map(Digested::inner),
+                Some(&dup)
+            );
 
             // Evict from p0's deque only
             for i in 0..CACHE_SIZE {
                 let spam = TestMessage::shared(format!("p0-{i}").into_bytes());
-                assert!(mb0.broadcast(Recipients::All, spam).accepted());
+                assert!(
+                    mb0.broadcast(
+                        Recipients::All,
+                        Digested::precomputed(spam.clone(), spam.digest())
+                    )
+                    .accepted()
+                );
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-            assert_eq!(obs.get(digest).await.as_deref(), Some(&dup));
+            assert_eq!(
+                obs.get(digest).await.as_ref().map(Digested::inner),
+                Some(&dup)
+            );
 
             // Evict from p1's deque as well
             for i in 0..CACHE_SIZE {
                 let spam = TestMessage::shared(format!("p1-{i}").into_bytes());
-                assert!(mb1.broadcast(Recipients::All, spam).accepted());
+                assert!(
+                    mb1.broadcast(
+                        Recipients::All,
+                        Digested::precomputed(spam.clone(), spam.digest())
+                    )
+                    .accepted()
+                );
             }
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
             assert!(obs.get(digest).await.is_none());
@@ -842,14 +1252,32 @@ mod tests {
                 let m1 = TestMessage::shared(b"content-1");
                 let m2 = TestMessage::shared(b"content-2");
                 let m3 = TestMessage::shared(b"content-3");
-                assert!(mb1.broadcast(Recipients::All, m1.clone()).accepted());
-                assert!(mb1.broadcast(Recipients::All, m2.clone()).accepted());
-                assert!(mb1.broadcast(Recipients::All, m3.clone()).accepted());
+                assert!(
+                    mb1.broadcast(
+                        Recipients::All,
+                        Digested::precomputed(m1.clone(), m1.digest())
+                    )
+                    .accepted()
+                );
+                assert!(
+                    mb1.broadcast(
+                        Recipients::All,
+                        Digested::precomputed(m2.clone(), m2.digest())
+                    )
+                    .accepted()
+                );
+                assert!(
+                    mb1.broadcast(
+                        Recipients::All,
+                        Digested::precomputed(m3.clone(), m3.digest())
+                    )
+                    .accepted()
+                );
 
                 let mut hasher = Sha256::default();
                 for msg in [&m1, &m2, &m3] {
                     if let Some(value) = mb1.get(msg.digest()).await {
-                        hasher.update(&value.content);
+                        hasher.update(&value.inner().content);
                     }
                 }
                 hasher.finalize().1
@@ -865,23 +1293,24 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_malformed_network_payload_does_not_break_valid_traffic() {
+    fn test_invalid_message_blocks_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
+            // Connect an attacker, an honest sender, and a victim.
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.child("network"), 3, probability!(1.0)).await;
-
             let attacker = peers[0].clone();
             let honest = peers[1].clone();
             let victim = peers[2].clone();
 
+            // Send attacker traffic directly so malformed bytes can bypass message encoding.
             let (mut attacker_sender, _) = registrations.remove(&attacker).unwrap();
             let mailboxes =
                 spawn_peer_engines(context.child("peers"), &oracle, &mut registrations).await;
             let honest_mailbox = mailboxes.get(&honest).unwrap().clone();
             let victim_mailbox = mailboxes.get(&victim).unwrap().clone();
 
-            // Send malformed bytes that cannot decode into `TestMessage`.
+            // Malformed bytes block the attacker at the victim.
             let sent = attacker_sender.send(
                 Recipients::One(victim.clone()),
                 IoBuf::from(vec![0xFF]),
@@ -890,20 +1319,36 @@ mod tests {
             assert_eq!(sent, vec![victim.clone()]);
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
-            // The victim should still process later valid traffic.
-            let message = TestMessage::shared(b"valid-after-malformed");
+            // A later well-formed message from the blocked attacker is never buffered.
+            let from_attacker = TestMessage::shared(b"from-blocked-peer");
+            let _ = attacker_sender.send(
+                Recipients::One(victim.clone()),
+                from_attacker.encode(),
+                false,
+            );
+
+            // Valid traffic from an honest peer still flows.
+            let from_honest = TestMessage::shared(b"from-honest-peer");
             assert!(
                 honest_mailbox
-                    .broadcast(Recipients::One(victim.clone()), message.clone())
+                    .broadcast(
+                        Recipients::One(victim.clone()),
+                        Digested::precomputed(from_honest.clone(), from_honest.digest())
+                    )
                     .accepted()
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
+            // The victim must cache honest traffic and reject the blocked attacker's message.
             let received = victim_mailbox
-                .subscribe(message.digest())
+                .subscribe(from_honest.digest())
                 .await
-                .expect("victim should receive valid message after malformed payload");
-            assert_eq!(received.as_ref(), &message);
+                .expect("victim must receive valid traffic from honest peers");
+            assert_eq!(received.inner(), &from_honest);
+            assert!(
+                victim_mailbox.get(from_attacker.digest()).await.is_none(),
+                "messages from a blocked peer must not be buffered"
+            );
         });
     }
 
@@ -911,24 +1356,16 @@ mod tests {
     fn test_dropped_waiters_for_missing_digest_are_cleaned_up() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|context| async move {
+            // Use one engine so its metrics account for every subscription in the test.
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.child("network"), 1, probability!(1.0)).await;
             let peer = peers[0].clone();
             let (sender, receiver) = registrations.remove(&peer).unwrap();
-
             let engine_context = context.child("waiter_cleanup");
-            let config = Config {
-                public_key: peer,
-                mailbox_size: NZUsize!(1024),
-                deque_size: CACHE_SIZE,
-                priority: false,
-                codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
-            };
-            let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(engine_context, config);
+            let (engine, mailbox) = TestEngine::new(engine_context, config(&peer, &oracle));
             engine.start((sender, receiver));
 
+            // Leave two subscribers waiting for a digest that will never arrive.
             let missing = TestMessage::shared(b"never-arrives");
             let missing_digest = missing.digest();
             let rx1 = mailbox.subscribe(missing_digest);
@@ -960,6 +1397,7 @@ mod tests {
                 "expected positive waiters before cleanup, got:\n{metrics_before}"
             );
 
+            // Cancel both subscriptions without supplying the missing message.
             drop(rx1);
             drop(rx2);
 
@@ -969,6 +1407,7 @@ mod tests {
                 .await;
             context.sleep(A_JIFFY).await;
 
+            // The waiter gauges must be zero after both subscriptions close.
             let metrics_after = context.encode();
             let waiter_values_after: Vec<f64> = metrics_after
                 .lines()
@@ -992,7 +1431,6 @@ mod tests {
         });
     }
 
-    #[allow(clippy::type_complexity)]
     async fn spawn_peer_engines_with_handles(
         context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
@@ -1001,23 +1439,17 @@ mod tests {
         BTreeMap<PublicKey, Mailbox<PublicKey, TestMessage>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
+        // Retain each peer's mailbox and handle so tests can send requests and stop the engine.
         let mut mailboxes = BTreeMap::new();
         let mut handles = Vec::new();
         while let Some((peer, network)) = registrations.pop_first() {
             let ctx = context.child("peer").with_attribute("public_key", &peer);
-            let config = Config {
-                public_key: peer.clone(),
-                mailbox_size: NZUsize!(1024),
-                deque_size: CACHE_SIZE,
-                priority: false,
-                codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
-            };
-            let (engine, engine_mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
-            mailboxes.insert(peer.clone(), engine_mailbox);
+            let (engine, engine_mailbox) = TestEngine::new(ctx, config(&peer, oracle));
+            mailboxes.insert(peer, engine_mailbox);
             handles.push(engine.start(network));
         }
 
+        // Let the engines apply the initial peer set before test traffic begins.
         context.sleep(A_JIFFY).await;
         (mailboxes, handles)
     }
@@ -1040,7 +1472,10 @@ mod tests {
             let mailbox = mailboxes.remove(&peers[0]).unwrap();
             assert!(
                 mailbox
-                    .broadcast(Recipients::All, message.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(message.clone(), message.digest())
+                    )
                     .accepted(),
                 "broadcast should succeed before shutdown"
             );
@@ -1055,7 +1490,10 @@ mod tests {
 
             // Broadcast should not panic
             assert_eq!(
-                mailbox.broadcast(Recipients::All, message.clone()),
+                mailbox.broadcast(
+                    Recipients::All,
+                    Digested::precomputed(message.clone(), message.digest())
+                ),
                 Feedback::Closed,
                 "broadcast after shutdown should return Closed"
             );
@@ -1106,7 +1544,10 @@ mod tests {
             let mailbox = mailboxes.get(&peers[0]).unwrap().clone();
             assert!(
                 mailbox
-                    .broadcast(Recipients::All, message.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(message.clone(), message.digest())
+                    )
                     .accepted(),
                 "broadcast should succeed"
             );
@@ -1117,7 +1558,7 @@ mod tests {
             // Verify message received
             let peer_mailbox = mailboxes.get(&peers[1]).unwrap().clone();
             let received = peer_mailbox.get(message.digest()).await;
-            assert_eq!(received.as_deref(), Some(&message));
+            assert_eq!(received.as_ref().map(Digested::inner), Some(&message));
 
             // Abort all engine handles
             for handle in handles {
@@ -1142,6 +1583,43 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_closed_network_receiver_stops_engine() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            // Registering the channel again closes the receiver the engine starts with.
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 1, probability!(1.0)).await;
+            let peer = peers[0].clone();
+            let network = registrations.remove(&peer).unwrap();
+            let _replacement = oracle
+                .control(peer.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (engine, mailbox) = TestEngine::new(context.child("peer"), config(&peer, &oracle));
+
+            // The engine must stop once its ingress reports the closed receiver.
+            engine
+                .start(network)
+                .await
+                .expect("engine must stop cleanly after its network receiver closes");
+
+            // Requests after the stop must observe the closed mailbox.
+            let message = TestMessage::shared(b"after-stop");
+            assert_eq!(
+                mailbox.broadcast(
+                    Recipients::All,
+                    Digested::precomputed(message.clone(), message.digest())
+                ),
+                Feedback::Closed
+            );
+            assert!(mailbox.get(message.digest()).await.is_none());
+            context.sleep(A_JIFFY).await;
+            assert_eq!(count_running_tasks(&context, "peer"), 0);
+        });
+    }
+
+    #[test_traced]
     fn test_peer_set_update_evicts_disconnected_peer_buffers() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
@@ -1154,16 +1632,8 @@ mod tests {
 
             // Spawn peer B's engine with its own manager.
             let network_b = registrations.remove(&peer_b).unwrap();
-            let config_b = Config {
-                public_key: peer_b.clone(),
-                mailbox_size: NZUsize!(1024),
-                deque_size: CACHE_SIZE,
-                priority: false,
-                codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
-            };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+                TestEngine::new(context.child("peer_b"), config(&peer_b, &oracle));
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1171,15 +1641,7 @@ mod tests {
             mailboxes.insert(peer_b.clone(), mailbox_b);
             for (peer, network) in registrations {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
-                let config = Config {
-                    public_key: peer.clone(),
-                    mailbox_size: NZUsize!(1024),
-                    deque_size: CACHE_SIZE,
-                    priority: false,
-                    codec_config: RangeCfg::from(..),
-                    peer_provider: oracle.manager(),
-                };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = TestEngine::new(ctx, config(&peer, &oracle));
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1188,13 +1650,24 @@ mod tests {
             // Peer A broadcasts a message.
             let msg = TestMessage::shared(b"eviction-test");
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
-            assert!(mailbox_a.broadcast(Recipients::All, msg.clone()).accepted());
+            assert!(
+                mailbox_a
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(msg.clone(), msg.digest())
+                    )
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // Peer B should have cached the message (received from A).
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
             assert_eq!(
-                mailbox_b.get(msg.digest()).await.as_deref(),
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
                 Some(&msg),
                 "peer B should have the message before eviction"
             );
@@ -1213,7 +1686,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peer_set_update_evicts_peers_not_in_latest_set_even_if_still_in_overlap() {
+    fn test_peer_set_update_keeps_peers_in_overlap_until_their_set_ages_out() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             // Use tracked_peer_sets=2 so old sets are retained in the window.
@@ -1268,31 +1741,15 @@ mod tests {
 
             // Spawn engines for B (with its own manager) and the rest.
             let network_b = registrations.remove(&peer_b).unwrap();
-            let config_b = Config {
-                public_key: peer_b.clone(),
-                mailbox_size: NZUsize!(1024),
-                deque_size: CACHE_SIZE,
-                priority: false,
-                codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
-            };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+                TestEngine::new(context.child("peer_b"), config(&peer_b, &oracle));
             engine_b.start(network_b);
 
             let mut mailboxes = BTreeMap::new();
             mailboxes.insert(peer_b.clone(), mailbox_b);
             for (peer, network) in registrations {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
-                let config = Config {
-                    public_key: peer.clone(),
-                    mailbox_size: NZUsize!(1024),
-                    deque_size: CACHE_SIZE,
-                    priority: false,
-                    codec_config: RangeCfg::from(..),
-                    peer_provider: oracle.manager(),
-                };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = TestEngine::new(ctx, config(&peer, &oracle));
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1301,43 +1758,75 @@ mod tests {
             // Peer A broadcasts a message. B caches it.
             let msg = TestMessage::shared(b"eviction-latest-test");
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
-            assert!(mailbox_a.broadcast(Recipients::All, msg.clone()).accepted());
-            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-
-            let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
-            assert_eq!(
-                mailbox_b.get(msg.digest()).await.as_deref(),
-                Some(&msg),
-                "peer B should have the message before eviction"
-            );
-
-            // Track set 1 with only [B, C]. With tracked_peer_sets=2, both
-            // sets 0 and 1 are retained, so A is still in `all.primary`. Buffered caches follow
-            // `latest.primary`, though, so A's deque should be evicted immediately.
-            let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![
-                peer_b.clone(),
-                peer_c.clone(),
-            ]);
-            oracle.manager().track(1, remaining);
-            context.sleep(A_JIFFY).await;
-
-            assert!(
-                mailbox_b.get(msg.digest()).await.is_none(),
-                "message should be evicted: peer A is not in the latest peer set"
-            );
-
-            // Peer A is no longer in `latest.primary`, so A does not buffer; send still runs.
-            let fresh = TestMessage::shared(b"post-eviction-latest-test");
             assert!(
                 mailbox_a
-                    .broadcast(Recipients::All, fresh.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(msg.clone(), msg.digest())
+                    )
                     .accepted()
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
+            let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
+            assert_eq!(
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
+                Some(&msg),
+                "peer B should have the message before eviction"
+            );
+
+            // Track set 1 with only [B, C]. With tracked_peer_sets=2, both sets 0 and 1 are
+            // retained, so A is still in `all.primary` and keeps its deque.
+            let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![
+                peer_b.clone(),
+                peer_c.clone(),
+            ]);
+            oracle.manager().track(1, remaining.clone());
+            context.sleep(A_JIFFY).await;
+
+            assert_eq!(
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
+                Some(&msg),
+                "message should survive while peer A is still a primary of a tracked set"
+            );
+
+            // A still buffers fresh messages through the overlap window.
+            let fresh = TestMessage::shared(b"overlap-latest-test");
             assert!(
-                mailbox_b.get(fresh.digest()).await.is_none(),
-                "message should not be rebuffered after peer A left latest.primary"
+                mailbox_a
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(fresh.clone(), fresh.digest())
+                    )
+                    .accepted()
+            );
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+            assert_eq!(
+                mailbox_b
+                    .get(fresh.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
+                Some(&fresh),
+                "message from a peer in the overlap window should still be cached"
+            );
+
+            // Tracking another set without A ages set 0 out of the window, so A leaves every
+            // tracked set and its deque is evicted.
+            oracle.manager().track(2, remaining);
+            context.sleep(A_JIFFY).await;
+            assert!(
+                mailbox_b.get(msg.digest()).await.is_none()
+                    && mailbox_b.get(fresh.digest()).await.is_none(),
+                "messages should be evicted once peer A left every tracked set"
             );
         });
     }
@@ -1346,6 +1835,7 @@ mod tests {
     fn test_initial_latest_peer_set_blocks_sender_not_in_latest_primary() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
+            // Use one tracked peer set so its primary membership controls cache admission.
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
@@ -1357,6 +1847,7 @@ mod tests {
             );
             network.start();
 
+            // Register three peers and connect every pair with reliable links.
             let mut schemes = (0..3)
                 .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
@@ -1365,7 +1856,6 @@ mod tests {
             let peer_a = peers[0].clone();
             let peer_b = peers[1].clone();
             let peer_c = peers[2].clone();
-
             let mut registrations: Registrations = BTreeMap::new();
             for peer in &peers {
                 let (sender, receiver) = oracle
@@ -1391,6 +1881,7 @@ mod tests {
                 }
             }
 
+            // Include A only as a secondary so its messages are ineligible for caching.
             let latest_primary = commonware_utils::ordered::Set::from_iter_dedup(vec![
                 peer_b.clone(),
                 peer_c.clone(),
@@ -1401,34 +1892,32 @@ mod tests {
                 .manager()
                 .track(0, TrackedPeers::new(latest_primary, latest_secondary));
 
+            // Let every engine apply the initial peer set before broadcasting.
             let mut mailboxes = BTreeMap::new();
             for (peer, network) in registrations {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
-                let config = Config {
-                    public_key: peer.clone(),
-                    mailbox_size: NZUsize!(1024),
-                    deque_size: CACHE_SIZE,
-                    priority: false,
-                    codec_config: RangeCfg::from(..),
-                    peer_provider: oracle.manager(),
-                };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = TestEngine::new(ctx, config(&peer, &oracle));
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
             context.sleep(A_JIFFY).await;
 
+            // Broadcast from the peer excluded from the initial primary set.
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
             let msg = TestMessage::shared(b"startup-latest-primary-only");
             assert!(
                 mailbox_a
-                    .broadcast(Recipients::All, msg.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(msg.clone(), msg.digest())
+                    )
                     .accepted(),
                 "Recipients::All is accepted locally; cache policy is separate"
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
+            // Neither the sender nor the recipient may cache the excluded peer's message.
             assert_eq!(
                 mailbox_a.get(msg.digest()).await,
                 None,
@@ -1436,47 +1925,45 @@ mod tests {
             );
             assert!(
                 mailbox_b.get(msg.digest()).await.is_none(),
-                "peer B should not cache messages from a sender excluded by the initial latest.primary set"
+                "peer B must not cache from a sender outside the initial latest.primary set"
             );
         });
     }
 
-    /// Local `broadcast` queued before the engine run loop starts must still be cached when the
-    /// peer is already in `latest.primary` (regression for biased handling of `peer_set_subscription`
-    /// vs mailbox).
+    /// A broadcast queued before startup is cached when the local peer is in the initial primary
+    /// set. The engine applies that peer set before handling queued requests.
     #[test_traced]
     fn test_broadcast_queued_before_start_respects_initial_latest_primary() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
-            // Add a sole peer (self) to the network
+            // Prepare a sole primary peer without starting its engine.
             let (peers, mut registrations, oracle) =
                 initialize_simulation(context.child("network"), 1, probability!(1.0)).await;
             let peer = peers[0].clone();
             let network = registrations.remove(&peer).unwrap();
-            let config = Config {
-                public_key: peer.clone(),
-                mailbox_size: NZUsize!(1024),
-                deque_size: CACHE_SIZE,
-                priority: false,
-                codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
-            };
-            let (engine, mailbox) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer"), config);
+            let (engine, mailbox) = TestEngine::new(context.child("peer"), config(&peer, &oracle));
 
-            // Enqueue a broadcast while the engine task is not running yet (only the mailbox channel)
+            // Queue a local broadcast before the engine can apply its initial peer set.
             let msg = TestMessage::shared(b"queued-before-start");
-            assert!(mailbox
-                .broadcast(Recipients::All, msg.clone())
-                .accepted());
+            assert!(
+                mailbox
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(msg.clone(), msg.digest())
+                    )
+                    .accepted()
+            );
 
-            // Start the engine (now that a message is enqueued)
+            // Startup must apply primary membership before caching the queued broadcast.
             engine.start(network);
-
             assert_eq!(
-                mailbox.get(msg.digest()).await.as_deref(),
+                mailbox
+                    .get(msg.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
                 Some(&msg),
-                "sender is already in the initial latest.primary set, so its local broadcast should be cached"
+                "a sender in the initial latest.primary set must cache its own broadcast"
             );
         });
     }
@@ -1485,6 +1972,7 @@ mod tests {
     fn test_engine_starts_before_initial_peer_set_and_delivers_after_tracking() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
+            // Create a network with no tracked peer set.
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
@@ -1496,6 +1984,7 @@ mod tests {
             );
             network.start();
 
+            // Register two peers without assigning primary membership.
             let mut schemes = (0..2)
                 .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
@@ -1503,7 +1992,6 @@ mod tests {
             let peers: Vec<PublicKey> = schemes.iter().map(|c| c.public_key()).collect();
             let peer_a = peers[0].clone();
             let peer_b = peers[1].clone();
-
             let mut registrations: Registrations = BTreeMap::new();
             for peer in &peers {
                 let (sender, receiver) = oracle
@@ -1514,6 +2002,7 @@ mod tests {
                 registrations.insert(peer.clone(), (sender, receiver));
             }
 
+            // Keep delivery reliable so cache checks reflect the current peer set.
             let link = Link {
                 latency: NETWORK_SPEED,
                 jitter: Duration::ZERO,
@@ -1530,34 +2019,31 @@ mod tests {
                 }
             }
 
+            // Start both engines before any peer set is tracked.
             let mut mailboxes = BTreeMap::new();
             for (peer, network) in registrations {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
-                let config = Config {
-                    public_key: peer.clone(),
-                    mailbox_size: NZUsize!(1024),
-                    deque_size: CACHE_SIZE,
-                    priority: false,
-                    codec_config: RangeCfg::from(..),
-                    peer_provider: oracle.manager(),
-                };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = TestEngine::new(ctx, config(&peer, &oracle));
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
 
+            // Broadcast before either peer is eligible to populate a cache.
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
-
             let before = TestMessage::shared(b"before-tracking");
             assert!(
                 mailbox_a
-                    .broadcast(Recipients::All, before.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(before.clone(), before.digest())
+                    )
                     .accepted(),
                 "broadcast request should be accepted before a peer set is tracked"
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
+            // A missing primary set prevents local and remote cache admission.
             assert_eq!(
                 mailbox_a.get(before.digest()).await,
                 None,
@@ -1568,21 +2054,34 @@ mod tests {
                 "without latest.primary, remote peers do not cache inbound messages"
             );
 
+            // Make both peers primary members and let the engines observe the update.
             oracle.manager().track(
                 0,
                 commonware_utils::ordered::Set::from_iter_dedup(peers.clone()),
             );
             context.sleep(A_JIFFY).await;
 
+            // Broadcast again after primary membership is available.
             let after = TestMessage::shared(b"after-tracking");
             assert!(
                 mailbox_a
-                    .broadcast(Recipients::All, after.clone())
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(after.clone(), after.digest())
+                    )
                     .accepted()
             );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
-            assert_eq!(mailbox_b.get(after.digest()).await.as_deref(), Some(&after));
+            // The remote peer must cache the message from a primary peer.
+            assert_eq!(
+                mailbox_b
+                    .get(after.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
+                Some(&after)
+            );
         });
     }
 
@@ -1599,16 +2098,8 @@ mod tests {
 
             // Spawn peer B with its own manager.
             let network_b = registrations.remove(&peer_b).unwrap();
-            let config_b = Config {
-                public_key: peer_b.clone(),
-                mailbox_size: NZUsize!(1024),
-                deque_size: CACHE_SIZE,
-                priority: false,
-                codec_config: RangeCfg::from(..),
-                peer_provider: oracle.manager(),
-            };
             let (engine_b, mailbox_b) =
-                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer_b"), config_b);
+                TestEngine::new(context.child("peer_b"), config(&peer_b, &oracle));
             engine_b.start(network_b);
 
             // Spawn remaining peer engines.
@@ -1616,15 +2107,7 @@ mod tests {
             mailboxes.insert(peer_b.clone(), mailbox_b);
             for (peer, network) in registrations {
                 let ctx = context.child("peer").with_attribute("public_key", &peer);
-                let config = Config {
-                    public_key: peer.clone(),
-                    mailbox_size: NZUsize!(1024),
-                    deque_size: CACHE_SIZE,
-                    priority: false,
-                    codec_config: RangeCfg::from(..),
-                    peer_provider: oracle.manager(),
-                };
-                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                let (engine, mailbox) = TestEngine::new(ctx, config(&peer, &oracle));
                 mailboxes.insert(peer, mailbox);
                 engine.start(network);
             }
@@ -1634,14 +2117,35 @@ mod tests {
             let msg = TestMessage::shared(b"shared-msg");
             let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
             let mailbox_c = mailboxes.get(&peer_c).unwrap().clone();
-            assert!(mailbox_a.broadcast(Recipients::All, msg.clone()).accepted());
+            assert!(
+                mailbox_a
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(msg.clone(), msg.digest())
+                    )
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
-            assert!(mailbox_c.broadcast(Recipients::All, msg.clone()).accepted());
+            assert!(
+                mailbox_c
+                    .broadcast(
+                        Recipients::All,
+                        Digested::precomputed(msg.clone(), msg.digest())
+                    )
+                    .accepted()
+            );
             context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
 
             // B has the message in both A's and C's deques (ref count = 2).
             let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
-            assert_eq!(mailbox_b.get(msg.digest()).await.as_deref(), Some(&msg));
+            assert_eq!(
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
+                Some(&msg)
+            );
 
             // Evict peer A only; C is still in the latest primary set.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![peer_b, peer_c]);
@@ -1650,7 +2154,11 @@ mod tests {
 
             // Message should still be available (C's deque still holds it).
             assert_eq!(
-                mailbox_b.get(msg.digest()).await.as_deref(),
+                mailbox_b
+                    .get(msg.digest())
+                    .await
+                    .as_ref()
+                    .map(Digested::inner),
                 Some(&msg),
                 "message should survive when another peer in the primary set still references it"
             );

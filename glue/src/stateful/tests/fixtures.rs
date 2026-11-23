@@ -1,6 +1,6 @@
 //! Shared marshal fixtures for stateful actor tests.
 
-use super::mocks::{TestBlock, TestScheme, TestVariant};
+use super::mocks::{TestBlock, TestScheme, TestVariant, digested};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Heightable as _, Reporter,
@@ -103,7 +103,7 @@ impl Resolver for IgnoreResolver {
         Feedback::Ok
     }
 
-    fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
+    fn fetch_all<F>(&mut self, _keys: impl IntoIterator<Item = F>) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
@@ -129,7 +129,10 @@ impl TargetedResolver for IgnoreResolver {
         Feedback::Ok
     }
 
-    fn fetch_all_targeted<F>(&mut self, _keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
+    fn fetch_all_targeted<F>(
+        &mut self,
+        _keys: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
+    ) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
@@ -345,7 +348,7 @@ pub(crate) async fn prunable_marshal_fixture(
         max_pending_acks,
         reporter: Some(FixtureReporter::new(acknowledge)),
     };
-    let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+    let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let finalizations_by_height = prunable::Archive::init(
         context.child("finalizations_by_height"),
         prunable_archive_config(page_cache.clone(), &format!("{prefix}-finalizations")),
@@ -393,7 +396,7 @@ async fn marshal_fixture_inner<R>(
 where
     R: Reporter<Activity = Update<TestBlock>>,
 {
-    let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+    let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let mut finalizations_by_height = immutable::Archive::init(
         context.child("finalizations_by_height"),
         archive_config(page_cache.clone(), &format!("{prefix}-finalizations")),
@@ -468,7 +471,7 @@ where
             provider,
             epocher: FixedEpocher::new(NZU64!(u64::MAX)),
             start: options.floor.map_or_else(
-                || marshal::Start::Genesis(TestBlock::new(0, 0).into()),
+                || marshal::Start::Genesis(digested(TestBlock::new(0, 0))),
                 marshal::Start::Floor,
             ),
             partition_prefix: format!("{prefix}-marshal"),

@@ -1,13 +1,14 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{
     Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Dealer, Info, Logs, Player, Reveal, deal},
         primitives::{sharing::Mode, variant::MinSig},
     },
-    ed25519::{Batch, PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, rayon::ThreadPoolBuilder};
 use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, ordered::Set, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand_core::CryptoRng;
@@ -106,13 +107,17 @@ impl Bench {
 }
 
 // Configure contributors based on context
-cfg_if::cfg_if! {
-    if #[cfg(full_bench)] {
-        const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50, 100, 250, 500];
-        const CONCURRENCY: &[usize] = &[1, 4, 8];
-    } else {
-        const CONTRIBUTORS: &[u32] = &[5, 10, 20, 50];
-        const CONCURRENCY: &[usize] = &[1];
+fn contributors() -> &'static [u32] {
+    match Inputs::current() {
+        Inputs::Full => &[5, 10, 20, 50, 100, 250, 500],
+        _ => &[5, 10, 20, 50],
+    }
+}
+
+fn concurrency_levels() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[1, 4, 8],
+        _ => &[1],
     }
 }
 
@@ -123,11 +128,11 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
         "_recovery"
     };
     let mut rng = test_rng();
-    for &n in CONTRIBUTORS {
+    for &n in contributors() {
         let t = N3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
-        for &concurrency in CONCURRENCY {
-            let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();
+        for &concurrency in concurrency_levels() {
+            let strategy = Rayon::new(ThreadPoolBuilder::new(NZUsize!(concurrency))).unwrap();
             c.bench_function(
                 &format!(
                     "{}{}/n={} t={} conc={}",
@@ -145,17 +150,13 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
                             if concurrency > 1 {
                                 black_box(
                                     player
-                                        .finalize::<N3f1, Batch>(&mut finalize_rng, logs, &strategy)
+                                        .finalize::<N3f1>(&mut finalize_rng, logs, &strategy)
                                         .unwrap(),
                                 );
                             } else {
                                 black_box(
                                     player
-                                        .finalize::<N3f1, Batch>(
-                                            &mut finalize_rng,
-                                            logs,
-                                            &Sequential,
-                                        )
+                                        .finalize::<N3f1>(&mut finalize_rng, logs, &Sequential)
                                         .unwrap(),
                                 );
                             }

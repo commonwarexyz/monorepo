@@ -30,9 +30,9 @@
 //! reporting the total build time.
 //!
 //! `init` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
-//! `0` = off) and `concurrency` (`1` = serial, `2` and `3` decode on the init task with one or
-//! two insert workers, and larger values split between spawned decode and insert tasks while the
-//! init task merely forwards). It reports the replay-region size `R` and the elapsed time.
+//! `0` = off) and `concurrency` (`init_concurrency`: `1` = serial, larger values scan the log on
+//! that many tasks beside fewer insert tasks). It reports the replay-region size `R` and the
+//! elapsed time.
 //! A capacity of `R` entries can still evict locations when too many map to the same cache set.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
@@ -60,8 +60,9 @@
 mod common;
 
 use common::{
-    AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
+    AnyOFixP3Db, AnyUFixP64kDb, Digest, THREADS, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     Runner as _, Spawner as _, Supervisor as _,
@@ -77,15 +78,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 /// Items per blob for the generated database. Much larger than the shared bench default (50k) so a
 /// multi-GB database is split across far fewer blob files, which keeps the partition-directory scan
 /// on reopen cheap. Note this only reduces the file count, not the on-disk byte growth.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
-/// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
-/// (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top of a
-/// realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
+/// Page cache size, realistic for a multi-GB database rather than the shared bench default of
+/// 2 MiB (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top
+/// of a realistic page cache instead of an unrealistically tiny one. 262144 * 4 KiB = 1 GiB.
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(262144);
 
 /// Page cache size for the get modes when `cache_pages` is not given: small enough that
 /// uniform-random reads at benchmark scale virtually never hit it, so cold reads reach the
@@ -133,16 +137,15 @@ impl IndexKind {
     }
 }
 
-/// Parse a `concurrency` CLI argument into a snapshot-build concurrency (`1` = serial on the
-/// init task, larger values follow the decode/insert split in the module docs). `None` is a
-/// parse failure.
+/// Parse a `concurrency` CLI argument into an init concurrency (`1` = serial on the init task).
+/// `None` is a parse failure.
 fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
     arg.parse::<usize>().ok().and_then(NonZeroUsize::new)
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N total build tasks)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
+        "usage:\n  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)\n  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N tasks scanning the log)\n  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (per concurrency: cold after an OS cache drop, then warm; cache_pages = in-process page cache pages, omitted = minimal 64)\n  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, but each reader issues gets in `batch`-key get_many calls\n  destroy  <folder>                          delete the database"
     );
 }
 
@@ -278,7 +281,7 @@ fn generate(
     /// Time the build itself (updates + prune + sync). Opening the empty db is done by the
     /// caller and is cheap.
     #[commonware_macros::boxed]
-    async fn populate<M: DbAny<Mmr, Key = Digest, Value = Digest>>(
+    async fn populate<M: DbAny<Family = Mmr, Key = Digest, Value = Digest>>(
         db: M,
         keyspace: u64,
         num_updates: u64,
@@ -354,7 +357,6 @@ fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind)
 /// reader count drop the OS page cache and run a cold pass of `num_gets` gets, followed by a warm
 /// pass over the same keys as a control. With `batch`, each reader issues its gets in `batch`-key
 /// `get_many` calls.
-#[allow(clippy::too_many_arguments)]
 fn get_bench(
     folder: &str,
     keyspace: u64,
@@ -381,7 +383,7 @@ fn get_bench(
         // production runs.
         let cache_pages = cache_pages.unwrap_or(MIN_PAGE_CACHE_SIZE);
         let cache_mode = format!("{cache_pages} pages");
-        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, cache_pages, NZUsize!(1));
+        let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, cache_pages, THREADS);
 
         let batch_mode = batch.map_or_else(|| "point".to_string(), |b| format!("get_many x{b}"));
         println!(
@@ -431,7 +433,7 @@ fn get_bench(
 }
 
 /// Run the cold/warm read passes for each reader count against an opened database.
-async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_reads<D: DbAny<Family = Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     opened: Duration,
@@ -470,7 +472,7 @@ async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
 /// deterministic key stream (so a repeat pass replays the same keys). With a `batch` size, each
 /// reader issues its gets in `batch`-key `get_many` calls instead of point gets. Returns the
 /// elapsed time, the number of gets issued, and how many found a value.
-async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_gets<D: DbAny<Family = Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     keyspace: u64,
@@ -508,8 +510,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
                                     Sha256::hash(&[&index.to_be_bytes()])
                                 })
                                 .collect();
-                            let refs: Vec<_> = keys.iter().collect();
-                            let values = db.get_many(&refs).await.unwrap();
+                            let values = db.get_many(&keys).await.unwrap();
                             found += values.iter().flatten().count() as u64;
                             remaining -= n;
                         }
@@ -564,13 +565,13 @@ fn time_init(
     index: IndexKind,
 ) -> (Duration, u64) {
     /// The elapsed time since `start` and the db's replay-region size.
-    fn measure<M: DbAny<Mmr, Key = Digest, Value = Digest>>(
+    fn measure<M: DbAny<Family = Mmr, Key = Digest, Value = Digest>>(
         db: &M,
         start: Instant,
     ) -> (Duration, u64) {
         let elapsed = start.elapsed();
         let end: u64 = *db.bounds().end;
-        let floor: u64 = *db.inactivity_floor_loc();
+        let floor: u64 = *db.inactivity_floor();
         (elapsed, end.saturating_sub(floor))
     }
 

@@ -35,7 +35,7 @@ mod tests {
     /// `[0, start)` prefix into a new fold-prefix peak that must be reconstructed
     /// from finer-grained pinned peaks.
     #[test]
-    fn test_verify_proof_and_pinned_nodes_recursive_fold_prefix_regression() {
+    fn test_verify_range_inclusion_with_pinned_nodes_recursive_fold_prefix_regression() {
         let (hasher, mmb) = make_mmb(5);
         let root = mmb.root(&hasher, 0).unwrap();
         let start = 4;
@@ -48,10 +48,10 @@ mod tests {
             .range_proof(&hasher, Location::new(start)..Location::new(start + 1), 0)
             .unwrap();
 
-        assert!(proof.verify_proof_and_pinned_nodes(
+        assert!(proof.verify_range_inclusion_with_pinned_nodes(
             &hasher,
-            &[start.to_be_bytes()],
             Location::new(start),
+            &[start.to_be_bytes()],
             &pinned,
             &root
         ));
@@ -80,13 +80,16 @@ mod tests {
             )
             .unwrap();
 
-            let total_digests = usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
+            let total_digests = usize::from(!bp.fold_prefix.is_empty())
+                + bp.individual_positions().count()
+                + bp.siblings.len();
             assert!(
                 total_digests <= 2,
                 "n={n}: expected <= 2 digests, got {total_digests} \
-                 (fold_prefix={}, fetch_nodes={})",
+                 (fold_prefix={}, individual_peaks={}, siblings={})",
                 bp.fold_prefix.len(),
-                bp.fetch_nodes.len(),
+                bp.individual_positions().count(),
+                bp.siblings.len(),
             );
 
             // Verify the proof actually works.
@@ -94,8 +97,8 @@ mod tests {
             assert!(
                 proof.verify_element_inclusion(
                     &hasher,
-                    &loc.to_be_bytes(),
                     Location::new(loc),
+                    &loc.to_be_bytes(),
                     &root
                 ),
                 "n={n}: verification failed"

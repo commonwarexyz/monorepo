@@ -1,34 +1,24 @@
-//! Tests for [crate::qmdb::current] state sync.
+//! Sync tests for [`crate::qmdb::current`] databases.
 //!
-//! This module reuses the shared sync test functions from [crate::qmdb::any::sync::tests] by
-//! implementing [SyncTestHarness] for current database types. The key difference from `any`
-//! harnesses is that `sync_target_root` returns the **QMDB ops root** (via
-//! [qmdb::sync::Database::root](crate::qmdb::sync::Database::root)), not the canonical root
-//! returned by `Db::root()`.
-//!
-//! Harnesses are instantiated for **both** MMR and MMB merkle families across each (ordered,
-//! unordered) x (fixed, variable) database variant, so the shared suite runs twice per variant.
-//!
-//! In addition to the shared harness-based suite, this module contains focused tests for
-//! `current`-specific sync behavior: pruned MMB round-trip (canonical-root reconstruction across
-//! a pruned chunk boundary) and `local_pinned_nodes` returning `None` for targets starting below
-//! the local lower bound.
+//! The harness contract and the shared sync tests live in [`crate::qmdb::sync::harness`]. This
+//! module implements the harness for `current` databases, runs a subset of the `any`-specific
+//! tests from [`crate::qmdb::any::sync::tests`], and adds `current`-specific tests. Sync targets
+//! the ops root, while the harness's canonical root is the root returned by `Db::root()`.
 
 use crate::qmdb::{
-    any::sync::tests::{ConfigOf, SyncTestHarness},
     current::tests::{fixed_config, variable_config},
-    sync::Database as SyncDatabase,
+    sync::{
+        Database as SyncDatabase,
+        harness::{ConfigOf, SyncTestHarness},
+    },
 };
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner as _, Supervisor as _, deterministic, deterministic::Context,
-};
-use commonware_utils::{NZU64, non_empty_range};
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Context};
+use commonware_utils::{NZU64, NZUsize, non_empty_range, probability};
 use rand::Rng as _;
-
-// ===== Harness Implementations =====
+use std::collections::BTreeMap;
 
 mod harnesses {
     use super::*;
@@ -175,6 +165,7 @@ mod harnesses {
     async fn apply_unordered_fixed_ops<F: merkle::Graftable>(
         db: UnorderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> UnorderedFixedDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
@@ -188,18 +179,19 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
     async fn apply_unordered_variable_ops<F: merkle::Graftable>(
         db: UnorderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> UnorderedVariableDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Unordered as Update};
 
@@ -213,18 +205,19 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
     async fn apply_ordered_fixed_ops<F: merkle::Graftable>(
         db: OrderedFixedDb<F>,
         ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> OrderedFixedDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
@@ -238,18 +231,19 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
     async fn apply_ordered_variable_ops<F: merkle::Graftable>(
         db: OrderedVariableDb<F>,
         ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
+        metadata: Option<Digest>,
     ) -> OrderedVariableDb<F> {
         use crate::qmdb::any::operation::{Operation, update::Ordered as Update};
 
@@ -263,12 +257,12 @@ mod harnesses {
                     Operation::Delete(key) => {
                         batch = batch.write(key, None);
                     }
-                    Operation::CommitFloor(_, _) => {}
+                    Operation::Commit(_, _) => {}
                 }
             }
-            batch.merkleize(&db, None::<Digest>).await.unwrap()
+            batch.with_metadata(metadata).merkleize(&db).await.unwrap()
         };
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
@@ -277,13 +271,10 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedFixedHarness<F> {
         type Family = F;
         type Db = UnorderedFixedDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::TwoCap>(suffix)
         }
 
         fn create_ops(
@@ -299,21 +290,24 @@ mod harnesses {
             create_unordered_fixed_ops::<F>(n, seed)
         }
 
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
-            Self::Db::init(ctx, cfg, None).await.unwrap()
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn init_db(ctx: Context) -> Self::Db {
+            let cfg = fixed_config::<crate::translator::TwoCap>("default");
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::fixed::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_unordered_fixed_ops(db, ops).await
+            apply_unordered_fixed_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type UnorderedFixedMmrHarness = UnorderedFixedHarness<mmr::Family>;
@@ -324,13 +318,10 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for UnorderedVariableHarness<F> {
         type Family = F;
         type Db = UnorderedVariableDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config::<crate::translator::TwoCap>(suffix)
         }
 
         fn create_ops(
@@ -346,21 +337,24 @@ mod harnesses {
             create_unordered_variable_ops::<F>(n, seed)
         }
 
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
-            Self::Db::init(ctx, cfg, None).await.unwrap()
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn init_db(ctx: Context) -> Self::Db {
+            let cfg = variable_config::<crate::translator::TwoCap>("default");
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::unordered::variable::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_unordered_variable_ops(db, ops).await
+            apply_unordered_variable_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type UnorderedVariableMmrHarness = UnorderedVariableHarness<mmr::Family>;
@@ -371,13 +365,10 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedFixedHarness<F> {
         type Family = F;
         type Db = OrderedFixedDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::OneCap>(suffix)
         }
 
         fn create_ops(
@@ -393,21 +384,24 @@ mod harnesses {
             create_ordered_fixed_ops::<F>(n, seed)
         }
 
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
-            Self::Db::init(ctx, cfg, None).await.unwrap()
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn init_db(ctx: Context) -> Self::Db {
+            let cfg = fixed_config::<crate::translator::OneCap>("default");
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::fixed::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_ordered_fixed_ops(db, ops).await
+            apply_ordered_fixed_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type OrderedFixedMmrHarness = OrderedFixedHarness<mmr::Family>;
@@ -418,13 +412,10 @@ mod harnesses {
     impl<F: merkle::Graftable> SyncTestHarness for OrderedVariableHarness<F> {
         type Family = F;
         type Db = OrderedVariableDb<F>;
+        type Metadata = Digest;
 
-        fn sync_target_root(db: &Self::Db) -> Digest {
-            SyncDatabase::root(db)
-        }
-
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config::<crate::translator::OneCap>(suffix)
         }
 
         fn create_ops(
@@ -440,21 +431,24 @@ mod harnesses {
             create_ordered_variable_ops::<F>(n, seed)
         }
 
-        async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
-            Self::Db::init(ctx, cfg, None).await.unwrap()
+        fn sample_metadata() -> Digest {
+            Digest::from([1; 32])
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn init_db(ctx: Context) -> Self::Db {
+            let cfg = variable_config::<crate::translator::OneCap>("default");
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn apply_ops(
             db: Self::Db,
             ops: Vec<crate::qmdb::any::ordered::variable::Operation<F, Digest, Digest>>,
+            metadata: Option<Digest>,
         ) -> Self::Db {
-            apply_ordered_variable_ops(db, ops).await
+            apply_ordered_variable_ops(db, ops, metadata).await
         }
+
+        crate::qmdb::any::sync::tests::db_any_harness_methods!();
     }
 
     pub type OrderedVariableMmrHarness = OrderedVariableHarness<mmr::Family>;
@@ -489,7 +483,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let target_context = context.child("target");
         let mut target_db: Db = Db::init(
             target_context.child("target"),
-            variable_config::<crate::translator::TwoCap>(&target_suffix, &target_context),
+            variable_config::<crate::translator::TwoCap>(&target_suffix),
             None,
         )
         .await
@@ -502,34 +496,34 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             let merkleized = target_db
                 .new_batch()
                 .write(key, expected)
-                .merkleize(&target_db, None)
+                .merkleize(&target_db)
                 .await
                 .unwrap();
-            (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
+            target_db = target_db.apply_batch(merkleized).await.unwrap();
             target_db = target_db.commit().await.unwrap();
         }
 
         assert!(
-            *target_db.inactivity_floor_loc() >= 256,
+            *target_db.inactivity_floor() >= 256,
             "expected inactivity floor past chunk 0"
         );
 
         let boundary = target_db.sync_boundary();
         let target_db = target_db.prune(boundary).await.unwrap();
 
-        let sync_root = SyncDatabase::root(&target_db);
+        let sync_root = SyncDatabase::target(&target_db).root;
         let verification_root = target_db.root();
         let lower_bound = target_db.sync_boundary();
         let upper_bound = target_db.bounds().end;
 
         let client_suffix = context.next_u64().to_string();
-        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix);
         let target_db = std::sync::Arc::new(target_db);
 
         // Sync targets the ops root, which is what the engine verifies. `build_db` reconstructs
         // the canonical root without authenticating it, so the assertions below compare it
         // against `verification_root`.
-        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::engine::Config {
+        let synced_db: Db = crate::qmdb::sync::sync(crate::qmdb::sync::Config {
             context: context.child("client"),
             db_config: client_config.clone(),
             fetch_batch_size: commonware_utils::NZU64!(64),
@@ -539,16 +533,15 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 4,
+            max_outstanding_requests: NZUsize!(4),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         })
         .await
         .unwrap();
 
-        assert_eq!(SyncDatabase::root(&synced_db), sync_root);
+        assert_eq!(SyncDatabase::target(&synced_db).root, sync_root);
         assert_eq!(synced_db.root(), verification_root);
         assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
@@ -558,7 +551,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let reopened: Db = Db::init(context.child("reopened"), client_config, None)
             .await
             .unwrap();
-        assert_eq!(SyncDatabase::root(&reopened), sync_root);
+        assert_eq!(SyncDatabase::target(&reopened).root, sync_root);
         assert_eq!(reopened.root(), verification_root);
         assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
@@ -588,7 +581,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context: Context| async move {
         let suffix = context.next_u64().to_string();
-        let config = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+        let config = variable_config::<crate::translator::TwoCap>(&suffix);
         let mut db: Db = Db::init(context.child("db"), config.clone(), None)
             .await
             .unwrap();
@@ -598,10 +591,10 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(Digest::from([round as u8; 32])))
-                .merkleize(&db, None)
+                .merkleize(&db)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
             db = db.commit().await.unwrap();
         }
         let prune_loc = crate::merkle::Location::new(256);
@@ -611,7 +604,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let bounds = db.bounds();
         let local_start = bounds.start;
         let local_end = bounds.end;
-        let sync_root = SyncDatabase::root(&db);
+        let sync_root = SyncDatabase::target(&db).root;
 
         assert!(local_start > crate::merkle::Location::new(0));
 
@@ -632,7 +625,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
+            <Db as crate::qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -648,7 +641,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
+            <Db as crate::qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
@@ -662,157 +655,428 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     });
 }
 
-// ===== Test Generation Macro =====
+/// Persisting a sync result writes the grafted metadata before the operation frontier, so a
+/// catch-up sync whose boundary prune fails reopens at the target.
+#[test_traced]
+fn test_current_sync_persist_failure_reopens_at_target() {
+    type Db = crate::qmdb::current::unordered::fixed::Db<
+        crate::merkle::mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        crate::translator::TwoCap,
+        32,
+        Sequential,
+    >;
 
-/// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
-macro_rules! current_sync_tests_for_harness {
-    ($harness:ty, $mod_name:ident) => {
-        mod $mod_name {
-            use super::harnesses;
-            use commonware_macros::test_traced;
-            use rstest::rstest;
-            use std::num::NonZeroU64;
-
-            #[test_traced]
-            fn test_sync_source_fails() {
-                crate::qmdb::any::sync::tests::test_sync_source_fails::<$harness>();
+    let executor = deterministic::Runner::default();
+    executor.start(|context: Context| async move {
+        // Build the same history twice, so the local database already holds the target's
+        // operations and recording the boundary prunes the ones before it.
+        let key = Digest::from([9u8; 32]);
+        let populate = |label: &'static str, config| {
+            let context = context.child(label);
+            async move {
+                let mut db: Db = Db::init(context, config, None).await.unwrap();
+                for round in 0..300u64 {
+                    let merkleized = db
+                        .new_batch()
+                        .write(key, Some(Digest::from([round as u8; 32])))
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
+                    db = db.apply_batch(merkleized).await.unwrap();
+                }
+                db.sync().await.unwrap()
             }
+        };
+        let source = populate(
+            "source",
+            fixed_config::<crate::translator::TwoCap>("source"),
+        )
+        .await;
+        let local_config = fixed_config::<crate::translator::TwoCap>("local");
+        let local = populate("local", local_config.clone()).await;
+        let target = crate::qmdb::sync::Target {
+            root: SyncDatabase::target(&source).root,
+            range: non_empty_range!(source.sync_boundary(), source.bounds().end),
+        };
+        let canonical_root = source.root();
+        assert!(
+            *target.range.start() >= 2 * commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS,
+            "chunk 0's root must not be a pinned node"
+        );
+        assert_eq!(local.root(), canonical_root);
+        drop(local);
 
-            #[rstest]
-            #[case::small_batch_size_one(10, 1)]
-            #[case::small_batch_size_gt_db_size(10, 20)]
-            #[case::batch_size_one(1000, 1)]
-            #[case::floor_div_db_batch_size(1000, 3)]
-            #[case::floor_div_db_batch_size_2(1000, 999)]
-            #[case::div_db_batch_size(1000, 100)]
-            #[case::db_size_eq_batch_size(1000, 1000)]
-            #[case::batch_size_gt_db_size(1000, 1001)]
-            fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
-                crate::qmdb::any::sync::tests::test_sync::<$harness>(
-                    target_db_ops,
-                    NonZeroU64::new(fetch_batch_size).unwrap(),
+        // Failing every blob removal fails the prune that records the boundary, after the
+        // frontier is written.
+        let faults = context.storage_fault_config();
+        faults.write().remove_rate = Some(probability!(1.0));
+        let result = crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+            context: context.child("sync"),
+            db_config: local_config.clone(),
+            fetch_batch_size: NZU64!(64),
+            target: target.clone(),
+            source: std::sync::Arc::new(source),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: NZUsize!(4),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        })
+        .await;
+        assert!(matches!(result, Err(crate::qmdb::sync::Error::Database(_))));
+        faults.write().remove_rate = None;
+
+        // The database opens at the target and finishes the interrupted deletion.
+        let reopened: Db = Db::init(context.child("reopened"), local_config, None)
+            .await
+            .unwrap();
+        assert_eq!(SyncDatabase::target(&reopened).root, target.root);
+        assert_eq!(reopened.root(), canonical_root);
+        assert_eq!(reopened.bounds().start, target.range.start());
+        reopened.destroy().await.unwrap();
+    });
+}
+
+/// Stop a boundary change or catch-up after each storage mutation. Each reopen matches the
+/// source at the recovered commit, and retrying reaches the target.
+#[test_traced("WARN")]
+fn test_current_sync_interrupted_persist_is_retried() {
+    use commonware_runtime::mocks::{MutationFaultContext, MutationFaults};
+
+    type Db = crate::qmdb::current::unordered::fixed::Db<
+        crate::merkle::mmr::Family,
+        MutationFaultContext<Context>,
+        Digest,
+        Digest,
+        Sha256,
+        crate::translator::TwoCap,
+        32,
+        Sequential,
+    >;
+
+    for rounds in [300u64, 280] {
+        let mut saw_intermediate = false;
+        for interrupted in 0.. {
+            let (completed, intermediate) =
+                deterministic::Runner::default().start(|context| async move {
+                    let faults = MutationFaults::default();
+                    let context = MutationFaultContext {
+                        inner: context,
+                        faults: faults.clone(),
+                    };
+                    let key = Digest::from([9u8; 32]);
+                    let populate = |label: &'static str, rounds: u64, prune_at: Option<_>| {
+                        let context = context.child(label);
+                        async move {
+                            let config = fixed_config::<crate::translator::TwoCap>(label);
+                            let mut db: Db = Db::init(context, config, None).await.unwrap();
+                            let mut commits = BTreeMap::new();
+                            for round in 0..rounds {
+                                let value = Digest::from([round as u8; 32]);
+                                let merkleized = db
+                                    .new_batch()
+                                    .write(key, Some(value))
+                                    .merkleize(&db)
+                                    .await
+                                    .unwrap();
+                                db = db.apply_batch(merkleized).await.unwrap();
+                                commits.insert(db.bounds().end, (db.ops_root(), db.root(), value));
+                            }
+                            let boundary = prune_at.unwrap_or_else(|| db.sync_boundary());
+                            let db = db.prune(boundary).await.unwrap().sync().await.unwrap();
+                            (db, commits)
+                        }
+                    };
+                    let (source, commits) = populate("source", 300, None).await;
+                    let (local, _) =
+                        populate("local", rounds, Some(crate::merkle::Location::new(256))).await;
+                    let target = crate::qmdb::sync::Target {
+                        root: SyncDatabase::target(&source).root,
+                        range: non_empty_range!(source.sync_boundary(), source.bounds().end),
+                    };
+                    let canonical_root = source.root();
+                    let local_end = local.bounds().end;
+                    assert_eq!(local.root() == canonical_root, rounds == 300);
+                    assert!(local.bounds().start < target.range.start());
+                    assert!(local.bounds().end > target.range.start());
+                    drop(local);
+
+                    let source = std::sync::Arc::new(source);
+                    let sync = |label: &'static str| {
+                        crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+                            context: context.child(label),
+                            db_config: fixed_config::<crate::translator::TwoCap>("local"),
+                            fetch_batch_size: NZU64!(64),
+                            target: target.clone(),
+                            source: source.clone(),
+                            apply_batch_size: NZU64!(1024),
+                            max_outstanding_requests: NZUsize!(4),
+                            update_rx: None,
+                            finish_rx: None,
+                            reached_target_tx: None,
+                        })
+                    };
+                    let reopen = |label: &'static str| {
+                        Db::init(
+                            context.child(label),
+                            fixed_config::<crate::translator::TwoCap>("local"),
+                            None,
+                        )
+                    };
+
+                    // Sync fails exactly when one of its mutations was refused.
+                    faults.allow(interrupted);
+                    let result = sync("sync").await;
+                    let stopped = faults.failed();
+                    faults.disarm();
+                    let scenario = format!("rounds {rounds}, stopped after {interrupted}");
+                    assert_eq!(result.is_err(), stopped, "{scenario}");
+                    if let Ok(db) = result {
+                        assert_eq!(db.root(), canonical_root, "{scenario}");
+                        return (true, false);
+                    }
+
+                    let db = reopen("reopen").await.unwrap();
+                    let end = db.bounds().end;
+                    assert!(
+                        (local_end..=target.range.end()).contains(&end),
+                        "{scenario}"
+                    );
+                    let (ops_root, root, value) = commits[&end];
+                    assert_eq!(db.ops_root(), ops_root, "{scenario}");
+                    assert_eq!(db.root(), root, "{scenario}");
+                    assert_eq!(db.get(&key).await.unwrap(), Some(value), "{scenario}");
+                    drop(db);
+
+                    // Retrying the sync reaches the target, which survives a reopen.
+                    drop(sync("retry").await.unwrap());
+                    assert_eq!(
+                        reopen("final").await.unwrap().root(),
+                        canonical_root,
+                        "{scenario}"
+                    );
+                    (false, local_end < end && end < target.range.end())
+                });
+            saw_intermediate |= intermediate;
+            if completed {
+                break;
+            }
+        }
+        assert_eq!(saw_intermediate, rounds < 300);
+    }
+}
+
+/// A replica that already holds the target's operations syncs to a start below the boundary it
+/// recorded. Stopped after each storage mutation in turn, it reopens at the target, and retrying
+/// the sync reaches the target.
+#[test_traced("WARN")]
+fn test_current_sync_below_boundary_interrupted_persist_is_retried() {
+    use crate::merkle::Location;
+    use commonware_runtime::mocks::{MutationFaultContext, MutationFaults};
+
+    type Db = crate::qmdb::current::unordered::fixed::Db<
+        crate::merkle::mmr::Family,
+        MutationFaultContext<Context>,
+        Digest,
+        Digest,
+        Sha256,
+        crate::translator::TwoCap,
+        32,
+        Sequential,
+    >;
+
+    // One blob holds every operation, so recording a boundary deletes none before it.
+    let config = |label: &str| {
+        let mut config = fixed_config::<crate::translator::TwoCap>(label);
+        config.log.items_per_blob = NZU64!(4096);
+        config
+    };
+    for interrupted in 0.. {
+        let completed = deterministic::Runner::default().start(|context| async move {
+            // Populate a source and a local replica with the same operations.
+            let faults = MutationFaults::default();
+            let context = MutationFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let key = Digest::from([9u8; 32]);
+            let populate = |label: &'static str| {
+                let context = context.child(label);
+                async move {
+                    let mut db: Db = Db::init(context, config(label), None).await.unwrap();
+                    for round in 0..300u64 {
+                        let merkleized = db
+                            .new_batch()
+                            .write(key, Some(Digest::from([round as u8; 32])))
+                            .merkleize(&db)
+                            .await
+                            .unwrap();
+                        db = db.apply_batch(merkleized).await.unwrap();
+                    }
+                    db.sync().await.unwrap()
+                }
+            };
+            let source = populate("source").await;
+            let local = populate("local").await;
+            let canonical_root = source.root();
+            assert_eq!(local.root(), canonical_root);
+            drop(local);
+
+            // Sync either from the source's boundary or from chunk 1, which lies below it.
+            let (root, end) = (SyncDatabase::target(&source).root, source.bounds().end);
+            let boundary = source.sync_boundary();
+            let below = Location::new(commonware_utils::bitmap::Prunable::<32>::CHUNK_SIZE_BITS);
+            assert!(
+                *boundary >= 2 * *below,
+                "chunk 1 must lie below the source's boundary"
+            );
+            let source = std::sync::Arc::new(source);
+            let sync = |label: &'static str, start: Location<crate::merkle::mmr::Family>| {
+                crate::qmdb::sync::sync::<Db, _>(crate::qmdb::sync::Config {
+                    context: context.child(label),
+                    db_config: config("local"),
+                    fetch_batch_size: NZU64!(64),
+                    target: crate::qmdb::sync::Target {
+                        root,
+                        range: non_empty_range!(start, end),
+                    },
+                    source: source.clone(),
+                    apply_batch_size: NZU64!(1024),
+                    max_outstanding_requests: NZUsize!(4),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                })
+            };
+            let reopen =
+                |label: &'static str| Db::init(context.child(label), config("local"), None);
+
+            // Record a boundary past chunk 1.
+            drop(sync("record", boundary).await.unwrap());
+
+            // Sync fails exactly when one of its mutations was refused.
+            faults.allow(interrupted);
+            let result = sync("sync", below).await;
+            let stopped = faults.failed();
+            faults.disarm();
+            let scenario = format!("stopped after {interrupted}");
+            assert_eq!(
+                result.is_err(),
+                stopped,
+                "{scenario}: sync must fail exactly when a mutation is refused"
+            );
+            if let Ok(db) = result {
+                assert_eq!(
+                    db.root(),
+                    canonical_root,
+                    "{scenario}: the synced root must match the source"
                 );
+                return true;
             }
 
-            #[test_traced]
-            fn test_sync_subset_of_target_database() {
-                crate::qmdb::any::sync::tests::test_sync_subset_of_target_database::<$harness>(
-                    1000,
-                );
+            // The stopped sync leaves the replica at the target.
+            match reopen("reopen").await {
+                Ok(db) => assert_eq!(
+                    db.root(),
+                    canonical_root,
+                    "{scenario}: the reopened root must match the source"
+                ),
+                Err(err) => panic!("{scenario}: reopen must succeed, got {err}"),
             }
 
-            #[test_traced]
-            fn test_sync_use_existing_db_partial_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(
-                    1000,
-                );
-            }
+            // Retrying the sync reaches the target, which survives a reopen.
+            drop(sync("retry", below).await.unwrap());
+            assert_eq!(
+                reopen("final").await.unwrap().root(),
+                canonical_root,
+                "{scenario}: the retried root must match the source"
+            );
+            false
+        });
+        if completed {
+            break;
+        }
+    }
+}
 
-            #[test_traced]
-            fn test_sync_use_existing_db_exact_match() {
-                crate::qmdb::any::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(
-                    1000,
-                );
-            }
+/// Emits the `any`-specific sync tests that also run against `current` databases for `$harness`.
+macro_rules! current_sync_tests {
+    ($harness:ty) => {
+        #[test_traced("WARN")]
+        fn test_sync_waits_for_explicit_finish() {
+            crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
+        }
 
-            #[test_traced("WARN")]
-            fn test_target_update_lower_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_lower_bound_decrease::<$harness>(
-                );
-            }
+        #[test_traced("WARN")]
+        fn test_sync_handles_early_finish_signal() {
+            crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
+        }
 
-            #[test_traced("WARN")]
-            fn test_target_update_upper_bound_decrease() {
-                crate::qmdb::any::sync::tests::test_target_update_upper_bound_decrease::<$harness>(
-                );
-            }
+        #[test_traced("WARN")]
+        fn test_sync_fails_when_finish_sender_dropped() {
+            crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<$harness>();
+        }
 
-            #[test_traced("WARN")]
-            fn test_target_update_bounds_increase() {
-                crate::qmdb::any::sync::tests::test_target_update_bounds_increase::<$harness>();
-            }
+        #[test_traced("WARN")]
+        fn test_sync_allows_dropped_reached_target_receiver() {
+            crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
+                $harness,
+            >();
+        }
 
-            #[test_traced("WARN")]
-            fn test_target_update_on_done_client() {
-                crate::qmdb::any::sync::tests::test_target_update_on_done_client::<$harness>();
-            }
+        #[test_traced("WARN")]
+        fn test_sync_post_sync_usability() {
+            crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
+        }
 
-            #[test_traced]
-            fn test_sync_waits_for_explicit_finish() {
-                crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_sync_handles_early_finish_signal() {
-                crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_sync_fails_when_finish_sender_dropped() {
-                crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<
-                    $harness,
-                >();
-            }
-
-            #[test_traced]
-            fn test_sync_allows_dropped_reached_target_receiver() {
-                crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
-                    $harness,
-                >();
-            }
-
-            #[rstest]
-            #[case(1, 1)]
-            #[case(1, 2)]
-            #[case(1, 100)]
-            #[case(2, 1)]
-            #[case(2, 2)]
-            #[case(2, 100)]
-            // Regression test: panicked when we didn't set pinned nodes after updating target
-            #[case(20, 10)]
-            #[case(100, 1)]
-            #[case(100, 2)]
-            #[case(100, 100)]
-            #[case(100, 1000)]
-            fn test_target_update_during_sync(
-                #[case] initial_ops: usize,
-                #[case] additional_ops: usize,
-            ) {
-                crate::qmdb::any::sync::tests::test_target_update_during_sync::<$harness>(
-                    initial_ops,
-                    additional_ops,
-                );
-            }
-
-            #[test_traced]
-            fn test_sync_database_persistence() {
-                crate::qmdb::any::sync::tests::test_sync_database_persistence::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_sync_post_sync_usability() {
-                crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
-            }
-
-            #[test_traced]
-            fn test_local_pinned_nodes_below_floor() {
-                crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
-            }
+        #[test_traced("WARN")]
+        fn test_local_pinned_nodes_below_floor() {
+            crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
         }
     };
 }
 
-current_sync_tests_for_harness!(harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr);
-current_sync_tests_for_harness!(harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
-current_sync_tests_for_harness!(
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::UnorderedFixedMmrHarness,
+    unordered_fixed_mmr,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::UnorderedFixedMmbHarness,
+    unordered_fixed_mmb,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
     harnesses::UnorderedVariableMmrHarness,
-    unordered_variable_mmr
+    unordered_variable_mmr,
+    current_sync_tests
 );
-current_sync_tests_for_harness!(
+crate::qmdb::sync::harness::sync_tests!(
     harnesses::UnorderedVariableMmbHarness,
-    unordered_variable_mmb
+    unordered_variable_mmb,
+    current_sync_tests
 );
-current_sync_tests_for_harness!(harnesses::OrderedFixedMmrHarness, ordered_fixed_mmr);
-current_sync_tests_for_harness!(harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
-current_sync_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
-current_sync_tests_for_harness!(harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedFixedMmrHarness,
+    ordered_fixed_mmr,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedFixedMmbHarness,
+    ordered_fixed_mmb,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedVariableMmrHarness,
+    ordered_variable_mmr,
+    current_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::OrderedVariableMmbHarness,
+    ordered_variable_mmb,
+    current_sync_tests
+);

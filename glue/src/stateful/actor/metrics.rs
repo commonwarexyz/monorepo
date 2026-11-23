@@ -6,96 +6,99 @@ use commonware_runtime::{
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 
-/// Buckets for histograms.
-///
-/// These buckets are much less coarse than [`Buckets::LOCAL`].
+/// Duration buckets from 1ms to 1s, finer than [`Buckets::LOCAL`] between 10ms and 1s.
 ///
 /// [`Buckets::LOCAL`]: commonware_runtime::telemetry::metrics::histogram::Buckets::LOCAL
 const BUCKETS: [f64; 10] = [0.001, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0];
 
 /// Metrics for the stateful actor.
-///
-/// All duration histograms use [`Timed`] wrappers for automatic recording via
-/// [`Timer`](commonware_runtime::telemetry::metrics::histogram::Timer).
 #[derive(Clone)]
 pub(crate) struct Metrics {
-    /// Whether startup state sync is complete.
+    /// Whether the actor has finished startup state sync or recovery.
     pub sync_done: Registered<Gauge>,
 
-    /// Current number of entries in the in-memory pending map.
+    /// Unfinalized blocks with cached speculative state.
     pub pending_blocks: Registered<Gauge>,
 
-    /// Total pending entries pruned after finalizations.
+    /// Total cached states discarded by finalizations because they do not descend from the
+    /// finalized block.
     pub pruned_forks: Registered<Counter>,
 
-    /// Wall-clock duration of a full propose cycle.
+    /// Time taken to build a block, excluding parent recovery.
     pub propose_duration: Timed,
 
-    /// Wall-clock duration of a full verify cycle.
+    /// Time taken by verifications that accept the block.
     pub verify_duration: Timed,
 
-    /// Wall-clock duration of a finalization.
+    /// Time taken to apply a newly finalized block.
     pub finalize_duration: Timed,
 
-    /// Wall-clock duration of lazy-recovery replays via `rebuild_pending`.
+    /// Time taken to fetch and replay missing ancestors, recorded on success.
     pub rebuild_pending_duration: Timed,
 
-    /// Number of blocks replayed during the most recent `rebuild_pending` call.
+    /// Time taken to fetch an ancestor for application processing.
+    pub ancestor_fetch_duration: Timed,
+
+    /// Missing ancestors walked by the most recent successful fetch and replay.
     pub rebuild_pending_depth: Registered<Gauge>,
 }
 
 impl Metrics {
-    /// Create and register all stateful metrics.
-    ///
-    /// The provided `context` determines the metric label hierarchy.
+    /// Creates and registers the stateful actor's metrics.
     pub fn new<E: MetricsTrait>(context: &E) -> Self {
         let sync_done = context.register(
             "sync_done",
-            "Whether startup state sync is complete",
+            "Whether startup state sync or recovery is complete",
             Gauge::default(),
         );
         let _ = sync_done.try_set(0);
 
         let pending_blocks = context.register(
             "pending_blocks",
-            "Current entries in the in-memory pending map",
+            "Unfinalized blocks with cached speculative state",
             Gauge::default(),
         );
 
         let pruned_forks = context.register(
             "pruned_forks",
-            "Total pending entries pruned after finalizations",
+            "Total cached states discarded for not descending from the finalized block",
             Counter::default(),
         );
 
         let propose_hist = context.register(
             "propose_duration",
-            "Wall-clock duration of a full propose cycle",
+            "Histogram of time taken to build a block, excluding parent recovery, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let verify_hist = context.register(
             "verify_duration",
-            "Wall-clock duration of a full verify cycle",
+            "Histogram of time taken by verifications that accept the block, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let finalize_hist = context.register(
             "finalize_duration",
-            "Wall-clock duration of a finalization",
+            "Histogram of time taken to apply a newly finalized block, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let rebuild_hist = context.register(
             "rebuild_pending_duration",
-            "Wall-clock duration of lazy-recovery replays",
+            "Histogram of time taken to successfully fetch and replay missing ancestors, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let rebuild_pending_depth = context.register(
             "rebuild_pending_depth",
-            "Blocks replayed during the most recent rebuild_pending",
+            "Missing ancestors walked by the most recent successful fetch and replay",
             Gauge::default(),
+        );
+
+        let ancestor_fetch_hist = context.register(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch an ancestor for application processing, in seconds",
+            Histogram::new(BUCKETS),
         );
 
         Self {
@@ -106,6 +109,7 @@ impl Metrics {
             verify_duration: Timed::new(verify_hist),
             finalize_duration: Timed::new(finalize_hist),
             rebuild_pending_duration: Timed::new(rebuild_hist),
+            ancestor_fetch_duration: Timed::new(ancestor_fetch_hist),
             rebuild_pending_depth,
         }
     }

@@ -1,16 +1,18 @@
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
 use commonware_utils::{TestRng, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
-use futures::executor::block_on;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
-#[cfg(not(full_bench))]
-const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(full_bench)]
-const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
+fn n_leaves() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000, 5_000_000, 10_000_000],
+        _ => &[10_000, 100_000],
+    }
+}
 
 fn make_elements(n: usize, sampler: &mut TestRng) -> Vec<sha256::Digest> {
     let mut elements = Vec::with_capacity(n);
@@ -23,16 +25,14 @@ fn make_elements(n: usize, sampler: &mut TestRng) -> Vec<sha256::Digest> {
 fn make_mem<F: Family>(elements: &[sha256::Digest]) -> Mem<F, sha256::Digest> {
     let h = StandardHasher::<Sha256>::new(ForwardFold);
     let mut mem = Mem::<F, _>::new();
-    block_on(async {
-        let batch = {
-            let mut batch = mem.new_batch();
-            for digest in elements {
-                batch = batch.add(&h, digest);
-            }
-            batch.merkleize(&mem, &h)
-        };
-        mem.apply_batch(&batch).unwrap();
-    });
+    let batch = {
+        let mut batch = mem.new_batch();
+        for digest in elements {
+            batch = batch.add(&h, digest);
+        }
+        batch.merkleize(&mem, &h)
+    };
+    mem.apply_batch(&batch).unwrap();
     mem
 }
 
@@ -44,7 +44,7 @@ fn setup<F: Family>(n: usize, a: usize) -> (Mem<F, sha256::Digest>, Vec<sha256::
 }
 
 fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         for a in [100, 1_000, 10_000, 50_000] {
             c.bench_function(
                 &format!("{}/start={n} add={a} family={family}", module_path!()),
@@ -53,13 +53,11 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                         || setup::<F>(n, a),
                         |(mem, additional)| {
                             let h = StandardHasher::<Sha256>::new(ForwardFold);
-                            block_on(async {
-                                let mut batch = mem.new_batch();
-                                for digest in &additional {
-                                    batch = batch.add(&h, digest);
-                                }
-                                batch.merkleize(&mem, &h);
-                            });
+                            let mut batch = mem.new_batch();
+                            for digest in &additional {
+                                batch = batch.add(&h, digest);
+                            }
+                            batch.merkleize(&mem, &h);
                         },
                         BatchSize::LargeInput,
                     )
