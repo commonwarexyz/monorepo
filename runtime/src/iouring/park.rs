@@ -492,11 +492,13 @@ impl Parker {
                 // pointer is valid, so the call cannot fail.
                 assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
 
-                // Both nanosecond fields are below one second, so their sum
-                // carries at most one second.
+                // Each nanosecond field is below one second, so their sum is
+                // below two seconds, and at most one whole second moves from
+                // it into the seconds field.
                 const NANOS_PER_SEC: libc::c_long = 1_000_000_000;
                 let nanos = clock.tv_nsec + libc::c_long::from(remaining.subsec_nanos());
                 let secs = libc::time_t::try_from(remaining.as_secs()).unwrap_or(libc::time_t::MAX);
+
                 Some(libc::timespec {
                     tv_sec: clock
                         .tv_sec
