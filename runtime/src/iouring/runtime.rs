@@ -118,8 +118,9 @@
 //! A pool worker takes a share of the global queue every
 //! [`Config::with_global_queue_interval`] takes and whenever its own run queue
 //! is empty. It also takes one ahead of its run queue when a push that woke no
-//! worker left an unserved hint that has aged, at most once per pop from its
-//! run queue, as the [pool](super::pool) describes. Taking a share returns one
+//! worker left an unserved hint that has aged. After a hinted take ahead of
+//! a nonempty run queue, the worker pops from that queue before acting on
+//! another hint. Taking a share returns one
 //! runnable to poll next and queues the rest in the run queue, no more than it
 //! has room for and no more than would fill it to half. A pool worker that
 //! finds both queues empty after a service pass tries to steal before parking,

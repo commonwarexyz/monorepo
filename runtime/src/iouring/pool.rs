@@ -36,31 +36,27 @@
 //! other run queues before parking, after servicing its own I/O and messages.
 //!
 //! A push into the global queue that finds no idle worker to wake leaves an
-//! unserved hint: when it happened and which episode of the queue it joined,
-//! an episode lasting from a push into the empty queue until the queue is
-//! empty again. The hint is set only while none is, and cleared only by the
-//! worker that acts on it, so its cache line stays quiet however many pushes
-//! go by. A busy worker reads it before each pop from its own run queue. Once
-//! the hint is [`GLOBAL_AGE`] old, the worker that clears it takes from the
-//! global queue once, ahead of its own run queue, if the hinted episode still
-//! lasts. That worker then pops its own run queue before it acts on another
-//! hint, so hints cannot starve the run queue. Between two pops of a run
-//! queue that stays nonempty, its worker polls at most two runnables straight
-//! from the global queue when the global queue interval is three or more, one
-//! for a hint and one for the interval, and at most three when it is two. An
-//! interval of one takes from the global queue before every pop, hint or not,
-//! so there the run queue waits while the global queue holds runnables.
+//! unserved hint with the time it tried to wake a worker. A push only sets a
+//! hint when none is set, and a worker only clears one when it acts on it,
+//! so the cache line stays quiet through a burst of pushes. A busy worker
+//! reads the hint before each pop from its own run queue. Once the hint is
+//! [`GLOBAL_AGE`] old, the worker that clears it attempts one global take
+//! ahead of its run queue. The take starts with the oldest global runnable
+//! still queued. The hinted push may already have been taken, and the
+//! runnables still queued may be younger than the hint.
 //!
-//! A worker reads the clock only when it sees a hint for the first time, which
-//! is how it notices one left during its own long poll, and otherwise compares
-//! with the time sample of its current turn. So a foreign wake that finds
-//! every worker inside a long poll, and is the global age old once that poll
-//! returns, runs next, or after one pop of the run queue that a just served
-//! hint owes, rather than after the polls queued behind it. A hint first seen
-//! younger waits for a later turn's sample or for the global queue interval. A
-//! hint whose episode has ended takes nothing when acted on, and until then it
-//! keeps later unanswered pushes from leaving hints of their own, which then
-//! wait for the interval.
+//! A worker that takes for a hint ahead of a nonempty run queue pops from
+//! that run queue before it acts on another hint. Between two pops of a run
+//! queue that stays nonempty, a worker polls at most two runnables straight
+//! from the global queue when the global queue interval is three or more,
+//! one for a hint and one for the interval, and at most three when it is
+//! two. An interval of one takes from the global queue before every pop,
+//! hint or not, so the run queue waits while the global queue holds runnables.
+//!
+//! A worker reads the clock when it first sees a hint, so it can act on one
+//! left during its own long poll. On later checks it uses the time sample
+//! of its current turn. A hint first seen younger waits for a later turn's
+//! sample. The global queue interval can bring work in sooner.
 //!
 //! [global queue interval]: super::Config::with_global_queue_interval
 //!
@@ -282,38 +278,6 @@ pub const MAX_STEAL_AGE: Duration = Duration::from_secs(1);
 /// takes from the global queue ahead of its own run queue.
 pub const GLOBAL_AGE: u64 = 100;
 
-/// Low bits of an unserved hint that hold the global queue's episode. The
-/// rest hold one more than the microseconds since the pool's epoch, which fit
-/// for over 142 years (see [`pack_unserved`]). A hint whose episode ended
-/// matches a later episode only after a multiple of 4096 more, and then takes
-/// from the global queue early once.
-const EPISODE_BITS: u32 = 12;
-
-/// Mask that selects a hint's episode bits.
-const EPISODE_MASK: u64 = (1 << EPISODE_BITS) - 1;
-
-/// Largest time field of an unserved hint.
-const MAX_UNSERVED_SINCE: u64 = (1 << (u64::BITS - EPISODE_BITS)) - 1;
-
-/// Pack the unserved hint of a push into `episode` that woke no worker
-/// `micros` after the pool's epoch. The time field saturates rather than
-/// wraps, so a hint is never zero, and it decodes to its own time until it
-/// saturates, over 142 years after the epoch.
-const fn pack_unserved(micros: u64, episode: u64) -> u64 {
-    let since = if micros < MAX_UNSERVED_SINCE {
-        micros + 1
-    } else {
-        MAX_UNSERVED_SINCE
-    };
-    (since << EPISODE_BITS) | (episode & EPISODE_MASK)
-}
-
-/// The microseconds after the pool's epoch that the nonzero hint `hint` was
-/// left, as [`pack_unserved`] saturates them.
-const fn unserved_micros(hint: u64) -> u64 {
-    (hint >> EPISODE_BITS) - 1
-}
-
 /// The key of a stamp that no look has set yet. No 55-bit head count equals
 /// it.
 const UNSEEN: u64 = u64::MAX;
@@ -394,8 +358,6 @@ struct GlobalQueue {
     open: bool,
     /// Runnables waiting for any worker, oldest first.
     runnables: VecDeque<Runnable>,
-    /// Pushes into the empty queue so far, which number its episodes.
-    episode: u64,
 }
 
 /// Progress of the pool's shutdown, guarded by its own lock and signaled
@@ -528,7 +490,6 @@ impl Pool {
             global: CachePadded::new(Mutex::new(GlobalQueue {
                 open: true,
                 runnables: VecDeque::new(),
-                episode: 0,
             })),
             closing: Mutex::new(Closing {
                 closed: false,
@@ -621,7 +582,7 @@ impl Pool {
     /// worker and leaves no hint. Once the queue has closed, returns them for
     /// the caller to discard, as [`Self::push`] does.
     pub fn push_batch<I: Iterator<Item = Runnable>>(&self, runnables: I) -> Result<(), I> {
-        let episode = {
+        {
             let mut queue = self.global();
             if !queue.open {
                 return Err(runnables);
@@ -631,19 +592,15 @@ impl Pool {
             let len = queue.runnables.len();
 
             // A batch that brought nothing, as a spill whose run queue thieves
-            // emptied first, starts no episode and wakes no worker.
+            // emptied first, wakes no worker.
             if len == before {
                 return Ok(());
-            }
-            if before == 0 {
-                queue.episode = queue.episode.wrapping_add(1);
             }
 
             // Under the lock, so the mirror's stores follow the queue's own
             // order.
             self.global_len.store(len, Ordering::Release);
-            queue.episode
-        };
+        }
 
         // Pairs with the fence in `Searcher::prepare_park`, which a worker
         // puts between publishing its bit and its last look. Either the loads
@@ -652,25 +609,23 @@ impl Pool {
         // store, so the loads that follow need no ordering of their own.
         fence(Ordering::SeqCst);
         if !self.idle.notify_global(&self.mailboxes) {
-            self.mark_unserved(episode);
+            self.mark_unserved();
         }
         Ok(())
     }
 
-    /// Leave an unserved hint for a push into `episode` that woke no worker,
-    /// unless one is already left. Reads the clock only to set one.
+    /// Leave an unserved hint for a push that woke no worker, unless one is
+    /// already left. Reads the clock only to set one.
     #[inline]
-    fn mark_unserved(&self, episode: u64) {
+    fn mark_unserved(&self) {
         if self.unserved.load(Ordering::Relaxed) != 0 {
             return;
         }
-        let hint = pack_unserved(self.clock().1, episode);
+        // Leave zero for the absent hint.
+        let hint = self.clock().1.saturating_add(1);
 
-        // Release publishes the push with the hint, so the worker that
-        // acquires the hint in `Self::take_unserved` sees the push. The fence
-        // in `Self::push_batch` orders the push before this exchange as well,
-        // so the acquire there is the half that matters. The release keeps
-        // this pairing correct on its own should that fence move.
+        // Publish the push before a worker clears the hint and locks the
+        // queue. The queue lock also orders a refill with that worker's take.
         let _ = self
             .unserved
             .compare_exchange(0, hint, Ordering::Release, Ordering::Relaxed);
@@ -684,35 +639,28 @@ impl Pool {
 
     /// When the nonzero unserved hint `hint` reaches [`GLOBAL_AGE`].
     pub fn unserved_due(&self, hint: u64) -> Instant {
-        self.epoch + Duration::from_micros(unserved_micros(hint) + GLOBAL_AGE)
+        self.epoch + Duration::from_micros((hint - 1).saturating_add(GLOBAL_AGE))
     }
 
-    /// Act on the unserved hint `hint`: clear it, unless another worker
-    /// already did or it was replaced, and then take a share of the global
-    /// queue as [`Self::take`] does if the queue is still in the hinted
-    /// episode, that is, if it has held runnables ever since the hinted push.
-    /// The episode shows only that, not that the runnable taken waited the
-    /// global age, since a queue that stays nonempty can still turn over.
-    /// Only the worker that clears a hint takes for it, and only once.
-    /// Returns `None` when another worker cleared the hint or the episode has
-    /// ended.
+    /// Clear the hint and take one share as [`Self::take`] does, if it still
+    /// matches. Returns `None` if another worker cleared it or the queue is
+    /// empty when locked.
     #[inline(never)]
     #[must_use]
     pub fn take_unserved(&self, hint: u64, ready: &mut Ready) -> Option<Runnable> {
-        // Acquire pairs with the release in `Self::mark_unserved`, so the
-        // length read below sees the hinted push, or a take since that emptied
-        // the queue and ended its episode. A relaxed clear could read the
-        // length from before the push and drop the hint unseen.
         if self
             .unserved
             .compare_exchange(hint, 0, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
-            || !self.has_global()
         {
             return None;
         }
+
+        // A refill can leave this hint in place. Use the lock to see any
+        // refill before this take. A refill after it sees the cleared hint
+        // through the lock and can mark a new one.
         let mut queue = self.global();
-        if queue.episode & EPISODE_MASK != hint & EPISODE_MASK {
+        if queue.runnables.is_empty() {
             return None;
         }
         self.take_locked(&mut queue, ready)
@@ -1285,8 +1233,7 @@ pub mod tests {
         /// Leave an unserved hint that never comes due, so no worker takes
         /// from the global queue for a hint and no push leaves another.
         pub fn suppress_unserved(&self) {
-            self.unserved
-                .store(pack_unserved(u64::MAX, 0), Ordering::Relaxed);
+            self.unserved.store(u64::MAX, Ordering::Relaxed);
         }
 
         /// Take the oldest runnable from the global queue.
@@ -1344,42 +1291,7 @@ pub mod tests {
         task
     }
 
-    /// An unserved hint keeps its time and episode however long the pool has
-    /// run, past 2^44 microseconds (about 204 days) as well. Its time field
-    /// holds over 142 years of microseconds and then saturates, so a hint is
-    /// never zero and never decodes to an earlier time.
-    #[test]
-    fn test_unserved_hint_keeps_its_time_at_any_uptime() {
-        assert!(
-            Duration::from_micros(MAX_UNSERVED_SINCE) > Duration::from_secs(142 * 365 * 24 * 3600)
-        );
-        let times = [
-            0,
-            1,
-            (1 << 44) - 1,
-            1 << 44,
-            1 << 51,
-            MAX_UNSERVED_SINCE - 2,
-            MAX_UNSERVED_SINCE - 1,
-            MAX_UNSERVED_SINCE,
-            u64::MAX,
-        ];
-        for micros in times {
-            for episode in [0, 1, EPISODE_MASK, EPISODE_MASK + 1, u64::MAX] {
-                let hint = pack_unserved(micros, episode);
-                assert_ne!(hint, 0);
-                assert_eq!(hint & EPISODE_MASK, episode & EPISODE_MASK);
-                assert_eq!(
-                    unserved_micros(hint),
-                    micros.min(MAX_UNSERVED_SINCE - 1),
-                    "micros {micros}"
-                );
-            }
-        }
-    }
-
-    /// A batch that brings nothing, as a spill whose run queue thieves
-    /// emptied, starts no episode, leaves no hint and wakes no worker.
+    /// A batch that brings nothing leaves no hint and wakes no worker.
     #[test]
     fn test_empty_batch_changes_nothing() {
         let pool = pool(2);
@@ -1390,7 +1302,6 @@ pub mod tests {
         assert!(pool.idle().is_idle(1));
         assert_eq!(notifications(&pool.mailbox(1).unparker), 0);
         assert_eq!(pool.unserved(), 0);
-        assert_eq!(pool.global().episode, 0);
         assert!(!pool.has_global());
         parked.finish_park();
     }
@@ -1428,41 +1339,33 @@ pub mod tests {
         }
     }
 
-    /// A hint whose episode ended takes nothing, even with the queue refilled
-    /// since, and is cleared, so the next unwoken push leaves a fresh one that
-    /// takes.
+    /// A hint outlives a take that empties the global queue, and the worker
+    /// that later clears it takes what a refill queued since, which left no
+    /// hint of its own.
     #[test]
-    fn test_unserved_hint_takes_only_within_its_episode() {
+    fn test_unserved_hint_can_take_a_refill() {
         let pool = pool(2);
         let set = Tasks::new(1);
         let mut ready = ready(&pool, 0);
         let first = push(&pool, &set);
-        let stale = pool.unserved();
+        let hint = pool.unserved();
         pool.take(&mut ready).unwrap().discard();
-        assert!(!pool.has_global());
 
-        // A new episode keeps the stale hint, which then takes nothing.
+        // The refill finds the hint left and leaves none.
         let second = push(&pool, &set);
-        assert_eq!(pool.unserved(), stale);
-        assert!(pool.take_unserved(stale, &mut ready).is_none());
-        assert_eq!(pool.unserved(), 0);
-        assert!(pool.has_global());
-
-        // The next push leaves a fresh hint, which takes the waiting runnable first.
-        let third = push(&pool, &set);
-        let fresh = pool.unserved();
-        assert_ne!(fresh, 0);
-        assert_ne!(fresh, stale);
-        let runnable = pool.take_unserved(fresh, &mut ready).unwrap();
-        assert_eq!(task_of(&runnable).as_ptr(), second.as_ptr());
-        runnable.discard();
-        while let Some(runnable) = ready.pop() {
+        assert_eq!(pool.unserved(), hint);
+        let taken = pool.take_unserved(hint, &mut ready).map(|runnable| {
+            let task = task_of(&runnable).as_ptr();
             runnable.discard();
-        }
+            task
+        });
+
         pool.close();
-        for task in [first, second, third] {
+        for task in [&first, &second] {
             task.clear();
         }
+        assert_eq!(taken, Some(second.as_ptr()));
+        assert_eq!(pool.unserved(), 0);
     }
 
     /// A take preserves FIFO order and bounds its share, including the returned runnable.
@@ -2014,22 +1917,11 @@ mod loom_tests {
     }
 
     /// A push into the global queue that wakes no worker leaves an unserved
-    /// hint, and the worker that clears the hint sees that push, so its take
-    /// finds the runnable. The clear's acquire is the half that matters: it
-    /// pairs with the fence in `Pool::push_batch`, which orders the push
-    /// before the hint as the hint's own release does. With a relaxed clear,
-    /// the worker can read the length from before the push and drop the hint
-    /// unseen, which fails this model.
-    ///
-    /// The pusher and the worker each run on a spawned thread, and the worker
-    /// waits for the hint with yields, since two properties of loom would let
-    /// other shapes pass without checking anything. Loom keeps only the last
-    /// access to each atomic for its partial order reduction, so it never
+    /// hint, and the worker that clears it can take the runnable. The worker
+    /// waits for the hint with yields. Loom's partial order reduction never
     /// runs the pusher's load and exchange of the hint ahead of a worker's
-    /// load that came first, and a worker that reads the hint once can miss
-    /// it in every schedule. And loom never returns a value that a thread saw
-    /// before it yielded, so a worker on the thread that built the pool,
-    /// which saw the initial length, cannot read it stale after waiting.
+    /// load that came first, so a worker that read the hint once could miss it
+    /// in every schedule.
     #[test]
     fn test_cleared_hint_shows_its_push() {
         loom::model(|| {
@@ -2066,6 +1958,49 @@ mod loom_tests {
             assert_eq!(pool.unserved(), 0);
             assert!(!pool.has_global());
             task.clear();
+        });
+    }
+
+    /// A refill that finds a hint left stays covered when the worker that
+    /// clears the hint races it: the worker's take, under the queue lock,
+    /// finds the refill, or the refill sees the clear and leaves a hint of its
+    /// own. A take that checked the length mirror before locking could miss
+    /// the refill while the refill still saw the old hint, which fails this
+    /// model.
+    #[test]
+    fn test_hint_clear_races_refill() {
+        loom::model(|| {
+            let pool = std::sync::Arc::new(Pool::new(2, Duration::ZERO).0);
+            let mut ready = pool.queue(0).owner();
+            let set = Tasks::new(1);
+            let first = super::tests::push(&pool, &set);
+            let hint = pool.unserved();
+            pool.take(&mut ready).unwrap().discard();
+
+            // Use a different timestamp if the refill marks a new hint.
+            pool.model_clock
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+            let refill = thread::spawn({
+                let pool = pool.clone();
+                let (task, runnable) = super::tests::task(&set);
+                move || {
+                    assert!(pool.push(runnable).is_ok());
+                    task
+                }
+            });
+
+            let took_refill = pool
+                .take_unserved(hint, &mut ready)
+                .is_some_and(|runnable| {
+                    runnable.discard();
+                    true
+                });
+            let second = refill.join().unwrap();
+            let left_hint = pool.unserved() != 0;
+            pool.close();
+            first.clear();
+            second.clear();
+            assert!(took_refill || left_hint, "refill lost its hint");
         });
     }
 }
