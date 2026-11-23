@@ -445,46 +445,49 @@ impl Parker {
             return None;
         }
 
-        let before = Instant::now();
-        self.futex_wait(arm.snapshot(), deadline, before)
-            .then(|| before.elapsed())
+        self.futex_wait(arm.snapshot(), deadline)
     }
 
-    /// Sleep on the word for the fully idle path, returning whether a wake
-    /// ended the sleep.
+    /// Sleep on the word for the fully idle path, returning how long the
+    /// thread blocked when a wake ended the sleep.
     ///
     /// `snapshot` must be the exact post-arm word from the atomic transition
     /// that set the waiter bit. The wait blocks only while the word still
     /// equals it, which closes the race between arming and a concurrent
     /// notification. A stale snapshot, an elapsed deadline, `EINTR`, `EAGAIN`,
-    /// `ETIMEDOUT`, and an unexpected error all return `false`, and the caller
-    /// rechecks its sources with the deadline unchanged. `now` is a clock
-    /// reading the caller took just before, from which the timeout is computed.
+    /// `ETIMEDOUT`, and an unexpected error all return `None`, and the caller
+    /// rechecks its sources with the deadline unchanged.
     #[cfg(not(feature = "loom"))]
-    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>, now: Instant) -> bool {
+    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> Option<Duration> {
         // This is only a same-word equality check before entering the
         // syscall. It relies only on modification order of this atomic, so
         // `Relaxed` is sufficient.
         if self.word.load(Ordering::Relaxed) != snapshot {
-            return false;
+            return None;
         }
+
+        // This reading times the sleep and the deadline's remaining time.
+        let now = Instant::now();
 
         // futex2 takes an absolute `CLOCK_MONOTONIC` timeout. That is the clock
         // of [`Instant`], which does not expose its value, so the clock is read
-        // again here and the time remaining since `now` added to it.
+        // again and the time remaining since `now` added to it. Reading it
+        // after `now` keeps the timeout from preceding the deadline.
         let timeout = match deadline {
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(now);
                 if remaining.is_zero() {
-                    return false;
+                    return None;
                 }
 
                 let mut clock = libc::timespec {
                     tv_sec: 0,
                     tv_nsec: 0,
                 };
+
                 // SAFETY: `clock` is writable storage that outlives the call.
                 let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut clock) };
+
                 // CLOCK_MONOTONIC exists on every supported kernel and the
                 // pointer is valid, so the call cannot fail.
                 assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
@@ -527,18 +530,18 @@ impl Parker {
             )
         };
         if ret == 0 {
-            return true;
+            return Some(now.elapsed());
         }
 
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
-            Some(libc::EINTR | libc::EAGAIN | libc::ETIMEDOUT) => false,
+            Some(libc::EINTR | libc::EAGAIN | libc::ETIMEDOUT) => None,
             _ => {
                 // An unexpected futex wait error means the kernel
                 // refused to block, so the safe fallback is to return to
                 // userspace and re-check the word rather than panic.
                 warn!("futex wait failed: {err}");
-                false
+                None
             }
         }
     }
@@ -549,20 +552,22 @@ impl Parker {
     /// until a wake releases it, so loom can explore the same lost-wake
     /// boundary that the kernel's atomic futex wait protects in production.
     #[cfg(feature = "loom")]
-    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>, now: Instant) -> bool {
+    fn futex_wait(&self, snapshot: u32, deadline: Option<Instant>) -> Option<Duration> {
+        let now = Instant::now();
+
         // Loom models notification races, not the kernel's timer queue. An
         // already due deadline exercises the no-sleep transition, and a deadline
         // still ahead is ignored, so the wait compares and queues as an untimed
         // wait does.
         if deadline.is_some_and(|deadline| deadline <= now) {
-            return false;
+            return None;
         }
 
         // The bucket lock orders this compare against every wake, as in the
         // kernel, so the load needs no ordering of its own.
         let mut queue = self.word.futex.lock().unwrap();
         if self.word.load(Ordering::Relaxed) != snapshot {
-            return false;
+            return None;
         }
 
         let waiter = Waiter::Thread(queue.next_ticket);
@@ -575,7 +580,7 @@ impl Parker {
             );
             queue = self.word.futex_waiters.wait(queue).unwrap();
         }
-        true
+        Some(now.elapsed())
     }
 }
 
@@ -984,7 +989,7 @@ pub mod tests {
 
         // A wait on the stale snapshot returns at once instead of blocking,
         // through the userspace equality check or the futex EAGAIN path.
-        assert!(!parker.futex_wait(arm.snapshot(), None, Instant::now()));
+        assert!(parker.futex_wait(arm.snapshot(), None).is_none());
         drop(arm);
 
         // The notification was counted and the guard disarmed.
@@ -1258,7 +1263,7 @@ mod loom_tests {
     /// wake of that wait posts its completion. A fresh ring wait therefore
     /// behaves as a blocking wait.
     fn ring_wait(parker: &Parker, guard: &ArmGuard<'_>) {
-        let _ = parker.futex_wait(guard.snapshot(), None, Instant::now());
+        let _ = parker.futex_wait(guard.snapshot(), None);
     }
 
     /// Arm against `seen` and block in a new ring wait if that is still idle.
@@ -1797,7 +1802,7 @@ mod loom_tests {
             assert_eq!(notifications(&unparker), 2);
             assert!(!waiting(&unparker));
             assert_eq!(parker.word.futex.lock().unwrap().wakes, 1);
-            assert!(!parker.futex_wait(guard.snapshot(), None, Instant::now()));
+            assert!(parker.futex_wait(guard.snapshot(), None).is_none());
             drop(guard);
             assert!(!waiting(&unparker));
         });
