@@ -134,11 +134,15 @@ impl<D: Copy> Resident<D> {
     fn reserve<F: Family>(&mut self, end: Position<F>) {
         let born = born(end);
         for (level, &to) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
+            let additional = to.saturating_sub(level.end());
+            if additional == 0 {
+                continue;
+            }
             let len = level.nodes.len();
-            let total = usize::try_from(to.saturating_sub(level.end()))
-                .ok()
-                .and_then(|additional| len.checked_add(additional));
-            let Some(total) = total.filter(|&total| total > len) else {
+            let Ok(additional) = usize::try_from(additional) else {
+                continue;
+            };
+            let Some(total) = len.checked_add(additional) else {
                 continue;
             };
             let capacity = total.checked_next_power_of_two().unwrap_or(total);
