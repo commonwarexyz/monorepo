@@ -477,20 +477,42 @@ impl<T> Queue<T> {
         }
     }
 
-    /// Move half the unclaimed backlog, rounded up, into `into`, returning
-    /// how many values moved. A backlog of exactly one value is claimed only
-    /// if `lone` accepts its 55-bit count and whether it was pushed marked.
+    /// Claim half the unclaimed backlog, rounded up, returning its oldest
+    /// value to the caller and moving the rest into `into`. A backlog of
+    /// exactly one value is claimed only if `lone` accepts its 55-bit count
+    /// and whether it was pushed marked.
     ///
-    /// Moves none when the backlog is empty, while another thief holds a
+    /// The returned value is never published in `into`, so no other thief
+    /// can take it before the caller uses it.
+    ///
+    /// Returns `None` when the backlog is empty, while another thief holds a
     /// claim, when `into` has fewer than half its slots free, or when `lone`
     /// refuses. `lone` is called only for a lone value, on the head snapshot
     /// the claim's exchange compares, so a successful lone claim takes the
     /// value at the count it accepted. A retried claim calls it again with
-    /// the count it sees then. The claim is released before the values are
+    /// the count it sees then. The claim is released before the rest are
     /// published in `into` with one tail store. Panics if `into` belongs to
     /// this queue or this queue is exclusive.
     #[must_use]
-    pub fn steal_into_if(&self, into: &mut Owner<T>, lone: impl FnMut(u64, bool) -> bool) -> usize {
+    pub fn steal_into_if(
+        &self,
+        into: &mut Owner<T>,
+        lone: impl FnMut(u64, bool) -> bool,
+    ) -> Option<T> {
+        let (first, _) = self.steal_split(into, lone, true);
+        first
+    }
+
+    /// Claim as [`Self::steal_into_if`] does, returning the oldest claimed
+    /// value if `reserve` is set and moving the rest into `into`, with the
+    /// number of values claimed.
+    #[inline(always)]
+    fn steal_split(
+        &self,
+        into: &mut Owner<T>,
+        lone: impl FnMut(u64, bool) -> bool,
+        reserve: bool,
+    ) -> (Option<T>, usize) {
         assert!(!self.0.exclusive, "steal source must be a shared queue");
         assert!(
             !Arc::ptr_eq(&into.0, &self.0),
@@ -502,26 +524,32 @@ impl<T> Queue<T> {
         let tail = into.0.tail.load(Ordering::Relaxed);
         let (real, gap) = unpack(into.0.head.load(Ordering::Acquire));
         if tail.wrapping_sub(steal(real, gap)) > HALF {
-            return 0;
+            return (None, 0);
         }
 
         let Some((first, count)) = self.claim(lone) else {
-            return 0;
+            return (None, 0);
         };
-        for offset in 0..count {
+
+        // SAFETY: the source claim owns this initialized slot.
+        let reserved = reserve.then(|| unsafe { self.0.read(first as u32) });
+        let moved = u32::from(reserve);
+        for offset in moved..count {
             // SAFETY: the source claim owns this initialized slot.
             let value = unsafe { self.0.read((first as u32).wrapping_add(offset)) };
 
             // SAFETY: the destination had half its slots free before the
             // claim, the owner is borrowed, and thieves only add room.
-            unsafe { into.0.write(tail.wrapping_add(offset), value) };
+            unsafe { into.0.write(tail.wrapping_add(offset - moved), value) };
         }
 
         self.release_claim(first, count);
-        into.0
-            .tail
-            .store(tail.wrapping_add(count), Ordering::Release);
-        Widen::widen(count)
+        if count > moved {
+            into.0
+                .tail
+                .store(tail.wrapping_add(count - moved), Ordering::Release);
+        }
+        (reserved, Widen::widen(count))
     }
 
     /// Claim half the published backlog, rounded up, returning the first
@@ -904,10 +932,12 @@ pub mod tests {
             self.backlog() != Backlog::None
         }
 
-        /// Steal as [`Self::steal_into_if`] does, taking a lone value too.
+        /// Steal as [`Self::steal_into_if`] does, taking a lone value too,
+        /// but move every claimed value into `into` and return how many
+        /// moved.
         #[must_use]
         pub fn steal_into(&self, into: &mut Owner<T>) -> usize {
-            self.steal_into_if(into, |_, _| true)
+            self.steal_split(into, |_, _| true, false).1
         }
 
         /// Move an empty, unclaimed queue's head and tail to the 55-bit count
@@ -1439,12 +1469,12 @@ pub mod tests {
                 asked.push((real, marked));
                 marked
             };
-            assert_eq!(queue.steal_into_if(&mut into, &mut decide), 0);
+            assert_eq!(queue.steal_into_if(&mut into, &mut decide), None);
             assert_eq!(owner.pop(), Some(2));
             assert!(matches!(owner.push_marked(3), Push::Pushed(1)));
-            assert_eq!(queue.steal_into_if(&mut into, &mut decide), 1);
+            assert_eq!(queue.steal_into_if(&mut into, &mut decide), Some(3));
             assert_eq!(asked, [(count(2), false), (count(3), true)]);
-            assert_eq!(drain(&mut into), [3]);
+            assert!(drain(&mut into).is_empty());
 
             // A marked push into a full queue hands the value back, and the
             // value left alone after the drain is not marked.
@@ -1497,7 +1527,7 @@ pub mod tests {
                 asked = Some((real, marked));
                 false
             });
-            assert_eq!(stolen, 0);
+            assert_eq!(stolen, None);
             assert_eq!(asked, Some((later, marked)));
             assert_eq!(owner.pop(), Some(1));
         }
@@ -2233,12 +2263,12 @@ mod loom_tests {
                     let thief = thread::spawn(move || {
                         let destination = Queue::shared();
                         let mut into = destination.owner();
-                        let moved = queue.steal_into_if(&mut into, |real, marked| {
+                        let first = queue.steal_into_if(&mut into, |real, marked| {
                             if by_mark { marked } else { real == start }
                         });
-                        let seen = drain(&mut into);
-                        assert_eq!(seen.len(), moved);
-                        seen
+                        let rest = drain(&mut into);
+                        assert!(first.is_some() || rest.is_empty());
+                        first.into_iter().chain(rest).collect::<Vec<_>>()
                     });
 
                     // The owner pops the first value and queues the second
@@ -2282,14 +2312,14 @@ mod loom_tests {
                     }
                     let destination = Queue::shared();
                     let mut into = destination.owner();
-                    let moved = queue.steal_into_if(&mut into, |real, marked| {
+                    let first = queue.steal_into_if(&mut into, |real, marked| {
                         assert_eq!(real, start);
                         assert!(marked, "the claim saw the value without its mark");
                         true
                     });
-                    let seen = drain(&mut into);
-                    assert_eq!(seen.len(), moved);
-                    seen
+                    let rest = drain(&mut into);
+                    assert!(first.is_some() || rest.is_empty());
+                    first.into_iter().chain(rest).collect::<Vec<_>>()
                 });
 
                 assert!(matches!(owner.push_marked(0), Push::Pushed(1)));

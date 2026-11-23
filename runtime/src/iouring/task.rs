@@ -2094,8 +2094,8 @@ mod loom_tests {
     };
     use crate::iouring::{
         idle::{
-            Park, Searcher,
-            tests::{WakePoint, on_wake_point},
+            Look, Park, Searcher,
+            tests::{WakePoint, on_wake_point, search_then_look},
         },
         park::Parker,
         pool::KICK,
@@ -2266,8 +2266,14 @@ mod loom_tests {
                 continue;
             }
 
-            if searcher.search(ready) || searcher.publish_and_look(ready) {
+            // A runnable a steal reserved is polled next, as in the drive
+            // loop, so no other worker can take it first.
+            let (again, stolen) = search_then_look(&mut searcher, ready);
+            if again {
                 searcher.leave_search();
+                if let Some(runnable) = stolen {
+                    complete(pool, set, runnable, completed, tasks);
+                }
                 continue;
             }
             if completed.load(Ordering::Acquire) == tasks {
@@ -2324,8 +2330,12 @@ mod loom_tests {
                 continue;
             }
 
-            if searcher.search(ready) || searcher.publish_and_look(ready) {
+            let (again, stolen) = search_then_look(&mut searcher, ready);
+            if again {
                 searcher.leave_search();
+                if let Some(runnable) = stolen {
+                    run(set, runnable);
+                }
                 continue;
             }
             if stop.load(Ordering::Acquire) {
@@ -2610,8 +2620,11 @@ mod loom_tests {
                 move || {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
-                    let _ = searcher.search(&mut ready);
+                    let stolen = searcher.search(&mut ready);
                     searcher.leave_search();
+                    if let Some(runnable) = stolen {
+                        run(&set, runnable);
+                    }
                     drain(&set, &mut ready);
                 }
             });
@@ -2664,9 +2677,9 @@ mod loom_tests {
                 move || {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
-                    let _ = searcher.search(&mut ready);
+                    let stolen = searcher.search(&mut ready);
                     searcher.leave_search();
-                    while let Some(runnable) = ready.pop() {
+                    for runnable in stolen.into_iter().chain(std::iter::from_fn(|| ready.pop())) {
                         complete(&pool, &set, runnable, &completed, KICK);
                     }
                     wait_ran(&ran);
@@ -2808,7 +2821,7 @@ mod loom_tests {
             let mut r1 = pool.queue(1).owner();
             let mut searcher = Searcher::new(&pool, 1);
             let seen = p1.observe();
-            assert!(searcher.publish_and_look(&mut r1));
+            assert!(matches!(searcher.publish_and_look(&mut r1), Look::Run));
             assert!(r1.is_empty(), "the claimed lap must not steal");
             assert!(!pool.idle().is_idle(1));
             assert!(pool.idle().is_idle(3));
@@ -2893,7 +2906,7 @@ mod loom_tests {
             let mut zero = Searcher::new(&pool, 0);
             let mut two = Searcher::new(&pool, 2);
             assert_eq!(zero.prepare_park(&r0), Park::Wait);
-            assert!(!two.search(&mut r2));
+            assert!(two.search(&mut r2).is_none());
 
             // Worker three overflows. Its kicks see worker two's count, and
             // the overflow's push claims only worker zero.
@@ -2939,7 +2952,9 @@ mod loom_tests {
 
     /// The backlog model on ordinary run queues, whose thieves also steal a
     /// lone runnable, before the kick or after the first steal, at four
-    /// preemptions. After a peer runs a task, the owner drains its queue.
+    /// preemptions. A thief keeps a lone runnable it steals for its next poll,
+    /// so that steal publishes nothing a peer could take back. After a peer
+    /// runs a task, the owner drains its queue.
     #[test]
     fn test_backlog_behind_a_busy_worker_is_stolen_with_lone_steals() {
         backlog_behind_a_busy_worker(pool, 4, true);
@@ -2951,8 +2966,10 @@ mod loom_tests {
         kick_left_with_stop(pool_rounding_down, 2);
     }
 
-    /// The hand-on model on ordinary run queues, whose searchers also steal a
-    /// lone runnable, at one preemption.
+    /// The hand-on model on ordinary run queues, at one preemption. A searcher
+    /// there can also steal a lone runnable, which it keeps unpublished for its
+    /// next poll, and its count's return must still hand the kick on to the
+    /// parked peer.
     #[test]
     fn test_kick_left_to_a_searcher_is_handed_on_with_lone_steals() {
         kick_left_to_a_searcher(pool, 1);
@@ -2982,7 +2999,9 @@ mod loom_tests {
 
     /// The claim model on ordinary run queues, where the woken peer and
     /// worker zero also race for the lone runnable that the peer's first
-    /// steal leaves, at one preemption.
+    /// steal leaves, at one preemption. A thief keeps the oldest runnable of
+    /// each steal for its next poll, so a steal of one runnable publishes
+    /// nothing.
     #[rstest]
     #[case::prompt_return(false, false)]
     #[case::prompt_drop(false, true)]
@@ -2997,7 +3016,8 @@ mod loom_tests {
 
     /// The claim model on ordinary run queues with a lone runnable as its
     /// backlog, at two preemptions. The claimed look took its count for that
-    /// runnable, which the peer that the last return wakes then steals.
+    /// runnable, which the peer that the last return wakes then steals and
+    /// keeps for its next poll.
     #[rstest]
     #[case::prompt_return(false, false)]
     #[case::prompt_drop(false, true)]
@@ -3017,7 +3037,8 @@ mod loom_tests {
     }
 
     /// The run-after model on ordinary run queues, whose workers also steal a
-    /// lone runnable, at one preemption.
+    /// lone runnable and keep it unpublished for their next poll, at one
+    /// preemption.
     #[test]
     fn test_run_after_the_last_count_wakes_a_parked_peer_with_lone_steals() {
         run_after_the_last_count(pool, 1);
@@ -3080,11 +3101,14 @@ mod loom_tests {
                 move || {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
-                    assert!(!searcher.search(&mut ready));
+                    assert!(searcher.search(&mut ready).is_none());
                     reach(&gate, 1);
                     await_stage(&gate, 2);
-                    let _ = searcher.search(&mut ready);
+                    let stolen = searcher.search(&mut ready);
                     searcher.leave_search();
+                    if let Some(runnable) = stolen {
+                        run(&set, runnable);
+                    }
                     drain(&set, &mut ready);
                 }
             });
@@ -3148,12 +3172,12 @@ mod loom_tests {
                 move || {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
-                    assert!(!searcher.search(&mut ready));
+                    assert!(searcher.search(&mut ready).is_none());
                     reach(&gate, 1);
                     await_stage(&gate, 2);
-                    let _ = searcher.search(&mut ready);
+                    let stolen = searcher.search(&mut ready);
                     searcher.leave_search();
-                    while let Some(runnable) = ready.pop() {
+                    for runnable in stolen.into_iter().chain(std::iter::from_fn(|| ready.pop())) {
                         complete(&pool, &set, runnable, &completed, TASKS);
                     }
                 }

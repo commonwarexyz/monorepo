@@ -188,7 +188,11 @@
 //! passes the cap once when it comes due. That only adds contention: the count
 //! it takes is an ordinary one, and its search clears the re-look.
 
-use super::{mailbox::Mailbox, pool::Pool, task::Ready};
+use super::{
+    mailbox::Mailbox,
+    pool::Pool,
+    task::{Ready, Runnable},
+};
 use std::{mem, sync::Arc, thread, time::Instant};
 
 cfg_if::cfg_if! {
@@ -420,6 +424,18 @@ pub enum Park {
     Search,
 }
 
+/// What a pool worker does after [`Searcher::publish_and_look`].
+#[must_use]
+pub enum Look {
+    /// Wait for a wake, as [`Park::Wait`] says.
+    Wait,
+    /// Run again for work observed or a claim, as [`Park::Run`] says.
+    Run,
+    /// Run again, polling this stolen runnable first, as
+    /// [`Searcher::search`] requires.
+    Stole(Runnable),
+}
+
 /// A pool worker's part in searching and waking: whether its idle bit is
 /// published, whether it holds a search count, and where its next search
 /// starts.
@@ -469,12 +485,14 @@ impl<'a> Searcher<'a> {
     }
 
     /// Scan the other workers' run queues once and steal half of the first
-    /// backlog found into `ready`. Returns whether it took any. A worker
-    /// holding no count first takes one, unless the search count is already at
-    /// least half the worker count. A count taken or inherited stays held
-    /// whether or not the steal succeeds, until the worker leaves searching or
-    /// parks. The worker must be unpublished, and `ready` must be its own empty
-    /// run queue. A one-worker pool returns `false` without taking a count.
+    /// backlog found. Returns the oldest runnable taken, which the worker must
+    /// poll next or offer to the other workers before it runs user code, and
+    /// moves the rest into `ready`. A worker holding no count first takes one,
+    /// unless the search count is already at least half the worker count. A
+    /// count taken or inherited stays held whether or not the steal succeeds,
+    /// until the worker leaves searching or parks. The worker must be
+    /// unpublished, and `ready` must be its own empty run queue. A one-worker
+    /// pool returns `None` without taking a count.
     ///
     /// A search that scans clears [`Self::relook`] first, and a young lone
     /// runnable it refuses brings it forward. A re-look that has come due is
@@ -483,14 +501,14 @@ impl<'a> Searcher<'a> {
     /// longer than that. Passing the cap also keeps a due re-look from
     /// staying recorded, where it would end every wait at once.
     #[must_use]
-    pub fn search(&mut self, ready: &mut Ready) -> bool {
+    pub fn search(&mut self, ready: &mut Ready) -> Option<Runnable> {
         let pool = self.pool;
         let due = self.relook.is_some_and(|relook| relook <= pool.now());
 
         // A one-worker pool has no run queue to steal from, and a worker
         // without a count needs one, under the cap, before it searches.
         if pool.workers() == 1 || (!self.searching && !self.begin(due)) {
-            return false;
+            return None;
         }
         self.relook = None;
 
@@ -689,12 +707,12 @@ impl<'a> Searcher<'a> {
     /// the look asks it to. Requires this worker's empty run queue and no live
     /// publication, as [`Self::prepare_park`] does.
     ///
-    /// `true` leaves the worker unpublished with work observed or stolen, and
-    /// possibly a held count. `false` leaves it published for the caller to
-    /// wait, no longer than [`Self::relook`], and then call
-    /// [`Self::finish_park`], even if the wait does not block.
-    #[must_use]
-    pub fn publish_and_look(&mut self, ready: &mut Ready) -> bool {
+    /// [`Look::Run`] and [`Look::Stole`] leave the worker unpublished with
+    /// work observed or stolen, and possibly a held count. [`Look::Wait`]
+    /// leaves it published for the caller to wait, no longer than
+    /// [`Self::relook`], and then call [`Self::finish_park`], even if the
+    /// wait does not block.
+    pub fn publish_and_look(&mut self, ready: &mut Ready) -> Look {
         // A search that finds nothing keeps its count, and the next publication
         // returns it. Another worker can pop or claim the backlog between the
         // look and the steal, so a failed scan must publish and look again.
@@ -703,11 +721,11 @@ impl<'a> Searcher<'a> {
         // publication of a call can bring a claim's notification.
         loop {
             match self.prepare_park(ready) {
-                Park::Wait => return false,
-                Park::Run => return true,
+                Park::Wait => return Look::Wait,
+                Park::Run => return Look::Run,
                 Park::Search => {
-                    if self.search(ready) {
-                        return true;
+                    if let Some(runnable) = self.search(ready) {
+                        return Look::Stole(runnable);
                     }
                 }
             }
@@ -772,10 +790,61 @@ pub mod tests {
             tests::{aged_pool, pool, push, ready, task},
         },
         queue::CAPACITY,
-        task::{Task, tests::queue},
+        task::{
+            Task,
+            tests::{queue, task_of},
+        },
         tasks::Tasks,
     };
     use std::{cell::RefCell, rc::Rc, time::Duration};
+
+    /// Searches that queue the runnable a steal reserves at the end of the
+    /// thief's run queue, for tests that count or drain that run queue.
+    pub trait Keep {
+        /// Search as [`Searcher::search`] does, returning whether it stole.
+        fn searched(&mut self, ready: &mut Ready) -> bool;
+
+        /// Look as [`Searcher::publish_and_look`] does, returning whether to
+        /// run again.
+        fn looked(&mut self, ready: &mut Ready) -> bool;
+    }
+
+    /// Search, then publish and look if the search stole nothing, as the
+    /// drive loop does before it parks. Returns whether to run again, with
+    /// the runnable a steal reserved for the next poll, if any.
+    #[cfg(feature = "loom")]
+    pub fn search_then_look(
+        searcher: &mut Searcher<'_>,
+        ready: &mut Ready,
+    ) -> (bool, Option<Runnable>) {
+        if let Some(runnable) = searcher.search(ready) {
+            return (true, Some(runnable));
+        }
+        match searcher.publish_and_look(ready) {
+            Look::Wait => (false, None),
+            Look::Run => (true, None),
+            Look::Stole(runnable) => (true, Some(runnable)),
+        }
+    }
+
+    impl Keep for Searcher<'_> {
+        fn searched(&mut self, ready: &mut Ready) -> bool {
+            self.search(ready)
+                .map(|runnable| queue(ready, runnable))
+                .is_some()
+        }
+
+        fn looked(&mut self, ready: &mut Ready) -> bool {
+            match self.publish_and_look(ready) {
+                Look::Wait => false,
+                Look::Run => true,
+                Look::Stole(runnable) => {
+                    queue(ready, runnable);
+                    true
+                }
+            }
+        }
+    }
 
     impl Idle {
         /// Whether worker `index` is published in the idle set.
@@ -855,6 +924,54 @@ pub mod tests {
         // Drop the hooks outside the borrow, as `at_wake_point` runs them.
         let hooks = WAKE_HOOKS.with(|hooks| mem::take(&mut *hooks.borrow_mut()));
         drop(hooks);
+    }
+
+    /// A steal hands the oldest runnable it takes to the thief for its next
+    /// poll instead of publishing it, so no other worker can take it first.
+    /// Two workers that stole a published runnable back and forth, each woken
+    /// by the count the other returned before its poll, would pass it between
+    /// them without polling it.
+    #[test]
+    fn test_stolen_runnable_is_left_for_the_thief_poll() {
+        let pool = pool(2);
+        let set = Tasks::new(2);
+        let (mut zero, mut one) = (ready(&pool, 0), ready(&pool, 1));
+        let (mut a, mut b) = (Searcher::new(&pool, 0), Searcher::new(&pool, 1));
+        assert_eq!(b.prepare_park(&one), Park::Wait);
+
+        // Worker zero queues two tasks, waking worker one, which steals the
+        // oldest for its next poll and publishes none in its run queue.
+        let (relayed, runnable) = task(&set);
+        pool.enqueue(&mut zero, runnable);
+        let (remaining, runnable) = task(&set);
+        pool.enqueue(&mut zero, runnable);
+        assert_eq!(notifications(&pool.mailbox(1).unparker), 1);
+        b.finish_park();
+        let stolen = b.search(&mut one).expect("worker one steals");
+        assert_eq!(task_of(&stolen).as_ptr(), relayed.as_ptr());
+        assert!(one.is_empty());
+
+        // Worker zero runs its other task and parks on worker one's count.
+        zero.pop().expect("the second task remains").discard();
+        remaining.clear();
+        assert!(b.searching);
+        assert!(!a.searched(&mut zero));
+        assert!(!a.looked(&mut zero));
+
+        // Worker one returns its count before its poll, which wakes worker
+        // zero. Its search finds nothing to take back.
+        let mailbox = pool.mailbox(0);
+        let before = notifications(&mailbox.unparker);
+        b.leave_search();
+        assert_eq!(notifications(&mailbox.unparker), before + 1);
+        a.finish_park();
+        assert!(a.search(&mut zero).is_none());
+        a.leave_search();
+        assert_eq!(pool.idle().search_count(), 0);
+
+        // Only worker one polls the task.
+        stolen.discard();
+        relayed.clear();
     }
 
     /// Queue new tasks' first runnables in `ready` through the pool, kicking
@@ -1025,7 +1142,7 @@ pub mod tests {
         // The woken worker holds the count its wake took and steals.
         parked.finish_park();
         assert!(parked.searching);
-        assert!(parked.search(&mut one));
+        assert!(parked.searched(&mut one));
 
         // Its return is the last and hands the duty on, but no worker is parked.
         parked.leave_search();
@@ -1048,7 +1165,7 @@ pub mod tests {
         // take counts and keep them, and the cap then refuses the other two.
         let mut held = Vec::new();
         for (searcher, ready) in searchers.iter_mut().zip(&mut readies) {
-            assert!(!searcher.search(ready));
+            assert!(!searcher.searched(ready));
             held.push(searcher.searching);
         }
 
@@ -1077,7 +1194,7 @@ pub mod tests {
         // Workers zero and one take the two counts the cap allows, and the cap
         // refuses worker two.
         for (searcher, ready) in searchers.iter_mut().zip(&mut readies) {
-            assert!(!searcher.search(ready));
+            assert!(!searcher.searched(ready));
         }
 
         assert!(searchers[0].searching);
@@ -1104,7 +1221,7 @@ pub mod tests {
 
         // Worker two resumes with the count its wake took and steals the backlog.
         searchers[2].finish_park();
-        assert!(searchers[2].search(&mut readies[2]));
+        assert!(searchers[2].searched(&mut readies[2]));
         searchers[2].leave_search();
         assert_eq!(pool.idle().search_count(), 0);
 
@@ -1131,7 +1248,7 @@ pub mod tests {
 
         // The first look refuses the young lone runnable and records when it
         // ripens, and no count stays held for it.
-        assert!(!searcher.search(&mut readies[1]));
+        assert!(!searcher.searched(&mut readies[1]));
         let relook = searcher
             .relook()
             .expect("the young lone runnable is looked at again");
@@ -1141,7 +1258,7 @@ pub mod tests {
 
         // Two other workers now hold the counts the cap allows.
         pool.idle().searching.fetch_add(2, Ordering::Relaxed);
-        assert!(searcher.search(&mut readies[1]));
+        assert!(searcher.searched(&mut readies[1]));
         assert_eq!(pool.idle().search_count(), 3);
         assert_eq!(searcher.relook(), None);
         searcher.leave_search();
@@ -1172,7 +1289,7 @@ pub mod tests {
 
         // The first look refuses the young lone runnable and records when it
         // ripens.
-        assert!(!searcher.search(&mut readies[1]));
+        assert!(!searcher.searched(&mut readies[1]));
         let relook = searcher
             .relook()
             .expect("the young lone runnable is looked at again");
@@ -1189,7 +1306,7 @@ pub mod tests {
         // pool of four. The search clears the re-look and steals there, before
         // its scan reaches worker zero.
         searcher.rng = 2;
-        assert!(searcher.search(&mut readies[1]));
+        assert!(searcher.searched(&mut readies[1]));
         assert_eq!(readies[0].len(), 1, "the search must start at worker two");
         assert!(readies[2].is_empty());
         assert_eq!(searcher.relook(), None);
@@ -1200,7 +1317,7 @@ pub mod tests {
         // the worker cannot search, and its look leaves the run queues to the
         // count holders. No re-look bounds its wait.
         pool.idle().searching.fetch_add(2, Ordering::Relaxed);
-        assert!(!searcher.search(&mut readies[1]));
+        assert!(!searcher.searched(&mut readies[1]));
         assert_eq!(searcher.prepare_park(&readies[1]), Park::Wait);
         assert_eq!(searcher.relook(), None);
         assert_eq!(readies[0].len(), 1);
@@ -1229,7 +1346,7 @@ pub mod tests {
         let mut searcher = Searcher::new(&pool, 1);
 
         // The look refuses the young lone runnable, and its owner then runs it.
-        assert!(!searcher.search(&mut readies[1]));
+        assert!(!searcher.searched(&mut readies[1]));
         let relook = searcher
             .relook()
             .expect("the young lone runnable is looked at again");
@@ -1243,7 +1360,7 @@ pub mod tests {
 
         // The stale re-look passes the cap, and the search that finds nothing
         // keeps its count and clears the re-look.
-        assert!(!searcher.search(&mut readies[1]));
+        assert!(!searcher.searched(&mut readies[1]));
         assert!(searcher.searching);
         assert_eq!(searcher.relook(), None);
         assert_eq!(pool.idle().search_count(), 3);
@@ -1252,7 +1369,7 @@ pub mod tests {
         // left the cap refuses the next search.
         searcher.leave_search();
         assert_eq!(pool.idle().search_count(), 2);
-        assert!(!searcher.search(&mut readies[1]));
+        assert!(!searcher.searched(&mut readies[1]));
         assert!(!searcher.searching);
         assert_eq!(searcher.prepare_park(&readies[1]), Park::Wait);
         searcher.finish_park();
@@ -1295,7 +1412,7 @@ pub mod tests {
         searcher.finish_park();
         assert!(searcher.searching);
         wait_until(&pool, relook);
-        assert!(searcher.search(&mut one));
+        assert!(searcher.searched(&mut one));
         assert_eq!(pool.idle().search_count(), 1);
         searcher.leave_search();
         assert_eq!(pool.idle().search_count(), 0);
@@ -1319,7 +1436,7 @@ pub mod tests {
             // In the first round, worker zero keeps the count of a search that
             // found nothing.
             if held {
-                assert!(!holder.search(&mut zero));
+                assert!(!holder.searched(&mut zero));
             }
 
             // A backlog queued without a kick, as a take leaves it.
@@ -1351,7 +1468,7 @@ pub mod tests {
 
             // Either way, worker one holds a count and steals the backlog.
             assert!(searcher.searching);
-            assert!(searcher.search(&mut one));
+            assert!(searcher.searched(&mut one));
             searcher.leave_search();
             assert_eq!(pool.idle().search_count(), 0);
 
@@ -1383,7 +1500,7 @@ pub mod tests {
         assert_eq!(one.prepare_park(&r1), Park::Wait);
 
         // Worker two searches, finds nothing, and keeps its count.
-        assert!(!two.search(&mut r2));
+        assert!(!two.searched(&mut r2));
         assert_eq!(pool.idle().search_count(), 1);
 
         // Worker three fills its run queue and overflows. Its kicks see the
@@ -1416,7 +1533,7 @@ pub mod tests {
         // backlog.
         one.finish_park();
         assert!(one.searching);
-        assert!(one.search(&mut r1));
+        assert!(one.searched(&mut r1));
 
         one.leave_search();
         assert_eq!(pool.idle().search_count(), 0);
@@ -1477,7 +1594,7 @@ pub mod tests {
 
         // Worker zero resumes with the count its wake took and steals the backlog.
         searcher.finish_park();
-        assert!(searcher.search(&mut zero));
+        assert!(searcher.searched(&mut zero));
         searcher.leave_search();
         assert_eq!(pool.idle().search_count(), 0);
 
@@ -1520,7 +1637,7 @@ pub mod tests {
 
         // Holding the count of a search that found nothing.
         let mut searcher = Searcher::new(&pool, 0);
-        assert!(!searcher.search(&mut zero));
+        assert!(!searcher.searched(&mut zero));
         assert_eq!(pool.idle().search_count(), 1);
 
         // The drop returns the held count.
@@ -1571,7 +1688,7 @@ pub mod tests {
         // Worker two resumes with the count and steals, leaving a clean idle state.
         let (later, ready, _) = &mut *parts[2].borrow_mut();
         later.finish_park();
-        assert!(later.search(ready));
+        assert!(later.searched(ready));
         later.leave_search();
         assert_eq!(pool.idle().search_count(), 0);
         assert!((0..3).all(|index| !pool.idle().is_idle(index)));
@@ -1633,7 +1750,7 @@ pub mod tests {
         // Worker two resumes with the count and steals the kicked backlog.
         let (later, ready, _) = &mut *parts[2].borrow_mut();
         later.finish_park();
-        assert!(later.search(ready));
+        assert!(later.searched(ready));
         later.leave_search();
         assert_eq!(pool.idle().search_count(), 0);
         assert!((0..4).all(|index| !pool.idle().is_idle(index)));
@@ -1673,7 +1790,7 @@ pub mod tests {
         assert_eq!(pool.idle().search_count(), 1);
 
         // The kept count covers the steal, and its return leaves a clean idle state.
-        assert!(searcher.search(ready));
+        assert!(searcher.searched(ready));
         searcher.leave_search();
         assert_eq!(pool.idle().search_count(), 0);
         assert!((0..2).all(|index| !pool.idle().is_idle(index)));
@@ -1715,7 +1832,7 @@ pub mod tests {
         // The claim ends the last look: worker one is unpublished, notified,
         // and holds one count.
         let (searcher, ready, _) = &mut *parts[1].borrow_mut();
-        assert!(searcher.publish_and_look(ready));
+        assert!(searcher.looked(ready));
         assert!(notified(pool, 1));
         assert!(!pool.idle().is_idle(1));
         assert_eq!(pool.idle().search_count(), 1);
@@ -1806,7 +1923,7 @@ pub mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        tests::{WakePoint, clear_wake_hooks, on_wake_point},
+        tests::{Keep, WakePoint, clear_wake_hooks, on_wake_point, search_then_look},
         *,
     };
     use crate::iouring::{
@@ -1921,16 +2038,40 @@ mod loom_tests {
     /// `pool`, so none waits for work that no longer exists.
     fn run_queued(pool: &Pool, set: &Tasks, ready: &mut Ready, runs: &Runs) {
         while let Some(runnable) = ready.pop() {
-            match runnable.poll(set.id()) {
-                AfterPoll::Retire(task) => drop(set.remove(&task)),
-                _ => panic!("a model task completes on its first poll"),
-            }
-            if runs.total() == runs.each.len() {
-                for worker in 0..pool.workers() as u32 {
-                    pool.mailbox(worker).unparker.unpark();
-                }
+            run_one(pool, set, runnable, runs);
+        }
+    }
+
+    /// Poll `runnable`, notifying every worker of `pool` if that completes
+    /// the last task of `runs`, as [`run_queued`] does.
+    fn run_one(pool: &Pool, set: &Tasks, runnable: Runnable, runs: &Runs) {
+        match runnable.poll(set.id()) {
+            AfterPoll::Retire(task) => drop(set.remove(&task)),
+            _ => panic!("a model task completes on its first poll"),
+        }
+        if runs.total() == runs.each.len() {
+            for worker in 0..pool.workers() as u32 {
+                pool.mailbox(worker).unparker.unpark();
             }
         }
+    }
+
+    /// Run what a search or look took, as the drive loop does: return the
+    /// count, poll the runnable the steal reserved, if any, then poll the
+    /// worker's run queue.
+    fn run_taken(
+        pool: &Pool,
+        set: &Tasks,
+        searcher: &mut Searcher<'_>,
+        stolen: Option<Runnable>,
+        ready: &mut Ready,
+        runs: &Runs,
+    ) {
+        searcher.leave_search();
+        if let Some(runnable) = stolen {
+            run_one(pool, set, runnable, runs);
+        }
+        run_queued(pool, set, ready, runs);
     }
 
     /// Run worker `index` of `pool`, whose word `parker` owns, through the
@@ -1952,9 +2093,9 @@ mod loom_tests {
         let mut ready = pool.queue(index).owner();
         while runs.total() < runs.each.len() {
             let seen = parker.observe();
-            if searcher.search(&mut ready) || searcher.publish_and_look(&mut ready) {
-                searcher.leave_search();
-                run_queued(pool, set, &mut ready, runs);
+            let (run, stolen) = search_then_look(searcher, &mut ready);
+            if run {
+                run_taken(pool, set, searcher, stolen, &mut ready, runs);
                 continue;
             }
             if runs.total() < runs.each.len() {
@@ -2041,8 +2182,10 @@ mod loom_tests {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
                     searcher.searching = true;
-                    assert!(pool.steal(1, 0, &mut ready, &mut None));
+                    let stolen = pool.steal(1, 0, &mut ready, &mut None);
+                    let stolen = stolen.expect("the backlog is stolen");
                     searcher.leave_search();
+                    stolen.discard();
                     ready.discard();
                 }
             });
@@ -2106,9 +2249,8 @@ mod loom_tests {
                     let mut stolen = Vec::new();
                     match searcher.prepare_park(&ready) {
                         Park::Search => {
-                            if searcher.search(&mut ready) {
-                                stolen.extend(std::iter::from_fn(|| ready.pop()));
-                            }
+                            stolen.extend(searcher.search(&mut ready));
+                            stolen.extend(std::iter::from_fn(|| ready.pop()));
                             searcher.leave_search();
                         }
                         Park::Wait => searcher.finish_park(),
@@ -2160,9 +2302,8 @@ mod loom_tests {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
                     searcher.searching = true;
-                    let _ = searcher.search(&mut ready);
-                    searcher.leave_search();
-                    run_queued(&pool, &set, &mut ready, &runs);
+                    let stolen = searcher.search(&mut ready);
+                    run_taken(&pool, &set, &mut searcher, stolen, &mut ready, &runs);
                 }
             });
             let last = thread::spawn({
@@ -2376,7 +2517,7 @@ mod loom_tests {
             let mut searcher = Searcher::new(&pool, 1);
 
             // The first look refuses the young lone runnable.
-            assert!(!searcher.search(&mut readies[1]));
+            assert!(!searcher.searched(&mut readies[1]));
             let relook = searcher
                 .relook()
                 .expect("the young lone runnable is looked at again");
@@ -2385,7 +2526,7 @@ mod loom_tests {
             // Woken early, with two other workers holding the counts the cap
             // allows, the worker cannot search.
             pool.idle().searching.fetch_add(2, Ordering::Relaxed);
-            assert!(!searcher.search(&mut readies[1]));
+            assert!(!searcher.searched(&mut readies[1]));
 
             // The re-look comes due right after the refusal. The look leaves
             // the backlog to the count holders and keeps the re-look, which
@@ -2398,7 +2539,7 @@ mod loom_tests {
 
             // The next search sees the re-look due, so it takes a count past
             // the cap and steals the now ripe runnable.
-            assert!(searcher.search(&mut readies[1]));
+            assert!(searcher.searched(&mut readies[1]));
             assert_eq!(pool.idle().search_count(), 3);
             assert_eq!(searcher.relook(), None);
             searcher.leave_search();
@@ -2453,11 +2594,13 @@ mod loom_tests {
                 move || {
                     let mut ready = pool.queue(1).owner();
                     let mut searcher = Searcher::new(&pool, 1);
-                    if searcher.publish_and_look(&mut ready) {
-                        searcher.leave_search();
-                        run_queued(&pool, &set, &mut ready, &runs);
-                    } else {
-                        searcher.finish_park();
+                    match searcher.publish_and_look(&mut ready) {
+                        Look::Wait => searcher.finish_park(),
+                        Look::Run => run_taken(&pool, &set, &mut searcher, None, &mut ready, &runs),
+                        Look::Stole(runnable) => {
+                            let stolen = Some(runnable);
+                            run_taken(&pool, &set, &mut searcher, stolen, &mut ready, &runs);
+                        }
                     }
                 }
             });
@@ -2522,9 +2665,9 @@ mod loom_tests {
                     match searcher.prepare_park(&ready) {
                         Park::Wait => searcher.finish_park(),
                         Park::Search => {
-                            if searcher.search(&mut ready) {
-                                searcher.leave_search();
-                                run_queued(&pool, &set, &mut ready, &runs);
+                            if let Some(runnable) = searcher.search(&mut ready) {
+                                let stolen = Some(runnable);
+                                run_taken(&pool, &set, &mut searcher, stolen, &mut ready, &runs);
                             }
                         }
                         Park::Run => panic!("the global queue is empty"),

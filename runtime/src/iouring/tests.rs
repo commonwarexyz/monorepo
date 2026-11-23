@@ -42,7 +42,7 @@ use std::{
     future::{Pending, Ready},
     io::{self, Write as _},
     os::{fd::OwnedFd, unix::net::UnixStream},
-    panic::panic_any,
+    panic::{self, panic_any},
     process::Command,
     sync::{
         OnceLock,
@@ -420,6 +420,11 @@ fn kernel_service() -> (bool, bool) {
 /// A point in a pool worker's park sequence where a test hook runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParkPoint {
+    /// After a search or a last look took work and the worker returned its
+    /// search count, before the catch-up of a deferred kernel enter and the
+    /// worker's next poll. Reached only when a steal left the worker a
+    /// runnable to poll or its run queue holds one.
+    Took,
     /// After a turn's service, messages and callbacks, before the worker
     /// decides whether to go round again, for pending work or a deadline that
     /// has passed, or to look for work before it parks. Reached on every turn.
@@ -7095,4 +7100,424 @@ fn test_due_sleep_fires_beside_a_full_run_queue() {
             spinner.await.unwrap();
         }
     });
+}
+
+/// A steal hands the oldest runnable it takes to the thief for its next poll,
+/// so no other worker can steal it first. Whenever a worker steals the only
+/// task, it pauses after returning its search count and before its poll, until
+/// the other worker steals the task back or a grace period passes. The count's
+/// return wakes the other worker. A thief that published the task in its run
+/// queue would let the two pass it back and forth without polling it, with the
+/// default steal age only slowing the relay down.
+#[rstest::rstest]
+#[case::immediate(Duration::ZERO)]
+#[case::default(DEFAULT_STEAL_AGE)]
+fn test_stolen_task_is_polled_before_another_steal(#[case] age: Duration) {
+    /// Steals that show the task relayed rather than polled.
+    const LIMIT: usize = 64;
+
+    /// How long a worker that stole waits for the other to steal it back.
+    const GRACE: Duration = Duration::from_millis(200);
+
+    /// Pause worker `index` at its next turn that took work, counting the
+    /// steal in `steals`, until another steal follows or the grace passes.
+    fn pause(pool: &Arc<Pool>, index: u32, steals: Arc<AtomicUsize>) {
+        let hooked = pool.clone();
+        on_next_park(pool, index, ParkPoint::Took, move || {
+            let seen = steals.fetch_add(1, Ordering::SeqCst) + 1;
+            if seen + 2 <= LIMIT {
+                pause(&hooked, index, steals.clone());
+            }
+            let deadline = Instant::now() + GRACE;
+            while seen < LIMIT && steals.load(Ordering::SeqCst) == seen && Instant::now() < deadline
+            {
+                std::hint::spin_loop();
+            }
+        });
+    }
+
+    let steals = Runner::new(config().with_worker_threads(2).with_steal_age(age)).start(
+        |context| async move {
+            let pool = context.shared.pool.clone();
+            every_worker_waits(&pool).await;
+            let steals = Arc::new(AtomicUsize::new(0));
+            pause(&pool, 0, steals.clone());
+            pause(&pool, 1, steals.clone());
+            let counted = steals.clone();
+            let task = context.spawn(move |_| async move { counted.load(Ordering::SeqCst) });
+
+            // A lone spawn wakes no worker, so notify worker one, which steals
+            // it while this root spins. No push or wake follows.
+            pool.mailbox(1).unparker.unpark();
+            spin_until(
+                || steals.load(Ordering::SeqCst) > 0,
+                "worker one must steal",
+            );
+            task.await.unwrap()
+        },
+    );
+    assert_eq!(
+        steals, 1,
+        "the task was stolen {steals} times before its first poll"
+    );
+}
+
+/// A runnable that a steal kept for the thief's next poll goes ahead of the
+/// runnables the steal queued in the thief's run queue. The root wakes three
+/// idle tasks on worker zero, and worker one, woken by that backlog, waits
+/// until all three are queued, then steals the two oldest. It keeps the first
+/// and queues the second, which wakes itself until the first has run. Polling
+/// the run queue first would let the second hold the first back.
+#[test]
+fn test_stolen_runnable_is_polled_before_the_thief_run_queue() {
+    /// Polls after which the second task stops waiting for the first.
+    const LIMIT: usize = 64;
+
+    let early = Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let wakers = Arc::new(Mutex::new([None, None, None]));
+        let ran = Arc::new(AtomicBool::new(false));
+        let early = Arc::new(AtomicUsize::new(0));
+
+        // Each task records its waker on its first poll. Then the first
+        // completes and the second waits for it.
+        let tasks: Vec<Handle<()>> = (0..3)
+            .map(|index| {
+                let wakers = wakers.clone();
+                let ran = ran.clone();
+                let early = early.clone();
+                let mut polls = 0;
+                context.child("task").spawn(move |_| {
+                    poll_fn(move |cx| {
+                        polls += 1;
+                        if polls == 1 {
+                            wakers.lock()[index] = Some(cx.waker().clone());
+                            return Poll::Pending;
+                        }
+                        if index != 1 || ran.load(Ordering::SeqCst) {
+                            if index == 0 {
+                                ran.store(true, Ordering::SeqCst);
+                            }
+                            return Poll::Ready(());
+                        }
+                        if early.fetch_add(1, Ordering::SeqCst) + 1 == LIMIT {
+                            return Poll::Ready(());
+                        }
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    })
+                })
+            })
+            .collect();
+        every_worker_waits(&pool).await;
+
+        // Worker one, woken by the second wake's backlog, waits until the
+        // third is queued as well.
+        let queued = Arc::new(AtomicBool::new(false));
+        on_next_park(&pool, 1, ParkPoint::AfterMessages, {
+            let queued = queued.clone();
+            move || {
+                spin_until(
+                    || queued.load(Ordering::SeqCst),
+                    "the root must queue three tasks",
+                );
+            }
+        });
+        let wakers: Vec<Waker> = wakers
+            .lock()
+            .iter_mut()
+            .map(|waker| waker.take().expect("every task must be polled once"))
+            .collect();
+        for waker in wakers {
+            waker.wake();
+        }
+        queued.store(true, Ordering::SeqCst);
+
+        // Worker zero spins in this root until the first task ran, so only
+        // worker one can poll the first two.
+        spin_until(
+            || ran.load(Ordering::SeqCst),
+            "worker one must run the first task",
+        );
+        for task in tasks {
+            task.await.unwrap();
+        }
+        early.load(Ordering::SeqCst)
+    });
+    assert_eq!(
+        early, 0,
+        "the second task was polled {early} times before the first"
+    );
+}
+
+/// A worker that stole a task for its next poll offers it to the other workers
+/// before a catch-up's callbacks run, since a callback may wait for exactly
+/// that task. Worker one, with a receive in its ring and a timer due later,
+/// steals the only task, a lone spawn, in the search before it parks, with its
+/// kernel enter deferred. The timer expires before the catch-up service, which
+/// collects its callback. The callback blocks until the stolen task has run,
+/// which only worker two, parked, can do.
+#[test]
+fn test_callback_waiting_for_the_task_its_worker_stole_makes_progress() {
+    /// A callback that blocks until `ran` is set, then records that it
+    /// finished.
+    struct WaitForTask {
+        /// Whether the stolen task ran.
+        ran: Arc<AtomicBool>,
+        /// Whether the callback finished.
+        done: AtomicBool,
+    }
+
+    impl ArcWake for WaitForTask {
+        fn wake_by_ref(this: &Arc<Self>) {
+            spin_until(
+                || this.ran.load(Ordering::SeqCst),
+                "another worker must run the stolen task",
+            );
+            this.done.store(true, Ordering::SeqCst);
+        }
+    }
+
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let ran = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::new(WaitForTask {
+            ran: ran.clone(),
+            done: AtomicBool::new(false),
+        });
+
+        // Worker one, the lowest parked worker, holds a receive in its ring
+        // and registers a sleep whose waker is the trigger.
+        every_worker_waits(&pool).await;
+        let (receiver, _peer) = occupy_worker_one(&context, true);
+        every_worker_waits(&pool).await;
+        let expiry = Arc::new(Mutex::new(None::<Instant>));
+        let (_timer, sleeper) = spawn_elsewhere(&context, {
+            let sleep = context.child("sleep");
+            let expiry = expiry.clone();
+            let trigger = trigger.clone();
+            async move {
+                assert_eq!(thread::current().name(), Some("iouring-pool-1"));
+                let sleep = sleep.sleep(Duration::from_millis(500));
+                let mut sleep = pin!(sleep);
+                let waker = waker(trigger);
+                assert!(
+                    sleep
+                        .as_mut()
+                        .poll(&mut TaskContext::from_waker(&waker))
+                        .is_pending()
+                );
+                *expiry.lock() = Some(Instant::now() + Duration::from_millis(500));
+                drop(waker);
+                pending::<()>().await;
+            }
+        });
+        assert_eq!(receiver, sleeper, "worker one must hold the receive");
+        every_worker_waits(&pool).await;
+
+        // At the turn that takes the task, the timer expires before the
+        // catch-up service.
+        let took = Arc::new(AtomicBool::new(false));
+        on_next_park(&pool, 1, ParkPoint::Took, {
+            let took = took.clone();
+            move || {
+                assert_eq!(kernel_service(), (true, true), "the enter must be deferred");
+                let expiry = (*expiry.lock()).expect("the sleep is registered");
+                spin_until(|| Instant::now() >= expiry, "the timer must expire");
+                took.store(true, Ordering::SeqCst);
+            }
+        });
+
+        // A lone spawn wakes no worker, so notify worker one, which steals it
+        // while this root stays in its poll until the callback has finished.
+        let stolen = context.child("stolen").spawn(move |_| async move {
+            ran.store(true, Ordering::SeqCst);
+        });
+        pool.mailbox(1).unparker.unpark();
+        spin_until(
+            || trigger.done.load(Ordering::SeqCst),
+            "the callback must finish",
+        );
+        assert!(
+            took.load(Ordering::SeqCst),
+            "worker one must steal the task"
+        );
+        stolen.await.unwrap();
+    });
+}
+
+/// A pool worker whose drive loop unwinds after a steal, before the poll the
+/// steal left it, offers that runnable to the other workers during cleanup.
+/// Dropping it with the worker would panic a second time on that worker's
+/// thread, which the runner reports behind the first panic.
+#[test]
+fn test_unwinding_worker_offers_the_runnable_it_stole() {
+    /// Panics that report a runnable dropped without being disposed of.
+    static DROPPED: AtomicUsize = AtomicUsize::new(0);
+    let previous = Arc::new(panic::take_hook());
+    panic::set_hook(Box::new({
+        let previous = previous.clone();
+        move |info| {
+            if info
+                .payload()
+                .downcast_ref::<&str>()
+                .is_some_and(|message| message.starts_with("runnable dropped"))
+            {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+            previous(info);
+        }
+    }));
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(3)).start(|context| async move {
+            let pool = context.shared.pool.clone();
+            every_worker_waits(&pool).await;
+            let took = Arc::new(AtomicBool::new(false));
+            on_next_park(&pool, 1, ParkPoint::Took, {
+                let took = took.clone();
+                move || {
+                    took.store(true, Ordering::SeqCst);
+                    panic!("worker one unwinds after its steal");
+                }
+            });
+
+            // A lone spawn wakes no worker, so notify worker one, which steals
+            // it while this root spins and unwinds before its poll.
+            let _task = context.spawn(|_| async {});
+            pool.mailbox(1).unparker.unpark();
+            spin_until(|| took.load(Ordering::SeqCst), "worker one must steal");
+            pending::<()>().await;
+        })
+    }));
+
+    // Restore the previous hook before any check. This runs even when the
+    // runner fails, since catch_unwind stops its panic. A drop guard would run
+    // during a failed check's unwind, where set_hook itself panics.
+    panic::set_hook(Box::new(move |info| previous(info)));
+    let panic = result.expect_err("the unwinding worker's panic is resumed");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"worker one unwinds after its steal")
+    );
+    assert_eq!(
+        DROPPED.load(Ordering::SeqCst),
+        0,
+        "the stolen runnable was dropped"
+    );
+}
+
+/// A worker zero that unwinds after a steal, before the poll the steal left
+/// it, offers the stolen runnable to the other workers before it destroys its
+/// root, so a root destructor that waits for that task sees it run. A busy task
+/// on another worker spawns the lone task into its own run queue, worker zero
+/// steals it and unwinds, and the third worker, parked, must run it.
+#[test]
+fn test_root_destructor_after_an_unwind_with_a_stolen_runnable_sees_it_run() {
+    /// Waits a bounded time for the stolen task to run when dropped after the
+    /// steal, then releases the busy task.
+    struct WaitOnDrop {
+        /// Set once worker zero has stolen the lone task.
+        took: Arc<AtomicBool>,
+        /// Set by the lone task.
+        ran: Arc<AtomicBool>,
+        /// Set if the lone task ran within the wait.
+        progressed: Arc<AtomicBool>,
+        /// Ends the busy task.
+        release: Arc<AtomicBool>,
+    }
+
+    impl Drop for WaitOnDrop {
+        fn drop(&mut self) {
+            if self.took.load(Ordering::SeqCst) {
+                let deadline = Instant::now() + TEST_TIMEOUT;
+                while !self.ran.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::hint::spin_loop();
+                }
+                self.progressed
+                    .store(self.ran.load(Ordering::SeqCst), Ordering::SeqCst);
+            }
+            self.release.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let took = Arc::new(AtomicBool::new(false));
+    let ran = Arc::new(AtomicBool::new(false));
+    let progressed = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let (took, ran, progressed, release) = (
+            took.clone(),
+            ran.clone(),
+            progressed.clone(),
+            release.clone(),
+        );
+        Runner::new(
+            config()
+                .with_worker_threads(3)
+                .with_steal_age(Duration::ZERO),
+        )
+        .start(move |context| async move {
+            let pool = context.shared.pool.clone();
+            let _guard = WaitOnDrop {
+                took: took.clone(),
+                ran: ran.clone(),
+                progressed,
+                release: release.clone(),
+            };
+            every_worker_waits(&pool).await;
+
+            // The busy task lets the wakes of its start settle and waits until
+            // the third worker waits, then spawns the lone task into its own
+            // run queue, which wakes no worker, and keeps its worker busy
+            // until the root is destroyed.
+            let spawned = Arc::new(AtomicBool::new(false));
+            let _busy = spawn_elsewhere(&context, {
+                let context = context.child("busy");
+                let pool = pool.clone();
+                let spawned = spawned.clone();
+                let release = release.clone();
+                let ran = ran.clone();
+                async move {
+                    let other = if thread::current().name() == Some("iouring-pool-1") {
+                        2
+                    } else {
+                        1
+                    };
+                    thread::sleep(Duration::from_millis(50));
+                    spin_until(|| is_waiting(&pool, other), "the third worker must wait");
+                    let _lone = context.child("lone").spawn(move |_| async move {
+                        ran.store(true, Ordering::SeqCst);
+                    });
+                    spawned.store(true, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) {
+                        std::hint::spin_loop();
+                    }
+                }
+            });
+            spin_until(
+                || spawned.load(Ordering::SeqCst),
+                "the busy task must spawn",
+            );
+            assert!(!ran.load(Ordering::SeqCst), "the lone task must still wait");
+
+            // Worker zero steals the lone task once this root waits, and
+            // unwinds before its poll.
+            on_next_park(&pool, 0, ParkPoint::Took, {
+                let took = took.clone();
+                move || {
+                    took.store(true, Ordering::SeqCst);
+                    panic!("worker zero unwinds after its steal");
+                }
+            });
+            pending::<()>().await;
+        })
+    }));
+    let panic = result.expect_err("the unwinding worker's panic is resumed");
+    assert!(extract_panic_message(&*panic).contains("worker zero unwinds after its steal"));
+    assert!(took.load(Ordering::SeqCst), "worker zero must steal");
+    assert!(
+        progressed.load(Ordering::SeqCst),
+        "the root's destructor waited for a task only its unwinding worker could poll"
+    );
 }

@@ -842,10 +842,13 @@ impl Pool {
     }
 
     /// Scan every run queue but worker `index`'s once, from `start`, and steal
-    /// half of the first backlog found into `ready`. Returns whether a steal
-    /// moved any runnable. The caller holds a search count and supplies worker
-    /// `index`'s empty run queue, with `start` inside the pool. A pending claim
-    /// can leave insufficient room even in an empty destination.
+    /// half of the first backlog found. Returns the oldest runnable stolen,
+    /// for the caller to poll next, and moves the rest into `ready`. The
+    /// returned runnable is never published in `ready`, so no other worker
+    /// can steal it before that poll. The caller holds a search count and
+    /// supplies worker `index`'s empty run queue, with `start` inside the
+    /// pool. A pending claim can leave insufficient room even in an empty
+    /// destination.
     ///
     /// A lone runnable is taken only once ripe (see [`Self::ripe`]). One still
     /// young brings `relook` forward to when it ripens.
@@ -856,15 +859,15 @@ impl Pool {
         start: usize,
         ready: &mut Ready,
         relook: &mut Option<Instant>,
-    ) -> bool {
+    ) -> Option<Runnable> {
         let workers = self.workers();
         (0..workers)
             .map(|offset| (start + offset) % workers)
             .filter(|&victim| victim != index as usize)
-            .any(|victim| {
+            .find_map(|victim| {
                 self.queues[victim].steal_into_if(ready, |real, spawned| {
                     self.ripe(victim, real, spawned, relook)
-                }) > 0
+                })
             })
     }
 
@@ -1214,7 +1217,7 @@ fn run(
 pub mod tests {
     use super::*;
     use crate::iouring::{
-        idle::{Park, Searcher},
+        idle::{Park, Searcher, tests::Keep},
         park::tests::notifications,
         task::{
             Task,
@@ -1691,8 +1694,10 @@ pub mod tests {
             tasks.push(task);
         }
         let mut searcher = Searcher::new(&pool, 0);
-        assert!(searcher.search(&mut zero));
-        for task in &tasks[..3] {
+        let first = searcher.search(&mut zero).expect("the search steals");
+        assert_eq!(task_of(&first).as_ptr(), tasks[0].as_ptr());
+        first.discard();
+        for task in &tasks[1..3] {
             let runnable = zero.pop().unwrap();
             assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
             runnable.discard();
@@ -1704,12 +1709,12 @@ pub mod tests {
         // lone runnable after it.
         let mut other = Searcher::new(&pool, 1);
         for task in &tasks[3..] {
-            assert!(other.search(&mut one));
-            let runnable = one.pop().unwrap();
+            let runnable = other.search(&mut one).expect("the search steals");
+            assert!(one.is_empty());
             assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
             runnable.discard();
         }
-        assert!(!other.search(&mut one));
+        assert!(!other.searched(&mut one));
         assert!(two.is_empty());
         searcher.leave_search();
         other.leave_search();
@@ -1910,9 +1915,11 @@ pub mod tests {
         let mut relook = None;
         assert!(pool.has_stealable(1, &mut relook));
         assert!(relook.is_none());
-        assert!(pool.steal(1, 0, &mut one, &mut relook));
+        let stolen = pool
+            .steal(1, 0, &mut one, &mut relook)
+            .expect("the lone runnable is stolen");
         assert!(relook.is_none());
-        let stolen = one.pop().unwrap();
+        assert!(one.is_empty());
         assert_eq!(task_of(&stolen).as_ptr(), spawned.as_ptr());
         stolen.discard();
 
@@ -1922,7 +1929,7 @@ pub mod tests {
         pool.enqueue(&mut zero, runnable);
         assert!(!pool.has_stealable(1, &mut relook));
         assert!(relook.take().is_some());
-        assert!(!pool.steal(1, 0, &mut one, &mut relook));
+        assert!(pool.steal(1, 0, &mut one, &mut relook).is_none());
         assert!(relook.is_some());
         zero.pop().unwrap().discard();
         for task in [spawned, woken] {

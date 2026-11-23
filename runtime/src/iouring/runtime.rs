@@ -191,7 +191,7 @@
 
 use super::{
     driver::Driver,
-    idle::Searcher,
+    idle::{Look, Searcher},
     mailbox::{Mailbox, Message},
     park::Parker,
     pool::{MAX_STEAL_AGE, MAX_WORKERS, MIN_STEAL_AGE, Pool, Threads},
@@ -1748,6 +1748,11 @@ pub struct Worker {
     /// nonempty run queue and has not popped that run queue since. It acts on
     /// no hint meanwhile, so hints cannot starve the run queue.
     unserved_debt: bool,
+    /// The runnable this pool worker's last search stole for its next poll,
+    /// which no other worker can take meanwhile. A worker that must run user
+    /// code before that poll first offers it to the others through the global
+    /// queue.
+    stolen: Option<Runnable>,
     /// False until kernel retirement and callback cleanup have finished.
     finished: bool,
 }
@@ -1779,6 +1784,7 @@ impl Worker {
             unserved_seen: 0,
             unserved_due: Instant::now(),
             unserved_debt: false,
+            stolen: None,
             finished: false,
         };
         worker.scope = Some(Scope::install(local));
@@ -1840,7 +1846,21 @@ impl Worker {
         // outside it so root destruction can orphan operations or spawn more work.
         let result = catch_unwind(AssertUnwindSafe(|| {
             let root = build();
-            worker.drive(pin!(root), &root_waker)
+            let mut root = pin!(root);
+
+            // An unwind out of the drive loop destroys the root, whose
+            // destructor may wait for the runnable a steal left for this
+            // worker's next poll. Offer that runnable to the other workers
+            // first, while the pool is still open.
+            match catch_unwind(AssertUnwindSafe(|| {
+                worker.drive(root.as_mut(), &root_waker)
+            })) {
+                Ok(output) => output,
+                Err(panic) => {
+                    worker.offer_stolen(&shared.pool);
+                    resume_unwind(panic)
+                }
+            }
         }));
         let output = match result {
             Ok(output) => output,
@@ -1986,6 +2006,13 @@ impl Worker {
             (local.role(), local.shared.clone())
         };
         if role.is_pool() {
+            // A drive loop that unwound after a steal leaves the runnable it
+            // stole for its next poll. Worker zero offered it before its root
+            // was destroyed. Offer one still left to the other workers, as the
+            // rest of that steal stays stealable in the run queue until the
+            // pool closes, rather than drop it, which would panic.
+            self.offer_stolen(&shared.pool);
+
             // The drive loop withdrew this worker from the idle set and
             // returned its search count when it ended, unwinding included, so
             // no wake is spent on it and no kick waits for it here.
@@ -2335,13 +2362,16 @@ impl Worker {
     /// Try to steal from the other run queues, then publish this worker idle
     /// and look once more. Returns whether to run again instead of waiting,
     /// because the search stole or observed work or a claim answered the last
-    /// look, even if that work is gone by the next turn. `searcher` must be
+    /// look, even if observed work is gone by the next turn. A runnable stolen
+    /// for the next poll is left in [`Self::stolen`]. `searcher` must be
     /// this worker's, with its run queue empty and Local unborrowed. A true
     /// result leaves no publication but may hold a search count. A false result
     /// leaves a live publication for the caller to end through
     /// [`Searcher::finish_park`] once its wait or spin returns.
-    fn search_before_park(&self, searcher: &mut Searcher<'_>) -> bool {
-        if searcher.search(self.local.borrow_mut().ready_mut()) {
+    fn search_before_park(&mut self, searcher: &mut Searcher<'_>) -> bool {
+        let stolen = searcher.search(self.local.borrow_mut().ready_mut());
+        if stolen.is_some() {
+            self.stolen = stolen;
             return true;
         }
 
@@ -2352,8 +2382,14 @@ impl Worker {
             tests::ParkPoint::BeforeIdle,
         );
 
-        if searcher.publish_and_look(self.local.borrow_mut().ready_mut()) {
-            return true;
+        let look = searcher.publish_and_look(self.local.borrow_mut().ready_mut());
+        match look {
+            Look::Wait => {}
+            Look::Run => return true,
+            Look::Stole(runnable) => {
+                self.stolen = Some(runnable);
+                return true;
+            }
         }
 
         #[cfg(test)]
@@ -2364,6 +2400,19 @@ impl Worker {
         );
 
         false
+    }
+
+    /// Move the runnable a steal left for this worker's next poll, if any, into
+    /// the global queue, waking a parked worker, so that user code this worker
+    /// runs before that poll cannot wait for it forever. A closed queue hands
+    /// it back, and it is discarded, since the task set closed first and
+    /// teardown clears its task.
+    fn offer_stolen(&mut self, pool: &Pool) {
+        if let Some(runnable) = self.stolen.take()
+            && let Err(runnable) = pool.push(runnable)
+        {
+            runnable.discard();
+        }
     }
 
     /// Drive tasks and one separately pinned root through bounded service turns.
@@ -2426,7 +2475,10 @@ impl Worker {
                 let slice_end = self.backlog.then(|| Instant::now() + BACKLOG_SLICE);
 
                 for _ in 0..BATCH_SIZE {
-                    let Some(runnable) = self.next_runnable(pool) else {
+                    // A runnable a search stole goes first, as only this
+                    // worker can poll it.
+                    let Some(runnable) = self.stolen.take().or_else(|| self.next_runnable(pool))
+                    else {
                         break;
                     };
 
@@ -2591,8 +2643,19 @@ impl Worker {
                 // user code.
                 searcher.leave_search();
 
+                #[cfg(test)]
+                if self.stolen.is_some() || !self.local.borrow().ready().is_empty() {
+                    tests::at_park(searcher.pool(), searcher.index(), tests::ParkPoint::Took);
+                }
+
                 if kernel_deferred && needs_kernel {
                     self.service(false);
+
+                    // The callbacks may wait for the stolen runnable, so offer
+                    // it to the other workers before they run.
+                    if !self.local.borrow().deferred.is_empty() {
+                        self.offer_stolen(&shared.pool);
+                    }
                     self.callbacks(None);
                 }
 
