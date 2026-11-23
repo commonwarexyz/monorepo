@@ -4,9 +4,9 @@
 //! inside `bench_function` so criterion's name filter can skip them entirely.
 
 use crate::common::{
-    Digest, KeylessDb, StoreDb, define_fixed_variants, define_vec_variants, gen_random_kv,
-    gen_store_random_kv, keyless_cfg, make_fixed_value, make_var_value, open_keyless_db,
-    open_store_db, store_cfg,
+    Digest, KeylessDb, StoreDb, StorePartDb, THREADS, define_fixed_variants, define_vec_variants,
+    gen_random_kv, gen_store_random_kv, keyless_cfg, make_fixed_value, make_var_value,
+    open_keyless_db, open_store_db, store_cfg,
 };
 use commonware_bench::Inputs;
 use commonware_macros::boxed;
@@ -19,7 +19,7 @@ use commonware_storage::{
     merkle::{Family, mmb, mmr},
     qmdb::any::traits::DbAny,
 };
-use commonware_utils::TestRng;
+use commonware_utils::{NZUsize, TestRng};
 use criterion::{Criterion, criterion_group};
 use rand::Rng;
 use std::time::{Duration, Instant};
@@ -148,9 +148,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                     // Benchmark: measure init time.
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let ctx = context::get::<Context>();
-                        dispatch_fixed_timed_init!(ctx, variant, iters, |db| {
-                            assert_ne!(db.bounds().end, 0);
-                        })
+                        dispatch_fixed_timed_init!(ctx, variant, iters)
                     });
                 },
             );
@@ -214,9 +212,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                     // Benchmark: measure init time.
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let ctx = context::get::<Context>();
-                        dispatch_var_timed_init!(ctx, variant, iters, |db| {
-                            assert_ne!(db.bounds().end, 0);
-                        })
+                        dispatch_var_timed_init!(ctx, variant, iters)
                     });
                 },
             );
@@ -238,10 +234,9 @@ async fn keyless_init<F: Family>(ctx: Context, iters: u64) -> Duration {
     let cfg = keyless_cfg(&ctx);
     let start = Instant::now();
     for _ in 0..iters {
-        let db = KeylessDb::<F>::init(ctx.child("storage"), cfg.clone(), None)
+        KeylessDb::<F>::init(ctx.child("storage"), cfg.clone(), None)
             .await
             .unwrap();
-        assert_ne!(db.bounds().end, 0);
     }
     start.elapsed()
 }
@@ -290,56 +285,75 @@ fn bench_keyless_init(c: &mut Criterion) {
     bench_keyless_family::<mmb::Family>(c, "keyless::mmb");
 }
 
-/// Benchmark reopening a populated unauthenticated store.
+/// Benchmark reopening a populated unauthenticated store, over the plain index on one task and a
+/// partitioned index on one or [THREADS] tasks.
 fn bench_store_init(c: &mut Criterion) {
     let cfg = Config::default();
     for &(elements, operations) in cases() {
-        // Populated lazily on the first matched sample.
-        let mut initialized = false;
-        let runner = tokio::Runner::new(cfg.clone());
-        c.bench_function(
-            &format!(
-                "{}/variant=store::variable elements={elements}",
-                module_path!(),
-            ),
-            |b| {
-                // Populate the database once, on the first matched sample.
-                if !initialized {
-                    commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                        let db = open_store_db(ctx.child("storage")).await;
-                        let db = gen_store_random_kv(
-                            db,
-                            elements,
-                            operations,
-                            COMMIT_FREQUENCY,
-                            make_var_value,
+        // Populated lazily on the first matched sample, then reused by every variant. All read
+        // the same on-disk database, which does not depend on the index it is reopened with.
+        // Holds the populated database's size once it exists.
+        let mut populated = None;
+        for (partitioned, tasks) in [(false, NZUsize!(1)), (true, NZUsize!(1)), (true, THREADS)] {
+            let runner = tokio::Runner::new(cfg.clone());
+            c.bench_function(
+                &format!(
+                    "{}/variant=store::variable{} tasks={tasks} elements={elements}",
+                    module_path!(),
+                    if partitioned { "::partitioned" } else { "" },
+                ),
+                |b| {
+                    // Populate the database once, on the first matched sample.
+                    let size = *populated.get_or_insert_with(|| {
+                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                            |ctx| async move {
+                                let db = open_store_db(ctx.child("storage")).await;
+                                let db = gen_store_random_kv(
+                                    db,
+                                    elements,
+                                    operations,
+                                    COMMIT_FREQUENCY,
+                                    make_var_value,
+                                )
+                                .await;
+                                let floor = db.inactivity_floor();
+                                let db = db.prune(floor).await.unwrap();
+                                let size = db.bounds().end;
+                                db.sync().await.unwrap();
+                                size
+                            },
                         )
-                        .await;
-                        let floor = db.inactivity_floor();
-                        let db = db.prune(floor).await.unwrap();
-                        db.sync().await.unwrap();
                     });
-                    initialized = true;
-                }
 
-                // Measure init time.
-                b.to_async(&runner).iter_custom(move |iters| async move {
-                    let ctx = context::get::<Context>();
-                    let cfg = store_cfg(&ctx);
-                    let start = std::time::Instant::now();
-                    for _ in 0..iters {
-                        let db = StoreDb::init(ctx.child("storage"), cfg.clone(), None)
-                            .await
-                            .unwrap();
-                        assert_ne!(db.bounds().end, 0);
-                    }
-                    start.elapsed()
-                });
-            },
-        );
+                    // Measure init time.
+                    b.to_async(&runner).iter_custom(move |iters| async move {
+                        let ctx = context::get::<Context>();
+                        let mut cfg = store_cfg(&ctx);
+                        cfg.init_concurrency = tasks;
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let (ctx, cfg) = (ctx.child("storage"), cfg.clone());
+                            let end = if partitioned {
+                                StorePartDb::init(ctx, cfg, None)
+                                    .await
+                                    .unwrap()
+                                    .bounds()
+                                    .end
+                            } else {
+                                StoreDb::init(ctx, cfg, None).await.unwrap().bounds().end
+                            };
+
+                            // Every reopen must find the populated database, not start a new one.
+                            assert_eq!(end, size);
+                        }
+                        start.elapsed()
+                    });
+                },
+            );
+        }
 
         // Destroy the populated database.
-        if initialized {
+        if populated.is_some() {
             commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
                 open_store_db(ctx.child("storage"))
                     .await

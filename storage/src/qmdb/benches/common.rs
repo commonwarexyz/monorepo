@@ -37,7 +37,7 @@ use commonware_storage::{
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
-        store::{Config as StoreConfig, Db as Store},
+        store::{Config as StoreConfig, partitioned::Db as StorePart, unpartitioned::Db as Store},
     },
     translator::EightCap,
 };
@@ -104,6 +104,11 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
 
 /// Unauthenticated store with variable-size values.
 pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap, Rayon>;
+
+/// [StoreDb] with a partitioned snapshot index (256 partitions, P=1), which can build its snapshot
+/// on several tasks. It opens the same database as [StoreDb].
+#[allow(dead_code)]
+pub type StorePartDb = StorePart<Context, Digest, Vec<u8>, EightCap, 1, Rayon>;
 
 /// Open an unauthenticated store benchmark database using the shared benchmark configuration.
 pub async fn open_store_db(ctx: Context) -> StoreDb {
@@ -350,6 +355,7 @@ pub fn store_cfg(ctx: &impl Strategizer) -> StoreConfig<EightCap, VarVecCfg, Ray
         init_scratch_partition: format!("scratch-{PARTITION_STORE}"),
         init_buffer: NZUsize!(1 << 21),
         strategy: ctx.strategy(THREADS),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -403,7 +409,7 @@ macro_rules! define_db_variants {
 
         #[allow(unused_macros)]
         macro_rules! $timed_dispatch_name {
-            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, |$db_name:ident| $body:expr) => {
+            ($ctx_expr:expr, $variant_expr:expr, $iters:expr) => {
                 match $variant_expr {
                     $(
                         $enum_name::$entry => {
@@ -411,10 +417,7 @@ macro_rules! define_db_variants {
                             let cfg = $cfg(&ctx);
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
-                                #[allow(unused_mut)]
-                                let mut $db_name =
-                                    <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
-                                $body
+                                <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
                             }
                             start.elapsed()
                         }

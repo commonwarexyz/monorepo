@@ -1,11 +1,14 @@
 //! A mutable key-value database that supports variable-sized values, but without authentication.
 //!
+//! [Db] and [Batch] take a snapshot index type. For aliases that take a translator, use
+//! [unpartitioned] or [partitioned].
+//!
 //! # Example
 //!
 //! ```rust
 //! use commonware_storage::{
 //!     journal::contiguous::variable::Config as JournalConfig,
-//!     qmdb::store::{Config, Db},
+//!     qmdb::store::unpartitioned::{Config, Db},
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -36,6 +39,7 @@
 //!         init_scratch_partition: "test-partition-scratch".into(),
 //!         init_buffer: NZUsize!(1 << 21),
 //!         strategy: Sequential,
+//!         init_concurrency: NZUsize!(1),
 //!     };
 //!     let db =
 //!         Db::<_, Digest, Digest, TwoCap, _>::init(ctx.child("store"), config, None)
@@ -79,6 +83,49 @@
 
 mod db;
 pub use db::{Batch, Changeset, Config, Db};
+
+/// Store types with an unpartitioned snapshot index.
+pub mod unpartitioned {
+    pub use super::Config;
+    use crate::{index::unordered::Index, merkle::mmr::Location};
+
+    /// An unauthenticated key-value database backed by an append-only journal and an unpartitioned
+    /// snapshot index. See [`store::Db`](super::Db) for its methods.
+    pub type Db<E, K, V, T, S> = super::Db<E, K, V, Index<T, Location>, S>;
+
+    /// A batch of writes and deletes staged against an unpartitioned [Db].
+    /// See [`store::Batch`](super::Batch) for its methods.
+    pub type Batch<'a, E, K, V, T, S> = super::Batch<'a, E, K, V, Index<T, Location>, S>;
+}
+
+/// Partitioned index variants that divide the key space into `2^(P*8)` partitions, which startup
+/// fills on up to `init_concurrency` tasks. With `init_concurrency = 1`, the calling task rebuilds
+/// the snapshot.
+///
+/// Partition metrics use the `index` attribute for the partition number. Use a separate attribute,
+/// such as `store`, to distinguish stores that share a metrics prefix.
+pub mod partitioned {
+    pub use super::Config;
+    use crate::{index::partitioned::unordered::Index, merkle::mmr::Location};
+
+    /// An unauthenticated key-value database with a partitioned snapshot index.
+    ///
+    /// The const generic `P` specifies the number of prefix bytes used for partitioning:
+    /// - `P = 1`: 256 partitions
+    /// - `P = 2`: 65,536 partitions
+    /// - `P = 3`: ~16 million partitions
+    ///
+    /// Choose a prefix over which keys are uniformly distributed. Amortizing each partition's
+    /// fixed memory cost requires many more keys than partitions, and alignment can eliminate
+    /// the per-key savings from removing the prefix.
+    /// See [`store::Db`](super::Db) for the database methods.
+    pub type Db<E, K, V, T, const P: usize, S> = super::Db<E, K, V, Index<T, Location, P>, S>;
+
+    /// A batch of writes and deletes staged against a partitioned [Db].
+    /// See [`store::Batch`](super::Batch) for its methods.
+    pub type Batch<'a, E, K, V, T, const P: usize, S> =
+        super::Batch<'a, E, K, V, Index<T, Location, P>, S>;
+}
 
 #[cfg(test)]
 pub(crate) mod tests {
