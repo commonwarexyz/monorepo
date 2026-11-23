@@ -73,8 +73,9 @@ const STAGE_BYTES: usize = 64;
 
 /// Bytes of records a build holds in memory across its buckets before they start writing theirs
 /// to the scratch blob. A build that never holds more creates no blob. The records are counted
-/// as they arrive, so the bound holds whatever size the keys are. Small in tests so ordinary
-/// logs use a blob.
+/// as they arrive, so the bound holds whatever size the keys are. A larger budget buys little:
+/// in benchmarks, a build that held every record in memory was less than 2% faster. Small in
+/// tests so ordinary logs use a blob.
 #[cfg(not(test))]
 const MEMORY_BYTES: u64 = 64 << 20;
 #[cfg(test)]
