@@ -1,6 +1,6 @@
 //! Codec implementation for tuples.
 
-use crate::{Buf, BufsMut, EncodeSize, Error, Read, Write};
+use crate::{Buf, BufsMut, EncodeSize, Error, MaxEncodeSize, Read, Write};
 use bytes::BufMut;
 use paste::paste;
 
@@ -33,6 +33,10 @@ macro_rules! impl_codec_for_tuple {
                 }
             }
 
+            impl<$( [<T $index>]: MaxEncodeSize ),*> MaxEncodeSize for ( $( [<T $index>], )* ) {
+                const MAX_ENCODE_SIZE: usize = 0 $( + [<T $index>]::MAX_ENCODE_SIZE )*;
+            }
+
             impl <$( [<T $index>]: Read ),*> Read for ( $( [<T $index>], )* ) {
                 type Cfg = ( $( [<T $index>]::Cfg, )* );
                 #[inline]
@@ -60,7 +64,7 @@ impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 
 #[cfg(test)]
 mod tests {
-    use crate::{DecodeExt, Encode};
+    use crate::{DecodeExt, Encode, MaxEncodeSize};
 
     #[test]
     fn test_tuple() {
@@ -70,6 +74,10 @@ mod tests {
             let decoded = <(u16, Option<u32>)>::decode(encoded).unwrap();
             assert_eq!(value, decoded);
         }
+        assert_eq!(
+            <(u16, Option<u32>)>::MAX_ENCODE_SIZE,
+            (1u16, Some(2u32)).encode().len()
+        );
     }
 
     #[test]

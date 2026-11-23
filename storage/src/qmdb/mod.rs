@@ -15,32 +15,64 @@
 //!
 //! # Database Lifecycle
 //!
-//! All variants are modified through a batch API that follows a common pattern:
+//! All authenticated variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
-//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//! 3. Merkleize the batch. This resolves mutations against the current state and computes
 //!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
-//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
+//! 5. Apply the batch to the database (unapplied ancestors are applied automatically).
 //!
 //! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
-//! [store] does so when applying a batch.
+//! `merkleize` uses [`floor::Proportional`], which keeps the share of inactive operations in the
+//! log bounded, and `merkleize_with` takes a caller-owned policy. [store] takes the policy when
+//! applying a batch. [immutable] and [keyless], including their compact variants, start each batch
+//! at the database or parent batch's floor, and `with_inactivity_floor` sets a different one. That
+//! default holds the floor, so their logs grow until the application advances it.
+//!
+//! A batch records no commit metadata unless `with_metadata` sets it ([store] takes metadata in
+//! `finalize` instead). Metadata belongs to one batch. Child batches start without it, and [any]
+//! and [current] keep it through `stage` and `expand`.
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
+//!
+//! # Batch validity
+//!
+//! A batch's chain has a set of states: its recorded database boundary, each ancestor's tip, and
+//! the batch's own tip. While the database is at one of them, value reads through the batch are
+//! exact, because the batch retains the writes of every ancestor the database has not applied. At
+//! any other state, for example after a sibling or a descendant of the batch is applied, reads
+//! return [`Error::StaleRead`], and merkleize and apply return [`Error::StaleBatch`]. Merkleize
+//! also returns [`Error::StaleBatch`] once an unapplied ancestor has been dropped, because it
+//! reads ancestor operations through the weak parent links, so every unapplied ancestor must be
+//! held until its descendant is merkleized. See [`chain`] for the details.
+//!
+//! # Variable-size writes
+//!
+//! Callers must ensure that the journal's [`codec_config`] can decode the keys, values, and commit
+//! metadata they write to the operation log. For example, if byte values are limited to 4096 bytes,
+//! check the length of the final value before adding it to a batch. A commit can succeed with an
+//! out-of-bounds value. Reads, proofs, and recovery can then fail when they decode it.
+//! [Compact databases](compact) apply the same requirement to commit metadata in their witnesses.
+//!
+//! [`codec_config`]: crate::journal::contiguous::variable::Config#structfield.codec_config
 //!
 //! # Durability
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
-//! durable and guarantees no recovery is needed on startup after a crash.
+//! durable and advances the operation journal's recovery watermark. Full databases rebuild their
+//! Merkle digests from retained operations at every startup.
 //!
 //! # Initialization bounds
 //!
 //! With `Some(max_size)`, `init` opens the latest retained commit with at most `max_size`
 //! operations, counting commit records and pruned operations. `None` opens the latest retained
 //! state. Zero is invalid, and a bound above the stored size does not grow the database.
-//! Initialization fails if pruning removed history needed by the selected commit.
+//! If pruning leaves no commit at or below the bound, initialization returns
+//! [`Error::NoRetainedCommit`]. Initialization also fails if pruning removed history needed
+//! to rebuild the selected commit.
 //!
 //! Initialization durably removes later history before returning successfully. The bound does not
 //! limit future appends. To require an exact checkpoint, also check the recovered root and range.
@@ -55,7 +87,9 @@
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny`.
+//! The `test-traits` feature compiles `any::traits`, whose `DbAny` and `Provable` traits give the
+//! crate's tests and benchmarks one interface over the keyed mutable variants ([any] and
+//! [current]). Outside unit-test builds, this shared interface requires the `test-traits` feature.
 //!
 //! # Acknowledgments
 //!
@@ -66,32 +100,22 @@
 //!   Ranges](https://github.com/opentimestamps/opentimestamps-server/blob/master/doc/merkle-mountain-range.md)
 
 use crate::{
-    index::{
-        Cursor, Unordered as Index,
-        partitioned::{PartitionRange, Partitioned},
+    Context,
+    index::{Cursor, Unordered as Index},
+    journal::{
+        Error as JournalError,
+        authenticated::{self, Backing, Config as MerkleConfig, Journal, Recovery},
+        contiguous::Contiguous,
     },
-    journal::{Error as JournalError, authenticated::Authenticated, contiguous::Contiguous},
     merkle::{
-        Bagging, Family, Location, Proof,
+        Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
     },
-    qmdb::operation::{Floored, Operation},
-    translator::Translator,
+    qmdb::operation::Committable,
 };
-use cache::Cache;
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
-use commonware_utils::{
-    bitmap::{Atomic, BitMap},
-    channel::mpsc,
-};
-use core::{
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
-};
-use futures::{StreamExt as _, pin_mut};
-use std::{collections::VecDeque, sync::Arc};
+use commonware_parallel::Strategy;
 use thiserror::Error;
 
 pub mod any;
@@ -104,17 +128,18 @@ mod conformance;
 pub mod current;
 pub mod floor;
 pub mod immutable;
+mod index_build;
 pub mod keyless;
 mod metrics;
 pub mod operation;
 pub mod store;
 pub mod sync;
+pub mod value;
 pub mod verify;
 
-pub use verify::{
-    create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
-    verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
-};
+pub use index_build::IndexBuild;
+pub(super) use index_build::build_index_from_log;
+pub use verify::ProofExt;
 
 /// Reject a bound that cannot retain the bootstrap commit.
 pub(crate) fn validate_initialization_bound<F: Family>(
@@ -126,12 +151,20 @@ pub(crate) fn validate_initialization_bound<F: Family>(
     Ok(())
 }
 
+/// Classify pruning while selecting a commit for a bounded open.
+fn selection_error<F: Family>(error: JournalError, max_size: Option<Location<F>>) -> Error<F> {
+    match (error, max_size) {
+        (JournalError::ItemPruned(_), Some(cap)) => Error::NoRetainedCommit(cap),
+        (error, _) => error.into(),
+    }
+}
+
 /// Validate a selected commit against its retained history and return its floor.
 fn validate_initialization_commit<F: Family>(
     start: u64,
     size: u64,
     fresh: bool,
-    commit: Option<&impl Floored<F>>,
+    commit: Option<&impl Committable<F>>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>> {
     if size == 0 {
@@ -142,7 +175,7 @@ fn validate_initialization_commit<F: Family>(
         };
     }
     let floor = commit
-        .and_then(Floored::has_floor)
+        .and_then(Committable::inactivity_floor)
         .ok_or(Error::DataCorrupted(
             "selected operation has no commit floor",
         ))?;
@@ -160,15 +193,15 @@ fn validate_initialization_commit<F: Family>(
 /// Check the selected commit before recovery discards history. Rebuilding an index from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
-    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    pending: &Recovery<F, E, C, H, S>,
     replay_from_floor: bool,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     let bounds = pending.bounds();
     let commit = if bounds.end == 0 {
@@ -188,48 +221,32 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: MerkleConfig<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
-) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+) -> Result<Recovery<F, E, C, H, S>, Error<F>>
 where
     F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    E: Context,
+    C: Backing<E, Item: Committable<F> + EncodeShared>,
     H: Hasher,
-    S: commonware_parallel::Strategy,
+    S: Strategy,
 {
     validate_initialization_bound(max_size)?;
-    Ok(crate::journal::authenticated::Journal::prepare(
+    Journal::prepare(
         context,
         merkle,
         journal,
         max_size.map(|size| *size),
-        |op: &C::Item| op.has_floor().is_some(),
+        |op: &C::Item| op.inactivity_floor().is_some(),
         ROOT_BAGGING,
     )
-    .await?)
-}
-
-/// Publish a standard QMDB journal after validating the retained commit.
-#[commonware_macros::boxed]
-pub(crate) async fn init_journal<F, E, C, H, S>(
-    context: E,
-    merkle: crate::merkle::full::Config<S>,
-    journal: C::Config,
-    max_size: Option<Location<F>>,
-    replay_from_floor: bool,
-) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
-where
-    F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
-    H: Hasher,
-    S: commonware_parallel::Strategy,
-{
-    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
-    validate_initialization(&pending, replay_from_floor).await?;
-    Ok(pending.finish().await?)
+    .await
+    // Every pruning error from this step means the selection found no usable commit.
+    .map_err(|err| match err {
+        authenticated::Error::Journal(err) => selection_error(err, max_size),
+        err => err.into(),
+    })
 }
 
 /// Merkle peak bagging policy used by QMDB operation roots.
@@ -255,28 +272,23 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
         .expect("a single-leaf Merkle root is always valid")
 }
 
-/// Look up the inactivity floor declared at the commit immediately preceding `op_count`.
-///
-/// `op_count` must be a non-zero commit-boundary historical size: the operation at `op_count - 1`
-/// must itself be a commit op (one for which `floor_of` returns `Some`).
+/// Look up the inactivity floor declared by the commit at `size - 1`. Returns `None` for
+/// size zero or when the retained operation at `size - 1` is not a commit.
 ///
 /// # Errors
 ///
-/// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
-///   `op_count - 1` is retained but is not a commit op (either because the caller passed a
-///   non-commit-boundary size, or because pruning removed the commit that would have governed this
-///   size).
-/// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
-pub(crate) async fn find_inactivity_floor_at<F, R>(
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
+pub(crate) async fn commit_floor_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
-) -> Result<Location<F>, Error<F>>
+    size: Location<F>,
+) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    let Some(last_op) = op_count.checked_sub(1) else {
-        return Err(Error::HistoricalFloorPruned(op_count));
+    let Some(last_op) = size.checked_sub(1) else {
+        return Ok(None);
     };
     let last_op = *last_op;
     let bounds = reader.bounds();
@@ -285,70 +297,51 @@ where
     }
 
     let op = reader.read(last_op).await?;
-    let floor = op
-        .has_floor()
-        .ok_or(Error::HistoricalFloorPruned(op_count))?;
+    let Some(floor) = op.inactivity_floor() else {
+        return Ok(None);
+    };
     if floor > Location::new(last_op) {
         return Err(Error::DataCorrupted(
             "inactivity floor exceeds commit location",
         ));
     }
-    Ok(floor)
+    Ok(Some(floor))
 }
 
-/// Compute the inactive peak count for a historical operation count.
+/// Look up the inactivity floor at the commit boundary required by recovery or sync.
 ///
 /// # Errors
 ///
-/// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` exceeds the operations
-/// `reader` holds.
+/// - [`Error::HistoricalFloorPruned`] if `size` is zero or the retained operation at
+///   `size - 1` has no commit floor.
+/// - [`JournalError::ItemPruned`] if `size - 1` precedes the oldest retained location.
+/// - [`Error::DataCorrupted`] if the commit declares a floor past its own location.
+pub(crate) async fn find_inactivity_floor_at<F, R>(
+    reader: &R,
+    size: Location<F>,
+) -> Result<Location<F>, Error<F>>
+where
+    F: Family,
+    R: Contiguous<Item: Committable<F>>,
+{
+    commit_floor_at(reader, size)
+        .await?
+        .ok_or(Error::HistoricalFloorPruned(size))
+}
+
+/// Compute the inactive peak count for a proof at the requested commit boundary.
 pub(crate) async fn inactive_peaks_at<F, R>(
     reader: &R,
-    op_count: Location<F>,
+    size: Location<F>,
 ) -> Result<usize, Error<F>>
 where
     F: Family,
-    R: Contiguous<Item: Floored<F>>,
+    R: Contiguous<Item: Committable<F>>,
 {
-    if *op_count > reader.bounds().end {
-        return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
-    }
-    if op_count == Location::new(0) {
-        return Ok(0);
-    }
-
-    let floor = find_inactivity_floor_at::<F, _>(reader, op_count).await?;
-    Ok(F::inactive_peaks(op_count, floor))
-}
-
-/// Generate a proof of the operations starting at `start_loc` when the database had `op_count`
-/// operations.
-///
-/// # Errors
-///
-/// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `op_count`
-///   exceeds the operations `log` holds or `start_loc >= op_count` (so always for a zero
-///   `op_count`).
-/// - Returns [`Error::HistoricalFloorPruned`] if the operation at `op_count - 1` is not a commit.
-/// - Returns [`Error::DataCorrupted`] if that commit's floor lies past the commit.
-/// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
-///   with [`crate::merkle::Error::ElementPruned`] if a required operation or node was pruned.
-pub(crate) async fn historical_proof<F, C, M, H>(
-    log: &Authenticated<C, M, H>,
-    op_count: Location<F>,
-    start_loc: Location<F>,
-    max_ops: NonZeroU64,
-) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>>
-where
-    F: Family,
-    C: Contiguous<Item: Floored<F>>,
-    M: crate::merkle::storage::Storage<Family = F, Digest = H::Digest>,
-    H: Hasher,
-{
-    let inactive_peaks = inactive_peaks_at::<F, _>(&log.journal, op_count).await?;
-    Ok(log
-        .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
-        .await?)
+    let floor = commit_floor_at(reader, size)
+        .await?
+        .ok_or(Error::NotCommitBoundary(size))?;
+    Ok(F::inactive_peaks(size, floor))
 }
 
 /// Errors that can occur when interacting with an authenticated database.
@@ -358,21 +351,31 @@ pub enum Error<F: Family> {
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
 
+    /// No retained commit is at or below the requested initialization bound.
+    #[error("no retained commit at or below size: {0}")]
+    NoRetainedCommit(Location<F>),
+
+    /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
+    /// An error from an underlying Merkle structure.
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 
+    /// An error from a metadata store.
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
 
+    /// An error from an underlying journal.
     #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
+    Journal(#[from] JournalError),
 
+    /// An error from the runtime.
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
 
+    /// The operation at the location, or the bitmap chunk covering it, has been pruned.
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
@@ -384,9 +387,13 @@ pub enum Error<F: Family> {
     #[error("key exists")]
     KeyExists,
 
+    /// A compact sync result is not exactly one commit at the expected location. The payload is
+    /// that location.
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location<F>),
 
+    /// A requested location is at or past the size of the database or batch being read. The
+    /// payloads are the location and that size.
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
@@ -394,46 +401,58 @@ pub enum Error<F: Family> {
     #[error("location {1} out of order after {0}")]
     LocationOutOfOrder(Location<F>, Location<F>),
 
+    /// A prune location exceeds the furthest location pruning may reach: the inactivity floor,
+    /// or the sync boundary for [current]. The payloads are the requested location and that
+    /// bound.
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch cannot be merkleized or applied against the current database state.
+    /// The batch cannot be merkleized or applied against the database's state.
     ///
-    /// Causes:
-    /// - The database moved off the batch's chain. Reads report this case as
-    ///   [`Error::StaleRead`]. Apply also refuses at the batch's own tip (it is already applied),
-    ///   where reads still pass.
-    /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
-    ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
+    /// This happens when:
+    /// - The database is at neither the batch's recorded database boundary nor an ancestor's tip.
+    ///   Reads then return [`Error::StaleRead`], except at the batch's own tip, where an applied
+    ///   batch still reads but cannot be applied again.
+    /// - Merkleize only: an unapplied ancestor was dropped, so merkleize cannot read its
+    ///   operations. Value reads are unaffected, because merkleized batches retain their
+    ///   ancestors' writes.
     /// - Current merkleize only: the batch was built against another database instance.
     ///
-    /// See [`chain`] for more details on staleness detection.
+    /// See [`chain`] for more details on staleness detection, and
+    /// [batch validity](self#batch-validity) for the states at which a batch stays usable.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// A batch read found the database on none of the batch's chain states: a batch other than
-    /// this one or an ancestor was applied (or the database was reinitialized off the chain).
-    /// The caller should fork a new batch from the current state.
-    #[error("stale read: a non-ancestor batch was applied")]
+    /// A read through a batch found the database at no state of the batch's chain (see [`chain`]),
+    /// for example after a sibling or a descendant of the batch was applied, or after the database
+    /// was reinitialized at another state. Build a new batch from the database to read its state.
+    #[error("stale read: database is at no state of the batch's chain")]
     StaleRead,
 
-    /// A batch read asked for a location below the inactivity floor its chain commits to.
+    /// A read by location asked for a location below the inactivity floor: the database's, or for
+    /// a batch read the batch's (for an unmerkleized batch, the floor it builds on).
     ///
-    /// Such locations may or may not be pruned depending on local history, so they are refused
-    /// on every node alike.
+    /// Whether the journal still retains such a location depends on local pruning, so reads
+    /// reject it on every database at the same commitment.
     #[error("location below inactivity floor: {0}")]
     BelowInactivityFloor(Location<F>),
 
     /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
-    /// database's for a batch with no parent.
+    /// database's for a batch with no parent. The payloads are the batch's floor and that earlier
+    /// floor.
     #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
-    /// The batch's inactivity floor exceeds its own commit operation's location. The floor
-    /// must not sit past the commit, since a subsequent `prune(floor)` would then remove the
-    /// last readable commit from the journal.
+    /// A commit's inactivity floor exceeds the commit operation's own location. The floor must
+    /// not sit past the commit, since a subsequent `prune(floor)` would then remove the last
+    /// readable commit from the journal. The payloads are the requested floor and the commit
+    /// operation's location.
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
-    FloorBeyondSize(Location<F>, Location<F>),
+    FloorBeyondCommit(Location<F>, Location<F>),
+
+    /// The requested operation count is zero or its final operation is a retained non-commit.
+    #[error("size {0} is not a commit boundary")]
+    NotCommitBoundary(Location<F>),
 
     /// The commit at the given operation count cannot be reconstructed from retained history.
     /// The payload is the requested or selected operation count, not its inactivity floor.
@@ -441,744 +460,12 @@ pub enum Error<F: Family> {
     HistoricalFloorPruned(Location<F>),
 }
 
-impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
-    fn from(e: crate::journal::authenticated::Error<F>) -> Self {
+impl<F: Family> From<authenticated::Error<F>> for Error<F> {
+    fn from(e: authenticated::Error<F>) -> Self {
         match e {
-            crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
-            crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
+            authenticated::Error::Journal(j) => Self::Journal(j),
+            authenticated::Error::Merkle(m) => Self::Merkle(m),
         }
-    }
-}
-
-/// Builds the database's key index by replaying the log starting at the inactivity floor. Assumes
-/// the log is not pruned beyond the inactivity floor. The callback is invoked for each replayed
-/// operation, indicating activity status updates. The first argument of the callback is the
-/// activity status of the operation, and the second argument is the location of the operation it
-/// inactivates (if any). Returns the number of active keys in the db.
-///
-/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
-/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
-/// instead of re-reading the log; `None` disables it.
-pub(super) async fn build_index_from_log<F, C, I, Fn>(
-    inactivity_floor_loc: crate::merkle::Location<F>,
-    reader: &C,
-    index: &mut I,
-    init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
-    mut callback: Fn,
-) -> Result<usize, Error<F>>
-where
-    F: crate::merkle::Family,
-    C: Contiguous<Item: Operation<F>>,
-    I: Index<Value = crate::merkle::Location<F>>,
-    Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
-{
-    let bounds = reader.bounds();
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
-    let stream = reader
-        .replay(
-            *inactivity_floor_loc..bounds.end,
-            init_buffer,
-            ReadOptions::DONT_CACHE,
-        )
-        .await?;
-    pin_mut!(stream);
-    let last_commit_loc = bounds.end.saturating_sub(1);
-
-    // Memoize `(location -> key)` for replayed update ops so collision resolution in
-    // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
-    // log.
-    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
-
-    let mut active_keys: usize = 0;
-    while let Some(batch) = stream.next().await {
-        for (loc, op) in batch? {
-            if let Some(key) = op.key() {
-                if op.is_delete() {
-                    let old_loc = delete_key(index, reader, key, cache.as_mut()).await?;
-                    callback(false, old_loc);
-                    if old_loc.is_some() {
-                        active_keys -= 1;
-                    }
-                } else if op.is_update() {
-                    let new_loc = crate::merkle::Location::new(loc);
-                    let old_loc = update_key(index, reader, key, new_loc, cache.as_mut()).await?;
-                    callback(true, old_loc);
-                    if old_loc.is_none() {
-                        active_keys += 1;
-                    }
-
-                    // This update op is now a `find_update_op` candidate for later ops of its
-                    // key.
-                    if let Some(cache) = cache.as_mut() {
-                        cache.put(loc, op.into_key().expect("operation without key"));
-                    }
-                }
-            } else if op.has_floor().is_some() {
-                callback(loc == last_commit_loc, None);
-            }
-        }
-    }
-
-    Ok(active_keys)
-}
-
-/// Delete `key` from the index if it exists, using a stable log reader, and return the
-/// previously associated location.
-async fn delete_key<F, I, R>(
-    index: &mut I,
-    reader: &R,
-    key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
-) -> Result<Option<Location<F>>, Error<F>>
-where
-    F: Family,
-    I: Index<Value = Location<F>>,
-    R: Contiguous,
-    R::Item: Operation<F>,
-{
-    // If the translated key is in the index, get a cursor to look for the key.
-    let Some(cursor) = index.get_mut(key) else {
-        return Ok(None);
-    };
-    delete_at_cursor::<F, _, _>(cursor, reader, key, cache).await
-}
-
-/// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
-/// it was present among the cursor's conflicts. When supplied, the matched location is removed
-/// from `cache` with the index deletion.
-async fn delete_at_cursor<F, C, R>(
-    mut cursor: C,
-    reader: &R,
-    key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
-) -> Result<Option<Location<F>>, Error<F>>
-where
-    F: Family,
-    C: Cursor<Value = Location<F>>,
-    R: Contiguous,
-    R::Item: Operation<F>,
-{
-    // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
-    else {
-        return Ok(None);
-    };
-
-    // Cache entries mirror current index locations, so invalidate the matched location with
-    // the authoritative deletion.
-    cursor.delete();
-    if let Some(cache) = cache {
-        cache.remove(*loc);
-    }
-
-    Ok(Some(loc))
-}
-
-/// Update `key` in the index using a stable log reader, returning its old location if present.
-async fn update_key<F, I, R>(
-    index: &mut I,
-    reader: &R,
-    key: &<R::Item as Operation<F>>::Key,
-    new_loc: Location<F>,
-    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
-) -> Result<Option<Location<F>>, Error<F>>
-where
-    F: Family,
-    I: Index<Value = Location<F>>,
-    R: Contiguous,
-    R::Item: Operation<F>,
-{
-    // If the translated key is not in the index, insert the new location. Otherwise, get a
-    // cursor to look for the key.
-    let Some(cursor) = index.get_mut_or_insert(key, new_loc) else {
-        return Ok(None);
-    };
-    update_at_cursor::<F, _, _>(cursor, reader, key, new_loc, cache).await
-}
-
-/// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
-/// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
-/// is inserted at the cursor. When supplied, the matched old location is removed from `cache` with
-/// the index update.
-async fn update_at_cursor<F, C, R>(
-    mut cursor: C,
-    reader: &R,
-    key: &<R::Item as Operation<F>>::Key,
-    new_loc: Location<F>,
-    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
-) -> Result<Option<Location<F>>, Error<F>>
-where
-    F: Family,
-    C: Cursor<Value = Location<F>>,
-    R: Contiguous,
-    R::Item: Operation<F>,
-{
-    // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) =
-        find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
-    {
-        // Removing the superseded cache entry with the index update lets the caller reuse its
-        // slot for `new_loc` instead of evicting another live entry.
-        assert!(new_loc > loc);
-        cursor.update(new_loc);
-        if let Some(cache) = cache {
-            cache.remove(*loc);
-        }
-        return Ok(Some(loc));
-    }
-
-    // The key wasn't in the index, so add it to the cursor.
-    cursor.insert(new_loc);
-
-    Ok(None)
-}
-
-/// Find and return the location of the update operation for `key`, if it exists. The cursor is
-/// positioned at the matching location, and can be used to update or delete the key.
-async fn find_update_op<F, R>(
-    reader: &R,
-    cursor: &mut impl Cursor<Value = Location<F>>,
-    key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
-) -> Result<Option<Location<F>>, Error<F>>
-where
-    F: Family,
-    R: Contiguous,
-    R::Item: Operation<F>,
-{
-    while let Some(&loc) = cursor.next() {
-        // Consult the cache first; on a miss, read the log and populate.
-        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(*loc)) {
-            *k == *key
-        } else {
-            let op = reader.read(*loc).await?;
-            let k = op.key().expect("operation without key");
-            let matches = *k == *key;
-
-            // Every caller immediately mutates a match. Admitting it here could evict a live
-            // candidate before the caller invalidates this location.
-            if !matches && let Some(cache) = cache.as_deref_mut() {
-                cache.put(*loc, op.into_key().expect("operation without key"));
-            }
-            matches
-        };
-        if matches {
-            return Ok(Some(loc));
-        }
-    }
-
-    Ok(None)
-}
-
-/// Bounded depth (in batches) of each per-worker channel during a parallel build. Backpressure keeps
-/// the replay from running arbitrarily far ahead of a slow worker.
-const INDEX_CHANNEL_DEPTH: usize = 4;
-
-/// A batch of keyed operations routed to an index-build worker. Each entry is the op's key, its
-/// location, and whether it is a delete.
-type RoutedBatch<K> = Vec<(K, u64, bool)>;
-
-/// Parameters shared by the inline replay and decode chunks of one parallel build.
-#[derive(Clone, Copy)]
-struct IndexRouting {
-    /// Number of insert workers routed to.
-    workers: usize,
-    /// Maps a key to its index partition.
-    partition_of: fn(&[u8]) -> usize,
-    /// Partitions per worker range: worker = `partition_of(key) / range_size`.
-    range_size: usize,
-    /// Replay read-buffer size in bytes.
-    init_buffer: NonZeroUsize,
-}
-
-/// Number of operations the index replay batches per worker-channel send during a parallel
-/// build. Build throughput is mostly insensitive to this value, so it is a constant rather than
-/// configuration. Small in tests so ordinary logs exercise batch boundaries.
-#[cfg(not(test))]
-const INDEX_ROUTE_BATCH: usize = 4096;
-#[cfg(test)]
-const INDEX_ROUTE_BATCH: usize = 3;
-
-/// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
-/// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
-/// partition-routed) on concurrent tasks while the coordinator forwards finished chunks in position
-/// order. Together with the decoder count, this bounds the queued operations. Each decoder also
-/// reserves one batch per worker. Small in tests so ordinary logs exercise chunk boundaries.
-#[cfg(not(test))]
-const INDEX_DECODE_CHUNK: u64 = 1 << 17;
-#[cfg(test)]
-const INDEX_DECODE_CHUNK: u64 = 64;
-
-/// Replay `range` and send each worker's keyed operations in log order, in batches of at most
-/// [INDEX_ROUTE_BATCH] operations.
-///
-/// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
-/// joining them.
-async fn route_index<F, C, Fut>(
-    log: &C,
-    range: Range<u64>,
-    routing: IndexRouting,
-    mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
-) -> Result<(), Error<F>>
-where
-    F: Family,
-    C: Contiguous<Item: Operation<F>>,
-    Fut: Future<Output = bool> + Send,
-{
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
-    let stream = log
-        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
-        .await?;
-    pin_mut!(stream);
-    let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
-        .map(|_| Vec::with_capacity(INDEX_ROUTE_BATCH))
-        .collect();
-    while let Some(batch) = stream.next().await {
-        for (loc, op) in batch? {
-            let is_delete = op.is_delete();
-            let Some(key) = op.into_key() else { continue };
-            let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
-            batches[w].push((key, loc, is_delete));
-            if batches[w].len() >= INDEX_ROUTE_BATCH {
-                let routed =
-                    std::mem::replace(&mut batches[w], Vec::with_capacity(INDEX_ROUTE_BATCH));
-                if !send(w, routed).await {
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    // Flush remaining batches before the caller closes the channels.
-    for (w, batch) in batches.into_iter().enumerate() {
-        if !batch.is_empty() && !send(w, batch).await {
-            break;
-        }
-    }
-    Ok(())
-}
-
-/// Build one parallel-init worker's partial index by applying the routed operations (streamed in log
-/// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
-/// `reader` and `(location -> key)` cache. Sets the bits of the range's active locations in the
-/// shared `active` bitmap (indexed over `activity`, the replayed region) and returns the populated
-/// worker index along with the range's active-key count.
-async fn build_index_worker<F, C, R>(
-    log: Arc<C>,
-    mut rx: mpsc::Receiver<RoutedBatch<<C::Item as Operation<F>>::Key>>,
-    mut index: R,
-    activity: Range<u64>,
-    active: Arc<Atomic>,
-    cache_size: Option<NonZeroUsize>,
-) -> Result<(R, usize), Error<F>>
-where
-    F: Family,
-    C: Contiguous<Item: Operation<F>>,
-    R: PartitionRange<Value = Location<F>>,
-{
-    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
-    while let Some(batch) = rx.recv().await {
-        for (key, loc, is_delete) in batch {
-            if is_delete {
-                if let Some(cursor) = index.get_mut(&key) {
-                    delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
-                }
-            } else {
-                let new_loc = Location::new(loc);
-                if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
-                    update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
-                        .await?;
-                }
-
-                // This update op is now a `find_update_op` candidate for later ops of its key.
-                // `key` is owned by this batch and unused after the update, so move it in.
-                if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, key);
-                }
-            }
-        }
-    }
-
-    // Reconstruct this range's share of the activity bitmap (in parallel with the other workers)
-    // and count the active keys. Locations are partitioned across workers, so every bit has a
-    // single writer.
-    let mut active_keys = 0;
-    index.for_each_value(|loc| {
-        active.set(**loc - activity.start);
-        active_keys += 1;
-    });
-    Ok((index, active_keys))
-}
-
-/// Build an index serially on the calling task via [build_index_from_log], collecting each
-/// replayed location's activity status into a [BitMap]. Returns the number of active keys and the
-/// activity bitmap (see [IndexBuild::build_index]).
-async fn build_index_serial<F, C, I>(
-    inactivity_floor_loc: Location<F>,
-    reader: &C,
-    index: &mut I,
-    init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
-) -> Result<(usize, BitMap), Error<F>>
-where
-    F: Family,
-    C: Contiguous<Item: Operation<F>>,
-    I: Index<Value = Location<F>>,
-{
-    // Track per-op transitions locally: push each op's status and clear the bit of any location it
-    // supersedes. The state after the last op is each location's final status.
-    let mut activity = BitMap::new();
-    let floor = *inactivity_floor_loc;
-    let active_keys = build_index_from_log(
-        inactivity_floor_loc,
-        reader,
-        index,
-        init_buffer,
-        cache_size,
-        |is_active, old_loc| {
-            activity.push(is_active);
-            if let Some(loc) = old_loc {
-                activity.set(*loc - floor, false);
-            }
-        },
-    )
-    .await?;
-    Ok((active_keys, activity))
-}
-
-/// Build an index by decoding the log replay in contiguous chunks on concurrent decode tasks
-/// and routing each keyed operation to the parallel insert worker owning its partition range
-/// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
-/// [IndexBuild::build_index]).
-async fn build_index_parallel<F, E, C, I>(
-    index: &mut I,
-    context: E,
-    inactivity_floor_loc: Location<F>,
-    log: &Arc<C>,
-    init_concurrency: NonZeroUsize,
-    init_buffer: NonZeroUsize,
-    cache_size: Option<NonZeroUsize>,
-) -> Result<(usize, BitMap), Error<F>>
-where
-    F: Family,
-    E: Spawner,
-    C: Contiguous<Item: Operation<F>> + 'static,
-    I: Partitioned + Index<Value = Location<F>>,
-{
-    let count = index.partition_count();
-
-    // Split the `init_concurrency` budget between decode tasks and insert workers. When there is at
-    // least one decode task, this task only forwards batches and is mostly idle, so it does not
-    // count against the concurrency budget. At budgets of three or less, this task decodes inline
-    // and counts against the budget.
-    let concurrency = init_concurrency.get();
-
-    // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
-    // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
-    // a lone decoder starves the workers. Below four tasks this task decodes inline instead.
-    let decoders = if concurrency <= 3 {
-        0
-    } else {
-        // Divide before multiplying to preserve the ratio without overflowing large budgets.
-        let share = concurrency / 5 * 2 + concurrency % 5 * 2 / 5;
-        share.max(2).min(concurrency / 2)
-    };
-    let workers = if decoders == 0 {
-        concurrency.saturating_sub(1).min(count)
-    } else {
-        (concurrency - decoders).min(count)
-    };
-
-    // No workers: build on this task.
-    if workers == 0 {
-        return build_index_serial(inactivity_floor_loc, &**log, index, init_buffer, cache_size)
-            .await;
-    }
-
-    let floor = *inactivity_floor_loc;
-    let range_size = count.div_ceil(workers);
-
-    // `range_size` rounds up, so the last ranges could start at or past `count`. Reduce
-    // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
-    // partition and routing (`partition / range_size`) stays in `[0, workers)`.
-    let workers = count.div_ceil(range_size);
-    let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
-    let end = log.bounds().end;
-
-    // All workers share one atomic bitmap to track the activity bits.
-    let active = Arc::new(Atomic::zeroes(end - floor));
-
-    // Spawn one worker per contiguous partition range, each owning its own reader and cache.
-    let mut senders = Vec::with_capacity(workers);
-    let mut handles = Vec::with_capacity(workers);
-    for w in 0..workers {
-        let (tx, rx) = mpsc::channel(INDEX_CHANNEL_DEPTH);
-        senders.push(tx);
-        let log = log.clone();
-
-        // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
-        // only that many slots, so per-worker memory is the range, not the full partition set.
-        let lo = w * range_size;
-        let range_len = range_size.min(count - lo);
-        let worker_index = index.new_range(lo, range_len);
-        let active = active.clone();
-        let handle = context
-            .child("index_worker")
-            .with_attribute("worker", w)
-            .dedicated()
-            .spawn(move |_| {
-                build_index_worker::<F, C, I::Range>(
-                    log,
-                    rx,
-                    worker_index,
-                    floor..end,
-                    active,
-                    per_worker_cache,
-                )
-            });
-        handles.push(handle.abort_on_drop());
-    }
-
-    // Route each replayed op to the worker owning its partition, forwarding decoded chunks in
-    // position order to preserve the per-worker op order the insert path relies on. Routing runs in
-    // an inner future so a failure here still drains the workers below rather than leaving them
-    // running detached.
-    //
-    // A closed worker channel means that worker terminated early (e.g. returned an `Error<F>` while
-    // resolving a collision). Routing stops on the first such send failure and the join below
-    // surfaces that worker's error, rather than panicking on the send.
-    let mut pending = VecDeque::new();
-    let routing = IndexRouting {
-        workers,
-        partition_of: I::partition_of,
-        range_size,
-        init_buffer,
-    };
-    let routing_result: Result<(), Error<F>> = async {
-        // With no decode tasks, decode and route on this task over one continuous replay to avoid
-        // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
-        if decoders == 0 {
-            let senders = &senders;
-            return route_index::<F, C, _>(&**log, floor..end, routing, |w, batch| async move {
-                senders[w].send(batch).await.is_ok()
-            })
-            .await;
-        }
-
-        // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
-        // worker), so every decoder can finish regardless of which chunk is being forwarded.
-        let chunk_capacity = INDEX_DECODE_CHUNK as usize / INDEX_ROUTE_BATCH + workers;
-        let mut starts = (floor..end)
-            .step_by(usize::try_from(INDEX_DECODE_CHUNK).expect("chunk size fits usize"));
-        let mut spawn_next = |pending: &mut VecDeque<_>| {
-            let Some(start) = starts.next() else {
-                return false;
-            };
-            let log = log.clone();
-            let len = INDEX_DECODE_CHUNK.min(end - start);
-            let (tx, rx) = mpsc::channel(chunk_capacity);
-            let handle = context
-                .child("index_decoder")
-                .dedicated()
-                .spawn(move |_| async move {
-                    let tx = &tx;
-                    route_index::<F, C, _>(
-                        &*log,
-                        start..start + len,
-                        routing,
-                        |w, batch| async move { tx.send((w, batch)).await.is_ok() },
-                    )
-                    .await
-                });
-            pending.push_back((rx, handle.abort_on_drop()));
-            true
-        };
-
-        // Start decoding ahead of forwarding, with at most `decoders` chunks in flight.
-        for _ in 0..decoders {
-            if !spawn_next(&mut pending) {
-                break;
-            }
-        }
-
-        // Workers need operations in log order even when later chunks finish decoding first.
-        // Reuse each decoder slot only after forwarding its chunk and joining its task.
-        while let Some((rx, _)) = pending.front_mut() {
-            while let Some((w, batch)) = rx.recv().await {
-                if senders[w].send(batch).await.is_err() {
-                    return Ok(());
-                }
-            }
-            let (_, decoder) = pending.pop_front().expect("front exists");
-            decoder.join().await??;
-            spawn_next(&mut pending);
-        }
-        Ok(())
-    }
-    .await;
-
-    // Close the channels so each worker's stream terminates and it returns its index.
-    drop(senders);
-
-    // Abort and join any decode chunks still in flight, so no decoder outlives a failed init.
-    while let Some((rx, decoder)) = pending.pop_front() {
-        drop(rx);
-        decoder.abort().await;
-    }
-
-    // Join workers before surfacing any replay failure, so none outlive a failed init.
-    let joined = AbortOnDrop::join_all::<Error<F>>(handles).await;
-    routing_result?;
-    let joined = joined?;
-
-    // Install each worker's partition range into the index and fold its active-key count in.
-    let mut total_items = 0;
-    for (worker_index, worker_keys) in joined {
-        index.install_range(worker_index);
-        total_items += worker_keys;
-    }
-
-    // The join reclaimed exclusive ownership of the shared bitmap, so it can be read back.
-    let mut active = Arc::into_inner(active)
-        .expect("workers were joined")
-        .into_bitmap();
-
-    // The last operation is the final commit (a log always ends with one), which stays active.
-    // An empty log has none.
-    if let Some(last_commit) = end.checked_sub(1)
-        && last_commit >= floor
-    {
-        active.set(last_commit - floor, true);
-    }
-
-    Ok((total_items, active))
-}
-
-/// Builds a database's key index from the operations log.
-///
-/// Generic over the `Index` type so each index controls how it builds: serially with the default
-/// method body, or split across parallel workers with an override.
-///
-/// Sealed: only in-crate index types implement this, so internal invariants (e.g. builds must
-/// drop every clone of the shared log before returning) are enforced by the implementations
-/// rather than the public contract.
-pub trait IndexBuild<F: Family>:
-    sealed::IndexBuildSealed + Index<Value = Location<F>> + Sized + 'static
-{
-    /// The concurrency configuration the build consumes. Index types that always build serially
-    /// declare `()`, so a setting they cannot use is unrepresentable.
-    type Concurrency: Copy + Send + Sync + 'static;
-
-    /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
-    /// keys and the activity status of every replayed location, in location order: a location's
-    /// bit is set iff it holds the current operation of an active key or is the last commit.
-    ///
-    /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
-    /// build's `(location -> key)` cache in entries (`None` disables it).
-    fn build_index<E, C>(
-        &mut self,
-        _context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        _init_concurrency: Self::Concurrency,
-        init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        async move {
-            build_index_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
-        }
-    }
-}
-
-mod sealed {
-    use crate::translator::Translator;
-
-    pub trait IndexBuildSealed {}
-    impl<T: Translator, V: Send + Sync> IndexBuildSealed for crate::index::unordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync> IndexBuildSealed for crate::index::ordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync, const P: usize> IndexBuildSealed
-        for crate::index::partitioned::unordered::Index<T, V, P>
-    {
-    }
-    impl<T: Translator, V: Send + Sync, const P: usize> IndexBuildSealed
-        for crate::index::partitioned::ordered::Index<T, V, P>
-    {
-    }
-}
-
-impl<F: Family, T: Translator> IndexBuild<F> for crate::index::unordered::Index<T, Location<F>> {
-    type Concurrency = ();
-}
-impl<F: Family, T: Translator> IndexBuild<F> for crate::index::ordered::Index<T, Location<F>> {
-    type Concurrency = ();
-}
-
-impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
-    for crate::index::partitioned::unordered::Index<T, Location<F>, P>
-{
-    type Concurrency = NonZeroUsize;
-
-    async fn build_index<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
-        init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build_index_parallel(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            init_concurrency,
-            init_buffer,
-            cache_size,
-        )
-        .await
-    }
-}
-
-impl<F: Family, T: Translator, const P: usize> IndexBuild<F>
-    for crate::index::partitioned::ordered::Index<T, Location<F>, P>
-{
-    type Concurrency = NonZeroUsize;
-
-    async fn build_index<E, C>(
-        &mut self,
-        context: E,
-        inactivity_floor_loc: Location<F>,
-        log: &Arc<C>,
-        init_concurrency: NonZeroUsize,
-        init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
-    where
-        E: Spawner,
-        C: Contiguous<Item: Operation<F>> + 'static,
-    {
-        build_index_parallel(
-            self,
-            context,
-            inactivity_floor_loc,
-            log,
-            init_concurrency,
-            init_buffer,
-            cache_size,
-        )
-        .await
     }
 }
 

@@ -6,7 +6,7 @@ use super::{
     ingress::{FetchKey, Mailbox, Message},
     metrics, wire,
 };
-use crate::{Consumer, Delivery, Outcome, subscribers};
+use crate::{Consumer, Delivery, Outcome, Resolution, delivery::Completion, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -16,7 +16,7 @@ use commonware_p2p::{
     utils::codec::{WrappedSender, wrap},
 };
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
@@ -35,7 +35,7 @@ struct Serve<P: PublicKey> {
 /// Manages incoming and outgoing P2P requests, coordinating fetch and serve operations.
 pub struct Engine<E, P, D, B, Key, Con, Pro>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -85,7 +85,7 @@ where
 
 impl<E, P, D, B, Key, Con, Pro> Engine<E, P, D, B, Key, Con, Pro>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -108,8 +108,8 @@ where
             context.child("fetcher"),
             FetcherConfig {
                 me: cfg.me,
-                timeout: cfg.timeout,
-                retry_timeout: cfg.fetch_retry_timeout,
+                fetch_timeout: cfg.fetch_timeout,
+                retry_delay: cfg.fetch_retry_delay,
                 priority_requests: cfg.priority_requests,
             },
         );
@@ -150,12 +150,7 @@ where
         network: (NetS, NetR),
     ) {
         // Wrap channel
-        let (mut sender, mut receiver) = wrap(
-            (),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
         let mut blocked_subscription = Some(self.blocker.blocked());
 
@@ -177,7 +172,7 @@ where
                 let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
                 let _ = self.metrics.serve_processing.try_set(self.serves.len());
 
-                // Get retry timeout (if any)
+                // Get retry deadline (if any)
                 let deadline_pending = match self.fetcher.get_pending_deadline() {
                     Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                     None => Either::Right(future::pending()),
@@ -202,7 +197,7 @@ where
             } => {
                 if self.last_peer_set_id < Some(update.index) {
                     self.last_peer_set_id = Some(update.index);
-                    self.fetcher.reconcile(update.latest.primary.as_ref());
+                    self.fetcher.reconcile(update.latest.union().as_ref());
                 }
             },
             // Handle blocked-set updates
@@ -223,15 +218,10 @@ where
                     self.fetcher.add_retry(key);
                 }
             },
-            // Handle completed consumer deliveries before accepting new work:
-            // a fetch issued in reaction to a delivery's outcome must find the
-            // completed key no longer in flight, not be deduplicated against
-            // it and dropped when it completes.
+            // Handle delivery completions
             delivery = self.inflight.next_delivery() => {
-                // If the delivery was aborted, its inflight entry was dropped (via
-                // Retain or shutdown) before the consumer finished validating.
-                if let Ok((peer, elapsed, bytes, delivery, result)) = delivery {
-                    self.handle_delivery(peer, elapsed, bytes, delivery, result);
+                if let Ok(completed) = delivery {
+                    self.handle_delivery(completed);
                 }
             },
             // Handle mailbox messages
@@ -240,42 +230,9 @@ where
                 return;
             } => {
                 match msg {
-                    Message::Fetch(keys) => {
-                        for FetchKey {
-                            key,
-                            subscribers,
-                            metadata: targets,
-                        } in keys
-                        {
-                            trace!(?key, "mailbox: fetch");
-
-                            // Check if the fetch is already in progress
-                            let is_new = !self.inflight.contains(&key);
-                            self.subscribers.insert(key.clone(), subscribers);
-
-                            // Update targets
-                            match targets {
-                                Some(targets) => {
-                                    // Only add targets if this is a new fetch OR the existing
-                                    // fetch already has targets. Don't restrict an "all" fetch
-                                    // (no targets) to specific targets.
-                                    if is_new || self.fetcher.has_targets(&key) {
-                                        self.fetcher.add_targets(key.clone(), targets);
-                                    }
-                                }
-                                None => self.fetcher.clear_targets(&key),
-                            }
-
-                            // Only start new fetch if not already in progress
-                            if is_new {
-                                self.inflight.insert(
-                                    key.clone(),
-                                    self.metrics.fetch_duration.timer(self.context.as_ref()),
-                                );
-                                self.fetcher.add_ready(key);
-                            } else {
-                                trace!(?key, "updated targets for existing fetch");
-                            }
+                    Message::Fetch(fetches) => {
+                        for fetch in fetches {
+                            self.add_fetch(fetch);
                         }
                     }
                     Message::Retain { predicate } => {
@@ -357,6 +314,50 @@ where
         }
     }
 
+    /// Add subscribers for a key and start a fetch if none is in progress.
+    fn add_fetch(&mut self, fetch: FetchKey<Key, P, Con::Subscriber>) {
+        let FetchKey {
+            key,
+            subscribers,
+            metadata: targets,
+        } = fetch;
+        trace!(?key, "mailbox: fetch");
+
+        // Apply a verdict the consumer already sent before adding these subscribers so
+        // it cannot retire them. They then start a new fetch or join those that remain.
+        if let Some(completed) = self.inflight.try_delivery(&key) {
+            self.handle_delivery(completed);
+        }
+
+        // Check if the fetch is already in progress
+        let is_new = !self.inflight.contains(&key);
+        self.subscribers.insert(key.clone(), subscribers);
+
+        // Update targets
+        match targets {
+            Some(targets) => {
+                // Only add targets if this is a new fetch OR the existing
+                // fetch already has targets. Don't restrict an "all" fetch
+                // (no targets) to specific targets.
+                if is_new || self.fetcher.has_targets(&key) {
+                    self.fetcher.add_targets(key.clone(), targets);
+                }
+            }
+            None => self.fetcher.clear_targets(&key),
+        }
+
+        // Only start new fetch if not already in progress
+        if is_new {
+            self.inflight.insert(
+                key.clone(),
+                self.metrics.fetch_duration.timer(self.context.as_ref()),
+            );
+            self.fetcher.add_ready(key);
+        } else {
+            trace!(?key, "updated targets for existing fetch");
+        }
+    }
+
     /// Record cancellation metrics for a retain-style operation.
     fn record_cancellations(&mut self, count: u64) {
         if count == 0 {
@@ -435,18 +436,50 @@ where
     /// Handle completed delivery to the consumer.
     fn handle_delivery(
         &mut self,
-        peer: P,
-        elapsed: std::time::Duration,
-        bytes: usize,
-        delivery: Delivery<Key, Con::Subscriber>,
-        outcome: Option<Outcome>,
+        completed: Completion<Key, Con::Subscriber, (P, std::time::Duration, usize)>,
     ) {
-        let Delivery {
-            key,
-            subscribers: delivered,
-            ..
-        } = delivery;
-        let already_accepted = self.inflight.response_accepted(&key);
+        let Completion {
+            context: (peer, elapsed, bytes),
+            delivery:
+                Delivery {
+                    key,
+                    subscribers: delivered,
+                },
+            outcome,
+            canceled,
+            previously_accepted: already_accepted,
+        } = completed;
+
+        // Source feedback belongs to the delivered response even if its fetch was
+        // canceled. Local redelivery of an accepted response cannot earn more credit.
+        match outcome {
+            Some(Outcome::Resolved(_)) if !already_accepted => {
+                self.fetcher.record_response(&peer, elapsed, bytes);
+                self.metrics.fetch.inc(Status::Success);
+            }
+            Some(Outcome::Unresolved) if !already_accepted => {
+                self.metrics.fetch.inc(Status::Ambiguous);
+            }
+            Some(Outcome::Invalid) => {
+                // Conflicting verdicts on an accepted response reflect local consumer
+                // state. Only the first validation can identify invalid peer data.
+                if already_accepted {
+                    warn!(
+                        ?key,
+                        "previously accepted response was rejected during local redelivery"
+                    );
+                } else {
+                    commonware_p2p::block!(self.blocker, peer, "invalid data received");
+                }
+                self.metrics.fetch.inc(Status::Failure);
+            }
+            _ => {}
+        }
+
+        // Canceled feedback cannot retire, retry, or redeliver a replacement fetch.
+        if canceled {
+            return;
+        }
 
         // A dropped verdict says nothing about the response, only that the consumer
         // did not judge it for these subscribers. Hand the response to the
@@ -463,16 +496,14 @@ where
                 self.metrics.fetch.inc(Status::Dropped);
             }
             self.inflight.cancel(&key);
-            self.fetcher.clear_targets(&key);
+            self.fetcher.clear(&key);
             return;
         };
 
-        if !already_accepted && outcome != Outcome::Ignored {
-            self.fetcher.record_response(&peer, elapsed, bytes);
-        }
-
+        // Resolution reports demand within the delivered subscriber snapshot.
+        // Ignored cancels demand for the entire key, including later subscribers.
         match outcome {
-            Outcome::Complete => {
+            Outcome::Resolved(Resolution::Complete) => {
                 // Remove only the subscribers that accepted this response. If other
                 // subscribers still need the key, deliver the same accepted response
                 // locally with the remaining annotations.
@@ -482,50 +513,34 @@ where
 
                 if let Some(subscribers) = remaining {
                     if !already_accepted {
-                        self.metrics.fetch.inc(Status::Success);
                         self.inflight.accept_response(&key, self.context.as_ref());
                     }
                     self.inflight.redeliver(Delivery { key, subscribers });
                 } else {
-                    // All subscribers observed a valid response; clear any targeting
-                    // state retained for this key.
-                    if !already_accepted {
-                        self.metrics.fetch.inc(Status::Success);
-                    }
+                    // All subscribers observed a valid response, so drop the key's targets
+                    // and peer-selection history.
                     self.inflight.complete(self.context.as_ref(), &key);
-                    self.fetcher.clear_targets(&key);
+                    self.fetcher.clear(&key);
                 }
             }
-            Outcome::Ambiguous => {
-                // The peer served valid data for the wire key, but local
-                // subscribers still need different evidence. Do not cache the
-                // response or penalize the peer; retry the same key.
-                self.metrics.fetch.inc(Status::Ambiguous);
+            Outcome::Resolved(Resolution::Partial) | Outcome::Unresolved => {
+                // Valid data can leave subscribers unresolved. Discard it and retry
+                // without penalizing the peer or recounting an accepted response.
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }
             Outcome::Invalid => {
-                // A previously accepted response is only redelivered locally to subscribers that
-                // joined while validation was pending. A later invalid outcome therefore reflects
-                // conflicting consumer verdicts, not invalid peer data. Retire the fetch without
-                // blocking the peer or retrying the accepted response.
+                // An accepted response remains valid peer data. Retire conflicting
+                // local demand without fetching the same response again.
                 if already_accepted {
-                    warn!(
-                        ?key,
-                        "previously accepted response was rejected during local redelivery"
-                    );
-                    self.metrics.fetch.inc(Status::Failure);
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.subscribers.remove(&key);
-                    self.fetcher.clear_targets(&key);
+                    self.fetcher.clear(&key);
                     return;
                 }
 
-                // If the data is invalid, block the peer and try again. The network
-                // reports the block through the blocked subscription, which is what
-                // makes the peer ineligible until it is unblocked.
-                commonware_p2p::block!(self.blocker, peer, "invalid data received");
-                self.metrics.fetch.inc(Status::Failure);
+                // Subscribers still need valid data, so discard the rejected response
+                // and schedule another attempt.
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }
@@ -535,7 +550,7 @@ where
                 self.metrics.fetch.inc(Status::Dropped);
                 self.inflight.cancel(&key);
                 self.subscribers.remove(&key);
-                self.fetcher.clear_targets(&key);
+                self.fetcher.clear(&key);
             }
         }
     }
@@ -553,5 +568,91 @@ where
         // The peer did not have the data, so we need to try again
         self.metrics.fetch.inc(Status::Failure);
         self.fetcher.add_retry(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::p2p::{
+        mocks::{Consumer as MockConsumer, Key as MockKey, Producer as MockProducer},
+        tests::ClosedBlocker,
+    };
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use commonware_p2p::utils::StaticProvider;
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{NZDuration, NZUsize, non_empty_vec, ordered::Set};
+    use futures::{FutureExt as _, future::Aborted};
+    use std::time::Duration;
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5720.
+    ///
+    /// A verdict sent before the consumer fetches the key again does not retire that fetch,
+    /// even when the engine takes the fetch before it polls the verdict.
+    #[test]
+    fn issue_5720_regression() {
+        deterministic::Runner::default().start(|context| async move {
+            // Build an engine that is never started, so the test calls its handlers in
+            // the order under test.
+            let (consumer, mut delivered) = MockConsumer::<MockKey, Bytes>::new();
+            let (mut engine, _mailbox) = Engine::new(
+                context,
+                Config {
+                    peer_provider: StaticProvider::new(0, Set::default()),
+                    blocker: ClosedBlocker,
+                    consumer,
+                    producer: MockProducer::<MockKey, Bytes>::default(),
+                    mailbox_size: NZUsize!(1),
+                    me: None,
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_secs(1),
+                    priority_requests: false,
+                    priority_responses: false,
+                },
+            );
+            let key = MockKey(1);
+            let fetch = || FetchKey {
+                key: key.clone(),
+                subscribers: non_empty_vec![((), tracing::Span::none())],
+                metadata: None,
+            };
+
+            // Stand in for a request and its response. The fetcher drops the key and
+            // the consumer receives the value, answering inside `deliver`.
+            engine.add_fetch(fetch());
+            engine.fetcher.retain(|_| false);
+            engine.inflight.deliver(
+                Delivery {
+                    key: key.clone(),
+                    subscribers: engine.subscribers.pending(&key).unwrap(),
+                },
+                PrivateKey::from_seed(1).public_key(),
+                Duration::ZERO,
+                Bytes::from_static(b"value"),
+            );
+            assert!(delivered.try_recv().is_ok());
+
+            // The consumer fetches again. The engine takes the fetch before it polls
+            // the verdict.
+            engine.add_fetch(fetch());
+
+            // The fetch applied the verdict, so the wait for the first delivery aborts and
+            // cannot complete the repeat.
+            assert!(
+                matches!(
+                    engine.inflight.next_delivery().now_or_never(),
+                    Some(Err(Aborted))
+                ),
+                "the wait for the first delivery must abort"
+            );
+
+            // The repeat keeps its subscriber and waits for a request of its own.
+            assert!(
+                engine.subscribers.contains(&key),
+                "fetch issued after the verdict must keep its subscriber"
+            );
+            assert!(engine.inflight.contains(&key));
+            assert_eq!(engine.fetcher.len_pending(), 1);
+        });
     }
 }

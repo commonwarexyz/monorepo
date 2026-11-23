@@ -2,7 +2,7 @@
 use crate::{
     merkle::{Family, Location},
     qmdb::{
-        self,
+        self, ProofExt as _,
         sync::{
             Database, Error as SyncError, Journal, Metrics, SourceFor, Target,
             database::Config as _,
@@ -78,7 +78,6 @@ where
         return false;
     }
 
-    let hasher = qmdb::hasher::<H>();
     match (&request, response) {
         (
             Request::Operations { start, max_ops, .. },
@@ -88,8 +87,7 @@ where
             if operations_len == 0 || operations_len > max_ops.get() {
                 false
             } else {
-                let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
-                proof.verify_range_inclusion(&hasher, &elements, *start, root)
+                proof.verify::<H, _>(*start, operations, root)
             }
         }
         (
@@ -99,9 +97,7 @@ where
                 op,
                 pinned_nodes,
             },
-        ) => {
-            proof.verify_proof_and_pinned_nodes(&hasher, &[op.encode()], *start, pinned_nodes, root)
-        }
+        ) => proof.verify_with_pinned_nodes::<H, _>(*start, [op], pinned_nodes, root),
         _ => false,
     }
 }
@@ -140,12 +136,10 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
     }
 }
 
-/// Configuration for creating a new Engine
+/// Configuration for synchronizing a database.
 pub struct Config<DB, S>
 where
     DB: Database,
-    S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Runtime context for creating database components
     pub context: DB::Context,
@@ -191,7 +185,6 @@ pub(crate) struct Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
     outstanding_requests: Requests<DB::Family, DB::Op, DB::Digest, S::Error>,
@@ -256,7 +249,6 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
         &self.journal
@@ -267,15 +259,14 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
         if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.range.start(),
-                upper_bound_pos: config.target.range.end(),
+                bounds: config.target.range.clone(),
             }));
         }
+        DB::validate_target(&config.target).map_err(SyncError::Engine)?;
 
         // Recover the operation prefix that can resume this target.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
@@ -286,11 +277,22 @@ where
         .await?;
         let journal_size = journal.size();
 
+        // A journal that resumes nothing holds none of the operations that persisted local
+        // state was derived from. That state is discarded before any fetched operation is
+        // appended, so it cannot be read as describing the operations fetched in their place.
+        if journal_size == config.target.range.start() {
+            DB::discard_local_state(
+                config.context.child("discard_local_state"),
+                &config.db_config,
+            )
+            .await?;
+        }
+
         // The sync journal is the source of truth for resume. If it already
         // reaches the target, try to recover the target's pinned nodes from local
         // Merkle state before asking peers for them. Partial journals resume without
         // probing completed database state.
-        let pinned_nodes = if journal_size == *config.target.range.end() {
+        let pinned_nodes = if journal_size == config.target.range.end() {
             DB::local_pinned_nodes(
                 config.context.child("local_pinned_nodes"),
                 &config.db_config,
@@ -391,7 +393,7 @@ where
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
-                Location::new(log_size)..self.target.range.end(),
+                log_size..self.target.range.end(),
                 self.fetched_operations.iter().map(|(&start, operations)| {
                     start..start.checked_add(operations.len() as u64).unwrap()
                 }),
@@ -424,15 +426,14 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
-        let start_moved = self.target.range.start() != new_target.range.start();
-        self.journal = self.journal.resize(new_target.range.start()).await?;
-        if start_moved {
+        let new_start = new_target.range.start();
+        self.journal = self.journal.resize(new_start).await?;
+        if new_start != self.target.range.start() {
             self.pinned_nodes = None;
 
             // A source may prune up to the new lower bound, so a request below a moved bound
             // may never be answered. Requests are also tracked by start location, so one kept at the
             // new bound would block the boundary request there.
-            let new_start = new_target.range.start();
             self.outstanding_requests
                 .retain(|request| request.start() > new_start);
         }
@@ -485,7 +486,7 @@ where
     /// Record a progress snapshot in metrics.
     fn record_progress(&mut self) {
         self.metrics.record_target(*self.target.range.end());
-        self.metrics.record_synced(self.journal.size());
+        self.metrics.record_synced(*self.journal.size());
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -547,7 +548,7 @@ where
             // Skip operations that are before the next location. The containment check when
             // selecting the range (`next_loc <= range_end`) guarantees at least one operation
             // at or after it, so the batch is never empty.
-            operations.drain(..(next_loc - *range_start_loc) as usize);
+            operations.drain(..(*next_loc - *range_start_loc) as usize);
             next_loc += operations.len() as u64;
             self.journal = self.journal.append(operations).await?;
         }
@@ -638,6 +639,7 @@ where
                 if new_target.root == self.target.root {
                     return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
                 }
+                DB::validate_target(&new_target).map_err(SyncError::Engine)?;
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress();
@@ -745,7 +747,7 @@ where
         )
         .await?;
 
-        let got_root = database.root();
+        let got_root = database.target().root;
         let expected_root = self.target.root;
         if got_root != expected_root {
             return Err(SyncError::Engine(EngineError::RootMismatch {
@@ -777,9 +779,13 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         merkle::{Proof, mmr::Family as MmrFamily},
-        qmdb::sync::{
-            harness::{DbOf, OpOf, SyncTestHarness},
-            source::{self, tests::FailSource},
+        qmdb::{
+            operation::Committable,
+            sync::{
+                Hooks,
+                harness::{DbOf, InterruptedDestroy, OpOf, SyncTestHarness},
+                source::{self, tests::FailSource},
+            },
         },
     };
     use commonware_cryptography::{Sha256, sha256};
@@ -796,6 +802,7 @@ pub(crate) mod tests {
     #[derive(Clone)]
     struct TestConfig {
         journal_size: u64,
+        local_state_discards: Arc<AtomicUsize>,
         pinned_node_probes: Arc<AtomicUsize>,
     }
 
@@ -804,6 +811,16 @@ pub(crate) mod tests {
 
         fn journal_config(&self) -> Self::JournalConfig {
             self.journal_size
+        }
+    }
+
+    impl Committable<MmrFamily> for i32 {
+        fn inactivity_floor(&self) -> Option<Location<MmrFamily>> {
+            None
+        }
+
+        fn initial_commit() -> Self {
+            0
         }
     }
 
@@ -834,8 +851,8 @@ pub(crate) mod tests {
             Ok(self)
         }
 
-        fn size(&self) -> u64 {
-            self.size
+        fn size(&self) -> Location<MmrFamily> {
+            Location::new(self.size)
         }
 
         async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
@@ -855,33 +872,61 @@ pub(crate) mod tests {
         type Journal = TestJournal;
         type Op = i32;
 
-        async fn from_sync_result(
+        async fn init(
             _context: Self::Context,
             _config: Self::Config,
-            _journal: Self::Journal,
-            _pinned_nodes: Option<Vec<Self::Digest>>,
-            _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
-            _apply_batch_size: NonZeroU64,
+            _max_size: Option<Location<Self::Family>>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             Ok(Self)
         }
 
-        async fn persist_sync_result(self) -> Result<Self, qmdb::Error<Self::Family>> {
+        fn target(&self) -> Target<MmrFamily, sha256::Digest> {
+            Target {
+                root: sha256::Digest::from([0u8; 32]),
+                range: non_empty_range!(Location::new(0), Location::new(1)),
+            }
+        }
+
+        async fn prune_to_target(
+            self,
+            _target: &Target<MmrFamily, sha256::Digest>,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(self)
+        }
+    }
+
+    impl Hooks<Self> for TestDb {
+        async fn from_sync_result(
+            _context: deterministic::Context,
+            _config: TestConfig,
+            _journal: TestJournal,
+            _pinned_nodes: Option<Vec<sha256::Digest>>,
+            _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
+            _apply_batch_size: NonZeroU64,
+        ) -> Result<Self, qmdb::Error<MmrFamily>> {
+            Ok(Self)
+        }
+
+        async fn persist_sync_result(self) -> Result<Self, qmdb::Error<MmrFamily>> {
             Ok(self)
         }
 
-        async fn local_pinned_nodes(
-            _context: Self::Context,
-            config: &Self::Config,
-            _target: &Target<Self::Family, Self::Digest>,
-            _journal: &Self::Journal,
-        ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<Self::Family>> {
-            config.pinned_node_probes.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(vec![]))
+        async fn discard_local_state(
+            _context: deterministic::Context,
+            config: &TestConfig,
+        ) -> Result<(), qmdb::Error<MmrFamily>> {
+            config.local_state_discards.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
-        fn root(&self) -> Self::Digest {
-            sha256::Digest::from([0u8; 32])
+        async fn local_pinned_nodes(
+            _context: deterministic::Context,
+            config: &TestConfig,
+            _target: &Target<MmrFamily, sha256::Digest>,
+            _journal: &TestJournal,
+        ) -> Result<Option<Vec<sha256::Digest>>, qmdb::Error<MmrFamily>> {
+            config.pinned_node_probes.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(vec![]))
         }
     }
 
@@ -926,6 +971,7 @@ pub(crate) mod tests {
             apply_batch_size: NZU64!(1),
             db_config: TestConfig {
                 journal_size,
+                local_state_discards: Arc::new(AtomicUsize::new(0)),
                 pinned_node_probes,
             },
             update_rx: None,
@@ -938,11 +984,11 @@ pub(crate) mod tests {
         context: deterministic::Context,
     ) -> Engine<DbOf<H>, FailSource<H::Family, OpOf<H>, sha256::Digest>>
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         // Source requests stay unpolled; completed fetch results are injected directly.
         let config = Config {
-            db_config: H::config("retention", &context),
+            db_config: H::config("retention"),
             context,
             source: FailSource::new(),
             target: Target {
@@ -966,7 +1012,7 @@ pub(crate) mod tests {
     where
         DB: Database,
         S: SourceFor<DB>,
-        DB::Op: Encode + 'static,
+        DB::Op: 'static,
     {
         engine
             .outstanding_requests
@@ -993,7 +1039,7 @@ pub(crate) mod tests {
     /// A boundary response keeps a fetched batch that starts at the lower bound.
     pub(crate) fn test_boundary_response_keeps_fetched_batch_at_lower_bound<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + Clone + PartialEq + Debug + 'static,
+        OpOf<H>: Clone + PartialEq + Debug + 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1041,7 +1087,7 @@ pub(crate) mod tests {
 
             // Applying moves the journal past the whole batch.
             let engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.journal.size(), 9);
+            assert_eq!(engine.journal.size(), Location::new(9));
         });
     }
 
@@ -1049,7 +1095,7 @@ pub(crate) mod tests {
     /// drops its queued result.
     pub(crate) fn test_target_update_drops_queued_result_of_cancelled_request<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1095,7 +1141,7 @@ pub(crate) mod tests {
     /// survives updates that keep the lower bound.
     pub(crate) fn test_target_updates_keep_old_size_request_beyond_floor<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + Clone + PartialEq + Debug + 'static,
+        OpOf<H>: Clone + PartialEq + Debug + 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1162,7 +1208,7 @@ pub(crate) mod tests {
     /// keeps one beyond it.
     pub(crate) fn test_target_update_floor_move_cancels_operations_below_bound<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1202,7 +1248,7 @@ pub(crate) mod tests {
         H: SyncTestHarness,
     >()
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1232,6 +1278,182 @@ pub(crate) mod tests {
             assert!(!engine.outstanding_requests.contains(&Location::new(5)));
             assert!(engine.outstanding_requests.contains(&Location::new(6)));
             assert_eq!(engine.outstanding_requests.len(), 1);
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
+    ///
+    /// A sync into the storage that [`InterruptedDestroy`] builds is stopped once fetched
+    /// operations are durable, and a second sync resumes from them and reaches the target's
+    /// roots. The target's range starts above zero when `pruned`. The first sync stops with the
+    /// whole range fetched when `fetched`, and with part of it otherwise.
+    pub(crate) fn issue_5669_regression_sync_restart_after_destroy<H: SyncTestHarness>(
+        pruned: bool,
+        fetched: bool,
+    ) where
+        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
+    {
+        deterministic::Runner::default().start(|mut context| async move {
+            let InterruptedDestroy {
+                target_db,
+                target,
+                canonical_root,
+                db_config,
+                ..
+            } = InterruptedDestroy::<H>::new(&mut context, pruned).await;
+            let config = |context: deterministic::Context| Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(10),
+                target: target.clone(),
+                context,
+                source: target_db.clone(),
+                apply_batch_size: NZU64!(1024),
+                max_outstanding_requests: NZUsize!(1),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            };
+
+            // Stop the first sync before it builds the database, with its journal durable.
+            let stop = if fetched {
+                target.range.end()
+            } else {
+                target.range.start() + 1
+            };
+            let mut engine: Engine<DbOf<H>, _> =
+                Engine::new(config(context.child("first"))).await.unwrap();
+            while engine.journal.size() < stop {
+                engine = match engine.step().await.unwrap() {
+                    NextStep::Continue(engine) => engine,
+                    NextStep::Complete(_) => panic!("sync completed before it was stopped"),
+                };
+            }
+            engine.journal = engine.journal.sync().await.unwrap();
+            drop(engine);
+
+            // The restarted sync resumes the journal and reaches the target.
+            let synced_db: DbOf<H> = crate::qmdb::sync::sync(config(context.child("second")))
+                .await
+                .unwrap();
+            assert_eq!(H::ops_root(&synced_db), target.root);
+            assert_eq!(H::canonical_root(&synced_db), canonical_root);
+            assert_eq!(H::bounds(&synced_db).end, target.range.end());
+
+            H::destroy(synced_db).await;
+            H::destroy(
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")),
+            )
+            .await;
+        });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5669.
+    ///
+    /// A sync into the storage that [`InterruptedDestroy`] builds is stopped once the target's
+    /// penultimate commit is durable. Opening the database then recovers that commit. When
+    /// `pruned`, the target's range starts above zero and the open fails instead. Either way it
+    /// never applies the client's stale state to the fetched operations, and a retried sync
+    /// reaches the target.
+    pub(crate) fn issue_5669_regression_open_after_stopped_sync<H: SyncTestHarness>(pruned: bool)
+    where
+        Arc<DbOf<H>>: SourceFor<DbOf<H>>,
+    {
+        deterministic::Runner::default().start(|mut context| async move {
+            let InterruptedDestroy {
+                target_db,
+                target,
+                canonical_root,
+                penultimate_end,
+                penultimate_root,
+                penultimate_canonical_root,
+                stale_boundary,
+                db_config,
+            } = InterruptedDestroy::<H>::new(&mut context, pruned).await;
+            let config = |context: deterministic::Context| Config {
+                db_config: db_config.clone(),
+                fetch_batch_size: NZU64!(10),
+                target: target.clone(),
+                context,
+                source: target_db.clone(),
+                apply_batch_size: NZU64!(1024),
+                max_outstanding_requests: NZUsize!(1),
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+            };
+
+            // Fetch through the penultimate commit, make the journal durable, and stop.
+            let mut engine: Engine<DbOf<H>, _> =
+                Engine::new(config(context.child("first"))).await.unwrap();
+            while engine.journal.size() < penultimate_end {
+                engine = match engine.step().await.unwrap() {
+                    NextStep::Continue(engine) => engine,
+                    NextStep::Complete(_) => panic!("sync completed before it was stopped"),
+                };
+            }
+            assert!(engine.journal.size() < target.range.end());
+            engine.journal = engine.journal.sync().await.unwrap();
+            drop(engine);
+
+            // The stale boundary lies among the fetched operations, where an open would accept
+            // the stale frontier if the sync had not discarded it.
+            assert!(
+                stale_boundary >= target.range.start(),
+                "test setup requires the client's boundary {stale_boundary} at or above the \
+                 target's start {}",
+                target.range.start()
+            );
+            assert!(
+                stale_boundary < penultimate_end,
+                "test setup requires the client's boundary {stale_boundary} below the \
+                 penultimate commit's end {penultimate_end}"
+            );
+
+            // The sync discarded the stale frontier, so the recorded boundary is zero. A journal
+            // that starts at zero opens at the penultimate commit. One that starts above zero does
+            // not match that boundary, so the open fails.
+            let opened =
+                <DbOf<H> as Database>::init(context.child("opened"), db_config.clone(), None).await;
+            match opened {
+                Ok(opened_db) => {
+                    assert_eq!(H::bounds(&opened_db).end, penultimate_end);
+                    assert_eq!(H::ops_root(&opened_db), penultimate_root);
+                    assert_eq!(H::canonical_root(&opened_db), penultimate_canonical_root);
+                    assert!(
+                        !pruned,
+                        "open recovered operations fetched without their pins"
+                    );
+                }
+                Err(err) => assert!(
+                    pruned
+                        && matches!(
+                            err,
+                            crate::qmdb::Error::Merkle(crate::merkle::Error::DataCorrupted(
+                                "frontier outside operation journal"
+                            ))
+                        ),
+                    "open failed: {err}"
+                ),
+            }
+
+            // A retried sync resumes from the journal and reaches the target, and so does a reopen.
+            let synced_db: DbOf<H> = crate::qmdb::sync::sync(config(context.child("second")))
+                .await
+                .unwrap();
+            assert_eq!(H::ops_root(&synced_db), target.root);
+            assert_eq!(H::canonical_root(&synced_db), canonical_root);
+            assert_eq!(H::bounds(&synced_db).end, target.range.end());
+            drop(synced_db);
+            let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
+            assert_eq!(H::ops_root(&reopened_db), target.root);
+            assert_eq!(H::canonical_root(&reopened_db), canonical_root);
+            assert_eq!(H::bounds(&reopened_db).end, target.range.end());
+
+            H::destroy(reopened_db).await;
+            H::destroy(
+                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")),
+            )
+            .await;
         });
     }
 
@@ -1279,7 +1501,7 @@ pub(crate) mod tests {
             // Applying drops the batch below the new lower bound and appends the operation of
             // the straddling batch at it.
             let engine = engine.apply_operations().await.unwrap();
-            assert_eq!(engine.journal.size(), 10);
+            assert_eq!(engine.journal.size(), Location::new(10));
             assert!(engine.fetched_operations.is_empty());
         });
     }
@@ -1305,6 +1527,37 @@ pub(crate) mod tests {
                 .unwrap();
 
             assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn new_discards_local_state_when_journal_resumes_nothing() {
+        deterministic::Runner::default().start(|context| async move {
+            let pinned_node_probes = Arc::new(AtomicUsize::new(0));
+            let config = test_engine_config(context, 5, pinned_node_probes.clone());
+            let local_state_discards = config.db_config.local_state_discards.clone();
+            Engine::new(config).await.unwrap();
+
+            assert_eq!(local_state_discards.load(Ordering::SeqCst), 1);
+            assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn new_keeps_local_state_when_journal_resumes() {
+        deterministic::Runner::default().start(|context| async move {
+            // A journal that holds part of the range or all of it resumes operations.
+            for (label, journal_size) in [("partial", 6), ("complete", 10)] {
+                let config = test_engine_config(
+                    context.child(label),
+                    journal_size,
+                    Arc::new(AtomicUsize::new(0)),
+                );
+                let local_state_discards = config.db_config.local_state_discards.clone();
+                Engine::new(config).await.unwrap();
+
+                assert_eq!(local_state_discards.load(Ordering::SeqCst), 0);
+            }
         });
     }
 
@@ -1348,6 +1601,29 @@ pub(crate) mod tests {
                 panic!("engine should retarget instead of completing");
             };
             assert_eq!(engine.target, advancing);
+        });
+    }
+
+    #[test]
+    fn step_fails_on_same_root_advance() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            let same_root = Target {
+                root: config.target.root,
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            assert!(update_tx.send_lossy(same_root));
+
+            let engine = Engine::new(config).await.unwrap();
+            let Err(err) = engine.step().await else {
+                panic!("a same-root advance must fail the sync");
+            };
+            assert!(matches!(
+                err,
+                SyncError::Engine(EngineError::SyncTargetRootUnchanged)
+            ));
         });
     }
 

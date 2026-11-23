@@ -5,11 +5,11 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
+    merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
-        any::{traits::DbAny as _, value::FixedEncoding},
-        current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
+        current::ordered::fixed::{Config, Db as CurrentDb},
+        value::FixedEncoding,
     },
     translator::TwoCap,
 };
@@ -100,7 +100,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(91);
 const PAGE_CACHE_SIZE: usize = 8;
-const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
@@ -121,14 +120,14 @@ async fn commit_pending<F: Graftable>(
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
 ) -> Db<F> {
-    let inherited = db.inactivity_floor_loc();
+    let inherited = db.inactivity_floor();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
-    let (db, _) = db
+    let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
+    let db = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
@@ -142,7 +141,7 @@ async fn commit_pending<F: Graftable>(
     *committed_state = policy.check_raw(
         committed_state.drain(),
         inherited,
-        db.inactivity_floor_loc(),
+        db.inactivity_floor(),
         db.bounds().end - 1,
     );
     db
@@ -178,22 +177,15 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let initial_writes = data.initial_writes;
     let operations = data.operations.clone();
     runner.start(|context| async move {
-        let page_cache = CacheRef::from_pooler(
-            &context,
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        );
+        let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
-            merkle_config: MerkleConfig {
-                journal_partition: format!("fuzz-current-ord-{suffix}-merkle-journal"),
-                metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
-                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+            merkle: MerkleConfig {
+                partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: commonware_storage_fuzz::low_resident_height(),
             },
-            journal_config: FConfig {
+            log: FConfig {
                 partition: format!("fuzz-current-ord-{suffix}-log-journal"),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
@@ -204,7 +196,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             translator: TwoCap,
             init_cache: Some(NZUsize!(3)),
             init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
+            init_concurrency: NZUsize!(2),
         };
 
         let mut db: Db<F> = Db::init(context.child("storage"), cfg, None)
@@ -357,8 +349,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             .expect("Range proof should not fail");
 
                         assert!(
-                            Db::<F>::verify_range_proof(
-                                &proof,
+                            proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -400,8 +391,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.proof.digests != bad_digests {
                             let mut bad_digest_proof = range_proof.clone();
                             bad_digest_proof.proof.digests = bad_digests;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_digest_proof,
+                            assert!(!bad_digest_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -414,8 +404,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             && range_proof.pending_chunk_digest != bad_pending {
                                 let mut bad_pending_proof = range_proof.clone();
                                 bad_pending_proof.pending_chunk_digest = bad_pending;
-                                assert!(!Db::<F>::verify_range_proof(
-                                    &bad_pending_proof,
+                                assert!(!bad_pending_proof.verify::<Sha256, _, _>(
                                     start_loc,
                                     &ops,
                                     &chunks,
@@ -427,8 +416,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         if range_proof.partial_chunk_digest != bad_partial_digest {
                             let mut bad_partial_proof = range_proof.clone();
                             bad_partial_proof.partial_chunk_digest = bad_partial_digest;
-                            assert!(!Db::<F>::verify_range_proof(
-                                &bad_partial_proof,
+                            assert!(!bad_partial_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &chunks,
@@ -445,8 +433,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                             corrupted
                         }).collect();
                         if chunks != bad_chunks {
-                            assert!(!Db::<F>::verify_range_proof(
-                                &range_proof,
+                            assert!(!range_proof.verify::<Sha256, _, _>(
                                 start_loc,
                                 &ops,
                                 &bad_chunks,
@@ -468,9 +455,10 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     committed_op_count = db.bounds().end;
                     let current_root = db.root();
 
-                    match db.key_value_proof(k.clone()).await {
-                        Ok(proof) => {
-                            let value = db.get(&k).await.expect("get should not fail").expect("key should exist");
+                    match db.key_value_proof(&k).await {
+                        Ok((proof, value)) => {
+                            let expected = committed_state.get(key).copied().expect("key should exist in committed state");
+                            assert_eq!(value, Value::new(expected));
                             let verification_result = proof.verify::<Sha256, FixedEncoding<Value>>(k, value, &current_root);
                             assert!(verification_result, "Key value proof verification failed for key {key:?}");
                         }

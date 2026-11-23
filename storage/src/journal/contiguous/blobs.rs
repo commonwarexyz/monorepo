@@ -15,10 +15,8 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
-use futures::{
-    FutureExt as _,
-    future::{self, try_join_all},
-};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
@@ -364,6 +362,22 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
+    /// Return the first blob to retain and its first item position if pruning advances.
+    pub(super) fn prune_target(
+        &self,
+        min_position: u64,
+        items_per_blob: u64,
+    ) -> Option<(u64, u64)> {
+        let blob =
+            super::position_to_blob(min_position, items_per_blob).min(self.tail_blob_index());
+        if blob <= self.oldest_blob_index() {
+            return None;
+        }
+
+        // The retained blob starts at or before min_position, so the product fits.
+        Some((blob, blob * items_per_blob))
+    }
+
     /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
     /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
     /// valid.
@@ -396,7 +410,6 @@ impl<E: Context> Writable<E> {
     ///
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear(mut self, tail_blob: u64) -> Result<Self, Error> {
         // Observe outstanding sync failures before removing any retained data.
         self.drain_tail_predecessor_sync().await?;
@@ -446,18 +459,23 @@ impl<E: Context> Writable<E> {
         Ok((self, handle))
     }
 
-    /// Remove every blob and the partition itself.
-    pub(super) async fn destroy(mut self) -> Result<(), Error> {
-        // Observe outstanding sync failures before removing any retained data.
+    /// Wait for every started sync to complete, surfacing a failure without changing any blob.
+    pub(super) async fn wait_for_sync(mut self) -> Result<Self, Error> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
+        Ok(self)
+    }
 
-        let tail_blob = self.tail_blob_index();
-        drop(self.tail);
-        for blob in self.oldest_blob_index..=tail_blob {
-            self.partition.remove(blob).await?;
+    /// Remove every blob and the partition itself, after observing any started sync so a failed
+    /// sync removes nothing.
+    pub(super) async fn destroy(self) -> Result<(), Error> {
+        let blobs = self.wait_for_sync().await?;
+        let tail_blob = blobs.tail_blob_index();
+        drop(blobs.tail);
+        for blob in blobs.oldest_blob_index..=tail_blob {
+            blobs.partition.remove(blob).await?;
         }
-        Partition::remove_all(&self.partition.context, &self.partition.name).await
+        Partition::remove_all(&blobs.partition.context, &blobs.partition.name).await
     }
 }
 
@@ -586,6 +604,18 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length.
+    pub(super) async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        match self {
+            Self::Writer(writer) => Ok(writer.read_ranges_into(buf, ranges).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_ranges_into(buf, ranges).await?),
+        }
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub(super) fn try_read_many_sync_into(
@@ -619,8 +649,10 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, bufs).await
+    ) -> Result<IoBufMut, Error> {
+        Self::read_up_to(self, offset, len, bufs)
+            .await
+            .map(|(buf, _)| buf)
     }
 
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
@@ -921,7 +953,7 @@ mod tests {
             encode_frame_into(None, &cross_page, &mut encoded).unwrap();
 
             // Replay a sealed snapshot so payloads are copied out of the paged replay buffer.
-            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(3));
             let (blob, size) = context
                 .open("paged-replay-bulk-fields", b"blob")
                 .await
@@ -961,7 +993,7 @@ mod tests {
     fn test_replay_preserves_byte_views_across_fills() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
             let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
             let writer = Writer::new(blob, size, 128, cache.clone()).await.unwrap();
             let (writer, _) = writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
@@ -1015,7 +1047,7 @@ mod tests {
         executor.start(|context| async move {
             let mut encoded = Vec::new();
             encode_frame_into(None, &IoBuf::from(b"abcdefgh"), &mut encoded).unwrap();
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
             let (blob, size) = context.open("replay-views", &[0]).await.unwrap();
             let pending = Writer::new(blob, size, 256, cache).await.unwrap();
             let (pending, _) = pending.append(&[0; 64]).await.unwrap();
@@ -1054,7 +1086,7 @@ mod tests {
                 for item in &items {
                     encode_frame_into(compression, item, &mut encoded).unwrap();
                 }
-                let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+                let cache = CacheRef::new(NZU16!(64), NZUsize!(3));
                 let (blob, size) = context
                     .open("replay-frames", &[compression.unwrap_or(0)])
                     .await
@@ -1143,7 +1175,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(3));
             let (blob, size) = context
                 .open("read_up_to_eof_parity", b"blob")
                 .await

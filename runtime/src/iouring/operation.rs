@@ -2,27 +2,66 @@
 //!
 //! Adapters register requests inside their async bodies, then await an
 //! [`Operation`] containing its waiter ID and weak worker identity. The driver
-//! retains both pending requests and completed results in one slab. A poll on
-//! another thread forwards observation through a completion channel while the
+//! retains both pending requests and completed results in one slab, and the
 //! request stays on its original worker.
+//!
+//! A poll on that worker inspects the driver directly. The first poll on
+//! another thread installs a completion channel through the worker's mailbox,
+//! and every later poll, on any thread, uses that channel. The waiter ID stays
+//! with the operation for cancellation until observation ends.
 //!
 //! An operation may be polled or dropped on any thread after registration.
 //! Dropping it releases its observer. The driver decides whether to cancel the
-//! request or finish retained work such as writes and syncs.
+//! request or finish retained work such as writes, syncs, and resizes.
 
 use super::{
-    mailbox::{Cancel, Forward},
-    registration::{Key, Observation, Registration},
+    mailbox::{Mailbox, Message},
     request::{Request, RequestOutput, SyncRequest},
     runtime::Local,
     waiter::{Observer, WaiterId},
 };
 use crate::Error;
 use commonware_utils::channel::oneshot;
-use std::{sync::Arc, task::Waker};
+use std::{
+    future::Future,
+    mem,
+    pin::Pin,
+    sync::{Arc, Weak},
+    task::{Context, Poll},
+};
+
+/// Inspection without cloning or invoking the observer's waker.
+pub enum Observation {
+    /// The request has completed and relinquished its output.
+    Ready(RequestOutput),
+    /// The installed waker already matches the current task.
+    Pending,
+    /// A new waker must be cloned outside the worker borrow.
+    Refresh,
+}
+
+/// Ownership retained between polls.
+enum State {
+    /// Request awaiting observation, directly or through a forwarding channel.
+    Waiting {
+        /// Owning worker, without extending its lifetime.
+        mailbox: Weak<Mailbox>,
+        /// Identity retained until completion or cancellation.
+        id: WaiterId,
+        /// Permanent observation path once forwarding is requested.
+        receiver: Option<oneshot::Receiver<Result<RequestOutput, Error>>>,
+    },
+    /// Request rejected by a closing worker, with closure not yet observed.
+    Closed,
+    /// Observation completed or released, with no cancellation identity retained.
+    Done,
+}
 
 /// Handle to an I/O request registered on a worker.
-pub(crate) type Operation = Registration<WaiterId>;
+pub(crate) struct Operation {
+    /// Retains the cancellation identity until observation completes or is released.
+    state: State,
+}
 
 impl Operation {
     /// Register on the current worker and return a handle to its result.
@@ -37,7 +76,9 @@ impl Operation {
             // Request owners may run destructors that reenter the worker.
             drop(local);
             drop(request);
-            return Self::closed();
+            return Self {
+                state: State::Closed,
+            };
         }
         let mailbox = Arc::downgrade(&local.mailbox);
 
@@ -53,27 +94,117 @@ impl Operation {
             .as_mut()
             .unwrap()
             .admit(request, Observer::Local(None), *now, deferred);
-        Self::new(mailbox, id)
+        Self {
+            state: State::Waiting {
+                mailbox,
+                id,
+                receiver: None,
+            },
+        }
+    }
+
+    /// Release the operation before destroying a channel's observer waker.
+    fn release(&mut self) {
+        // Consume the identity before cleanup can unwind. Publish cancellation
+        // before dropping the receiver, whose waker destructor may run user code.
+        if let State::Waiting {
+            mailbox,
+            id,
+            receiver,
+        } = mem::replace(&mut self.state, State::Done)
+        {
+            Local::cancel(&mailbox, id);
+            drop(receiver);
+        }
     }
 }
 
-impl Key for WaiterId {
-    type Output = RequestOutput;
+impl Future for Operation {
+    type Output = Result<RequestOutput, Error>;
 
-    fn observe(self, local: &mut Local, waker: &Waker) -> Observation<RequestOutput> {
-        local.driver.as_mut().unwrap().observe(self, waker)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Pending polls retain the owner and ID so Drop can still release the
+        // request if polling unwinds.
+        let this = self.get_mut();
+        let (mailbox, id, receiver) = match &mut this.state {
+            State::Waiting {
+                mailbox,
+                id,
+                receiver,
+            } => (mailbox, *id, receiver),
+            State::Closed => {
+                this.state = State::Done;
+                return Poll::Ready(Err(Error::Closed));
+            }
+            State::Done => panic!("io_uring operation polled after completion"),
+        };
+
+        // Direct access requires the owning worker and an unforwarded operation.
+        // Once installed, the channel remains the observation path even on that worker.
+        let owner = receiver.is_none().then(|| Local::owner(mailbox)).flatten();
+        let Some(owner) = owner else {
+            // A missing or closed worker drops the sender, allowing the receiver
+            // to report closure without retaining the worker.
+            let receiver = receiver.get_or_insert_with(|| {
+                let (sender, receiver) = oneshot::channel();
+                if let Some(mailbox) = mailbox.upgrade() {
+                    let _ = mailbox.send(Message::Forward(id, sender));
+                }
+                receiver
+            });
+
+            let result = std::task::ready!(Pin::new(receiver).poll(cx));
+            this.state = State::Done;
+            return Poll::Ready(result.unwrap_or(Err(Error::Closed)));
+        };
+
+        // A closing worker owns cleanup. Release observation after ending this
+        // borrow because cancellation reenters the worker.
+        let mut local = owner.borrow_mut();
+        if local.closing {
+            drop(local);
+            this.release();
+            return Poll::Ready(Err(Error::Closed));
+        }
+
+        // Only a changed pending waker needs a refresh. Ready results and matching
+        // wakers return without invoking observer callbacks.
+        match local.driver.as_mut().unwrap().observe(id, cx.waker()) {
+            Observation::Ready(output) => {
+                this.state = State::Done;
+                return Poll::Ready(Ok(output));
+            }
+            Observation::Pending => return Poll::Pending,
+            Observation::Refresh => {}
+        }
+
+        // Waker callbacks may reenter the runtime, so clone outside the borrow.
+        // A clone panic leaves the waiter ID available for cancellation. A
+        // clone can also admit a durability request, whose admission polls the
+        // notified permit waits and can complete this operation if its permit
+        // was granted since the last service, so observe again before
+        // installing the clone. Defer destruction of whichever waker is left
+        // over.
+        drop(local);
+        let waker = cx.waker().clone();
+        let mut local = owner.borrow_mut();
+        let driver = local.driver.as_mut().unwrap();
+        let (poll, unused) = match driver.observe(id, cx.waker()) {
+            Observation::Ready(output) => {
+                this.state = State::Done;
+                (Poll::Ready(Ok(output)), Some(waker))
+            }
+            Observation::Pending => (Poll::Pending, Some(waker)),
+            Observation::Refresh => (Poll::Pending, driver.set_waker(id, waker)),
+        };
+        local.deferred.drops.extend(unused);
+        poll
     }
+}
 
-    fn refresh(self, local: &mut Local, waker: Waker) -> Option<Waker> {
-        local.driver.as_mut().unwrap().set_waker(self, waker)
-    }
-
-    fn forward(self, sender: oneshot::Sender<Result<RequestOutput, Error>>) -> Forward {
-        Forward::Waiter(self, sender)
-    }
-
-    fn cancel(self) -> Cancel {
-        Cancel::Waiter(self)
+impl Drop for Operation {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -123,8 +254,10 @@ pub mod tests {
         storage::{hold::Hold, iouring::Shared},
         utils::{extract_panic_message, reschedule},
     };
+    use commonware_utils::sync::Mutex;
     use futures::{FutureExt as _, future::pending, poll};
     use std::{
+        cell::RefCell,
         fs::{self, OpenOptions},
         future::Future,
         io::Write as _,
@@ -132,14 +265,37 @@ pub mod tests {
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
         pin::pin,
+        ptr,
         sync::{
             atomic::{AtomicUsize, Ordering},
             mpsc,
         },
-        task::{Context, Poll, RawWaker, RawWakerVTable},
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
         thread,
         time::{Duration, Instant},
     };
+
+    impl Operation {
+        /// Return the waiter ID of a waiting operation.
+        fn key(&self) -> WaiterId {
+            let State::Waiting { id, .. } = self.state else {
+                panic!("operation already completed");
+            };
+            id
+        }
+    }
+
+    /// Return the number of unfinished logical requests admitted to the current worker.
+    pub fn admitted() -> usize {
+        let owner = Local::current().expect("io_uring I/O requires a current worker");
+        owner.borrow().driver.as_ref().unwrap().len()
+    }
+
+    /// Mark the current worker as closing, so it rejects new registrations as during shutdown.
+    pub fn close_current_worker() {
+        let owner = Local::current().expect("io_uring I/O requires a current worker");
+        owner.borrow_mut().closing = true;
+    }
 
     /// Arbitrary waker callbacks that reenter the current worker's local state.
     ///
@@ -159,11 +315,29 @@ pub mod tests {
         on_clone: Option<fn()>,
     }
 
+    /// The one vtable of every waker [`Reentrant`] makes.
+    ///
+    /// A static has a single address, so `will_wake` finds every clone of one
+    /// waker equal.
+    static REENTRANT_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        Reentrant::clone,
+        Reentrant::wake,
+        Reentrant::wake_by_ref,
+        Reentrant::drop,
+    );
+
     impl Reentrant {
+        /// Value of `panic_callback` that panics the next clone.
         pub const CLONE: usize = 1;
+
+        /// Value of `panic_callback` that panics the next wake, consuming or
+        /// borrowed.
         const WAKE: usize = 2;
+
+        /// Value of `panic_callback` that panics the next destructor.
         const DROP: usize = 3;
 
+        /// Panic if `callback` is the one armed, disarming it first.
         fn panic_once(&self, callback: usize) {
             // Disarm before unwinding so cleanup can use the remaining wakers.
             if self
@@ -175,6 +349,7 @@ pub mod tests {
             }
         }
 
+        /// Fail if the current worker's local state is borrowed.
         fn check_local() {
             if let Some(local) = Local::current() {
                 // A callback under an outstanding Local borrow fails here.
@@ -182,6 +357,8 @@ pub mod tests {
             }
         }
 
+        /// The vtable's clone: checks for a borrow, counts the clone, panics if
+        /// armed to, then runs `on_clone`.
         unsafe fn clone(data: *const ()) -> RawWaker {
             // SAFETY: Each raw waker owns one Arc reference to Reentrant.
             // ManuallyDrop borrows that reference without consuming it.
@@ -192,9 +369,11 @@ pub mod tests {
             if let Some(on_clone) = owner.on_clone {
                 on_clone();
             }
-            RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &Self::VTABLE)
+            RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &REENTRANT_VTABLE)
         }
 
+        /// The vtable's consuming wake: checks for a borrow, counts the wake,
+        /// and panics if armed to.
         unsafe fn wake(data: *const ()) {
             // SAFETY: Consuming wake takes exactly the Arc reference owned by
             // this raw waker. No reference is reconstructed a second time.
@@ -204,6 +383,8 @@ pub mod tests {
             owner.panic_once(Self::WAKE);
         }
 
+        /// The vtable's borrowed wake, as [`Self::wake`] without consuming the
+        /// waker's reference.
         unsafe fn wake_by_ref(data: *const ()) {
             // SAFETY: The waker retains its Arc reference after this callback,
             // so the temporary reconstructed Arc must not decrement it.
@@ -213,6 +394,8 @@ pub mod tests {
             owner.panic_once(Self::WAKE);
         }
 
+        /// The vtable's destructor: checks for a borrow, counts the drop, and
+        /// panics if armed to.
         unsafe fn drop(data: *const ()) {
             // SAFETY: Raw-waker destruction consumes its one owned Arc reference.
             let owner = unsafe { Arc::from_raw(data.cast::<Self>()) };
@@ -221,11 +404,9 @@ pub mod tests {
             owner.panic_once(Self::DROP);
         }
 
-        const VTABLE: RawWakerVTable =
-            RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop);
-
+        /// A waker that holds one reference to this fixture.
         pub fn waker(self: &Arc<Self>) -> Waker {
-            let raw = RawWaker::new(Arc::into_raw(self.clone()).cast(), &Self::VTABLE);
+            let raw = RawWaker::new(Arc::into_raw(self.clone()).cast(), &REENTRANT_VTABLE);
             // SAFETY: The vtable consistently owns or borrows one Arc reference
             // and Reentrant contains only thread-safe atomic state.
             unsafe { Waker::from_raw(raw) }
@@ -234,10 +415,7 @@ pub mod tests {
 
     /// Limit the driver to one in-flight request.
     fn runner() -> Runner {
-        Runner::new(Config::default().with_ring_config(RingConfig {
-            size: 1,
-            ..Default::default()
-        }))
+        Runner::new(Config::default().with_ring_config(RingConfig { size: 1 }))
     }
 
     /// Connected sockets whose local endpoint can be shared by requests.
@@ -385,7 +563,7 @@ pub mod tests {
             let waker = callbacks.waker();
             let mut cx = Context::from_waker(&waker);
 
-            Local::current().unwrap().borrow_mut().closing = true;
+            close_current_worker();
             assert!(matches!(
                 operation.poll_unpin(&mut cx),
                 Poll::Ready(Err(Error::Closed))
@@ -806,6 +984,42 @@ pub mod tests {
     }
 
     #[test]
+    fn test_queued_forward_wake_panic_fails_the_runner() {
+        // Cleanup drops a forwarding message still queued on its worker, which
+        // wakes the foreign observer. That waker's panic must fail the runner
+        // like any other deferred callback's.
+        let callbacks = Arc::new(Reentrant::default());
+
+        // Keep the operation and its peer past cleanup, so the receiver is
+        // still registered when the queued sender drops.
+        let mut kept = None;
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            runner().start(|_| async {
+                // A foreign poll queues the forwarding message on this worker.
+                let (fd, peer) = socket();
+                let operation = recv(fd, None);
+                let operation = poll_on_foreign_thread(operation, callbacks.waker());
+
+                // The root completes in this poll, so the message is still
+                // queued when cleanup starts.
+                callbacks
+                    .panic_callback
+                    .store(Reentrant::WAKE, Ordering::Relaxed);
+                kept = Some((operation, peer));
+            });
+        }))
+        .expect_err("a queued forwarding message's waker panic must fail the runner");
+
+        // The panic surfaced after the receiver was woken once.
+        assert_eq!(
+            extract_panic_message(&*panic),
+            format!("waker callback panic {}", Reentrant::WAKE)
+        );
+        assert_eq!(callbacks.wakes.load(Ordering::Relaxed), 1);
+        drop(kept);
+    }
+
+    #[test]
     fn test_forwarded_observer_callbacks_and_shutdown() {
         for (promoted, completed) in [(false, false), (true, false), (true, true)] {
             let callbacks = Arc::new(Reentrant::default());
@@ -957,5 +1171,104 @@ pub mod tests {
                 drained().await;
             });
         }
+    }
+
+    thread_local! {
+        /// Work run by the next clone of an [`admitting_waker`] on this thread.
+        static ON_CLONE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// The vtable of [`admitting_waker`].
+    ///
+    /// Clone runs the armed work, while wake and drop do nothing, so no
+    /// callback borrows the worker.
+    static ADMITTING_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        admitting_clone,
+        admitting_noop,
+        admitting_noop,
+        admitting_noop,
+    );
+
+    /// Run the armed work, then return another admitting waker.
+    unsafe fn admitting_clone(_: *const ()) -> RawWaker {
+        if let Some(work) = ON_CLONE.with(|slot| slot.borrow_mut().take()) {
+            work();
+        }
+        RawWaker::new(ptr::null(), &ADMITTING_VTABLE)
+    }
+
+    /// Wake and drop of an admitting waker.
+    const unsafe fn admitting_noop(_: *const ()) {}
+
+    /// A waker whose next clone runs `work` outside any worker borrow.
+    fn admitting_waker(work: impl FnOnce() + 'static) -> Waker {
+        ON_CLONE.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+        // SAFETY: The vtable never dereferences the null data pointer.
+        unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &ADMITTING_VTABLE)) }
+    }
+
+    /// A sync waits in the driver for its open's permit. The permit is released
+    /// to it, and before the worker services again the sync's future is polled
+    /// with a new waker. Cloning that waker admits another sync that must wait
+    /// for the same permit, and that admission polls the notified permit waits.
+    /// The open is clean, so acquiring the permit completes the observed sync
+    /// while its poll refreshes the waker.
+    #[test]
+    fn test_observer_clone_admitting_a_waiting_sync_keeps_the_observed_result() {
+        let directory = std::env::temp_dir().join(format!(
+            "commonware_operation_refresh_{}",
+            std::process::id()
+        ));
+        let hold = Hold::acquire(&directory).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.join("blob"))
+            .unwrap();
+        let shared = Shared::detached(file, hold);
+
+        let outcome = runner().start(|_| async move {
+            // Hold the open's permit so the sync waits for it in the driver.
+            let permit = shared.durability.clone().try_lock_owned().unwrap();
+            let mut sync = Operation::register(Request::Sync(SyncRequest::new(shared.clone())));
+            assert!(poll!(&mut sync).is_pending());
+
+            // Release the permit to the waiting sync. The worker has not
+            // serviced since, so the driver still lists the sync as waiting.
+            drop(permit);
+
+            // Poll with a new waker whose clone admits a second sync of the
+            // same open, which finds the permit granted and waits as well.
+            let admitted = Arc::new(Mutex::new(None));
+            let waker = admitting_waker({
+                let admitted = admitted.clone();
+                let shared = shared.clone();
+                move || {
+                    let second = Operation::register(Request::Sync(SyncRequest::new(shared)));
+                    *admitted.lock() = Some(second);
+                }
+            });
+            let poll = catch_unwind(AssertUnwindSafe(|| {
+                sync.poll_unpin(&mut Context::from_waker(&waker))
+            }));
+
+            // Report the poll's outcome, then let both syncs retire.
+            let outcome = match poll {
+                Ok(Poll::Pending) => "pending".to_string(),
+                Ok(Poll::Ready(Ok(RequestOutput::Sync(Ok(()))))) => "ready".to_string(),
+                Ok(Poll::Ready(other)) => format!("unexpected result: {other:?}"),
+                Err(panic) => format!("panic: {}", extract_panic_message(&*panic)),
+            };
+            drop(sync);
+            drop(admitted.lock().take());
+            drained().await;
+            outcome
+        });
+        fs::remove_dir_all(directory).unwrap();
+
+        // The poll must return the result completed during its clone.
+        assert_eq!(outcome, "ready");
     }
 }

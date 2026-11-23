@@ -1,6 +1,7 @@
 [package]
 name = "commonware-coding"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -29,8 +30,10 @@ bench = false
 
 [dev-dependencies]
 arbitrary.workspace = true
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 criterion.workspace = true
 rand.workspace = true

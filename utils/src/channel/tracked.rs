@@ -34,7 +34,7 @@
 //!     let msg = receiver.recv().await.unwrap();
 //!     assert_eq!(msg.data, "hello");
 //
-//!     // Clone the guard - delivery won't happen until all clones are dropped
+//!     // Delivery waits until all clones are dropped
 //!     let guard_clone = msg.guard.clone();
 //!     drop(msg.guard);
 //!     assert_eq!(sender.watermark(), 0); // Still not delivered
@@ -50,50 +50,52 @@ use super::mpsc::{
     self,
     error::{SendError, TryRecvError, TrySendError},
 };
-use crate::sync::Mutex;
+use crate::{Widen, sync::Mutex};
 use futures::Stream;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     hash::Hash,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
 
-/// A guard that tracks message delivery. When dropped, the message is marked as delivered.
+/// A guard that tracks message delivery. When all clones are dropped, the message is marked as
+/// delivered.
 #[derive(Clone)]
 pub struct Guard<B: Eq + Hash> {
+    inner: Arc<Inner<B>>,
+}
+
+/// Delivery bookkeeping shared by the clones of one [Guard].
+struct Inner<B: Eq + Hash> {
     sequence: u64,
     tracker: Arc<Mutex<State<B>>>,
 
     batch: Option<B>,
 }
 
-impl<B: Eq + Hash> Drop for Guard<B> {
+impl<B: Eq + Hash> Drop for Inner<B> {
     fn drop(&mut self) {
         // Get the state
         let mut state = self.tracker.lock();
 
         // Mark the message as delivered
-        *state.pending.get_mut(&self.sequence).unwrap() = true;
+        let index = usize::try_from(self.sequence - state.watermark - 1)
+            .expect("pending index must fit in usize");
+        state.pending[index] = true;
 
-        // Update watermark if possible
-        let mut current_watermark = state.watermark;
-        while let Some(delivered) = state.pending.get(&(current_watermark + 1)) {
-            // If the next message is not delivered, we can stop
-            if !*delivered {
-                break;
-            }
-
-            // Remove the next message from the pending list
-            state.pending.remove(&(current_watermark + 1));
-            current_watermark += 1;
-            state.watermark = current_watermark;
+        // Advance the watermark past the delivered prefix
+        while state.pending.pop_front_if(|delivered| *delivered).is_some() {
+            state.watermark += 1;
         }
 
-        // Update batch count (if necessary)
+        // Update the batch count (if necessary). `remove` drops the map's copy of the batch while
+        // the lock is held, but the guard's own batch is dropped with the rest of `Inner` after
+        // `state` is released. A batch destructor that runs then (for example, when the guard
+        // holds the last `Arc` reference) may lock the tracker.
         if let Some(batch) = &self.batch {
-            let count = state.batches.get_mut(batch).unwrap();
+            let count = state.batches.get_mut(batch).expect("batch must be tracked");
             if *count > 1 {
                 *count -= 1;
             } else {
@@ -109,25 +111,28 @@ pub struct Message<T, B: Eq + Hash> {
     pub data: T,
     /// The [Guard] that tracks delivery.
     ///
-    /// When no outstanding references to the guard exist, the message is considered delivered.
-    pub guard: Arc<Guard<B>>,
+    /// When all clones of the guard are dropped, the message is considered delivered.
+    pub guard: Guard<B>,
 }
 
 /// The state of the [Tracker].
 struct State<B> {
-    next: u64,
+    /// Every sequence up to and including the watermark has been delivered.
     watermark: u64,
+    /// The number of undelivered messages in each batch.
     batches: HashMap<B, usize>,
-    pending: HashMap<u64, bool>,
+    /// `pending[i]` records whether sequence `watermark + 1 + i` has been delivered. Every
+    /// sequence issued above the watermark has a slot, so [Tracker::guard] issues
+    /// `watermark + 1 + pending.len()` next.
+    pending: VecDeque<bool>,
 }
 
 impl<B> Default for State<B> {
     fn default() -> Self {
         Self {
-            next: 1,
             watermark: 0,
             batches: HashMap::new(),
-            pending: HashMap::new(),
+            pending: VecDeque::new(),
         }
     }
 }
@@ -154,12 +159,10 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         // Get state
         let mut state = self.state.lock();
 
-        // Get the next sequence
-        let sequence = state.next;
-        state.next += 1;
-
-        // Track this sequence as not yet delivered
-        state.pending.insert(sequence, false);
+        // Issue the next sequence and track it as not yet delivered
+        let issued: u64 = Widen::widen(state.pending.len());
+        let sequence = state.watermark + 1 + issued;
+        state.pending.push_back(false);
 
         // Update batch count if provided
         if let Some(batch) = &batch {
@@ -167,10 +170,12 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         }
 
         Guard {
-            sequence,
-            tracker: self.state.clone(),
+            inner: Arc::new(Inner {
+                sequence,
+                tracker: self.state.clone(),
 
-            batch,
+                batch,
+            }),
         }
     }
 }
@@ -186,8 +191,8 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     /// Sends a message with an optional batch ID and returns a delivery guard.
     pub async fn send(&self, batch: Option<B>, data: T) -> Result<u64, SendError<Message<T, B>>> {
         // Create the guard
-        let guard = Arc::new(self.tracker.guard(batch));
-        let watermark = guard.sequence;
+        let guard = self.tracker.guard(batch);
+        let watermark = guard.inner.sequence;
 
         // Send the message
         let msg = Message { data, guard };
@@ -199,8 +204,8 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     /// Tries to send a message without blocking.
     pub fn try_send(&self, batch: Option<B>, data: T) -> Result<u64, TrySendError<Message<T, B>>> {
         // Create the guard
-        let guard = Arc::new(self.tracker.guard(batch));
-        let watermark = guard.sequence;
+        let guard = self.tracker.guard(batch);
+        let watermark = guard.inner.sequence;
 
         // Send the message
         let msg = Message { data, guard };
@@ -267,6 +272,58 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
 
+    /// A batch whose destructor runs a callback.
+    struct CallbackBatch {
+        id: u64,
+        on_drop: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl PartialEq for CallbackBatch {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+
+    impl Eq for CallbackBatch {}
+
+    impl Hash for CallbackBatch {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.id.hash(state);
+        }
+    }
+
+    impl Drop for CallbackBatch {
+        fn drop(&mut self) {
+            (self.on_drop)();
+        }
+    }
+
+    #[test]
+    fn test_batch_destructor_can_read_watermark() {
+        // Run the channel on a worker thread so the receive timeout below fails the test if the
+        // batch destructor deadlocks on the tracker.
+        let (observed, observations) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            block_on(async move {
+                let (sender, mut receiver) = bounded::<(), Arc<CallbackBatch>>(1);
+                let observer = sender.clone();
+                let batch = Arc::new(CallbackBatch {
+                    id: 1,
+                    on_drop: Box::new(move || observed.send(observer.watermark()).unwrap()),
+                });
+                sender.send(Some(batch), ()).await.unwrap();
+
+                // Dropping the only guard drops the last reference to the batch
+                drop(receiver.recv().await.unwrap());
+            });
+        });
+        let watermark = observations
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("batch destructor must read the watermark");
+        assert_eq!(watermark, 1);
+        worker.join().unwrap();
+    }
+
     #[test]
     fn test_basic() {
         block_on(async move {
@@ -285,6 +342,54 @@ mod tests {
             // Drop the guard to mark as delivered
             drop(msg.guard);
             assert_eq!(sender.watermark(), 1);
+        });
+    }
+
+    #[test]
+    fn test_out_of_order_delivery() {
+        block_on(async move {
+            let (sender, mut receiver) = bounded::<i32, u64>(4);
+            for value in 1..=4 {
+                sender.send(Some(1), value).await.unwrap();
+            }
+            let first = receiver.recv().await.unwrap();
+            let second = receiver.recv().await.unwrap();
+            let third = receiver.recv().await.unwrap();
+            let fourth = receiver.recv().await.unwrap();
+
+            // Delivering the second and fourth messages leaves the first undelivered, so the
+            // watermark stays at zero
+            drop(second);
+            drop(fourth);
+            assert_eq!(sender.watermark(), 0);
+            assert_eq!(sender.pending(1), 2);
+
+            // A message sent while delivered messages wait behind the undelivered first takes the
+            // sequence after every issued message, delivered or not
+            let fifth = sender.send(Some(2), 5).await.unwrap();
+            assert_eq!(fifth, 5);
+            assert_eq!(sender.pending(2), 1);
+
+            // Delivering the first advances the watermark past the already delivered second
+            drop(first);
+            assert_eq!(sender.watermark(), 2);
+            assert_eq!(sender.pending(1), 1);
+
+            // Delivering the third advances the watermark past the already delivered fourth
+            drop(third);
+            assert_eq!(sender.watermark(), 4);
+            assert_eq!(sender.pending(1), 0);
+
+            // A message sent after the watermark advanced continues from the watermark
+            let sixth = sender.send(Some(2), 6).await.unwrap();
+            assert_eq!(sixth, 6);
+            assert_eq!(sender.pending(2), 2);
+
+            // Delivering the fifth and sixth in order advances the watermark past both
+            drop(receiver.recv().await.unwrap());
+            drop(receiver.recv().await.unwrap());
+            assert_eq!(sender.watermark(), 6);
+            assert_eq!(sender.pending(2), 0);
         });
     }
 
@@ -336,9 +441,9 @@ mod tests {
             let msg = receiver.recv().await.unwrap();
             assert_eq!(msg.data, "test");
 
-            // The message guard and sender guard are the same
-            let msg_guard_clone1 = msg.guard.clone();
-            let msg_guard_clone2 = msg.guard.clone();
+            // Clones of one guard share a single delivery
+            let msg_guard_clone1: Guard<u64> = msg.guard.clone();
+            let msg_guard_clone2: Guard<u64> = msg.guard.clone();
 
             assert_eq!(sender.pending(1), 1);
             assert_eq!(sender.watermark(), 0);

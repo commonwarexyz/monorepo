@@ -39,7 +39,8 @@ impl Encoder {
     /// Creates a new encoder with the given configuration and allocates the required working
     /// space.
     ///
-    /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
+    /// See [working space](crate::reed_solomon#working-space) for its size and the configurations
+    /// a coder accepts, and [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn new(
         original_count: usize,
         recovery_count: usize,
@@ -170,7 +171,8 @@ impl Decoder {
     /// Creates a new decoder with the given configuration and allocates the required working
     /// space.
     ///
-    /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
+    /// See [working space](crate::reed_solomon#working-space) for its size and the configurations
+    /// a coder accepts, and [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn new(
         original_count: usize,
         recovery_count: usize,

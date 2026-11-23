@@ -1,0 +1,10 @@
+# Dylint reads this section through .github/dylints/rust-toolchain.
+[toolchain]
+channel = "nightly-2026-08-20"
+components = ["rustc-dev", "llvm-tools-preview"]
+profile = "minimal"
+
+[tools]
+nightly = "nightly-2026-11-12"
+clippy = "1.100.0"
+rustfmt = "nightly-2026-11-12"

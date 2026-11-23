@@ -1,34 +1,37 @@
 use crate::{
     Context,
-    journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Family, Location,
-        full::{self, Merkle},
-    },
+    journal::authenticated,
+    merkle::{Family, Location},
     qmdb::{
         self, Error,
-        any::ValueEncoding,
-        immutable::{self, CompactDb, Metrics, Operation},
+        immutable::{self, Operation},
+        metrics::Metrics,
         operation::Key,
         sync,
+        value::ValueEncoding,
     },
     translator::Translator,
 };
-use commonware_codec::{EncodeShared, Read};
+use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 use commonware_utils::range::NonEmptyRange;
 use std::num::NonZeroU64;
 
-impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Db<F, E, K, V, C, H, T, S>
 where
     F: Family,
-    E: Context,
+    E: Context + Spawner,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: sync::Journal<F, Context = E, Op = Operation<F, K, V>>
+        + authenticated::Backing<
+            E,
+            Item = Operation<F, K, V>,
+            Config = <C as sync::Journal<F>>::Config,
+        > + 'static,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -37,52 +40,77 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
-    /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config, max_size).await
+    }
+
+    fn target(&self) -> sync::Target<F, H::Digest> {
+        sync::Target {
+            root: self.root(),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> sync::Hooks<Self> for immutable::Db<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context + Spawner,
+    K: Key,
+    V: ValueEncoding,
+    C: sync::Journal<F, Context = E, Op = Operation<F, K, V>>
+        + authenticated::Backing<
+            E,
+            Item = Operation<F, K, V>,
+            Config = <C as sync::Journal<F>>::Config,
+        > + 'static,
+    C::Item: EncodeShared,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+{
+    /// Returns a [Db](immutable::Db) initialized from data collected in the sync process.
     ///
-    /// # Behavior
-    ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the Merkle journal is empty or the last item is before the range start, it creates a
-    ///   fresh Merkle structure from the provided `pinned_nodes`
-    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
-    ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
-    ///   sync target
+    /// The range start becomes the pruning boundary, with `pinned_nodes` as its pinned digests,
+    /// and the Merkle digests are rebuilt by replaying the log from there.
     ///
     /// # Returns
     ///
-    /// A [super::Immutable] db populated with the state from the given range.
+    /// A [super::Db] populated with the state from the given range.
     /// Its inactivity floor comes from the final commit, while the Merkle pruning boundary is
     /// the range start.
     async fn from_sync_result(
-        context: Self::Context,
-        db_config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        context: E,
+        db_config: <Self as sync::Database>::Config,
+        log: C,
+        pinned_nodes: Option<Vec<H::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
-        // Initialize Merkle structure for sync
-        let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.child("merkle"),
-            full::SyncConfig {
-                config: db_config.merkle_config,
-                range: range.clone(),
-                pinned_nodes,
-            },
-        )
-        .await?;
-
         let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
-            merkle,
+            context.child("merkle"),
+            &db_config.merkle,
             log,
             hasher,
+            range.start(),
+            pinned_nodes.unwrap_or_default(),
             apply_batch_size,
         )
         .await?;
@@ -94,14 +122,14 @@ where
             return Err(Error::HistoricalFloorPruned(size));
         }
         let inactivity_floor_loc =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&journal, size).await?;
 
         // Replay the log from the inactivity floor to build the index.
-        let index = immutable::build_index(
+        let index = immutable::db::build_index(
             context.child("index"),
             db_config.translator,
             inactivity_floor_loc,
-            &journal.journal,
+            &journal,
             db_config.init_buffer,
         )
         .await?;
@@ -118,98 +146,28 @@ where
         };
         db.update_metrics();
 
-        db.sync().await
+        Ok(db)
     }
 
-    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, Error<F>> {
+        self.journal = self.journal.persist_boundary().await?;
         Ok(self)
     }
 
-    async fn local_pinned_nodes(
-        context: Self::Context,
-        config: &Self::Config,
-        target: &sync::Target<F, Self::Digest>,
-        journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !sync::journal_covers_range(journal.bounds(), &target.range)
-        {
-            return Ok(None);
-        }
-
-        // The inactivity floor is carried by the last commit operation rather than being
-        // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
-        sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle_config.clone(),
-            target,
-            inactivity_floor,
-        )
-        .await
-    }
-
-    fn root(&self) -> Self::Digest {
-        self.root()
-    }
-}
-
-impl<F, E, K, V, H, Cfg, S> sync::Database for CompactDb<F, E, K, V, H, Cfg, S>
-where
-    F: Family,
-    E: Context,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = Cfg>,
-    Cfg: Clone + Send + Sync + 'static,
-{
-    type Family = F;
-    type Op = Operation<F, K, V>;
-    type Journal = sync::journal::Memory<F, E, Operation<F, K, V>>;
-    type Config = immutable::CompactConfig<Cfg, S>;
-    type Digest = H::Digest;
-    type Context = E;
-    type Hasher = H;
-
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: NonEmptyRange<Location<F>>,
-        _apply_batch_size: NonZeroU64,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::compact::from_sync_result(
-            context,
-            config,
-            log,
-            pinned_nodes,
-            range,
-            Self::init_from_sync,
-        )
-        .await
-    }
-
-    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
-        self.sync().await
+    async fn discard_local_state(
+        context: E,
+        config: &<Self as sync::Database>::Config,
+    ) -> Result<(), Error<F>> {
+        Ok(authenticated::discard_frontier::<F, _, H, S>(context, &config.merkle).await?)
     }
 
     async fn local_pinned_nodes(
-        _context: Self::Context,
-        _config: &Self::Config,
-        _target: &sync::Target<F, Self::Digest>,
-        _journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
-        Ok(None)
-    }
-
-    fn root(&self) -> Self::Digest {
-        self.root()
+        context: E,
+        config: &<Self as sync::Database>::Config,
+        target: &sync::Target<F, H::Digest>,
+        journal: &C,
+    ) -> Result<Option<Vec<H::Digest>>, Error<F>> {
+        sync::local_pinned_nodes::<F, _, H, S>(context, &config.merkle, target, journal).await
     }
 }
 

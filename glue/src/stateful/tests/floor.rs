@@ -7,7 +7,7 @@ use super::{
 };
 use crate::stateful::{
     Application, Config, Stateful, SyncPlan,
-    db::{DatabaseSet, Publisher, SyncEngineConfig},
+    db::{DatabaseSet, SyncEngineConfig},
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
@@ -97,7 +97,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
             assert_ne!(predecessor_target, floor_target);
 
             // Four-item sections put F=4 on a section boundary, where pruning below F removes F-1.
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut certificates =
                 archive_config("floor-marshal", "finalizations", page_cache.clone(), ());
             certificates.items_per_section = NZU64!(4);
@@ -142,7 +142,6 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     },
                 )
                 .await;
-            let publication_context = context.child("publication");
             let (stateful, mut application) = Stateful::new(
                 context.child("stateful"),
                 Config {
@@ -153,7 +152,6 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     mailbox_size: NZUsize!(8),
                     plan,
                     resolvers: NoopQmdbResolver,
-                    snapshot_publisher: Publisher::new(&publication_context).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

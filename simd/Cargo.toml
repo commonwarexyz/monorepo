@@ -1,6 +1,7 @@
 [package]
 name = "commonware-simd"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -15,7 +16,7 @@ workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std" ]
+std = []
 fuzz = [ "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [dependencies]

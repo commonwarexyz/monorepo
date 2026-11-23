@@ -4,6 +4,7 @@ use crate::dkg::{
     reshare::{Actor, EpochInfoResponse, Message, metrics::Phase, store::Store},
     types::Payload,
 };
+use commonware_codec::Codec;
 use commonware_consensus::{
     Heightable as _, marshal::core::Variant as MarshalVariant,
     simplex::scheme::Scheme as SimplexScheme, types::Epocher,
@@ -14,9 +15,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
-};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _};
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use rand_core::CryptoRng;
 use std::ops::ControlFlow;
@@ -24,8 +23,8 @@ use tracing::{Instrument as _, debug, info_span};
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + Codec,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -44,9 +43,9 @@ where
     ///
     /// Acknowledges earlier finalized blocks without effects. Dealer-log requests
     /// receive no log and final-block requests receive
-    /// [`EpochInfoResponse::Following`]. Commits and registers the final block's
-    /// [`EpochInfo`](crate::dkg::types::EpochInfo) before returning `Continue`.
-    /// Returns `Break` on shutdown or when the mailbox closes.
+    /// [`EpochInfoResponse::Unavailable`]. Commits and registers the final
+    /// block's [`EpochInfo`](crate::dkg::types::EpochInfo) before returning
+    /// `Continue`. Returns `Break` on shutdown or when the mailbox closes.
     ///
     /// Panics as described on [`Self::covered`], or if the final block carries
     /// no [`EpochInfo`](crate::dkg::types::EpochInfo) for the next epoch.
@@ -76,7 +75,7 @@ where
                     let process =
                         info_span!(parent: &span, "dkg.reshare.actor.follower.epoch_info");
                     process.in_scope(|| {
-                        let _ = response.send_lossy(EpochInfoResponse::Following);
+                        let _ = response.send_lossy(EpochInfoResponse::Unavailable);
                     });
                 }
                 Message::Finalized {

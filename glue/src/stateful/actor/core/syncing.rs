@@ -3,13 +3,15 @@ use crate::stateful::{
     actor::{
         SyncTargets,
         core::{
-            mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
+            mailbox::{Message, ProposalRequest},
+            processing::Processing,
+            verifications::VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{Anchor, Publisher, SnapshotsOf},
+    db::{Anchor, AttachableResolverSet, DatabaseSet as _},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -19,7 +21,7 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant},
     },
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
@@ -29,7 +31,6 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
 };
-use rand_core::Rng;
 use std::{collections::VecDeque, mem};
 use tracing::{Instrument as _, debug, error, info_span};
 
@@ -57,13 +58,11 @@ pub(super) struct PendingFinalization<B> {
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
-pub(super) struct Syncing<E, A, S, V, T>
+pub(super) struct Syncing<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
-    T: Strategy,
+    V: Variant,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -74,9 +73,9 @@ where
     /// Provider cloned into each proposal after state sync.
     pub(super) provider: A::Provider,
     /// Marshal actor mailbox.
-    pub(super) marshal: MarshalMailbox<S, V>,
+    pub(super) marshal: MarshalMailbox<A::SigningScheme, V>,
     /// Startup plan carrying the durable sync decision and selected floor.
-    pub(super) plan: SyncPlan<E, S, V>,
+    pub(super) plan: SyncPlan<E, A::SigningScheme, V>,
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
@@ -86,8 +85,8 @@ where
     /// Database subscribers awaiting the handoff.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
 
-    /// Publishes the latest snapshots.
-    pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
+    /// Resolvers used for state sync fetching and post-bootstrap serving.
+    pub(super) resolvers: R,
     /// Strategy for computing the digests of blocks built by the application.
     pub(super) strategy: T,
 
@@ -103,13 +102,13 @@ where
     pub(super) metrics: StatefulMetrics,
 }
 
-impl<E, A, S, V, T> Syncing<E, A, S, V, T>
+impl<E, A, V, R, T> Syncing<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Spawner + Context,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    R: AttachableResolverSet<A::Databases>,
+    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
     pub async fn run(mut self) {
@@ -137,12 +136,12 @@ where
                 debug!("mailbox closed, shutting down processor");
                 break;
             } => match message {
-                Message::Propose {
+                Message::Propose(ProposalRequest {
                     span,
                     context: (_, context),
                     proposal,
                     ..
-                } => {
+                }) => {
                     span.in_scope(|| {
                         debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
                         proposal.decline();
@@ -164,7 +163,6 @@ where
                     span,
                     block,
                     acknowledgement,
-                    ..
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoff;
@@ -261,13 +259,8 @@ where
             artifact.anchor,
             self.metrics.clone(),
             self.pruning,
-            self.snapshot_publisher,
             self.strategy.clone(),
         );
-
-        // Serving must not wait for the next finalization, so the synced state
-        // alone publishes first.
-        processor.publish_snapshot().await;
 
         let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
@@ -280,14 +273,9 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
-                        let Applied { barrier, prune } = processor
-                            .finalize(self.context.as_present(), &block, false)
+                        let Applied { prune, .. } = processor
+                            .finalize(self.context.as_present(), &self.marshal, &block, false)
                             .await;
-
-                        assert!(
-                            barrier.is_none(),
-                            "the handoff requests no barrier per block"
-                        );
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
                     }
@@ -299,7 +287,7 @@ where
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
         if !pending_acknowledgements.is_empty() {
-            let barrier = processor.start_sync().await;
+            let barrier = processor.databases().finalize().await;
             if !barrier.durable().await {
                 return;
             }
@@ -318,12 +306,12 @@ where
         let _ = self.metrics.sync_done.try_set(1);
         if let Some(prune) = pending_prune {
             prune.run(processor.databases(), &self.marshal).await;
-            // The published snapshots were captured before this prune. Republish
-            // so serving stops pinning the pruned state. Every handoff barrier
-            // was awaited above, so the republished state is already durable.
-            processor.publish_snapshot().await;
         }
 
+        // Attach the databases to peer resolvers before giving subscribers access.
+        self.resolvers
+            .attach_databases(processor.databases().clone())
+            .await;
         for subscriber in self.database_subscribers.drain(..) {
             subscriber.send_lossy(processor.databases().clone());
         }
@@ -413,7 +401,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, Artifact, SyncPlan},
         },
-        db::{Anchor, Publisher, Shared},
+        db::{Anchor, AttachableResolver, Shared},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -436,12 +424,12 @@ mod tests {
         Digested, Digestible as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
-        Supervisor as _, deterministic,
+        ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _,
+        deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
-        reschedule,
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
@@ -455,11 +443,18 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct NoopResolver;
+
+    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
+        async fn attach_database(&self, _db: Shared<DB>) {}
+    }
+
     struct TestHarness<E>
     where
-        E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
+        E: commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestScheme, TestVariant, Sequential>,
+        syncing: Syncing<E, TestApp, TestVariant, NoopResolver, Sequential>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -546,7 +541,7 @@ mod tests {
 
     impl<E> TestHarness<E>
     where
-        E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
+        E: commonware_storage::Context,
     {
         async fn new_syncing_on(
             context: E,
@@ -563,7 +558,6 @@ mod tests {
                 actor_mailbox::new(context.child("syncer"), NZUsize!(1));
             let (sender, completion) = oneshot::channel();
 
-            let publication_context = context.child("publication");
             let harness = Self {
                 syncing: Syncing {
                     context: ContextCell::new(context.child("syncing")),
@@ -575,7 +569,7 @@ mod tests {
                     syncer: syncer::Mailbox::new(syncer_sender),
                     deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
-                    snapshot_publisher: Publisher::new(&publication_context).0,
+                    resolvers: NoopResolver,
                     completion,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
@@ -776,9 +770,7 @@ mod tests {
                     ],
                 )
             });
-            while control.flushes.lock().is_empty() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
+            let first_flush = control.next_flush().await;
             assert!(poll!(&mut reflected_waiter).is_ready());
             assert!(
                 poll!(&mut first_waiter).is_pending() && poll!(&mut second_waiter).is_pending(),
@@ -788,12 +780,16 @@ mod tests {
                 0,
                 "completion metadata must not be written before the handoff is durable",
             );
-            let first_flush = control.flushes.lock().remove(0);
             first_flush
                 .send(Ok(()))
                 .expect("handoff must be waiting on its database flush");
-            while control.flushes.lock().is_empty() && poll!(&mut second_waiter).is_pending() {
-                context.sleep(Duration::from_millis(10)).await;
+            select! {
+                _ = control.next_flush() => {
+                    panic!("one database flush must cover the complete handoff prefix");
+                },
+                result = &mut second_waiter => {
+                    result.expect("the durable handoff must acknowledge its last block");
+                },
             }
             assert!(poll!(&mut first_waiter).is_ready());
             assert!(poll!(&mut second_waiter).is_ready());
@@ -1026,16 +1022,13 @@ mod tests {
             let transition = context
                 .child("transition")
                 .spawn(move |_| syncing.transition(artifact, handoffs));
-            while control.flushes.lock().is_empty() {
-                reschedule().await;
-            }
+            let release = control.next_flush().await;
             assert_eq!(control.applied.load(Ordering::Relaxed), 2);
-            assert_eq!(control.flushes.lock().len(), 1);
+            assert!(control.flushes.lock().is_empty());
             assert_eq!(
                 marshal.mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(1)))
             );
-            let release = control.flushes.lock().remove(0);
             if !succeeds {
                 // A failed flush stops the handoff. After restart, marshal is still at block 1
                 // and state sync is still in progress.

@@ -35,10 +35,10 @@ enum QueueOperation {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    /// Page size for buffer pool.
+    /// Page size for the page cache.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
-    /// Number of pages in the buffer pool cache.
+    /// Number of pages in the page cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section.
@@ -160,7 +160,7 @@ fn fuzz(input: FuzzInput) {
             items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),
-            page_cache: CacheRef::from_pooler(&context, page_size, page_cache_size),
+            page_cache: CacheRef::new(page_size, page_cache_size),
             write_buffer,
             // The queue is initialized once on an empty partition and never reopened,
             // so replay never reads anything: fuzzing this knob adds no coverage.
@@ -175,7 +175,7 @@ fn fuzz(input: FuzzInput) {
         for op in input.operations.iter() {
             queue = match op {
                 QueueOperation::Enqueue { value } => {
-                    let (queue, pos) = queue.enqueue(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.enqueue(&vec![*value]).await.unwrap();
                     let ref_pos = reference.append(*value);
                     reference.publish();
                     assert_eq!(pos, ref_pos, "enqueue position mismatch");
@@ -183,7 +183,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 QueueOperation::Append { value } => {
-                    let (queue, pos) = queue.append(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.append(&vec![*value]).await.unwrap();
                     let ref_pos = reference.append(*value);
                     assert_eq!(pos, ref_pos, "append position mismatch");
                     queue

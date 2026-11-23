@@ -26,7 +26,6 @@
 pub mod ordered;
 pub mod unordered;
 
-#[commonware_macros::stability(ALPHA)]
 use crate::index::{Cursor, Unordered};
 
 // Because the prefix length has a max of 3, we can safely use a 4-byte int for the index type
@@ -37,7 +36,6 @@ const INDEX_INT_SIZE: usize = 4;
 /// range of its partitions. A worker's [Self::Range] is created empty by [Self::new_range],
 /// populated through its cursor operations, and folded back into the full index by
 /// [Self::install_range].
-#[commonware_macros::stability(ALPHA)]
 pub(crate) trait Partitioned: Unordered {
     /// A worker's restricted view over the contiguous partition range it owns.
     type Range: PartitionRange<Value = Self::Value> + Send + 'static;
@@ -59,7 +57,6 @@ pub(crate) trait Partitioned: Unordered {
 /// One [Partitioned] worker's restricted view of its partition range: only the cursor
 /// operations (addressed by full key), so the globally-addressed [Unordered] methods cannot be
 /// miscalled on a worker.
-#[commonware_macros::stability(ALPHA)]
 pub(crate) trait PartitionRange: Sized {
     /// The value type held by the range.
     type Value: Send + Sync;
@@ -80,6 +77,14 @@ pub(crate) trait PartitionRange: Sized {
 
     /// Visit every value held across the range, in unspecified order.
     fn for_each_value(&self, f: impl FnMut(&Self::Value));
+
+    /// Hint the header of `key`'s partition, the fixed-size slot this range holds for it, without
+    /// reading it. The key's partition must fall within this range.
+    fn prefetch_header(&self, _key: &[u8]) {}
+
+    /// Hint the memory `key`'s partition's entries live in, reading its header to find them. The
+    /// key's partition must fall within this range.
+    fn prefetch_entries(&self, _key: &[u8]) {}
 }
 
 /// Get the partition index for the given key, along with the prefix-stripped key for probing

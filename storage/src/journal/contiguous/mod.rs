@@ -202,7 +202,7 @@ impl<T> IntoIterator for Batch<T> {
 /// Returned items may retain shared backing allocations larger than their byte fields.
 pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
-    type Item: Send;
+    type Item: Send + Sync;
 
     /// Returns [start, end) with a guaranteed stable pruning boundary.
     fn bounds(&self) -> Range<u64>;
@@ -210,7 +210,7 @@ pub trait Contiguous: Send + Sync {
     /// Read the item at the given position.
     ///
     /// Guaranteed not to return [Error::ItemPruned] for positions within `bounds()`.
-    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send + Sync;
+    fn read(&self, position: u64) -> impl Future<Output = Result<Self::Item, Error>> + Send;
 
     /// Read multiple items at the given positions, which must be strictly increasing.
     ///
@@ -308,9 +308,7 @@ pub trait Mutable: Contiguous + Sized {
     fn append_many(
         self,
         items: Many<'_, Self::Item>,
-    ) -> impl std::future::Future<Output = Result<(Self, u64), Error>> + Send
-    where
-        Self::Item: Sync;
+    ) -> impl std::future::Future<Output = Result<(Self, u64), Error>> + Send;
 
     /// Prune items at positions strictly less than `min_position`.
     ///
@@ -331,6 +329,14 @@ pub trait Mutable: Contiguous + Sized {
         self,
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
+
+    /// Return the retained start that [Self::prune] with `min_position` would leave.
+    ///
+    /// The default assumes pruning is exact. Journals that prune coarser must override it.
+    fn prune_target(&self, min_position: u64) -> u64 {
+        let bounds = self.bounds();
+        min_position.min(bounds.end).max(bounds.start)
+    }
 
     /// Begin durably persisting the current state of the journal.
     ///
@@ -362,9 +368,8 @@ pub trait Mutable: Contiguous + Sized {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same storage may observe partially removed state. Use a reset operation
-    /// provided by the concrete type when the journal must remain recoverable.
+    /// If destruction is interrupted, reopening either recovers the journal normally or creates an
+    /// empty journal at position zero.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 }
 

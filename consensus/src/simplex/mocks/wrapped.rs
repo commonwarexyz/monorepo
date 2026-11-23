@@ -7,7 +7,8 @@ use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
     Digest, Hasher as _,
     certificate::{
-        self, AssemblyError, Attestation, Scheme as CertificateScheme, Verification, Verifier,
+        self, AssemblyError, Attestation, Membership, Scheme as CertificateScheme, Verification,
+        Verifier,
     },
     sha256::Sha256,
 };
@@ -174,6 +175,10 @@ where
         S::is_batchable()
     }
 
+    fn max_certificate_size(participants: u32) -> usize {
+        S::max_certificate_size(participants)
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
         self.inner.certificate_codec_config()
     }
@@ -189,7 +194,7 @@ where
 {
     type Signature = S::Signature;
 
-    fn me(&self) -> Option<Participant> {
+    fn me(&self) -> Option<Membership> {
         self.inner.me()
     }
 

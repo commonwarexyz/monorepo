@@ -4,7 +4,7 @@ use crate::queue::{Config, Error, Queue};
 use commonware_codec::RangeCfg;
 use commonware_conformance::conformance_tests;
 use commonware_runtime::{
-    BufferPooler, Supervisor as _,
+    Supervisor as _,
     buffer::paged::CacheRef,
     conformance::{StorageConformance, StorageWorkload},
 };
@@ -18,11 +18,11 @@ const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
+fn config(seed: u64) -> Config<(RangeCfg<usize>, ())> {
     Config {
         partition: format!("queue-conformance-{seed}"),
         items_per_section: ITEMS_PER_SECTION,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
         compression: None,
@@ -41,7 +41,7 @@ impl StorageWorkload for QueueWorkload {
     ) -> Result<(), Self::Error> {
         let (mut queue, mut reader) = Queue::<_, Vec<u8>>::init(
             context.child("queue").with_attribute("index", 0),
-            config(seed, &context),
+            config(seed),
         )
         .await?;
 
@@ -53,7 +53,7 @@ impl StorageWorkload for QueueWorkload {
             context.fill(item.as_mut_slice());
         }
         for item in &data {
-            (queue, _) = queue.enqueue(item.clone()).await?;
+            (queue, _) = queue.enqueue(item).await?;
         }
 
         let dequeue_count = items_count / 2;
@@ -69,7 +69,7 @@ impl StorageWorkload for QueueWorkload {
 
         let (queue, mut reader) = Queue::<_, Vec<u8>>::init(
             context.child("queue").with_attribute("index", 1),
-            config(seed, &context),
+            config(seed),
         )
         .await?;
         while let Some((pos, item)) = reader.try_recv().await? {

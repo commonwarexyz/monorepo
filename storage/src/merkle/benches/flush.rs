@@ -9,11 +9,12 @@
 //! destroyed) every `cycles` flushes so the backing journal doesn't grow without bound over a run.
 //! `cycles` scales down as `n` grows so the peak on-disk size stays roughly constant.
 
+use commonware_bench::Inputs;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BLOB_PAGE_SIZE, BufferPooler, Supervisor as _,
+    BLOB_PAGE_SIZE, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
@@ -38,12 +39,14 @@ const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 /// disk over a run (~32 bytes/node, so the live journal stays around 64 MiB).
 const REBUILD_NODE_BUDGET: usize = 2_000_000;
 
-#[cfg(not(full_bench))]
-const N_LEAVES: [usize; 2] = [10_000, 100_000];
-#[cfg(full_bench)]
-const N_LEAVES: [usize; 3] = [10_000, 100_000, 1_000_000];
+fn n_leaves() -> &'static [usize] {
+    match Inputs::current() {
+        Inputs::Full => &[10_000, 100_000, 1_000_000],
+        _ => &[10_000, 100_000],
+    }
+}
 
-fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential> {
+fn merkle_cfg(family: &str) -> full::Config<Sequential> {
     full::Config {
         journal_partition: format!("journal-bench-flush-{family}"),
         metadata_partition: format!("metadata-bench-flush-{family}"),
@@ -51,13 +54,13 @@ fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential>
         write_buffer: WRITE_BUFFER_SIZE,
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
     let runner = tokio::Runner::new(Config::default());
-    for n in N_LEAVES {
+    for &n in n_leaves() {
         // Flush moves ~2n nodes; rebuild every `cycles` flushes to cap the journal's on-disk size.
         let cycles = (REBUILD_NODE_BUDGET / (2 * n)).max(1);
         c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {
@@ -74,7 +77,7 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
                     let mut merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
                         ctx.child(family),
                         &hasher,
-                        merkle_cfg(&ctx, family),
+                        merkle_cfg(family),
                     )
                     .await
                     .unwrap();

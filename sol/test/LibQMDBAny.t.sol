@@ -103,7 +103,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         for (uint256 i = count - 1; i > 0; --i) {
             folded = _hash(abi.encodePacked(nodes[peaks[i - 1]].digest, folded));
         }
-        c.root = _hash(abi.encodePacked(uint64(n), folded));
+        c.root = _root(n, folded);
         bytes32[] memory digests = new bytes32[](count + 64);
         uint256 length;
         uint256 target;
@@ -256,7 +256,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         }
     }
 
-    /// @dev The oracle checks every emitted proof with Commonware's `qmdb::verify_proof`.
+    /// @dev The oracle checks every emitted proof with Commonware's `qmdb::ProofExt::verify`.
     function generate(uint256 leaves, uint256 location, uint256 floor, string memory history)
         internal
         returns (AnyCase memory c)

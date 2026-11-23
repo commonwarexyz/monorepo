@@ -38,6 +38,7 @@ use crate::reed_solomon::{
     DecoderResult, EncoderResult, Error,
     engine::{self, Engine, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
 };
+use commonware_utils::MAX_ALLOCATION_BYTES;
 
 mod decoder_work;
 mod encoder_work;
@@ -46,14 +47,14 @@ pub(crate) mod rate_high;
 pub(crate) mod rate_low;
 
 /// Returns [`Error::InvalidShardSize`] if `work_count` shards of `shard_bytes` bytes, each
-/// rounded up to whole `SHARD_CHUNK_BYTES` chunks, exceed `isize::MAX` bytes in total.
+/// rounded up to whole `SHARD_CHUNK_BYTES` chunks, exceed [`MAX_ALLOCATION_BYTES`] in total.
 ///
 /// # Panics
 ///
 /// Panics if `work_count` is zero.
 const fn validate_work_size(shard_bytes: usize, work_count: usize) -> Result<(), Error> {
     // The chunk array must fit within Vec's maximum allocation size.
-    let max_chunks = isize::MAX as usize / SHARD_CHUNK_BYTES;
+    let max_chunks = MAX_ALLOCATION_BYTES / SHARD_CHUNK_BYTES;
     if shard_bytes.div_ceil(SHARD_CHUNK_BYTES) > max_chunks / work_count {
         return Err(Error::InvalidShardSize { shard_bytes });
     }
@@ -267,7 +268,7 @@ mod tests {
     /// shards and rejects that size plus 2 bytes, which needs one more chunk per shard.
     fn check_capacity(validate: impl Fn(usize) -> Result<(), Error>, work_count: usize) {
         let shard_bytes =
-            (isize::MAX as usize / SHARD_CHUNK_BYTES / work_count) * SHARD_CHUNK_BYTES;
+            (MAX_ALLOCATION_BYTES / SHARD_CHUNK_BYTES / work_count) * SHARD_CHUNK_BYTES;
         assert_eq!(validate(shard_bytes), Ok(()));
         assert_eq!(
             validate(shard_bytes + 2),

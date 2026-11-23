@@ -1,5 +1,6 @@
 //! Native implementation of the x86v4c instruction profile.
 
+use super::x86_u32x4;
 use crate::{Operation, Simd, X86V4C};
 use core::arch::x86_64::*;
 
@@ -13,112 +14,6 @@ use core::arch::x86_64::*;
 pub struct NativeX86V4C(());
 
 impl NativeX86V4C {
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_load_native(self, input: &[u32]) -> __m128i {
-        assert!(input.len() >= 4);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe { _mm_loadu_si128(input.as_ptr().cast()) }
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_store_native(self, value: __m128i, output: &mut [u32]) {
-        assert!(output.len() >= 4);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe { _mm_storeu_si128(output.as_mut_ptr().cast(), value) }
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_add_native(self, a: __m128i, b: __m128i) -> __m128i {
-        _mm_add_epi32(a, b)
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_shuffle_native<const MASK: i32>(self, value: __m128i) -> __m128i {
-        assert!((0..256).contains(&MASK));
-        _mm_shuffle_epi32::<MASK>(value)
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_load_be_native(self, input: &[u8]) -> __m128i {
-        assert!(input.len() >= 16);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            _mm_shuffle_epi8(
-                _mm_loadu_si128(input.as_ptr().cast()),
-                _mm_set_epi32(0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203),
-            )
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_load_be2_native(self, input: &[u8]) -> __m128i {
-        assert!(input.len() >= 8);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            _mm_shuffle_epi8(
-                _mm_loadl_epi64(input.as_ptr().cast()),
-                _mm_set_epi32(0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203),
-            )
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_store_be_native(self, value: __m128i, output: &mut [u8]) {
-        assert!(output.len() >= 16);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            _mm_storeu_si128(
-                output.as_mut_ptr().cast(),
-                _mm_shuffle_epi8(
-                    value,
-                    _mm_set_epi32(0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203),
-                ),
-            )
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_align_native<const N: i32>(self, a: __m128i, b: __m128i) -> __m128i {
-        assert!((0..=4).contains(&N));
-        match N {
-            0 => a,
-            1 => _mm_alignr_epi8::<4>(b, a),
-            2 => _mm_alignr_epi8::<8>(b, a),
-            3 => _mm_alignr_epi8::<12>(b, a),
-            4 => b,
-            _ => unreachable!(),
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse4.1")]
-    unsafe fn u32x4_blend_native<const MASK: i32>(self, a: __m128i, b: __m128i) -> __m128i {
-        assert!((0..16).contains(&MASK));
-        _mm_blendv_epi8(
-            a,
-            b,
-            _mm_set_epi32(
-                if MASK & 8 != 0 { -1 } else { 0 },
-                if MASK & 4 != 0 { -1 } else { 0 },
-                if MASK & 2 != 0 { -1 } else { 0 },
-                if MASK & 1 != 0 { -1 } else { 0 },
-            ),
-        )
-    }
-
     /// Returns a token if all required instruction features are available.
     ///
     /// With `std`, checks the current CPU and operating system's vector support.
@@ -146,61 +41,63 @@ impl NativeX86V4C {
     }
 }
 
+const _: () = crate::core::assert_lane_relation::<NativeX86V4C>();
+
 impl Simd for NativeX86V4C {
     type U32x4 = __m128i;
 
     #[inline]
     fn u32x4_load(self, input: &[u32]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_native(input) }
+        unsafe { x86_u32x4::load(input) }
     }
 
     #[inline]
     fn u32x4_store(self, value: __m128i, output: &mut [u32]) {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_store_native(value, output) }
+        unsafe { x86_u32x4::store(value, output) }
     }
 
     #[inline]
     fn u32x4_add(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_add_native(a, b) }
+        unsafe { x86_u32x4::add(a, b) }
     }
 
     #[inline]
     fn u32x4_shuffle<const MASK: i32>(self, value: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_shuffle_native::<MASK>(value) }
+        unsafe { x86_u32x4::shuffle::<MASK>(value) }
     }
 
     #[inline]
     fn u32x4_load_be(self, input: &[u8]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_be_native(input) }
+        unsafe { x86_u32x4::load_be(input) }
     }
 
     #[inline]
     fn u32x4_load_be2(self, input: &[u8]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_be2_native(input) }
+        unsafe { x86_u32x4::load_be2(input) }
     }
 
     #[inline]
     fn u32x4_store_be(self, value: __m128i, output: &mut [u8]) {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_store_be_native(value, output) }
+        unsafe { x86_u32x4::store_be(value, output) }
     }
 
     #[inline]
     fn u32x4_align<const N: i32>(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_align_native::<N>(a, b) }
+        unsafe { x86_u32x4::align::<N>(a, b) }
     }
 
     #[inline]
     fn u32x4_blend<const MASK: i32>(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_blend_native::<MASK>(a, b) }
+        unsafe { x86_u32x4::blend::<MASK>(a, b) }
     }
 
     type U8 = __m512i;
@@ -242,6 +139,155 @@ impl Simd for NativeX86V4C {
     fn u8_and(self, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_and_si512(a, b) }
+    }
+
+    type U8Table = __m512i;
+
+    #[inline]
+    fn u8_table_load(self, table: &[u8; 16]) -> __m512i {
+        // The broadcast copies the table into every 128-bit group.
+        // SAFETY: The token guarantees AVX-512F. The table holds 16 readable bytes, and the
+        // load accepts unaligned memory.
+        unsafe { _mm512_broadcast_i32x4(_mm_loadu_si128(table.as_ptr().cast())) }
+    }
+
+    #[inline]
+    fn u8_table_lookup(self, table: __m512i, indices: __m512i) -> __m512i {
+        // Saturating addition of 0x70 maps indices 0..16 to 0x70..0x80, so the low nibble
+        // is unchanged and the top bit is clear. It maps 16..256 to 0x80..=0xff, and
+        // VPSHUFB zeroes lanes whose index has the top bit set. Every group holds the full
+        // table, so the group-local shuffle is a full lookup.
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_shuffle_epi8(table, _mm512_adds_epu8(indices, _mm512_set1_epi8(0x70))) }
+    }
+
+    #[inline]
+    fn u8_or(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_or_si512(a, b) }
+    }
+
+    #[inline]
+    fn u8_add(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_add_epi8(a, b) }
+    }
+
+    #[inline]
+    fn u8_sub(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_sub_epi8(a, b) }
+    }
+
+    #[inline]
+    fn u8_add_saturating(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_adds_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_sub_saturating(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_subs_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_min(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_min_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_max(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_max_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_eq(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_movm_epi8(_mm512_cmpeq_epi8_mask(a, b)) }
+    }
+
+    #[inline]
+    fn u8_gt(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_movm_epi8(_mm512_cmpgt_epu8_mask(a, b)) }
+    }
+
+    #[inline]
+    fn u8_movemask(self, value: __m512i) -> u64 {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_movepi8_mask(value) }
+    }
+
+    #[inline]
+    fn u8_any(self, value: __m512i) -> bool {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_test_epi8_mask(value, value) != 0 }
+    }
+
+    #[inline]
+    fn u8_all(self, value: __m512i) -> bool {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_cmpeq_epi8_mask(value, _mm512_setzero_si512()) == 0 }
+    }
+
+    // Split z into 16-byte chunks z[16*k..16*k+16] = Zk. Per 128-bit group g, VPUNPCKLBW
+    // yields Z(2g) and VPUNPCKHBW yields Z(2g+1), each occupying qwords 2g and 2g+1. With the
+    // low result as qwords 0..8 and the high result as qwords 8..16, the output qwords are
+    // zip_lo = [Z0, Z1, Z2, Z3] = [0, 1, 8, 9, 2, 3, 10, 11] and
+    // zip_hi = [Z4, Z5, Z6, Z7] = [4, 5, 12, 13, 6, 7, 14, 15].
+    #[inline]
+    fn u8_zip_lo(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            _mm512_permutex2var_epi64(
+                _mm512_unpacklo_epi8(a, b),
+                _mm512_set_epi64(11, 10, 3, 2, 9, 8, 1, 0),
+                _mm512_unpackhi_epi8(a, b),
+            )
+        }
+    }
+
+    #[inline]
+    fn u8_zip_hi(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            _mm512_permutex2var_epi64(
+                _mm512_unpacklo_epi8(a, b),
+                _mm512_set_epi64(15, 14, 7, 6, 13, 12, 5, 4),
+                _mm512_unpackhi_epi8(a, b),
+            )
+        }
+    }
+
+    // Byte 2k of a vector is the low byte of word k, and byte 2k+1 is its high byte. After
+    // isolating the selected byte in each word, VPACKUSWB packs group g of a into qword 2g
+    // (r[8g..8g+8]) and group g of b into qword 2g+1 (r[32+8g..32+8g+8]). Saturation
+    // leaves these values unchanged because each is below 256. Output qword k is then
+    // packed qword 2k for k < 4 and 2(k-4)+1 otherwise, giving [0, 2, 4, 6, 1, 3, 5, 7].
+    #[inline]
+    fn u8_unzip_even(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            let low = _mm512_set1_epi16(0x00ff);
+            _mm512_permutexvar_epi64(
+                _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0),
+                _mm512_packus_epi16(_mm512_and_si512(a, low), _mm512_and_si512(b, low)),
+            )
+        }
+    }
+
+    #[inline]
+    fn u8_unzip_odd(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            _mm512_permutexvar_epi64(
+                _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0),
+                _mm512_packus_epi16(_mm512_srli_epi16::<8>(a), _mm512_srli_epi16::<8>(b)),
+            )
+        }
     }
 
     #[inline]
@@ -304,6 +350,37 @@ impl Simd for NativeX86V4C {
     fn u64_xor(self, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_xor_si512(a, b) }
+    }
+
+    #[inline]
+    fn u64_rotate_left<const N: u32>(self, value: __m512i) -> __m512i {
+        assert!(N < 64);
+
+        // LLVM folds the constant count into a VPROLQ immediate.
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_rolv_epi64(value, _mm512_set1_epi64(N as i64)) }
+    }
+
+    #[inline]
+    fn u64_rotate_right<const N: u32>(self, value: __m512i) -> __m512i {
+        assert!(N < 64);
+
+        // LLVM folds the constant count into a VPRORQ immediate.
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_rorv_epi64(value, _mm512_set1_epi64(N as i64)) }
+    }
+
+    #[inline]
+    fn u64_andnot(self, a: __m512i, b: __m512i) -> __m512i {
+        // VPANDNQ complements its first operand.
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_andnot_si512(b, a) }
+    }
+
+    #[inline]
+    fn u64_xor3(self, a: __m512i, b: __m512i, c: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_ternarylogic_epi64::<0x96>(a, b, c) }
     }
 
     #[inline]
@@ -447,28 +524,18 @@ impl Simd for NativeX86V4C {
     }
 
     #[inline]
-    fn u32_permute(self, value: __m512i, indices: &[usize]) -> __m512i {
-        assert!(indices.len() >= 16);
-        let mut lanes = [0u32; 16];
-        for (lane, &index) in lanes.iter_mut().zip(indices) {
-            assert!(index < 16);
-            *lane = index as u32;
-        }
-        let indices = self.u32_load(&lanes);
-        // SAFETY: The token guarantees AVX-512F; all active indices were validated.
+    fn u32_permute(self, value: __m512i, indices: __m512i) -> __m512i {
+        // `_mm512_permutexvar_epi32` reads only the low 4 bits of each index lane, so it
+        // reduces the index modulo 16.
+        // SAFETY: The token guarantees AVX-512F.
         unsafe { _mm512_permutexvar_epi32(indices, value) }
     }
 
     #[inline]
-    fn u32_permute2(self, a: __m512i, b: __m512i, indices: &[usize]) -> __m512i {
-        assert!(indices.len() >= 16);
-        let mut lanes = [0u32; 16];
-        for (lane, &index) in lanes.iter_mut().zip(indices) {
-            assert!(index < 32);
-            *lane = index as u32;
-        }
-        let indices = self.u32_load(&lanes);
-        // SAFETY: The token guarantees AVX-512F; all active indices were validated.
+    fn u32_permute2(self, a: __m512i, b: __m512i, indices: __m512i) -> __m512i {
+        // `_mm512_permutex2var_epi32` reads only the low 5 bits of each index lane, so it
+        // reduces the index modulo 32. Bits 0 to 3 select the lane, and bit 4 selects `b`.
+        // SAFETY: The token guarantees AVX-512F.
         unsafe { _mm512_permutex2var_epi32(a, indices, b) }
     }
 
@@ -487,6 +554,36 @@ impl Simd for NativeX86V4C {
         self.u64_store(value, &mut lanes);
         lanes[N] = lane;
         self.u64_load(&lanes)
+    }
+
+    #[inline]
+    fn u8_as_u32(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u32_as_u8(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u8_as_u64(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u64_as_u8(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u32_as_u64(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u64_as_u32(self, value: __m512i) -> __m512i {
+        value
     }
 
     #[inline]
@@ -532,6 +629,13 @@ impl X86V4C for NativeX86V4C {
         assert!((0..256).contains(&MASK));
         // SAFETY: Token construction established AVX-512F support.
         unsafe { _mm512_ternarylogic_epi32::<MASK>(a, b, c) }
+    }
+
+    #[inline]
+    fn u64_ternary<const MASK: i32>(self, a: __m512i, b: __m512i, c: __m512i) -> __m512i {
+        assert!((0..256).contains(&MASK));
+        // SAFETY: Token construction established AVX-512F support.
+        unsafe { _mm512_ternarylogic_epi64::<MASK>(a, b, c) }
     }
 
     #[inline]

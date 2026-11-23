@@ -1,19 +1,30 @@
-//! Runtime configuration, task placement, worker reservations, and cleanup tests.
+//! Runtime configuration, task placement, worker reservations, pool, search
+//! and park, and cleanup tests, with hooks that pause a pool worker at a point
+//! of its park or at an overflow of its run queue.
 
 use super::{
     super::{
-        driver::tests::fail_after_completion,
-        operation::Operation,
-        request::{RecvRequest, Request},
+        driver::tests::{fail_after_completion, make_file, on_service_while_acquiring},
+        idle::tests::{WakePoint, on_wake_point},
+        operation::{Operation, start_sync},
+        park::{Unparker, tests::waiting},
+        queue::CAPACITY,
+        request::{RecvRequest, Request, SyncRequest},
+        slab::Id,
+        sleep,
+        task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
+        waiter::{Observer, WaiterId},
+        wheel::BUDGET,
     },
     *,
 };
 use crate::{
-    Blob as _, IoBufMut, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
-    Storage as _, WriteOptions,
+    Blob as _, IoBufMut, IoBufsMut, Listener as _, Metrics as _, Network as _, ReadOptions,
+    Resolver as _, Runner as _, Sink as _, Storage as _, Stream as _, WriteOptions,
     utils::{extract_panic_message, reschedule},
 };
+use commonware_utils::sync::OwnedAsyncMutexGuard;
 use futures::{
     FutureExt,
     executor::block_on,
@@ -21,18 +32,21 @@ use futures::{
     task::{ArcWake, waker},
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::HashSet,
     fs::{self, File},
     future::{Pending, Ready},
     io::{self, Write as _},
-    os::unix::net::UnixStream,
+    os::{fd::OwnedFd, unix::net::UnixStream},
     panic::panic_any,
+    process::Command,
     sync::{
+        OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     task::Wake,
-    thread,
+    thread::{self, ThreadId},
 };
 
 /// Bound individual synchronous channel waits within the test process.
@@ -41,6 +55,68 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 thread_local! {
     /// Whether the current test root requires progress without entering the idle path.
     static FORBID_PARK: Cell<bool> = const { Cell::new(false) };
+
+    /// Index of the pool worker to fail, and whether it fails at thread launch
+    /// (true) or at startup (false).
+    static POOL_FAIL_AT: Cell<Option<(usize, bool)>> = const { Cell::new(None) };
+
+    /// Whether the next native startup on this thread fails. Worker zero starts
+    /// on the runner's thread, so this fails a runner's first worker.
+    static FAIL_STARTUP: Cell<bool> = const { Cell::new(false) };
+
+    /// Shared services of the runner whose pool last started, to observe their release.
+    static POOL_SHARED: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
+
+    /// Pool of the runner whose pool last started, kept past the runner.
+    static POOL_KEPT: RefCell<Option<Arc<Pool>>> = const { RefCell::new(None) };
+}
+
+/// Keeps a runner's pool past the runner, so that dropping it once the runner
+/// has returned or unwound runs the checks of the pool's idle state outside any
+/// unwind.
+#[derive(Clone, Default)]
+struct KeptPool(Arc<Mutex<Option<Arc<Pool>>>>);
+
+impl KeptPool {
+    /// Keep the pool of the runner `context` belongs to.
+    fn keep(&self, context: &Context) {
+        *self.0.lock() = Some(context.shared.pool.clone());
+    }
+
+    /// Run `check_pool` on the kept pool. Panics if none was kept.
+    fn check(&self) {
+        check_pool(self.0.lock().take().expect("a pool must be kept"));
+    }
+}
+
+/// Check that every task cell was freed, then drop the last reference to
+/// `pool`. Each cell holds a weak reference to its pool, so none left means no
+/// runnable leaked. The drop asserts that every worker withdrew from the idle
+/// set and returned its search count.
+fn check_pool(pool: Arc<Pool>) {
+    assert_eq!(
+        Arc::strong_count(&pool),
+        1,
+        "the runner must release its pool"
+    );
+    assert_eq!(Arc::weak_count(&pool), 0, "every task cell must be freed");
+    drop(pool);
+}
+
+/// Once a test arms `POOL_FAIL_AT`, record the runner's shared services and
+/// pool so the test can check that both are released. Fail pool worker `index`
+/// as armed, at thread launch or at startup, after the workers before it have
+/// started.
+pub fn before_pool_worker(shared: &Arc<Shared>, index: usize) -> Option<impl Drop> {
+    let (fail_at, launch) = POOL_FAIL_AT.get()?;
+    POOL_SHARED.with(|slot| *slot.borrow_mut() = Arc::downgrade(shared));
+    POOL_KEPT.with(|slot| *slot.borrow_mut() = Some(shared.pool.clone()));
+    if index != fail_at {
+        return None;
+    }
+    POOL_FAIL_AT.set(None);
+    assert!(!launch, "injected pool thread launch failure");
+    Some(inject_worker_fault(&shared.workers, WorkerFault::Startup))
 }
 
 /// Clear the current thread's parking assertion when its test root finishes or unwinds.
@@ -56,13 +132,13 @@ impl Drop for ParkGuard {
 enum WorkerFault {
     /// Reject thread creation after taking ownership of its launch payload.
     Launch,
-    /// Fail ring initialization on the newly created worker thread.
+    /// Fail io_uring ring initialization on the newly created worker thread.
     Startup,
     /// Pause a worker after it releases its registration.
     AfterRelease(Box<dyn FnOnce() + Send>),
 }
 
-/// Fault state shared between a test and its one-off worker threads.
+/// Fault state shared between a test and its dedicated worker threads.
 struct WorkerFaultEntry {
     /// Worker registry identity without retaining the runtime's shared services.
     workers: Weak<Workers>,
@@ -140,9 +216,13 @@ pub(super) fn before_launch(payload: Launch) -> Launch {
     payload
 }
 
-/// Reject native initialization on the selected worker before creating its ring.
+/// Reject native initialization before the io_uring ring is created, on the
+/// worker an injected fault selects or on the thread that armed
+/// `FAIL_STARTUP`.
 pub(super) fn before_startup(registry: &Arc<Workers>) -> io::Result<()> {
-    if take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some() {
+    if FAIL_STARTUP.take()
+        || take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some()
+    {
         return Err(io::Error::other(
             "injected native worker initialization failure",
         ));
@@ -166,6 +246,15 @@ struct DropCount(Arc<AtomicUsize>);
 impl Drop for DropCount {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Record whether the thread was unwinding when the value was destroyed.
+struct UnwindObserver(Arc<Mutex<Option<bool>>>);
+
+impl Drop for UnwindObserver {
+    fn drop(&mut self) {
+        *self.0.lock() = Some(thread::panicking());
     }
 }
 
@@ -216,9 +305,71 @@ impl Drop for RejectedPayload {
     }
 }
 
-/// Disable idle spinning so tests exercise the worker's parking paths.
+/// Environment variable naming the startup failure case a child process of
+/// [`test_startup_failure_is_reported_once`] runs.
+const STARTUP_FAILURE_CASE: &str = "COMMONWARE_IOURING_STARTUP_FAILURE_CASE";
+
+/// Fail one native worker at startup, as named by `case`, and check that the
+/// failure reaches the runner or the task's handle as configured.
+fn run_startup_failure_case(case: &str) {
+    let result = catch_unwind(AssertUnwindSafe(|| match case {
+        // Worker zero fails on this thread before the root is built.
+        "worker_zero" => {
+            FAIL_STARTUP.set(true);
+            Runner::new(config()).start(|_| async {});
+        }
+
+        // The second pool worker fails on its own thread before the root is
+        // built.
+        "pool_worker" => {
+            POOL_FAIL_AT.set(Some((1, false)));
+            Runner::new(config().with_worker_threads(2)).start(|_| async {});
+        }
+
+        // A dedicated or blocking worker fails on its own thread while the
+        // root runs, which closes the task's handle.
+        "dedicated" | "dedicated_caught" | "blocking" => {
+            let catch = case == "dedicated_caught";
+            Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
+                let worker = context.child("failed");
+                let worker = if case == "blocking" {
+                    worker.shared(true)
+                } else {
+                    worker.dedicated()
+                };
+                let failed = worker.spawn(|_| async {});
+                assert!(matches!(failed.await, Err(Error::Closed)));
+
+                // Keep the root active until it observes an uncaught failure.
+                if !catch {
+                    pending::<()>().await;
+                }
+            });
+        }
+        _ => panic!("unknown startup failure case {case}"),
+    }));
+
+    // Only caught task panics keep the runner running. Otherwise its failure
+    // carries the startup error.
+    match result {
+        Ok(()) => assert_eq!(case, "dedicated_caught"),
+        Err(panic) => {
+            assert_ne!(case, "dedicated_caught");
+            assert!(
+                extract_panic_message(&*panic)
+                    .contains("injected native worker initialization failure")
+            );
+        }
+    }
+}
+
+/// One worker with idle spinning disabled, so tests that set no worker count
+/// place tasks deterministically and exercise the parking paths.
 fn config() -> Config {
-    Config::new().with_idle_spinner(SpinnerConfig::disabled())
+    Config::new()
+        .with_worker_threads(1)
+        .with_idle_spinner(SpinnerConfig::disabled())
 }
 
 /// Select a placement while preserving the unmodified default as a separate case.
@@ -244,6 +395,185 @@ pub fn before_park() {
     assert!(!FORBID_PARK.get(), "callback work reached the idle path");
 }
 
+thread_local! {
+    /// Whether this thread's worker offered, in its current turn, to defer
+    /// kernel service to its wait, and whether its service deferred it.
+    static KERNEL_SERVICE: Cell<(bool, bool)> = const { Cell::new((false, false)) };
+}
+
+/// Record whether the calling worker's current turn offered to defer kernel
+/// service to its wait, and whether its service deferred it.
+pub fn record_kernel_service(offered: bool, deferred: bool) {
+    KERNEL_SERVICE.set((offered, deferred));
+}
+
+/// Whether the calling worker's current turn offered to defer kernel service
+/// to its wait, and whether its service deferred it.
+fn kernel_service() -> (bool, bool) {
+    KERNEL_SERVICE.get()
+}
+
+/// A point in a pool worker's park sequence where a test hook runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParkPoint {
+    /// After a turn's service, messages and callbacks, before the worker
+    /// decides whether to go round again, for pending work or a deadline that
+    /// has passed, or to look for work before it parks. Reached on every turn.
+    AfterMessages,
+    /// After the worker's last readiness check and its search of the other
+    /// run queues, before it publishes itself idle. A worker whose search ran
+    /// and found nothing still holds its search count here.
+    BeforeIdle,
+    /// After the worker publishes itself idle and its last look leaves it to
+    /// wait, finding nothing or leaving a backlog to a worker holding a count,
+    /// before it waits.
+    BeforeWait,
+}
+
+/// A callback for one pool worker's next park, keyed by the pool's address,
+/// the worker's index, and the point.
+type ParkHook = (usize, u32, ParkPoint, Box<dyn FnOnce() + Send>);
+
+/// Whether a park hook was ever installed, so parks otherwise skip the lock.
+static PARK_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Callbacks each run once by one pool worker at one point of its park.
+static PARK_HOOKS: Mutex<Vec<ParkHook>> = Mutex::new(Vec::new());
+
+/// Run `hook` on worker `index` of `pool` when it next reaches `point`. The
+/// hook runs on the worker's thread once the hook list is unlocked and outside
+/// any borrow of the worker's local state, so it may borrow that state or
+/// install another hook.
+fn on_next_park(pool: &Pool, index: u32, point: ParkPoint, hook: impl FnOnce() + Send + 'static) {
+    PARK_HOOKS
+        .lock()
+        .push((ptr::from_ref(pool).addr(), index, point, Box::new(hook)));
+    PARK_HOOKS_ARMED.store(true, Ordering::Release);
+}
+
+/// Run `hook` when the calling pool worker next reaches
+/// [`ParkPoint::BeforeWait`], so after its latest service pass.
+pub fn when_current_worker_waits(hook: impl FnOnce() + Send + 'static) {
+    let local = Local::current().unwrap();
+    let local = local.borrow();
+    let Role::Pool(index) = local.role() else {
+        panic!("only a pool worker waits idle");
+    };
+
+    on_next_park(&local.shared.pool, index, ParkPoint::BeforeWait, hook);
+}
+
+/// Remove the hook installed for this worker at this point of its park, if
+/// any, and run it once the hook list is unlocked. The caller holds no borrow
+/// of the worker's local state.
+pub fn at_park(pool: &Pool, index: u32, point: ParkPoint) {
+    if !PARK_HOOKS_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let key = ptr::from_ref(pool).addr();
+    let hook = {
+        let mut hooks = PARK_HOOKS.lock();
+        hooks
+            .iter()
+            .position(|hook| hook.0 == key && hook.1 == index && hook.2 == point)
+            .map(|at| hooks.swap_remove(at).3)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+thread_local! {
+    /// Callback run once by this thread's runner after the pool has closed and
+    /// before the supervision tree is aborted.
+    static BEFORE_ABORT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// A callback for a pool's next run queue overflow, keyed by the pool's
+/// address.
+type OverflowHook = (usize, Box<dyn FnOnce() + Send>);
+
+/// Whether an overflow hook was ever installed, so overflows otherwise skip
+/// the lock.
+static OVERFLOW_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Callbacks each run once by the worker whose run queue overflows next.
+static OVERFLOW_HOOKS: Mutex<Vec<OverflowHook>> = Mutex::new(Vec::new());
+
+/// Run `hook` when a run queue of `pool` next overflows, after it hands over
+/// its newest half and before the batch reaches the global queue. The hook runs
+/// on the overflowing worker's thread once the hook list is unlocked, but while
+/// that worker's local state is borrowed, so it must not reach that state.
+fn on_next_overflow(pool: &Pool, hook: impl FnOnce() + Send + 'static) {
+    OVERFLOW_HOOKS
+        .lock()
+        .push((ptr::from_ref(pool).addr(), Box::new(hook)));
+    OVERFLOW_HOOKS_ARMED.store(true, Ordering::Release);
+}
+
+/// Remove the hook installed for this pool's next overflow, if any, and run it
+/// once the hook list is unlocked.
+pub fn before_overflow(pool: &Pool) {
+    if !OVERFLOW_HOOKS_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let key = ptr::from_ref(pool).addr();
+    let hook = {
+        let mut hooks = OVERFLOW_HOOKS.lock();
+        hooks
+            .iter()
+            .position(|hook| hook.0 == key)
+            .map(|at| hooks.swap_remove(at).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Whether worker `index` of `pool` is published idle and waits for a wake,
+/// on its futex or in its io_uring wait.
+fn is_waiting(pool: &Pool, index: u32) -> bool {
+    pool.idle().is_idle(index) && waiting(&pool.mailbox(index).unparker)
+}
+
+/// Block until every worker of `pool` waits for a wake, published idle with no
+/// wake's claim and no search count held, both before and after the scan of the
+/// waiting bits.
+///
+/// A worker a wake claimed shows its waiting bit until the wake's notification
+/// clears it, and one seen waiting can resume before the scan ends, so the
+/// waiting bits alone do not show a quiet pool. A worker that parks again
+/// before the second look has polled what it took. Once nothing can wake a
+/// task or push into the pool, this establishes that every task's poll has
+/// returned, leaving each idle.
+fn wait_until_every_worker_waits(pool: &Pool) {
+    let workers = pool.workers() as u32;
+    let parked =
+        || (0..workers).all(|index| pool.idle().is_idle(index)) && pool.idle().search_count() == 0;
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while !(parked() && (0..workers).all(|index| is_waiting(pool, index)) && parked()) {
+        assert!(Instant::now() < deadline, "every worker must wait");
+        thread::yield_now();
+    }
+}
+
+/// Spin on the calling thread until `done` holds, failing with `what` after
+/// the test's timeout.
+fn spin_until(done: impl Fn() -> bool, what: &str) {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::hint::spin_loop();
+    }
+}
+
+/// Run the callback a test installed for the window before the abort.
+pub fn before_abort() {
+    if let Some(callback) = BEFORE_ABORT.with(RefCell::take) {
+        callback();
+    }
+}
+
 /// Count destruction before injecting a task-disposal panic.
 struct PanickingDrop(Arc<AtomicUsize>);
 
@@ -259,30 +589,601 @@ impl Drop for PanickingDrop {
     }
 }
 
+/// Spin on the calling thread until `started` holds a thread, then return it.
+/// The spin keeps the calling worker from polling anything else.
+fn wait_started(started: &Mutex<Option<ThreadId>>) -> ThreadId {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        if let Some(thread) = *started.lock() {
+            return thread;
+        }
+        assert!(Instant::now() < deadline, "the task must start");
+        std::hint::spin_loop();
+    }
+}
+
+/// Spawn `f` from a thread outside the pool, so its first runnable goes to the
+/// global queue, and block the calling worker until another worker has started
+/// it. Returns the task's handle and the thread that started it.
+fn spawn_elsewhere<T, Fut>(context: &Context, f: Fut) -> (Handle<T>, ThreadId)
+where
+    T: Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
+    let started = Arc::new(Mutex::new(None));
+    let child = context.child("elsewhere");
+    let handle = thread::spawn({
+        let started = started.clone();
+        move || {
+            child.spawn(move |_| async move {
+                *started.lock() = Some(thread::current().id());
+                f.await
+            })
+        }
+    })
+    .join()
+    .unwrap();
+    let thread = wait_started(&started);
+    assert_ne!(
+        thread,
+        thread::current().id(),
+        "the task must not start on the caller"
+    );
+    (handle, thread)
+}
+
+/// Spawn `left` tasks one at a time from threads outside the pool, each while
+/// its predecessor polls, so each waits in the global queue alone. Each records
+/// `polls` when it starts, and the last sends the records through `done`.
+fn chain_foreign_spawns(
+    context: Context,
+    polls: Arc<AtomicUsize>,
+    mut records: Vec<usize>,
+    left: usize,
+    done: oneshot::Sender<Vec<usize>>,
+) {
+    thread::spawn(move || {
+        let next = context.child("chain");
+        context.child("foreign").spawn(move |_| async move {
+            records.push(polls.load(Ordering::Relaxed));
+            if left == 1 {
+                let _ = done.send(records);
+            } else {
+                chain_foreign_spawns(next, polls, records, left - 1, done);
+            }
+        });
+    })
+    .join()
+    .unwrap();
+}
+
+/// Start a task on worker one that holds a receive in its io_uring ring when
+/// `in_ring`, so worker one waits in its io_uring ring rather than on its
+/// futex. Returns worker one's thread and the receive's peer.
+fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<UnixStream>) {
+    if !in_ring {
+        return (spawn_elsewhere(context, async {}).1, None);
+    }
+    let (socket, peer) = UnixStream::pair().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let (_, other) = spawn_elsewhere(context, async move {
+        let fd: Arc<OwnedFd> = Arc::new(socket.into());
+        let _ = Operation::register(Request::Recv(RecvRequest {
+            fd,
+            buf: IoBufMut::with_capacity(1),
+            offset: 0,
+            len: 1,
+            exact: true,
+            deadline: None,
+        }))
+        .await;
+    });
+    (other, Some(peer))
+}
+
+/// A spin outlasting the test's timeout, so only a push's notification can end
+/// it, as no message is sent.
+fn endless_spinner() -> SpinnerConfig {
+    SpinnerConfig {
+        budget_us: 60_000_000,
+        max_budget_us: 60_000_000,
+        quick_wake_us: 60_000_000,
+    }
+}
+
+/// A waker whose destruction panics, so releasing its timer fails the worker
+/// that holds it.
+struct PanicOnDrop;
+
+impl ArcWake for PanicOnDrop {
+    fn wake_by_ref(_: &Arc<Self>) {}
+}
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        if !thread::panicking() {
+            panic!("injected pool worker failure during shutdown");
+        }
+    }
+}
+
+/// Wakes a stored task waker, then panics. The wake queues the task on the
+/// current worker, so the failing worker still holds the task's runnable.
+struct WakeThenPanic(Mutex<Option<Waker>>);
+
+impl ArcWake for WakeThenPanic {
+    fn wake_by_ref(this: &Arc<Self>) {
+        if let Some(waker) = this.0.lock().take() {
+            waker.wake();
+        }
+        panic!("injected pool worker callback failure");
+    }
+}
+
+/// Wait in the root until every worker of `pool` waits for a wake. A thread
+/// outside the pool runs [`wait_until_every_worker_waits`], so the root's own
+/// worker parks as well.
+async fn every_worker_waits(pool: &Arc<Pool>) {
+    let (go, idle) = oneshot::channel::<()>();
+    let watcher = thread::spawn({
+        let pool = pool.clone();
+        move || {
+            wait_until_every_worker_waits(&pool);
+            go.send(()).unwrap();
+        }
+    });
+    idle.await.unwrap();
+    watcher.join().unwrap();
+}
+
+/// Idle tasks a test wakes when it chooses. Each records its waker on its first
+/// poll and returns pending, then counts its second poll and completes.
+struct Recorded {
+    /// Wakers of the tasks polled once and not woken since.
+    wakers: Arc<Mutex<Vec<Waker>>>,
+    /// Number of tasks polled a second time.
+    ran: Arc<AtomicUsize>,
+    /// The tasks' handles.
+    tasks: Vec<Handle<()>>,
+}
+
+impl Recorded {
+    /// Spawn `count` recording tasks.
+    fn spawn(context: &Context, count: usize) -> Self {
+        let wakers = Arc::new(Mutex::new(Vec::new()));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let tasks = (0..count)
+            .map(|_| {
+                let wakers = wakers.clone();
+                let ran = ran.clone();
+                let mut polled = false;
+                context.child("recorded").spawn(move |_| {
+                    poll_fn(move |cx| {
+                        if polled {
+                            ran.fetch_add(1, Ordering::SeqCst);
+                            return Poll::Ready(());
+                        }
+                        polled = true;
+                        wakers.lock().push(cx.waker().clone());
+                        Poll::Pending
+                    })
+                })
+            })
+            .collect();
+        Self { wakers, ran, tasks }
+    }
+
+    /// Wake every task recorded since the last wake.
+    fn wake(&self) {
+        for waker in mem::take(&mut *self.wakers.lock()) {
+            waker.wake();
+        }
+    }
+
+    /// Number of tasks polled a second time.
+    fn ran(&self) -> usize {
+        self.ran.load(Ordering::SeqCst)
+    }
+}
+
+/// A callback that wakes the recorded tasks it holds, then blocks until another
+/// worker has run one of them, and records that it finished. A search count its
+/// worker held meanwhile would keep the kick of those wakes from reaching a
+/// parked worker.
+struct WakeAndWait {
+    /// The recorded tasks' wakers.
+    wakers: Arc<Mutex<Vec<Waker>>>,
+    /// Number of recorded tasks polled a second time.
+    ran: Arc<AtomicUsize>,
+    /// Whether the callback finished.
+    done: AtomicBool,
+}
+
+impl WakeAndWait {
+    /// A callback that wakes `recorded`.
+    fn new(recorded: &Recorded) -> Arc<Self> {
+        Arc::new(Self {
+            wakers: recorded.wakers.clone(),
+            ran: recorded.ran.clone(),
+            done: AtomicBool::new(false),
+        })
+    }
+
+    /// Whether the callback finished.
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
+    }
+}
+
+impl ArcWake for WakeAndWait {
+    fn wake_by_ref(this: &Arc<Self>) {
+        let wakers = mem::take(&mut *this.wakers.lock());
+        if wakers.is_empty() {
+            return;
+        }
+        for waker in wakers {
+            waker.wake();
+        }
+        spin_until(
+            || this.ran.load(Ordering::SeqCst) != 0,
+            "another worker must run a task the callback woke",
+        );
+        this.done.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Wakes the recorded tasks it holds when dropped, then waits a bounded time
+/// for one of them to run, recording whether it did. It never panics, since
+/// it runs while its worker unwinds.
+struct WakeOnDrop {
+    /// The recorded tasks' wakers.
+    wakers: Arc<Mutex<Vec<Waker>>>,
+    /// Number of recorded tasks polled a second time.
+    ran: Arc<AtomicUsize>,
+    /// Whether a woken task ran.
+    progressed: Arc<AtomicBool>,
+}
+
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        let wakers = mem::take(&mut *self.wakers.lock());
+        if wakers.is_empty() {
+            return;
+        }
+        for waker in wakers {
+            waker.wake();
+        }
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while self.ran.load(Ordering::SeqCst) == 0 {
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::hint::spin_loop();
+        }
+        self.progressed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Run a two-worker runner whose root makes worker zero unwind from `point` of
+/// its next park once both workers wait. The root's destructor wakes two idle
+/// tasks into worker zero's run queue. After checking the runner's failure and
+/// the pool's idle state, return whether another worker ran one of them before
+/// the destructor's bounded wait ended.
+fn root_destructor_after_an_unwind_at(point: ParkPoint) -> bool {
+    let progressed = Arc::new(AtomicBool::new(false));
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let progressed = progressed.clone();
+        Runner::new(config().with_worker_threads(2)).start(move |context| async move {
+            keeper.keep(&context);
+            let pool = context.shared.pool.clone();
+            let woken = Recorded::spawn(&context, 2);
+            let _guard = WakeOnDrop {
+                wakers: woken.wakers.clone(),
+                ran: woken.ran.clone(),
+                progressed,
+            };
+
+            // Once every worker waits, both tasks are idle and worker one is
+            // parked.
+            every_worker_waits(&pool).await;
+            on_next_park(&pool, 0, point, || panic!("injected unwind of worker zero"));
+            pending::<()>().await;
+        });
+    }));
+    let panic = result.expect_err("the injected unwind must fail the runner");
+    assert!(extract_panic_message(&*panic).contains("injected unwind of worker zero"));
+    kept.check();
+    progressed.load(Ordering::SeqCst)
+}
+
+/// Where a pool worker runs a catch-up service whose callbacks run user code
+/// while it may hold a search count.
+#[derive(Clone, Copy, Debug)]
+enum CatchUp {
+    /// Going round again with a message pending.
+    GoRound,
+    /// Going round again because a deadline has passed.
+    Deadline,
+    /// Running again after the search before parking took work.
+    AfterSearch,
+}
+
+/// A worker returns its search count before the catch-up service at `catch_up`,
+/// because its callbacks run user code.
+///
+/// Worker one, holding a count and with a receive pending in its io_uring ring,
+/// reaches the service with a timer, already due, that a hook registers after
+/// the turn's own service, so only the catch-up service collects it. The
+/// timer's callback wakes two idle tasks into worker one's run queue and blocks
+/// until worker two, parked, has run one of them, while the root holds worker
+/// zero. A count held across the callback would keep worker two asleep.
+fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+
+        // Two tasks the root wakes into its own run queue, and two the
+        // callback wakes into worker one's.
+        let backlog = Recorded::spawn(&context, 2);
+        let woken = Recorded::spawn(&context, 2);
+        let trigger = WakeAndWait::new(&woken);
+        every_worker_waits(&pool).await;
+
+        // Worker one holds a receive in its io_uring ring, so its idle turns
+        // defer kernel service and the catch-up runs it. Once it and worker two
+        // have parked again, no count is held.
+        let (socket, peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let _ = spawn_elsewhere(&context, async move {
+            assert_eq!(thread::current().name(), Some("iouring-pool-1"));
+            let fd: Arc<OwnedFd> = Arc::new(socket.into());
+            let _ = Operation::register(Request::Recv(RecvRequest {
+                fd,
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }))
+            .await;
+        });
+        spin_until(
+            || is_waiting(&pool, 1) && is_waiting(&pool, 2) && pool.idle().search_count() == 0,
+            "workers one and two must park again",
+        );
+
+        // Register a timer on worker one after the turn's own service, already
+        // due when it is inserted, so only the catch-up service collects it.
+        let register = {
+            let trigger = trigger.clone();
+            move || {
+                let waker = waker(trigger);
+                let local = Local::current().unwrap();
+                {
+                    let mut local = local.borrow_mut();
+                    let at = local.timers.insert_due(waker);
+                    local.timers_next = local.timers_next.min(at);
+                }
+                assert!(local.borrow().deferred.is_empty());
+            }
+        };
+        match catch_up {
+            CatchUp::GoRound | CatchUp::Deadline => {
+                // The root's kick claims worker one. It resumes holding the
+                // count the kick took for it, with nothing to poll.
+                on_next_park(&pool, 1, ParkPoint::AfterMessages, {
+                    let pool = pool.clone();
+                    move || {
+                        assert_eq!(
+                            pool.idle().search_count(),
+                            1,
+                            "worker one must hold the count the kick took for it"
+                        );
+                        register();
+                        if let CatchUp::GoRound = catch_up {
+                            assert!(pool.mailbox(1).send(Message::WakeRoot).is_ok());
+                        }
+                    }
+                });
+                backlog.wake();
+            }
+            CatchUp::AfterSearch => {
+                // A foreign spawn claims worker one. Its search on the way back
+                // to park finds nothing and keeps its count, so the kick of the
+                // backlog the root queues meanwhile finds it held. The last
+                // look then finds the backlog and searches again.
+                let searching = Arc::new(AtomicBool::new(false));
+                on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
+                    let pool = pool.clone();
+                    let searching = searching.clone();
+                    move || {
+                        spin_until(
+                            || pool.idle().search_count() == 1 && is_waiting(&pool, 2),
+                            "worker two must park again",
+                        );
+                        searching.store(true, Ordering::SeqCst);
+                        spin_until(
+                            || pool.queue(0).is_stealable(),
+                            "the root must queue a stealable backlog",
+                        );
+                        register();
+                    }
+                });
+                let _ = spawn_elsewhere(&context, async {});
+                spin_until(
+                    || searching.load(Ordering::SeqCst),
+                    "worker one must search",
+                );
+                backlog.wake();
+            }
+        }
+
+        // The root stays in its poll until the callback has finished.
+        spin_until(|| trigger.is_done(), "the callback must finish");
+        for task in backlog.tasks.into_iter().chain(woken.tasks) {
+            task.await.unwrap();
+        }
+        drop(peer);
+    });
+}
+
+/// An identity no request has, so neither its cancellation nor its forward
+/// makes the worker that applies it ready.
+fn stale_waiter() -> WaiterId {
+    WaiterId(Id {
+        index: u32::MAX,
+        generation: 0,
+    })
+}
+
+/// What worker one did in the turn after a notification, read at the turn's
+/// [`ParkPoint::AfterMessages`].
+#[derive(Debug)]
+struct Turn {
+    /// Whether the turn offered to defer kernel service to its wait.
+    offered: bool,
+    /// Whether the turn's service deferred kernel service to its wait.
+    deferred: bool,
+    /// Whether the turn could not finish while another thread held worker
+    /// one's inbox lock, so it took or tried to take from the mailbox.
+    blocked: bool,
+    /// Whether the mailbox still reported mail when the turn finished.
+    mail: bool,
+}
+
+/// Hold worker `index`'s inbox lock on another thread until the returned
+/// sender signals the end of the turn being checked, or until [`RESCUE`]
+/// passes. The holder returns whether it gave up waiting, which means the
+/// turn needed the lock.
+fn hold_inbox(pool: &Arc<Pool>, index: u32) -> (mpsc::Sender<()>, thread::JoinHandle<bool>) {
+    let (held, ready) = mpsc::channel();
+    let (release, finished) = mpsc::channel();
+    let pool = pool.clone();
+    let holder = thread::spawn(move || {
+        let _inbox = pool.mailbox(index).lock_inbox();
+        held.send(()).unwrap();
+        finished.recv_timeout(RESCUE).is_err()
+    });
+    ready.recv().unwrap();
+    (release, holder)
+}
+
+/// Notify worker one, parked in its ring with a receive in flight, first
+/// with a pool claim and then with a message, each just before it waits, and
+/// report the turn that follows each notification. Another thread holds
+/// worker one's inbox lock through the turn after the claim.
+fn claim_then_mail() -> [Turn; 2] {
+    let (sender, turns) = mpsc::channel();
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        spin_until(|| is_waiting(&pool, 1), "worker one must start and park");
+
+        // Report the next turn of worker one. A holder of its inbox lock is
+        // released once the turn has finished, and reports whether it gave up
+        // waiting first.
+        let report = {
+            let pool = pool.clone();
+            move |sender: mpsc::Sender<Turn>,
+                  holder: Option<(mpsc::Sender<()>, thread::JoinHandle<bool>)>| {
+                let hooked = pool.clone();
+                on_next_park(&pool, 1, ParkPoint::AfterMessages, move || {
+                    let (offered, deferred) = kernel_service();
+                    let blocked = holder.is_some_and(|(release, holder)| {
+                        let _ = release.send(());
+                        holder.join().unwrap()
+                    });
+                    let turn = Turn {
+                        offered,
+                        deferred,
+                        blocked,
+                        mail: hooked.mailbox(1).has_mail(),
+                    };
+                    sender.send(turn).unwrap();
+                });
+            }
+        };
+
+        // Once the receive is in flight and worker one is about to wait, a
+        // push from another thread claims it. Worker zero spins in this root
+        // until both turns are reported, so the claim cannot select it.
+        let claimant = context.child("claimant");
+        on_next_park(&pool, 1, ParkPoint::BeforeWait, {
+            let pool = pool.clone();
+            let sender = sender.clone();
+            move || {
+                report(sender.clone(), Some(hold_inbox(&pool, 1)));
+                thread::spawn(move || drop(claimant.spawn(|_| async {})))
+                    .join()
+                    .unwrap();
+
+                // At the next wait, worker one's mailbox gets a message.
+                let hooked = pool.clone();
+                on_next_park(&pool, 1, ParkPoint::BeforeWait, move || {
+                    let mailbox = hooked.mailbox(1);
+                    report(sender, None);
+                    let stale = Message::Cancel(stale_waiter());
+                    assert!(mailbox.send(stale).is_ok());
+                });
+            }
+        });
+        let (_, _peer) = occupy_worker_one(&context, true);
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        let mut reported = Vec::new();
+        while reported.len() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "worker one must report two turns"
+            );
+            reported.extend(turns.try_recv());
+            std::hint::spin_loop();
+        }
+        reported.try_into().unwrap()
+    })
+}
+
+/// How long a test waits for progress that must not need a rescue, such as a
+/// sync after its permit is released or a turn that must finish without the
+/// inbox lock another thread holds, before it gives up. It is well before
+/// worker zero's ten second process metrics tick.
+const RESCUE: Duration = Duration::from_secs(5);
+
+/// Unpark the worker of `unparker` unless `progress` reports within
+/// [`RESCUE`], recording in `rescued` that it needed the notification.
+fn rescue_after(
+    progress: mpsc::Receiver<()>,
+    unparker: Unparker,
+    rescued: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        if progress.recv_timeout(RESCUE).is_err() {
+            rescued.store(true, Ordering::Relaxed);
+            unparker.unpark();
+        }
+    })
+}
+
 #[test]
 fn test_config_validation_before_startup() {
-    let mut rounded = config().with_ring_config(RingConfig {
-        size: 3,
-        ..RingConfig::default()
-    });
+    // The documented defaults are valid.
+    let mut defaults = Config::default();
+    assert_eq!(defaults.worker_threads(), 2);
+    assert_eq!(defaults.global_queue_interval(), 31);
+    defaults.validate();
+
+    let mut rounded = config().with_ring_config(RingConfig { size: 3 });
     rounded.validate();
     assert_eq!(rounded.ring_config.size, 4);
 
     // Rounding must not admit zero or exceed the configured ring-size limit.
     for size in [0, 32_769, u32::MAX] {
-        let mut invalid = config().with_ring_config(RingConfig {
-            size,
-            ..RingConfig::default()
-        });
+        let mut invalid = config().with_ring_config(RingConfig { size });
 
         assert!(catch_unwind(AssertUnwindSafe(|| invalid.validate())).is_err());
     }
 
     // Check both timeout settings at the unsupported ends of the range.
-    for timeout in [
-        Duration::ZERO,
-        TimeoutWheel::MAX_TIMEOUT + Duration::from_nanos(1),
-    ] {
+    for timeout in [Duration::ZERO, MAX_TIMEOUT + Duration::from_nanos(1)] {
         for mut invalid in [
             config().with_connect_timeout(timeout),
             config().with_read_write_timeout(timeout),
@@ -291,19 +1192,21 @@ fn test_config_validation_before_startup() {
         }
     }
 
-    let invalid_layouts = [Duration::ZERO, Duration::from_nanos(1), Duration::MAX].map(|tick| {
-        config().with_ring_config(RingConfig {
-            timeout_wheel_tick: tick,
-            ..RingConfig::default()
-        })
-    });
+    let invalid_timeouts = [Duration::ZERO, MAX_TIMEOUT + Duration::from_nanos(1)]
+        .map(|timeout| config().with_read_write_timeout(timeout));
     let invalid_spinner = config().with_idle_spinner(SpinnerConfig {
         budget_us: 2,
         max_budget_us: 1,
         ..SpinnerConfig::default()
     });
+    let invalid_workers = [0, MAX_WORKERS + 1].map(|workers| config().with_worker_threads(workers));
+    let invalid_interval = config().with_global_queue_interval(0);
 
-    for invalid in invalid_layouts.into_iter().chain([invalid_spinner]) {
+    for invalid in invalid_timeouts
+        .into_iter()
+        .chain([invalid_spinner, invalid_interval])
+        .chain(invalid_workers)
+    {
         let directory = invalid.storage_directory().clone();
         let called = AtomicBool::new(false);
 
@@ -319,19 +1222,15 @@ fn test_config_validation_before_startup() {
         );
 
         // Invalid settings must fail before acquiring storage resources or
-        // invoking user code, including layouts whose slot arithmetic overflows.
+        // invoking user code.
         assert!(!called.load(Ordering::SeqCst));
         assert!(!directory.exists());
     }
 
-    // The maximum supported timeout remains valid with a representable wheel.
+    // The maximum supported timeout remains valid.
     let mut boundary = config()
-        .with_connect_timeout(TimeoutWheel::MAX_TIMEOUT)
-        .with_read_write_timeout(TimeoutWheel::MAX_TIMEOUT)
-        .with_ring_config(RingConfig {
-            timeout_wheel_tick: Duration::from_secs(3600),
-            ..RingConfig::default()
-        });
+        .with_connect_timeout(MAX_TIMEOUT)
+        .with_read_write_timeout(MAX_TIMEOUT);
     boundary.validate();
 }
 
@@ -603,8 +1502,8 @@ fn test_execution_modes_share_ordinary_descendants() {
                 .spawn(move |context| async move {
                     let parent = thread::current().id();
 
-                    // Ordinary children return to the original worker even when
-                    // their parent owns a dedicated or blocking worker.
+                    // Ordinary children run on the pool, here its only worker,
+                    // even when their parent owns a dedicated or blocking worker.
                     for explicit in [false, true] {
                         let child = context.child("ordinary_child");
                         let child = if explicit { child.shared(false) } else { child };
@@ -617,9 +1516,9 @@ fn test_execution_modes_share_ordinary_descendants() {
                         );
                     }
 
-                    // Nested one-off tasks each receive a separate worker.
+                    // Nested dedicated tasks each receive a separate worker.
                     for blocking in [false, true] {
-                        let nested = context.child("one_off");
+                        let nested = context.child("dedicated");
                         let nested = if blocking {
                             nested.shared(true)
                         } else {
@@ -800,8 +1699,8 @@ fn test_aborted_context_skips_factories_for_every_placement() {
 fn test_closed_task_set_skips_local_and_foreign_factories() {
     for foreign in [false, true] {
         Runner::new(config()).start(|context| async move {
-            // Close only the set, leaving the worker and its mailbox open, so
-            // the refusal comes from the spawn's check of the set.
+            // Close only the set, leaving the worker and the global queue open,
+            // so the refusal comes from the spawn's check of the set.
             context.shared.tasks.close();
 
             // Spawn from the worker's thread and from another thread.
@@ -822,7 +1721,7 @@ fn test_closed_task_set_skips_local_and_foreign_factories() {
 }
 
 #[test]
-fn test_closed_registry_skips_one_off_factories() {
+fn test_closed_registry_skips_dedicated_factories() {
     Runner::new(config()).start(|context| async move {
         // Leave supervision open so rejection must come from worker registration.
         context.shared.workers.close();
@@ -842,7 +1741,7 @@ fn test_closed_registry_skips_one_off_factories() {
 }
 
 #[test]
-fn test_closed_runner_rejects_one_off_payload_without_invoking_closure() {
+fn test_closed_runner_rejects_dedicated_payload_without_invoking_closure() {
     let escaped = Runner::new(config()).start(|context| async { context });
     let drops = Arc::new(AtomicUsize::new(0));
     let payload = DropCount(drops.clone());
@@ -951,7 +1850,7 @@ fn test_shutdown_does_not_wait_for_an_unpublished_ordinary_factory() {
 }
 
 #[test]
-fn test_one_off_reservation_covers_factory_construction_through_shutdown() {
+fn test_dedicated_reservation_covers_factory_construction_through_shutdown() {
     /// Signal worker registration closure while ordinary tasks are destroyed.
     struct Closing(mpsc::Sender<()>);
 
@@ -1042,7 +1941,7 @@ fn test_factory_panic_finishes_metrics_and_releases_reservation() {
 
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     child.spawn(move |_| -> Ready<()> {
-                        // One-off factories retain their reservation without holding its lock.
+                        // Dedicated factories retain their reservation without holding its lock.
                         let reserved = usize::from(matches!(
                             execution,
                             Execution::Dedicated | Execution::Shared(true)
@@ -1107,7 +2006,7 @@ fn test_retained_descendant_context_is_closed_before_parent_result() {
 }
 
 #[test]
-fn test_one_off_completion_cancels_local_and_remote_descendants() {
+fn test_dedicated_completion_cancels_local_and_remote_descendants() {
     for blocking in [false, true] {
         Runner::new(config()).start(|context| async move {
             let parent = context.child("parent");
@@ -1170,7 +2069,7 @@ fn test_root_shutdown_cancels_descendants_across_workers() {
 }
 
 #[test]
-fn test_completed_one_off_worker_does_not_close_sibling_registry() {
+fn test_completed_dedicated_worker_does_not_close_sibling_registry() {
     Runner::new(config()).start(|context| async move {
         context
             .child("first")
@@ -1179,7 +2078,7 @@ fn test_completed_one_off_worker_does_not_close_sibling_registry() {
             .await
             .unwrap();
 
-        // Spawning remains available to a later sibling and its own one-off children.
+        // Spawning remains available to a later sibling and its own dedicated children.
         let result = context
             .child("second")
             .dedicated()
@@ -1516,6 +2415,75 @@ fn test_startup_failure_survives_rejected_payload_destructor_panic() {
 }
 
 #[test]
+fn test_startup_failure_drops_the_root_builder_outside_any_unwind() {
+    // Record the thread's unwind state when the unbuilt root is destroyed.
+    let state = Arc::new(Mutex::new(None));
+    let observer = UnwindObserver(state.clone());
+
+    // Fail worker zero before the root builder runs.
+    FAIL_STARTUP.set(true);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config()).start(move |_| async move {
+            drop(observer);
+        });
+    }));
+
+    // The startup failure fails the runner, and the builder was destroyed
+    // outside any unwind.
+    let panic = result.expect_err("native startup failure must fail the runner");
+    assert!(
+        extract_panic_message(&*panic).contains("injected native worker initialization failure")
+    );
+    assert_eq!(*state.lock(), Some(false));
+}
+
+/// A native worker that fails to start is reported through the panic hook
+/// exactly once, whichever worker fails and whether task panics are caught.
+/// The panic hook is process-wide, so each case runs in a child process of
+/// this test binary, started through its libtest command line, and the test
+/// counts the error in the child's standard error.
+#[test]
+fn test_startup_failure_is_reported_once() {
+    // In a child process, run the requested case only.
+    if let Ok(case) = env::var(STARTUP_FAILURE_CASE) {
+        run_startup_failure_case(&case);
+        return;
+    }
+
+    // Test names omit the crate from the module path.
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let name = format!("{module}::test_startup_failure_is_reported_once");
+    for case in [
+        "worker_zero",
+        "pool_worker",
+        "dedicated",
+        "dedicated_caught",
+        "blocking",
+    ] {
+        let output = Command::new(env::current_exe().unwrap())
+            .args([name.as_str(), "--exact", "--nocapture"])
+            .env(STARTUP_FAILURE_CASE, case)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // The child ran the case, which passed.
+        assert!(output.status.success(), "{case}: {stdout}{stderr}");
+        assert!(stdout.contains("1 passed"), "{case}: {stdout}");
+
+        // The panic hook printed the startup error once.
+        assert_eq!(
+            stderr
+                .matches("failed to create native io_uring worker")
+                .count(),
+            1,
+            "{case}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn test_service_error_preserves_completions_before_cleanup() {
     let (socket, mut peer) = UnixStream::pair().unwrap();
     socket.set_nonblocking(true).unwrap();
@@ -1689,95 +2657,104 @@ fn test_shutdown_cancels_tasks_before_destruction() {
         }
     }
 
-    /// How far the ordinary tasks progress before the root returns.
+    /// How far the ordinary tasks progress before the root returns with one
+    /// worker. A second worker can also poll the tasks the first leaves queued.
     #[derive(Clone, Copy, Debug)]
     enum Placement {
         /// Registered locally but never polled.
         Local,
-        /// Registered from another thread, with its first runnable not taken
-        /// from the mailbox.
+        /// Registered from another thread, with its first runnable still in
+        /// the global queue.
         Foreign,
         /// Polled once and suspended before shutdown.
         Pending,
     }
 
-    for placement in [Placement::Local, Placement::Foreign, Placement::Pending] {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let cancelled = Arc::new(AtomicUsize::new(0));
-        let gauge = raw::Gauge::default();
-        let handles = Runner::new(config()).start(|context| {
-            let drops = &drops;
-            let cancelled = &cancelled;
-            let gauge = &gauge;
+    for workers in [1, 2] {
+        for placement in [Placement::Local, Placement::Foreign, Placement::Pending] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let cancelled = Arc::new(AtomicUsize::new(0));
+            let gauge = raw::Gauge::default();
+            let handles = Runner::new(config().with_worker_threads(workers)).start(|context| {
+                // Hold worker zero between the pool's close and the abort, so a
+                // worker that drained the set before the abort would be caught.
+                if workers > 1 {
+                    BEFORE_ABORT.with(|slot| {
+                        *slot.borrow_mut() =
+                            Some(Box::new(|| thread::sleep(Duration::from_millis(20))));
+                    });
+                }
+                let drops = &drops;
+                let cancelled = &cancelled;
+                let gauge = &gauge;
 
-            async move {
-                // Build both wrappers directly so a shared gauge can check that
-                // the whole subtree is cancelled before either future is destroyed.
-                let tree = Tree::child(&context.tree).0;
-                let descendant = Tree::child(&tree).0;
-                let mut handles = Vec::new();
-                let mut receivers = Vec::new();
+                async move {
+                    // Build both wrappers directly so a shared gauge can check that the whole
+                    // subtree is cancelled before either future is destroyed.
+                    let tree = Tree::child(&context.tree).0;
+                    let descendant = Tree::child(&tree).0;
+                    let mut handles = Vec::new();
+                    let mut receivers = Vec::new();
 
-                for tree in [tree, descendant.clone()] {
-                    let cleanup = Cleanup {
-                        drops: drops.clone(),
-                        cancelled: cancelled.clone(),
-                        gauge: gauge.clone(),
-                        descendant: descendant.clone(),
-                    };
-                    let (started, ready) = oneshot::channel();
-                    let (future, handle) = Handle::init(
-                        async move {
-                            let _cleanup = cleanup;
-                            started.send(()).unwrap();
-                            pending::<()>().await;
-                        },
-                        MetricHandle::new(gauge.clone()),
-                        context.shared.panicker.clone(),
-                        tree.clone(),
-                    );
-                    let shared = context.shared.clone();
-                    let origin = context.origin.clone();
-                    if matches!(placement, Placement::Foreign) {
-                        thread::spawn(move || {
-                            assert!(shared.tasks.register(future, origin).is_ok())
-                        })
-                        .join()
-                        .unwrap();
-                    } else {
-                        assert!(shared.tasks.register(future, origin).is_ok());
+                    for tree in [tree, descendant.clone()] {
+                        let cleanup = Cleanup {
+                            drops: drops.clone(),
+                            cancelled: cancelled.clone(),
+                            gauge: gauge.clone(),
+                            descendant: descendant.clone(),
+                        };
+                        let (started, ready) = oneshot::channel();
+                        let (future, handle) = Handle::init(
+                            async move {
+                                let _cleanup = cleanup;
+                                let _ = started.send(());
+                                pending::<()>().await;
+                            },
+                            MetricHandle::new(gauge.clone()),
+                            context.shared.panicker.clone(),
+                            tree,
+                        );
+                        let shared = context.shared.clone();
+                        let pool = Arc::downgrade(&shared.pool);
+                        if matches!(placement, Placement::Foreign) {
+                            thread::spawn(move || {
+                                assert!(shared.tasks.register(future, pool).is_ok())
+                            })
+                            .join()
+                            .unwrap();
+                        } else {
+                            assert!(shared.tasks.register(future, pool).is_ok());
+                        }
+
+                        handles.push(handle);
+                        receivers.push(ready);
                     }
 
-                    handles.push(handle);
-                    receivers.push(ready);
-                }
-
-                // Only this case lets the futures reach their suspension point.
-                if matches!(placement, Placement::Pending) {
-                    for ready in receivers {
-                        ready.await.unwrap();
+                    // Only this case waits for the futures to reach their
+                    // suspension point.
+                    if matches!(placement, Placement::Pending) {
+                        for ready in receivers {
+                            ready.await.unwrap();
+                        }
                     }
-                }
 
-                handles
+                    handles
+                }
+            });
+
+            let case = format!("workers={workers} placement={placement:?}");
+            assert_eq!(drops.load(Ordering::Relaxed), 2, "{case}");
+            assert_eq!(cancelled.load(Ordering::Relaxed), 2, "{case}");
+            assert_eq!(gauge.get(), 0, "{case}");
+
+            for handle in handles {
+                assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
             }
-        });
-
-        assert_eq!(drops.load(Ordering::Relaxed), 2, "placement={placement:?}");
-        assert_eq!(
-            cancelled.load(Ordering::Relaxed),
-            2,
-            "placement={placement:?}"
-        );
-        assert_eq!(gauge.get(), 0, "placement={placement:?}");
-
-        for handle in handles {
-            assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
         }
     }
 }
 
-/// A foreign spawn's task joins the set before its worker takes the first
+/// A foreign spawn's task joins the set before a worker takes the first
 /// runnable, and leaves it on completion.
 #[test]
 fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
@@ -1785,8 +2762,8 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
         // Only the runner's service task is registered.
         assert_eq!(context.shared.tasks.live(), 1);
 
-        // The root has not yielded, so the worker has not taken the first
-        // runnable from its mailbox, yet the set already retains the task.
+        // The root has not yielded, so no worker has taken the first runnable
+        // from the global queue, yet the set already retains the task.
         let remote = context.child("foreign");
         let handle = thread::spawn(move || remote.spawn(|_| async {}))
             .join()
@@ -1813,7 +2790,7 @@ fn test_shutdown_between_registration_and_first_runnable_clears_the_task() {
         let (inserted, inserting) = oneshot::channel();
         let publisher = thread::spawn(move || {
             // Pause this thread's registration once the set holds the task,
-            // before its first runnable reaches the worker.
+            // before its first runnable reaches the pool.
             AFTER_INSERT.set(Some(Box::new(move || {
                 inserted.send(()).unwrap();
                 released.recv_timeout(TEST_TIMEOUT).unwrap();
@@ -1833,8 +2810,8 @@ fn test_shutdown_between_registration_and_first_runnable_clears_the_task() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!polled.load(Ordering::Relaxed));
 
-    // The worker is gone, so delivery discards the runnable, and the handle is
-    // already closed.
+    // The pool's global queue has closed, so delivery discards the runnable,
+    // and the handle is already closed.
     release.send(()).unwrap();
     let handle = publisher.join().unwrap();
     assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
@@ -1895,23 +2872,25 @@ fn test_spawn_refused_by_the_closed_task_set_is_disposed_on_its_caller() {
 /// Teardown drops every idle or queued future, spawned locally or from
 /// another thread, while the worker's timers are still registered.
 #[test]
-fn test_teardown_drops_every_future_before_clearing_timers() {
+fn test_teardown_drops_every_future_before_closing_timers() {
     /// Record whether the worker still holds timers when a future is dropped.
     struct TimerCheck {
         /// Futures dropped.
         drops: Arc<AtomicUsize>,
-        /// Futures dropped while the worker's timer table was still open.
+        /// Futures dropped while the worker's timers were still open.
         early: Arc<AtomicUsize>,
     }
 
     impl Drop for TimerCheck {
         fn drop(&mut self) {
             // The future's own sleep drops after this guard, so its timer is
-            // still registered unless teardown has already closed the table.
+            // still registered unless teardown has already closed its timers.
             let local = Local::current().expect("future dropped off its worker");
-            if local.borrow_mut().timers.next_deadline().is_some() {
+
+            if !local.borrow().timers.is_closed() {
                 self.early.fetch_add(1, Ordering::Relaxed);
             }
+
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1976,7 +2955,7 @@ fn test_teardown_drops_every_future_before_clearing_timers() {
 }
 
 #[test]
-fn test_shutdown_waits_for_one_off_task_destruction() {
+fn test_shutdown_waits_for_dedicated_task_destruction() {
     /// Hold task disposal open until the test inspects the shutdown wait.
     struct HeldDestructor {
         /// Tell the test that destruction has begun.
@@ -2171,7 +3150,7 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
 }
 
 #[test]
-// Retain the task handle to check its result after the runner closes its mailbox.
+// Retain the task handle to check its result after the runner closes the pool.
 #[allow(clippy::async_yields_async)]
 fn test_queued_foreign_task_disposal_is_contained_at_shutdown() {
     for catch in [false, true] {
@@ -2182,7 +3161,7 @@ fn test_queued_foreign_task_disposal_is_contained_at_shutdown() {
             let remote = context.child("queued_foreign");
 
             // Joining only the publisher leaves its accepted task in the
-            // mailbox when this root completes its first poll.
+            // global queue when this root completes its first poll.
             thread::spawn(move || {
                 remote.spawn(move |_| async move {
                     let _payload = payload;
@@ -2444,6 +3423,178 @@ fn test_callback_generated_work_prevents_parking() {
     }
 }
 
+/// A callback in cleanup's drain can drop a sleep registered on another
+/// worker's open timers, which releases that sleep's waker into the same
+/// callback batch. Cleanup must run such a batch before waiting for retained
+/// I/O, which here is a sync waiting for a durability permit that only the
+/// last waker in a chain of such releases frees.
+#[test]
+fn test_cleanup_runs_released_wakers_before_waiting_for_retained_io() {
+    /// A waker that drops its sleep when destroyed.
+    struct DropSleep(
+        /// The sleep to drop, taken once by the destructor.
+        Mutex<Option<Sleep>>,
+    );
+
+    // This waker owns a destructor, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for DropSleep {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for DropSleep {
+        fn drop(&mut self) {
+            drop(self.0.lock().take());
+        }
+    }
+
+    /// A waker that releases a durability permit when destroyed.
+    struct ReleasePermit {
+        /// The held durability permit, taken once by the destructor.
+        permit: Arc<Mutex<Option<OwnedAsyncMutexGuard<()>>>>,
+        /// Set when the destructor runs, before the permit is released.
+        released: Arc<AtomicBool>,
+    }
+
+    // This waker owns a destructor, which Waker::noop cannot model.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for ReleasePermit {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ReleasePermit {
+        fn drop(&mut self) {
+            self.released.store(true, Ordering::SeqCst);
+            drop(self.permit.lock().take());
+        }
+    }
+
+    // Hold the file's durability permit, so a sync on it waits until a waker
+    // or the watchdog releases it.
+    let (directory, file) = make_file("cleanup_released_wakers");
+    let permit = Arc::new(Mutex::new(Some(
+        file.durability.clone().try_lock_owned().unwrap(),
+    )));
+    let released = Arc::new(AtomicBool::new(false));
+    let waited = Runner::new(config().with_worker_threads(1)).start(|_| async {
+        // Two sleeps wait on worker zero's timers. Dropping the first releases
+        // a waker that drops the second, whose waker releases the permit.
+        let last = Waker::from(Arc::new(ReleasePermit {
+            permit: permit.clone(),
+            released: released.clone(),
+        }));
+
+        let mut second = Sleep::new(Duration::from_secs(60));
+        assert!(
+            Pin::new(&mut second)
+                .poll(&mut TaskContext::from_waker(&last))
+                .is_pending()
+        );
+
+        drop(last);
+        let middle = Waker::from(Arc::new(DropSleep(Mutex::new(Some(second)))));
+        let mut first = Sleep::new(Duration::from_secs(60));
+        assert!(
+            Pin::new(&mut first)
+                .poll(&mut TaskContext::from_waker(&middle))
+                .is_pending()
+        );
+
+        drop(middle);
+
+        // A dedicated worker retains a sync that waits for the permit, then
+        // cleans up with the first sleep's drop in its callback batch.
+        let shared = Local::current().unwrap().borrow().shared.clone();
+        let file = file.clone();
+        let permit = permit.clone();
+        let released = released.clone();
+        thread::spawn(move || {
+            let (mut worker, output) = Worker::run(
+                shared,
+                Role::Dedicated,
+                Parker::new(),
+                || async {
+                    let local = Local::current().unwrap();
+                    let mut local = local.borrow_mut();
+                    let Local {
+                        driver,
+                        now,
+                        deferred,
+                        ..
+                    } = &mut *local;
+                    driver.as_mut().unwrap().admit(
+                        Request::Sync(SyncRequest::new(file)),
+                        Observer::Orphaned,
+                        *now,
+                        deferred,
+                    );
+                },
+                None,
+            )
+            .unwrap();
+
+            assert!(output.is_some());
+
+            // Queue the ring wait against a fresh observation and run the
+            // startup task work, so the only wake left for a blocking wait is
+            // the permit's release.
+            worker.service(false);
+            let seen = worker.parker.observe();
+            let parked = worker.local.borrow_mut().driver.as_mut().unwrap().park(
+                &worker.parker,
+                seen,
+                Some(Instant::now()),
+            );
+            parked.unwrap();
+            worker.service(false);
+
+            {
+                let local = worker.local.borrow();
+                let driver = local.driver.as_ref().unwrap();
+                assert!(!driver.is_empty());
+                assert!(!driver.has_pending_submissions());
+            }
+
+            worker
+                .local
+                .borrow_mut()
+                .deferred
+                .drops
+                .push(Waker::from(Arc::new(DropSleep(Mutex::new(Some(first))))));
+
+            // Without the release, cleanup would wait for the sync forever.
+            // Free the permit after a generous delay so a failure ends.
+            let watchdog = thread::spawn(move || {
+                let deadline = Instant::now() + TEST_TIMEOUT;
+
+                while !released.load(Ordering::SeqCst) {
+                    if Instant::now() >= deadline {
+                        drop(permit.lock().take());
+                        return false;
+                    }
+
+                    thread::sleep(Duration::from_millis(1));
+                }
+
+                true
+            });
+
+            worker.cleanup();
+
+            assert!(worker.take_panic().is_none());
+            watchdog.join().unwrap()
+        })
+        .join()
+        .unwrap()
+    });
+
+    // Remove the file, then check that a released waker, not the watchdog,
+    // freed the permit.
+    drop(file);
+    fs::remove_dir_all(directory).unwrap();
+    assert!(waited, "cleanup waited before running released wakers");
+}
+
 #[test]
 fn test_final_callbacks_finish_before_tls_removal() {
     /// Observe disposal of a successful root result when shutdown fails.
@@ -2650,6 +3801,2201 @@ fn test_foreign_tls_destructor_can_wake_after_current_key_destruction() {
     assert!(!panicked, "ordinary wake accessed destroyed runtime TLS");
 }
 
+/// Tasks spread across the workers and complete. With one worker every task
+/// runs on the root's thread. With more, the first spawn stays on worker zero
+/// and the others start elsewhere while the root holds it.
+#[test]
+fn test_tasks_spread_across_workers_and_complete() {
+    for count in [1, 2, 4] {
+        let borrowed = Rc::new(Cell::new(0));
+        let state = &borrowed;
+        let cfg = config().with_worker_threads(count);
+        assert_eq!(cfg.worker_threads(), count);
+        Runner::new(cfg).start(|context| async move {
+            let root = thread::current().id();
+            let started = Arc::new(AtomicUsize::new(0));
+            let mut tasks = Vec::new();
+            for _ in 0..count * 3 {
+                let started = started.clone();
+                tasks.push(context.child("worker").spawn(move |_| async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    thread::current().id()
+                }));
+            }
+
+            // Worker zero keeps the first spawn and queues the rest globally,
+            // so when there are other workers they start those while the root
+            // holds worker zero.
+            if count > 1 {
+                let deadline = Instant::now() + TEST_TIMEOUT;
+                while started.load(Ordering::SeqCst) < count * 3 - 1 {
+                    assert!(
+                        Instant::now() < deadline,
+                        "globally queued tasks must start"
+                    );
+                    std::hint::spin_loop();
+                }
+            }
+
+            let mut ids = Vec::new();
+            for task in tasks {
+                ids.push(task.await.unwrap());
+            }
+            let distinct = ids.iter().collect::<HashSet<_>>();
+            assert!(distinct.len() <= count);
+            if count == 1 {
+                assert!(ids.iter().all(|id| *id == root));
+            } else {
+                assert_eq!(ids[0], root, "a quiet worker must keep its spawn");
+                assert!(ids[1..].iter().all(|id| *id != root));
+            }
+            state.set(1);
+        });
+        assert_eq!(borrowed.get(), 1);
+        assert!(Local::current().is_none());
+    }
+}
+
+/// A wake of an idle task queues it on the waker's worker, so a pair started on
+/// two workers converges onto the first waker's worker and stays there. A lone
+/// queued runnable is not stolen, so the idle worker takes neither end.
+#[test]
+fn test_chatty_pair_converges_onto_one_worker() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let (request, mut requests) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
+        let (response, mut responses) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
+
+        // The responder starts on worker one. That worker parks only after the
+        // responder's first poll returns, and the poll leaves the responder
+        // idle. A wake that finds a task mid-poll leaves it on its poller.
+        let idle = Arc::new(AtomicBool::new(false));
+        let (responder, responder_first) = spawn_elsewhere(&context, {
+            let pool = context.shared.pool.clone();
+            let idle = idle.clone();
+            async move {
+                on_next_park(&pool, 1, ParkPoint::BeforeIdle, move || {
+                    idle.store(true, Ordering::Release);
+                });
+                let mut seen = Vec::new();
+                while let Some(requester) = requests.recv().await {
+                    seen.push((requester, thread::current().id()));
+                    response.send(thread::current().id()).await.unwrap();
+                }
+                seen
+            }
+        });
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while !idle.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "the responder must go idle");
+            std::hint::spin_loop();
+        }
+
+        // The requester starts here. Its first request moves the responder
+        // here, after which each task is woken only by the other on this
+        // worker while idle.
+        let requester = context.child("requester").spawn(move |_| async move {
+            let mut seen = Vec::new();
+            for _ in 0..200 {
+                let sent_from = thread::current().id();
+                request.send(sent_from).await.unwrap();
+                let responder = responses.recv().await.unwrap();
+                seen.push((sent_from, responder));
+            }
+            seen
+        });
+
+        let requester_seen = requester.await.unwrap();
+        let responder_seen = responder.await.unwrap();
+        let home = thread::current().id();
+        assert_ne!(responder_first, home);
+        assert!(
+            requester_seen
+                .iter()
+                .chain(&responder_seen)
+                .all(|(a, b)| *a == home && *b == home),
+            "the pair must converge onto one worker"
+        );
+    });
+}
+
+/// Shutdown destroys every pending task on a worker thread, whether the root
+/// returns or panics.
+#[test]
+fn test_shutdown_destroys_tasks_on_a_worker() {
+    struct OwnedDrop(Arc<AtomicUsize>);
+    impl Drop for OwnedDrop {
+        fn drop(&mut self) {
+            assert!(Local::current().is_some());
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for panic_root in [false, true] {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = dropped.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config().with_worker_threads(4)).start(|context| async move {
+                let mut ready = Vec::new();
+                for _ in 0..12 {
+                    let (started, receiver) = oneshot::channel();
+                    ready.push(receiver);
+                    let dropped = dropped.clone();
+                    context.child("pending").spawn(move |context| async move {
+                        let _guard = OwnedDrop(dropped);
+                        let sleep = context.sleep(Duration::from_secs(3600));
+                        let mut sleep = pin!(sleep);
+                        assert!(futures::poll!(&mut sleep).is_pending());
+                        started.send(()).unwrap();
+                        sleep.await;
+                    });
+                }
+                for receiver in ready {
+                    receiver.await.unwrap();
+                }
+                assert!(!panic_root, "root failure");
+            });
+        }));
+        assert_eq!(result.is_err(), panic_root);
+        assert_eq!(observed.load(Ordering::Relaxed), 12);
+    }
+}
+
+/// A pool whose third worker fails to launch or to start fails the runner
+/// without building its root, releases the shared services and the workers
+/// that started, and leaves no task cell and a clean idle state.
+#[test]
+fn test_partial_startup_failure_releases_all_workers() {
+    for launch in [false, true] {
+        for catch in [false, true] {
+            POOL_FAIL_AT.set(Some((2, launch)));
+            let called = Cell::new(false);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                Runner::new(config().with_worker_threads(4).with_catch_panics(catch)).start(|_| {
+                    called.set(true);
+                    async {}
+                });
+            }));
+            let panic = result.expect_err("partial pool startup must fail");
+            assert!(extract_panic_message(&*panic).contains("injected"));
+            assert!(!called.get());
+            assert!(POOL_SHARED.with(|slot| slot.borrow().upgrade().is_none()));
+            assert!(Local::current().is_none());
+            check_pool(POOL_KEPT.with(RefCell::take).expect("a pool must be kept"));
+        }
+    }
+}
+
+/// Network and storage operations work from a worker other than worker zero. A
+/// client on worker one pings a server task, stores the echo in a blob, and
+/// reads it back.
+#[test]
+fn test_network_and_storage_on_multiple_workers() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let mut listener = context.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = context.child("server").spawn(move |_| async move {
+            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+            let received = stream.recv(4).await.unwrap();
+            assert_eq!(received.clone().coalesce().as_ref(), b"ping");
+            sink.send(received).await.unwrap();
+        });
+        let (client, _) = spawn_elsewhere(&context, {
+            let context = context.child("client");
+            async move {
+                let (mut sink, mut stream) = context.dial(address).await.unwrap();
+                sink.send(b"ping".to_vec()).await.unwrap();
+                let received = stream.recv(4).await.unwrap();
+                let (blob, _) = context.open("multi", b"blob").await.unwrap();
+                blob.write_at(0, received, WriteOptions::default())
+                    .await
+                    .unwrap();
+                blob.sync().await.unwrap();
+                let data = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+                assert_eq!(data.coalesce().as_ref(), b"ping");
+            }
+        });
+        client.await.unwrap();
+        server.await.unwrap();
+    });
+}
+
+/// A task panic on another pool worker fails the runner unless task panics are
+/// caught, and then only the task's handle sees it while the pool runs on.
+/// Either way the pool frees every task cell and leaves a clean idle state.
+#[test]
+fn test_remote_task_panic_respects_policy() {
+    for catch in [false, true] {
+        let kept = KeptPool::default();
+        let keeper = kept.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config().with_worker_threads(2).with_catch_panics(catch)).start(
+                |context| async move {
+                    keeper.keep(&context);
+                    let (task, _) = spawn_elsewhere(&context, async {
+                        panic!("remote ordinary task failed");
+                    });
+                    if catch {
+                        assert!(matches!(task.await, Err(Error::Exited)));
+                        let survivor = context.child("survivor").spawn(|_| async { 7 });
+                        assert_eq!(survivor.await.unwrap(), 7);
+                    } else {
+                        pending::<()>().await;
+                    }
+                },
+            );
+        }));
+        assert_eq!(result.is_err(), !catch);
+        kept.check();
+    }
+}
+
+/// Shutdown completes the writes that tasks dropped while they were still
+/// queued behind a one-slot ring, on the ring of each worker, so a second
+/// runner reads back every byte.
+#[test]
+fn test_shutdown_drains_queued_writes_on_every_ring() {
+    let cfg = config()
+        .with_worker_threads(2)
+        .with_ring_config(RingConfig { size: 1 });
+    Runner::new(cfg.clone()).start(|context| async move {
+        for actor in 0_u8..4 {
+            let write = {
+                let context = context.child("writer");
+                async move {
+                    let (blob, _) = context.open("retained", &[actor]).await.unwrap();
+                    for offset in 0..8 {
+                        let write = blob.write_at(offset, vec![actor + 1], WriteOptions::default());
+                        let mut write = pin!(write);
+
+                        // Dropping a registered write retains its kernel work,
+                        // including submissions queued behind the single slot.
+                        let _ = futures::poll!(&mut write);
+                    }
+                    pending::<()>().await;
+                }
+            };
+
+            // The first writer stays here, and the others start on worker one.
+            if actor == 0 {
+                context.child("writer").spawn(move |_| write);
+            } else {
+                let _ = spawn_elsewhere(&context, write);
+            }
+        }
+
+        // The first writer runs once the root yields.
+        reschedule().await;
+    });
+    Runner::new(cfg).start(|context| async move {
+        for actor in 0_u8..4 {
+            let (blob, size) = context.open("retained", &[actor]).await.unwrap();
+            assert_eq!(size, 8);
+            let data = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
+            assert_eq!(data.coalesce().as_ref(), &[actor + 1; 8]);
+        }
+    });
+}
+
+/// A driver failure on another pool worker interrupts the root, before its
+/// code resumes, even while task panics are caught. The pool still frees
+/// every task cell and leaves a clean idle state.
+#[test]
+fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught() {
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    peer.write_all(b"x").unwrap();
+    let request = Request::Recv(RecvRequest {
+        fd: Arc::new(socket.into()),
+        buf: IoBufMut::with_capacity(1),
+        offset: 0,
+        len: 1,
+        exact: true,
+        deadline: None,
+    });
+    let resumed = &AtomicBool::new(false);
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(2).with_catch_panics(true)).start(
+            |context| async move {
+                keeper.keep(&context);
+                let _ = spawn_elsewhere(&context, async move {
+                    let _fault = fail_after_completion(
+                        Local::current().unwrap().borrow().driver.as_ref().unwrap(),
+                    );
+                    Operation::register(request).await.unwrap();
+                    pending::<()>().await;
+                });
+
+                // Nothing else wakes the root, so only the failure polls it
+                // again, and that poll must end it before its code resumes.
+                let mut yielded = false;
+                poll_fn(|_| {
+                    if mem::replace(&mut yielded, true) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                resumed.store(true, Ordering::SeqCst);
+            },
+        );
+    }));
+    let panic = result.expect_err("losing a pool worker must interrupt the root");
+    assert!(extract_panic_message(&*panic).contains("injected service failure after completion"));
+    assert!(
+        !resumed.load(Ordering::SeqCst),
+        "the root must not resume after the failure"
+    );
+    assert!(Local::current().is_none());
+    kept.check();
+}
+
+/// A task woken from a worker of another runtime runs on its own runtime's
+/// workers, not on the waker's.
+#[test]
+fn test_wake_from_another_runtime_stays_in_its_own_pool() {
+    // Runtime A owns the waiting task. Runtime B's worker performs the wake
+    // from inside one of its own task polls, so the current thread has a
+    // worker, but one of the wrong pool.
+    let (to_b, from_a) = mpsc::channel::<oneshot::Sender<()>>();
+    let (report, reports) = mpsc::channel::<(ThreadId, ThreadId)>();
+    let (to_a, from_b) = mpsc::channel::<ThreadId>();
+    let a = thread::spawn(move || {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let (wake, waiter) = oneshot::channel::<()>();
+            let task = context.child("waiter").spawn(|_| async move {
+                let before = thread::current().id();
+                waiter.await.unwrap();
+                (before, thread::current().id())
+            });
+
+            // The waiter starts on this worker and waits before the root
+            // runs again, so runtime B's send has a waker to wake.
+            reschedule().await;
+            to_b.send(wake).unwrap();
+            report.send(task.await.unwrap()).unwrap();
+            to_a.send(thread::current().id()).unwrap();
+        });
+    });
+    let sender = Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let wake = from_a.recv().unwrap();
+        context
+            .child("sender")
+            .spawn(|_| async move {
+                wake.send(()).unwrap();
+                thread::current().id()
+            })
+            .await
+            .unwrap()
+    });
+    let (before, after) = reports.recv().unwrap();
+    let _ = from_b.recv().unwrap();
+    a.join().unwrap();
+    assert_ne!(
+        after, sender,
+        "the task must not poll on another runtime's worker"
+    );
+    assert_ne!(before, sender);
+}
+
+/// An ordinary task woken from a dedicated worker runs on a pool worker, not on
+/// the dedicated thread, with one pool worker and with two. A dedicated worker
+/// serves no task set.
+#[test]
+fn test_wake_from_a_dedicated_worker_goes_to_the_pool() {
+    for workers in [1, 2] {
+        Runner::new(config().with_worker_threads(workers)).start(|context| async move {
+            let (wake, waiter) = oneshot::channel::<()>();
+            let task = context.child("waiter").spawn(|_| async move {
+                let before = thread::current().id();
+                waiter.await.unwrap();
+                (before, thread::current().id())
+            });
+            reschedule().await;
+            let sender = context
+                .child("sender")
+                .dedicated()
+                .spawn(|_| async move {
+                    wake.send(()).unwrap();
+                    thread::current().id()
+                })
+                .await
+                .unwrap();
+            let (before, after) = task.await.unwrap();
+            assert_ne!(before, sender);
+            assert_ne!(
+                after, sender,
+                "an ordinary task must not poll on a dedicated worker"
+            );
+        });
+    }
+}
+
+/// A task registers a receive and a sleep on worker zero, then a wake from
+/// another worker moves it there. Polled on that worker, both stay pending,
+/// the receive through a forward from worker zero and the sleep in worker
+/// zero's timers. Worker zero holds the registrations, and the receive's
+/// result arrives through its forward.
+#[test]
+fn test_operation_and_sleep_follow_their_task_to_another_worker() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let (move_task, moved) = oneshot::channel::<()>();
+        let (report_polls, polls_done) = oneshot::channel::<()>();
+
+        // The task registers here, on worker zero, then waits for a wake.
+        let mover = context.child("mover").spawn(move |context| async move {
+            let registered = thread::current().id();
+            let fd: Arc<OwnedFd> = Arc::new(socket.into());
+            let mut recv = Operation::register(Request::Recv(RecvRequest {
+                fd,
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
+            let sleep = context.sleep(Duration::from_secs(3600));
+            let mut sleep = pin!(sleep);
+            assert!(futures::poll!(&mut recv).is_pending());
+            assert!(futures::poll!(&mut sleep).is_pending());
+
+            // The wake comes from the other worker, which polls this task,
+            // forwards the receive from worker zero and polls the sleep in
+            // worker zero's timers. The root writes to the peer only after
+            // these polls, since a receive that completes before its forward
+            // is polled may return its result immediately.
+            moved.await.unwrap();
+            let polled = thread::current().id();
+            assert!(futures::poll!(&mut recv).is_pending());
+            assert!(futures::poll!(&mut sleep).is_pending());
+            report_polls.send(()).unwrap();
+            let received = recv.await.unwrap();
+            (registered, polled, received)
+        });
+        reschedule().await;
+
+        let (waker, other) = spawn_elsewhere(&context, async move {
+            move_task.send(()).unwrap();
+        });
+        waker.await.unwrap();
+        polls_done.await.unwrap();
+        peer.write_all(b"x").unwrap();
+
+        let (registered, polled, received) = mover.await.unwrap();
+        assert_eq!(registered, thread::current().id());
+        assert_eq!(polled, other);
+        assert!(matches!(received, RequestOutput::Recv(Ok((_, 1)))));
+        drop(peer);
+    });
+}
+
+/// A wake on a pool worker queues the woken task on that worker, even while
+/// another worker is parked and could take it from the global queue. A lone
+/// queued runnable is not stolen, so it waits there for the waker's poll.
+#[test]
+fn test_wake_on_a_pool_worker_keeps_the_task_there() {
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let (wake, woken) = oneshot::channel::<()>();
+        let polled_on = Arc::new(Mutex::new(None));
+
+        // The sleeper waits on worker zero until the wake.
+        let sleeper = context.child("sleeper").spawn({
+            let polled_on = polled_on.clone();
+            move |_| async move {
+                woken.await.unwrap();
+                *polled_on.lock() = Some(thread::current().id());
+            }
+        });
+        reschedule().await;
+
+        // The waker runs on another worker, wakes the sleeper, and keeps its
+        // worker busy while another worker stays parked.
+        let (waker, waker_thread) = spawn_elsewhere(&context, async move {
+            wake.send(()).unwrap();
+            let until = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < until {
+                std::hint::spin_loop();
+            }
+        });
+        waker.await.unwrap();
+        sleeper.await.unwrap();
+        assert_eq!(*polled_on.lock(), Some(waker_thread));
+    });
+}
+
+/// A push racing a worker's park reaches it in either wait. A push before the
+/// worker publishes itself idle finds no idle bit, so the worker's look at the
+/// global queue after publishing must find it. A push after the worker finds
+/// the queue empty claims its idle bit and wakes it. Either way the worker
+/// leaves the idle set.
+#[test]
+fn test_push_racing_a_park_reaches_the_worker() {
+    for point in [ParkPoint::BeforeIdle, ParkPoint::BeforeWait] {
+        for in_ring in [false, true] {
+            Runner::new(config().with_worker_threads(2)).start(|context| async move {
+                let pool = context.shared.pool.clone();
+                let (other, _peer) = occupy_worker_one(&context, in_ring);
+
+                // Only worker one can start the target while the root holds
+                // this worker.
+                let started = Arc::new(Mutex::new(None));
+                let idle = Arc::new(AtomicBool::new(true));
+                on_next_park(&pool, 1, point, {
+                    let context = context.child("target");
+                    let started = started.clone();
+                    let idle = idle.clone();
+                    let pool = pool.clone();
+                    move || {
+                        thread::spawn(move || {
+                            context.spawn(move |_| async move {
+                                idle.store(pool.idle().is_idle(1), Ordering::SeqCst);
+                                *started.lock() = Some(thread::current().id());
+                            });
+                        })
+                        .join()
+                        .unwrap();
+                    }
+                });
+
+                // Waking worker one sends it through its loop to that park.
+                let _ = spawn_elsewhere(&context, async {});
+                assert_eq!(wait_started(&started), other);
+                assert!(
+                    !idle.load(Ordering::SeqCst),
+                    "a busy worker must not stay in the idle set"
+                );
+            });
+        }
+    }
+}
+
+/// A push into the global queue ends a spinning worker's spin through its
+/// notification.
+#[test]
+fn test_push_ends_a_spin_through_its_notification() {
+    let cfg = config()
+        .with_worker_threads(2)
+        .with_idle_spinner(endless_spinner());
+    Runner::new(cfg).start(|context| async move {
+        let (_, other) = spawn_elsewhere(&context, async {});
+        for _ in 0..20 {
+            let (_, thread) = spawn_elsewhere(&context, async {});
+            assert_eq!(thread, other);
+        }
+    });
+}
+
+/// An idle worker whose next timer falls within its spin budget parks until
+/// the timer instead of spinning, since a timer does not notify the worker
+/// and so cannot end a spin.
+#[test]
+fn test_idle_worker_parks_instead_of_spinning_near_its_timer() {
+    let cfg = config()
+        .with_worker_threads(1)
+        .with_idle_spinner(endless_spinner());
+    Runner::new(cfg).start(|context| async move {
+        // The root sleeps, leaving its worker idle with a deadline well within
+        // the spin budget and nothing to notify it.
+        let start = Instant::now();
+        context.sleep(Duration::from_millis(10)).await;
+
+        // A spin would have run for the whole budget, far past the timeout.
+        assert!(start.elapsed() < TEST_TIMEOUT);
+    });
+}
+
+/// A worker whose spin ended on a push's notification observes the sequence
+/// again on its next turn, so once idle it can finish spinning and sleep on
+/// its futex.
+#[test]
+fn test_spinning_worker_sleeps_after_a_notified_spin() {
+    let spinner = SpinnerConfig {
+        budget_us: 1_000,
+        max_budget_us: 1_000,
+        quick_wake_us: 1_000,
+    };
+    let cfg = config().with_worker_threads(2).with_idle_spinner(spinner);
+    Runner::new(cfg).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let (_, other) = spawn_elsewhere(&context, async {});
+        for _ in 0..5 {
+            let (_, thread) = spawn_elsewhere(&context, async {});
+            assert_eq!(thread, other);
+        }
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while !waiting(&pool.mailbox(1).unparker) {
+            assert!(Instant::now() < deadline, "worker one must sleep");
+            std::hint::spin_loop();
+        }
+    });
+}
+
+/// A worker whose run queue never runs dry still takes from the global queue
+/// every configured interval.
+///
+/// With one task requeuing itself, a take moves a share of the global queue, so
+/// a burst of foreign wakes waits about one interval in all rather than one
+/// interval each. With enough requeuing tasks to keep the run queue at least
+/// half full, each take moves one runnable, so the k-th wake of the burst waits
+/// at most k + 1 intervals of the other tasks' polls.
+#[test]
+fn test_busy_worker_takes_a_share_of_the_global_queue_every_interval() {
+    /// Idle tasks that the burst of foreign wakes resumes.
+    const WAITERS: usize = 64;
+
+    // The tasks requeuing themselves, the most polls they make before the
+    // burst has run, and whether each take moves only one runnable.
+    for (requeuers, most_polls, one_per_take) in [(1, 100_000, false), (200, 10_000_000, true)] {
+        for interval in [config().global_queue_interval(), 4] {
+            let cfg = config().with_global_queue_interval(interval);
+            Runner::new(cfg).start(|context| async move {
+                // Idle tasks waiting for a wake from outside the pool, polled
+                // to pending before the requeuing tasks start.
+                let polls = Arc::new(AtomicUsize::new(0));
+                let lags = Arc::new(Mutex::new(Vec::new()));
+                let mut senders = Vec::new();
+                let mut waiters = Vec::new();
+                for _ in 0..WAITERS {
+                    let (sender, receiver) = oneshot::channel::<usize>();
+                    senders.push(sender);
+                    let lags = lags.clone();
+                    let polls = polls.clone();
+                    waiters.push(context.child("waiter").spawn(move |_| async move {
+                        let before = receiver.await.unwrap();
+                        lags.lock().push(polls.load(Ordering::Relaxed) - before);
+                    }));
+                }
+                reschedule().await;
+
+                // Every poll of a requeuing task counts.
+                let stop = Arc::new(AtomicBool::new(false));
+                let mut tasks = Vec::new();
+                for _ in 0..requeuers {
+                    let stop = stop.clone();
+                    let polls = polls.clone();
+                    tasks.push(context.child("requeuer").spawn(move |_| async move {
+                        while !stop.load(Ordering::Relaxed) {
+                            let count = polls.fetch_add(1, Ordering::Relaxed);
+                            assert!(count < most_polls, "the global queue must not starve");
+                            reschedule().await;
+                        }
+                    }));
+                }
+                reschedule().await;
+
+                let before = polls.load(Ordering::Relaxed);
+                thread::spawn(move || {
+                    for sender in senders {
+                        sender.send(before).unwrap();
+                    }
+                })
+                .join()
+                .unwrap();
+                for waiter in waiters {
+                    waiter.await.unwrap();
+                }
+                stop.store(true, Ordering::Relaxed);
+                for task in tasks {
+                    task.await.unwrap();
+                }
+
+                let mut lags = lags.lock().clone();
+                assert_eq!(lags.len(), WAITERS);
+                lags.sort_unstable();
+                let interval = interval as usize;
+                for (index, lag) in lags.iter().enumerate() {
+                    let bound = if one_per_take {
+                        (index + 2) * interval
+                    } else {
+                        2 * interval
+                    };
+                    assert!(
+                        *lag <= bound,
+                        "foreign wake {index} must wait at most {bound} polls but waited {lag} \
+                         with interval {interval} and {requeuers} requeuing tasks"
+                    );
+                }
+            });
+        }
+    }
+}
+
+/// A busy worker takes from the global queue on exactly every configured
+/// interval. A task queued there just after one take runs after the interval's
+/// other polls, none of them at 1.
+#[test]
+fn test_busy_worker_checks_the_global_queue_every_interval() {
+    /// Tasks in the chain of foreign spawns.
+    const CHAIN: usize = 8;
+    for interval in [1, 2, 4, config().global_queue_interval()] {
+        Runner::new(config().with_global_queue_interval(interval)).start(|context| async move {
+            // A task that requeues itself keeps this worker's run queue busy.
+            let polls = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let yielder = context.child("yielder").spawn({
+                let polls = polls.clone();
+                let stop = stop.clone();
+                move |_| async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        polls.fetch_add(1, Ordering::Relaxed);
+                        reschedule().await;
+                    }
+                }
+            });
+
+            let (done, records) = oneshot::channel();
+            chain_foreign_spawns(context.child("chain"), polls, Vec::new(), CHAIN, done);
+            let records = records.await.unwrap();
+            stop.store(true, Ordering::Relaxed);
+            yielder.await.unwrap();
+
+            // The first task waits for wherever the countdown stood. Each later
+            // one is queued while its predecessor polls, so it waits exactly
+            // one interval. The runner's metrics task sleeps for ten seconds
+            // after its first poll, so it takes none of those polls.
+            assert_eq!(records.len(), CHAIN);
+            for pair in records.windows(2) {
+                assert_eq!(
+                    pair[1] - pair[0],
+                    interval as usize - 1,
+                    "interval {interval}"
+                );
+            }
+        });
+    }
+}
+
+/// A storm of sleeps due at once beside a task whose every poll outlasts the
+/// backlog slice. Each expiry pass fires one budget, about one group's worth,
+/// and each group completes its other sleeps early once woken. With a full
+/// batch between passes, every group after the first would wait for about
+/// [`BATCH_SIZE`] of the long polls. The slice holds the whole storm to a few.
+/// Once the storm has drained, a pass that reaches every due deadline clears
+/// the backlog, possibly after a few more sliced passes while a stale bucket
+/// bound stays early, and the long polls get full batches again.
+#[test]
+fn test_expiry_backlog_keeps_pace_with_long_polls() {
+    /// Groups of sleeps, each owned by one task.
+    const GROUPS: usize = 4;
+
+    /// Time from the storm's setup to its deadline, by which every group must
+    /// have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(200);
+
+    /// Long polls measured after the storm, enough to span a full batch after
+    /// several batches cut short while the backlog lingers.
+    const MEASURED: usize = 4 * BATCH_SIZE;
+
+    Runner::new(config()).start(|context| async move {
+        // A task that requeues itself after polling for twice the slice. Once
+        // the storm has drained, it measures the longest run of its polls that
+        // share one service time, so no pass came between them.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drained = Arc::new(AtomicBool::new(false));
+        let spinner = context.child("spinner").spawn({
+            let polls = polls.clone();
+            let drained = drained.clone();
+            move |_| async move {
+                let (mut turn, mut run, mut longest, mut measured) = (None, 0, 0, 0);
+
+                while measured < MEASURED {
+                    let began = Instant::now();
+
+                    while began.elapsed() < 2 * BACKLOG_SLICE {
+                        std::hint::spin_loop();
+                    }
+
+                    polls.fetch_add(1, Ordering::Relaxed);
+
+                    if drained.load(Ordering::Relaxed) {
+                        let current = sleep::tests::turn();
+                        run = if current == turn { run + 1 } else { 1 };
+                        turn = current;
+                        longest = longest.max(run);
+                        measured += 1;
+                    }
+
+                    reschedule().await;
+                }
+
+                longest
+            }
+        });
+
+        // Each group registers two budgets of sleeps in one poll on the only
+        // worker, all at one deadline, then awaits them in order.
+        let deadline = SystemTime::now() + LEAD;
+        let groups: Vec<_> = (0..GROUPS)
+            .map(|_| {
+                let polls = polls.clone();
+                context.child("group").spawn(move |context| async move {
+                    // Register every sleep in one poll.
+                    let mut sleeps: Vec<_> = (0..2 * BUDGET)
+                        .map(|_| context.sleep_until(deadline))
+                        .collect();
+
+                    poll_fn(|cx| {
+                        for sleep in &mut sleeps {
+                            assert!(
+                                sleep.poll_unpin(cx).is_pending(),
+                                "the storm's deadline passed before its group registered"
+                            );
+                        }
+
+                        Poll::Ready(())
+                    })
+                    .await;
+
+                    // Report the long polls counted when the first sleep
+                    // completed and when the last one did.
+                    let mut first = None;
+
+                    for sleep in sleeps {
+                        sleep.await;
+                        first.get_or_insert(polls.load(Ordering::Relaxed));
+                    }
+
+                    (first.unwrap(), polls.load(Ordering::Relaxed))
+                })
+            })
+            .collect();
+
+        // The storm spans from the earliest first completion to the latest
+        // last one. Once it has drained, the spinner measures.
+        let (mut first, mut last) = (usize::MAX, 0);
+
+        for group in groups {
+            let (began, ended) = group.await.unwrap();
+            first = first.min(began);
+            last = last.max(ended);
+        }
+
+        drained.store(true, Ordering::Relaxed);
+        let longest = spinner.await.unwrap();
+
+        // Every pass after the first followed a slice, not a full batch.
+        assert!(
+            last - first < BATCH_SIZE,
+            "the storm spanned {} long polls",
+            last - first
+        );
+
+        // A pass soon after the storm cleared the backlog, so a full batch of
+        // long polls, and no more, ran between two later passes.
+        assert_eq!(
+            longest, BATCH_SIZE,
+            "longest run of long polls between passes in {MEASURED} after the storm"
+        );
+    });
+}
+
+/// A storm of request deadlines due at once beside a task whose every poll
+/// outlasts the backlog slice. Each expiry pass times out one budget of
+/// requests. With a full batch between passes, each further budget would wait
+/// for about [`BATCH_SIZE`] of the long polls. The slice holds the whole storm to
+/// a few.
+#[test]
+fn test_deadline_backlog_keeps_pace_with_long_polls() {
+    /// Requests in the storm, three budgets.
+    const REQUESTS: usize = 3 * BUDGET as usize;
+
+    /// Time from the storm's setup to its deadline, by which every request
+    /// must have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(200);
+
+    // The ring holds one request in flight, the first, which has no deadline,
+    // so the storm's requests stay queued and time out without the kernel.
+    let cfg = config().with_ring_config(RingConfig { size: 1 });
+    Runner::new(cfg).start(|context| async move {
+        // A task that requeues itself after polling for twice the slice.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner = context.child("spinner").spawn({
+            let polls = polls.clone();
+            let stop = stop.clone();
+            move |_| async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let began = Instant::now();
+
+                    while began.elapsed() < 2 * BACKLOG_SLICE {
+                        std::hint::spin_loop();
+                    }
+
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    reschedule().await;
+                }
+            }
+        });
+
+        // Receives on a socket that never has data, registered in one poll
+        // on the only worker, all but the first at one deadline.
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let fd: Arc<OwnedFd> = Arc::new(socket.into());
+        let receive = move |deadline| {
+            Operation::register(Request::Recv(RecvRequest {
+                fd: fd.clone(),
+                buf: IoBufMut::zeroed(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline,
+            }))
+        };
+
+        let storm = context.child("storm").spawn({
+            let polls = polls.clone();
+            move |_| async move {
+                let _in_flight = receive(None);
+                let deadline = Instant::now() + LEAD;
+                let requests: Vec<_> = (0..REQUESTS).map(|_| receive(Some(deadline))).collect();
+
+                // Report the long polls counted when the first request timed
+                // out and when the last one did.
+                let mut first = None;
+
+                for request in requests {
+                    assert!(matches!(
+                        request.await,
+                        Ok(RequestOutput::Recv(Err((_, Error::Timeout))))
+                    ));
+                    first.get_or_insert(polls.load(Ordering::Relaxed));
+                }
+
+                (first.unwrap(), polls.load(Ordering::Relaxed))
+            }
+        });
+
+        let (first, last) = storm.await.unwrap();
+        stop.store(true, Ordering::Relaxed);
+        spinner.await.unwrap();
+
+        // Every pass after the first followed a slice, not a full batch.
+        assert!(
+            last - first < BATCH_SIZE,
+            "the storm spanned {} long polls",
+            last - first
+        );
+    });
+}
+
+/// A task that completes on a worker other than the one that spawned it
+/// leaves the task set there.
+#[test]
+fn test_task_completing_away_from_its_spawner_retires() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let tasks = || context.shared.tasks.live();
+        let baseline = tasks();
+        let (finish, finished) = oneshot::channel::<()>();
+        let task = context.child("traveller").spawn(|_| async move {
+            let spawned_on = thread::current().id();
+            finished.await.unwrap();
+            (spawned_on, thread::current().id())
+        });
+        reschedule().await;
+        assert_eq!(tasks(), baseline + 1);
+
+        let (waker, other) = spawn_elsewhere(&context, async move {
+            finish.send(()).unwrap();
+        });
+        waker.await.unwrap();
+        let (spawned_on, completed_on) = task.await.unwrap();
+        assert_eq!(spawned_on, thread::current().id());
+        assert_eq!(completed_on, other);
+
+        // The handle resolves inside the final poll, and the worker removes
+        // the task once that poll returns.
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while tasks() != baseline {
+            assert!(Instant::now() < deadline, "a completed task must retire");
+            reschedule().await;
+        }
+    });
+}
+
+/// Shutdown while a task's poll runs on another worker. That poll can still
+/// forward a receive registered on worker zero, whose mailbox stays open until
+/// every pool worker has finished polling, and poll a sleep registered there,
+/// whose timers stay open as long. Teardown leaves the future to the poller.
+/// The poller drops it on its own thread once the poll returns.
+#[test]
+fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
+    struct Dropped(Arc<Mutex<Option<ThreadId>>>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            assert!(Local::current().is_some());
+            *self.0.lock() = Some(thread::current().id());
+        }
+    }
+
+    let dropped = Arc::new(Mutex::new(None));
+    let polled = Arc::new(Mutex::new(None));
+    let forwarded = Arc::new(Mutex::new(None::<(String, String)>));
+    let (socket, peer) = UnixStream::pair().unwrap();
+    Runner::new(config().with_worker_threads(2)).start(|context| {
+        let dropped = dropped.clone();
+        let polled = polled.clone();
+        let forwarded = forwarded.clone();
+        async move {
+            // Registered on worker zero by these first polls. The silent peer
+            // keeps the receive pending.
+            let mut receive = Operation::register(Request::Recv(RecvRequest {
+                fd: Arc::new(socket.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
+            let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+            assert!(futures::poll!(&mut receive).is_pending());
+            assert!(futures::poll!(&mut sleep).is_pending());
+
+            // Registered without a handle, so no abort can end the task. Only
+            // teardown's clear can, while the poll runs.
+            let shared = context.shared.clone();
+            let this: Arc<OnceLock<Task>> = Arc::new(OnceLock::new());
+            let future = {
+                let shared = shared.clone();
+                let this = this.clone();
+                let guard = Dropped(dropped);
+                let started = polled.clone();
+                poll_fn(move |_| {
+                    let _ = &guard;
+                    *started.lock() = Some(thread::current().id());
+                    let deadline = Instant::now() + TEST_TIMEOUT;
+                    while !shared.tasks.is_closed() {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the runner must close its task set"
+                        );
+                        std::hint::spin_loop();
+                    }
+
+                    // Give worker zero time to reach its drain, then poll the
+                    // receive, which forwards through worker zero's mailbox,
+                    // and the sleep, which locks worker zero's timers.
+                    thread::sleep(Duration::from_millis(20));
+                    let waker = futures::task::noop_waker();
+                    let mut cx = TaskContext::from_waker(&waker);
+
+                    let received = match Pin::new(&mut receive).poll(&mut cx) {
+                        Poll::Pending => "pending".into(),
+                        Poll::Ready(Ok(_)) => "ready".into(),
+                        Poll::Ready(Err(error)) => format!("{error:?}"),
+                    };
+
+                    let slept = catch_unwind(AssertUnwindSafe(|| sleep.as_mut().poll(&mut cx)));
+
+                    let slept = match slept {
+                        Ok(Poll::Pending) => "pending".into(),
+                        Ok(Poll::Ready(())) => "ready".into(),
+                        Err(panic) => extract_panic_message(&*panic),
+                    };
+
+                    *forwarded.lock() = Some((received, slept));
+
+                    // Return pending only once teardown has cleared the task
+                    // during this poll.
+                    while !cancelled(this.get().unwrap()) {
+                        assert!(Instant::now() < deadline, "teardown must clear the task");
+                        std::hint::spin_loop();
+                    }
+                    Poll::<()>::Pending
+                })
+            };
+            let (task, runnable) = Task::new(future, &shared.tasks, Arc::downgrade(&shared.pool));
+            assert!(this.set(task.clone()).is_ok());
+            assert!(shared.tasks.insert(task).is_ok());
+
+            // From outside the pool, so the runnable goes to the global queue
+            // and worker one starts it while the root holds this worker.
+            thread::spawn(move || runnable.spawn()).join().unwrap();
+            let other = wait_started(&polled);
+            assert_ne!(other, thread::current().id());
+        }
+    });
+
+    assert_eq!(
+        *forwarded.lock(),
+        Some(("pending".into(), "pending".into()))
+    );
+    let poller = polled.lock().expect("the task must have polled");
+    assert_eq!(
+        *dropped.lock(),
+        Some(poller),
+        "the future must drop on its poller"
+    );
+
+    drop(peer);
+}
+
+/// Shutdown while worker zero holds a forward it took from its mailbox but has
+/// not applied. A batch of root wakes ahead of the forward completes the root
+/// first. The task that sent the forward is still mid-poll on another worker,
+/// so its receive stays pending until every pool worker has finished polling.
+#[test]
+fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
+    let forwarded = Arc::new(Mutex::new(None::<String>));
+    let (socket, peer) = UnixStream::pair().unwrap();
+    Runner::new(config().with_worker_threads(2)).start(|context| {
+        let forwarded = forwarded.clone();
+        async move {
+            // Registered on worker zero by this first poll. The silent peer
+            // keeps it pending.
+            let mut receive = Operation::register(Request::Recv(RecvRequest {
+                fd: Arc::new(socket.into()),
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
+
+            assert!(futures::poll!(&mut receive).is_pending());
+            let root = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+
+            // Registered without a handle, so no abort can end the task. Only
+            // teardown's clear can, while the poll runs.
+            let shared = context.shared.clone();
+            let this: Arc<OnceLock<Task>> = Arc::new(OnceLock::new());
+            let queued = Arc::new(AtomicBool::new(false));
+            let future = {
+                let this = this.clone();
+                let queued = queued.clone();
+                poll_fn(move |_| {
+                    let waker = futures::task::noop_waker();
+                    let mut cx = TaskContext::from_waker(&waker);
+
+                    // Queue a full batch of root wakes on worker zero, then
+                    // the receive's forward behind them.
+                    for _ in 0..BATCH_SIZE {
+                        root.wake_by_ref();
+                    }
+
+                    assert!(Pin::new(&mut receive).poll(&mut cx).is_pending());
+                    queued.store(true, Ordering::Release);
+
+                    // Teardown clears this task once worker zero has begun
+                    // its cleanup. Poll the receive again while still
+                    // mid-poll.
+                    let deadline = Instant::now() + TEST_TIMEOUT;
+
+                    while !cancelled(this.get().unwrap()) {
+                        assert!(Instant::now() < deadline, "teardown must clear the task");
+                        std::hint::spin_loop();
+                    }
+
+                    *forwarded.lock() = Some(match Pin::new(&mut receive).poll(&mut cx) {
+                        Poll::Pending => "pending".into(),
+                        Poll::Ready(Ok(_)) => "ready".into(),
+                        Poll::Ready(Err(error)) => format!("{error:?}"),
+                    });
+
+                    Poll::<()>::Pending
+                })
+            };
+            let (task, runnable) = Task::new(future, &shared.tasks, Arc::downgrade(&shared.pool));
+            assert!(this.set(task.clone()).is_ok());
+            assert!(shared.tasks.insert(task).is_ok());
+
+            // From outside the pool, so worker one starts it while the root
+            // holds this worker until every message is queued, and this worker
+            // takes the wakes and the forward in one batch.
+            thread::spawn(move || runnable.spawn()).join().unwrap();
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            while !queued.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "the messages must queue");
+                std::hint::spin_loop();
+            }
+
+            // Return pending once without waking, so the batch's root wakes
+            // poll the root again and it completes before the forward applies.
+            let mut yielded = false;
+            poll_fn(move |_| {
+                if mem::replace(&mut yielded, true) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+        }
+    });
+
+    assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+
+    drop(peer);
+}
+
+/// A worker applies at most [`BATCH_SIZE`] messages a turn and takes a batch
+/// only into an empty scratch. A batch that starts while the worker still
+/// applies an earlier one notifies before the observation of the turn that
+/// empties the scratch, so that turn sees no notification since. It must find
+/// the batch through the mail flag before it parks, on its futex or in its
+/// io_uring wait, since no later send to that mailbox notifies.
+#[test]
+fn test_batch_started_during_a_long_batch_is_taken_before_parking() {
+    for in_ring in [false, true] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let pool = context.shared.pool.clone();
+            let (_, _peer) = occupy_worker_one(&context, in_ring);
+            let stale = stale_waiter();
+
+            // Hold worker one inside a poll while a batch one message longer
+            // than a turn's share queues in its mailbox.
+            let (release, held) = mpsc::channel::<()>();
+            let _ = spawn_elsewhere(&context, async move {
+                let _ = held.recv_timeout(TEST_TIMEOUT);
+            });
+            for _ in 0..=BATCH_SIZE {
+                assert!(pool.mailbox(1).send(Message::Cancel(stale)).is_ok());
+            }
+
+            // Once worker one has taken that batch and applied its share,
+            // start a second batch. Its notification precedes the observation
+            // of the turn that applies the last message of the first.
+            let (sender, mut receiver) = oneshot::channel();
+            on_next_park(&pool, 1, ParkPoint::AfterMessages, {
+                let pool = pool.clone();
+                move || {
+                    let mailbox = pool.mailbox(1);
+                    assert!(!mailbox.has_mail(), "the first batch must be taken");
+                    assert!(mailbox.send(Message::Forward(stale, sender)).is_ok());
+                }
+            });
+            release.send(()).unwrap();
+
+            // Worker one parks again only once it has answered the forward.
+            spin_until(|| is_waiting(&pool, 1), "worker one must park again");
+            let answered = receiver.try_recv().is_ok();
+
+            // A worker that parked with the batch hears no later send to its
+            // mailbox, the pool's stop included, so notify it before failing.
+            pool.mailbox(1).unparker.unpark();
+            spin_until(
+                || !pool.mailbox(1).has_mail(),
+                "worker one must take the second batch once notified",
+            );
+            assert!(answered, "worker one parked with a batch in its mailbox");
+        });
+    }
+}
+
+/// A pool claim moves the word without mail, so the turn it causes finishes
+/// without the inbox lock that another thread holds through it and still
+/// offers to defer kernel service to its wait, which its service does with a
+/// receive in flight. The turn after a message takes the batch and services
+/// the kernel at once.
+#[test]
+fn test_claim_without_mail_takes_nothing_and_keeps_kernel_service_deferred() {
+    let [claim, mail] = claim_then_mail();
+
+    // The claim's turn takes nothing and keeps the deferral.
+    assert!(!claim.blocked, "a claim without mail took from the mailbox");
+    assert!(claim.offered, "a claim without mail stopped the deferral");
+    assert!(claim.deferred, "service ignored the offered deferral");
+
+    // The message's turn takes the batch and services the kernel.
+    assert!(!mail.mail, "the turn after a message left its batch");
+    assert!(!mail.offered, "mail did not stop the deferral");
+    assert!(!mail.deferred, "service deferred despite mail");
+}
+
+/// The drive loop observes the word before its service turn polls permit
+/// acquisitions, so a permit released from another thread after that poll
+/// moves the word after the observation. The worker then goes round and
+/// polls the grant instead of waiting with it unpolled.
+#[test]
+fn test_permit_released_after_drive_service_is_polled_before_waiting() {
+    let (directory, file) = make_file("drive_permit");
+    let permit = file.durability.clone().try_lock_owned().unwrap();
+    let rescued = Arc::new(AtomicBool::new(false));
+    Runner::new(config()).start({
+        let rescued = rescued.clone();
+        move |context| async move {
+            // At the end of the service turn that polls the sync's
+            // acquisition, release the permit from another thread.
+            let unparker = context.shared.pool.mailbox(0).unparker.clone();
+            let (synced, progress) = mpsc::channel();
+            let watchdog = Arc::new(Mutex::new(None));
+            on_service_while_acquiring({
+                let watchdog = watchdog.clone();
+                move || {
+                    thread::spawn(move || drop(permit)).join().unwrap();
+                    *watchdog.lock() = Some(rescue_after(progress, unparker, rescued));
+                }
+            });
+
+            // The sync finishes without the rescue.
+            let result = start_sync(SyncRequest::new(file)).await.unwrap();
+            assert!(result.is_ok());
+            let _ = synced.send(());
+            let watchdog = watchdog.lock().take();
+            watchdog
+                .expect("the sync must wait for its permit")
+                .join()
+                .unwrap();
+        }
+    });
+    assert!(
+        !rescued.load(Ordering::Relaxed),
+        "the worker waited with a granted permit unpolled"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// The cleanup loop observes the word before its service turn polls permit
+/// acquisitions, so a permit released from another thread after that poll
+/// moves the word after the observation. Cleanup then polls the grant and
+/// finishes the sync instead of waiting in its ring with nothing in flight.
+#[test]
+fn test_permit_released_after_cleanup_service_is_polled_before_waiting() {
+    let (directory, file) = make_file("cleanup_permit");
+    let permit = file.durability.clone().try_lock_owned().unwrap();
+    let rescued = Arc::new(AtomicBool::new(false));
+    let (stopped, progress) = mpsc::channel();
+    let watchdog = Arc::new(Mutex::new(None));
+    Runner::new(config()).start(|context| {
+        let unparker = context.shared.pool.mailbox(0).unparker.clone();
+        let rescued = rescued.clone();
+        let watchdog = watchdog.clone();
+        async move {
+            // Leave a sync without an observer waiting for its permit, so
+            // cleanup must finish it.
+            drop(start_sync(SyncRequest::new(file)));
+
+            // The runner calls this after the drive loop ends and before
+            // cleanup starts, so the first service turn after it that polls
+            // the sync's acquisition is cleanup's. At the end of that turn,
+            // release the permit from another thread.
+            BEFORE_ABORT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    on_service_while_acquiring(move || {
+                        thread::spawn(move || drop(permit)).join().unwrap();
+                        *watchdog.lock() = Some(rescue_after(progress, unparker, rescued));
+                    });
+                }));
+            });
+        }
+    });
+
+    // Cleanup finished the sync without the rescue.
+    let _ = stopped.send(());
+    let watchdog = watchdog.lock().take();
+    watchdog
+        .expect("cleanup must wait for the sync's permit")
+        .join()
+        .unwrap();
+    assert!(
+        !rescued.load(Ordering::Relaxed),
+        "cleanup waited with a granted permit unpolled"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// Teardown clears two idle tasks whose destructors wake each other, so
+/// whichever is cleared first wakes the other while it is still idle, on a
+/// closing worker. The closing worker's wake goes to the closed global queue,
+/// which discards it, so no runnable stays in its run queue.
+#[test]
+fn test_wake_from_a_destructor_during_teardown_leaves_no_runnable() {
+    struct WakeOther(Arc<Mutex<Option<Waker>>>);
+    impl Drop for WakeOther {
+        fn drop(&mut self) {
+            if let Some(waker) = self.0.lock().take() {
+                waker.wake();
+            }
+        }
+    }
+    for workers in [1, 2] {
+        Runner::new(config().with_worker_threads(workers)).start(|context| async move {
+            let slots = [(); 2].map(|_| Arc::new(Mutex::new(None::<Waker>)));
+            for (own, other) in [(0, 1), (1, 0)] {
+                let own = slots[own].clone();
+                let guard = WakeOther(slots[other].clone());
+
+                // Registered without a handle, so no abort wakes it first.
+                let future = poll_fn(move |cx| {
+                    let _ = &guard;
+                    *own.lock() = Some(cx.waker().clone());
+                    Poll::<()>::Pending
+                });
+                let shared = context.shared.clone();
+                assert!(
+                    shared
+                        .tasks
+                        .register(future, Arc::downgrade(&shared.pool))
+                        .is_ok()
+                );
+            }
+            while slots.iter().any(|slot| slot.lock().is_none()) {
+                reschedule().await;
+            }
+        });
+    }
+}
+
+/// A pool worker that fails during shutdown, after the pool has closed, still
+/// fails the runner.
+#[test]
+fn test_pool_worker_failure_during_shutdown_fails_the_runner() {
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+
+    // The faulty task's handle outlives the runner, so the task stays pending
+    // until shutdown. It is dropped before the pool's check because an abort
+    // that races the task's poll leaves the task's waker with the handle.
+    let handle = Arc::new(Mutex::new(None));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let slot = handle.clone();
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            keeper.keep(&context);
+            let (faulty, _) = spawn_elsewhere(&context, {
+                let context = context.child("faulty");
+                async move {
+                    let sleep = context.sleep(Duration::from_secs(3600));
+                    let mut sleep = pin!(sleep);
+                    let waker = waker(Arc::new(PanicOnDrop));
+                    assert!(
+                        sleep
+                            .as_mut()
+                            .poll(&mut TaskContext::from_waker(&waker))
+                            .is_pending()
+                    );
+                    drop(waker);
+                    pending::<()>().await;
+                }
+            });
+            *slot.lock() = Some(faulty);
+        });
+    }));
+    let panic = result.expect_err("a pool worker failure during shutdown must fail the runner");
+    assert!(
+        extract_panic_message(&*panic).contains("injected pool worker failure during shutdown")
+    );
+    drop(handle.lock().take());
+    kept.check();
+}
+
+/// An unwind between the root and the runner's shutdown still stops the other
+/// pool workers, so worker zero's cleanup does not wait for them forever.
+#[test]
+fn test_unwind_before_shutdown_stops_the_pool() {
+    let (done, finished) = mpsc::channel();
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+    thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config().with_worker_threads(2)).start(|context| {
+                keeper.keep(&context);
+                BEFORE_ABORT.with(|slot| {
+                    *slot.borrow_mut() =
+                        Some(Box::new(|| panic!("injected unwind before the abort")));
+                });
+                async {}
+            })
+        }));
+        let _ = done.send(result.map_err(|panic| extract_panic_message(&*panic)));
+    });
+    let result = finished
+        .recv_timeout(TEST_TIMEOUT)
+        .expect("worker zero must stop the pool workers it waits for");
+    assert!(
+        result
+            .unwrap_err()
+            .contains("injected unwind before the abort")
+    );
+    kept.check();
+}
+
+/// A worker that unwinds while published as idle, here from a hook just before
+/// it waits, withdraws its idle bit on the way out, so the runner fails with
+/// that panic and the pool's idle state is clean.
+#[test]
+fn test_unwind_while_published_restores_the_idle_state() {
+    let kept = KeptPool::default();
+    let keeper = kept.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            keeper.keep(&context);
+            let pool = context.shared.pool.clone();
+
+            // Worker one's first park must have waited, or the push below could
+            // claim it before the hook and strand the task.
+            spin_until(|| is_waiting(&pool, 1), "worker one must park");
+            on_next_park(&pool, 1, ParkPoint::BeforeWait, || {
+                panic!("injected unwind while published")
+            });
+
+            // Waking worker one sends it through its loop to that park, and its
+            // failure then interrupts the root.
+            let _ = spawn_elsewhere(&context, async {});
+            pending::<()>().await;
+        });
+    }));
+    let panic = result.expect_err("a pool worker failure must fail the runner");
+    assert!(extract_panic_message(&*panic).contains("injected unwind while published"));
+    kept.check();
+}
+
+/// A task panic published while the root's state is destroyed is not observed,
+/// since task panics interrupt only a running root.
+#[test]
+fn test_task_panic_during_root_destruction_is_not_observed() {
+    struct PublishOnDrop(Option<Panicker>);
+    impl Future for PublishOnDrop {
+        type Output = u8;
+        fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<u8> {
+            Poll::Ready(7)
+        }
+    }
+    impl Drop for PublishOnDrop {
+        fn drop(&mut self) {
+            self.0
+                .take()
+                .unwrap()
+                .notify(Box::new("published during root destruction"));
+        }
+    }
+    for workers in [1, 2] {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(
+                config()
+                    .with_worker_threads(workers)
+                    .with_catch_panics(false),
+            )
+            .start(|context| PublishOnDrop(Some(context.shared.panicker.clone())))
+        }));
+        assert_eq!(
+            result.map_err(|panic| extract_panic_message(&*panic)),
+            Ok(7)
+        );
+    }
+}
+
+/// A pool worker that fails while the pool is open, with a runnable still in
+/// its run queue, interrupts the root, and shutdown discards that runnable
+/// once the pool has closed.
+#[test]
+fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
+    for catch in [false, true] {
+        let kept = KeptPool::default();
+        let keeper = kept.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let cfg = config().with_worker_threads(2).with_catch_panics(catch);
+            Runner::new(cfg).start(|context| async move {
+                keeper.keep(&context);
+                let armed = Arc::new(AtomicBool::new(false));
+                let (handle, _) = spawn_elsewhere(&context, {
+                    let context = context.child("faulty");
+                    let armed = armed.clone();
+                    async move {
+                        // Task A goes idle, leaving its waker. The root holds
+                        // worker zero until the timer below is registered, so
+                        // only this worker polls A, and A's poll has returned
+                        // once this task sees its waker.
+                        let trigger = Arc::new(WakeThenPanic(Mutex::new(None)));
+                        let a = context.child("a").spawn({
+                            let trigger = trigger.clone();
+                            move |_| {
+                                poll_fn(move |cx| {
+                                    *trigger.0.lock() = Some(cx.waker().clone());
+                                    Poll::<()>::Pending
+                                })
+                            }
+                        });
+                        let deadline = Instant::now() + TEST_TIMEOUT;
+                        while trigger.0.lock().is_none() {
+                            assert!(Instant::now() < deadline, "task A must be polled");
+                            reschedule().await;
+                        }
+
+                        // The timer's callback wakes A into the run queue of
+                        // the worker holding the timer, then fails that worker.
+                        let sleep = context.sleep(Duration::from_millis(20));
+                        let mut sleep = pin!(sleep);
+                        let waker = waker(trigger);
+                        assert!(
+                            sleep
+                                .as_mut()
+                                .poll(&mut TaskContext::from_waker(&waker))
+                                .is_pending()
+                        );
+                        armed.store(true, Ordering::SeqCst);
+                        let _ = a.await;
+                    }
+                });
+                spin_until(
+                    || armed.load(Ordering::SeqCst),
+                    "the faulty task must register its timer",
+                );
+                let _ = handle.await;
+                pending::<()>().await;
+            });
+        }));
+        let panic = result.expect_err("a pool worker failure must fail the runner");
+        assert!(extract_panic_message(&*panic).contains("injected pool worker callback failure"));
+        assert!(Local::current().is_none());
+        kept.check();
+    }
+}
+
+/// Pending operations registered on several pool workers leave the aggregate
+/// gauge at zero once shutdown has retired them.
+#[test]
+fn test_pending_operations_gauge_returns_to_zero_across_workers() {
+    let mut peers = Vec::new();
+    let shared = Runner::new(config().with_worker_threads(4)).start(|context| {
+        let mut sockets = Vec::new();
+        for _ in 0..6 {
+            let (socket, peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            sockets.push(socket);
+            peers.push(peer);
+        }
+        async move {
+            for (index, socket) in sockets.into_iter().enumerate() {
+                let task = async move {
+                    let fd: Arc<OwnedFd> = Arc::new(socket.into());
+                    let _ = Operation::register(Request::Recv(RecvRequest {
+                        fd,
+                        buf: IoBufMut::with_capacity(1),
+                        offset: 0,
+                        len: 1,
+                        exact: true,
+                        deadline: None,
+                    }))
+                    .await;
+                };
+                if index == 0 {
+                    context.child("here").spawn(move |_| task);
+                    reschedule().await;
+                } else {
+                    let (handle, _) = spawn_elsewhere(&context, task);
+                    mem::forget(handle);
+                }
+            }
+
+            // Let every worker submit its receive.
+            context.sleep(Duration::from_millis(20)).await;
+            assert!(context.shared.pending_operations.get() > 0);
+            context.shared.clone()
+        }
+    });
+    assert_eq!(shared.pending_operations.get(), 0);
+    drop(peers);
+}
+
+/// Every runnable is accounted for once when a full run queue overflows while a
+/// thief steals from it and the pool closes. Every future is dropped once, and
+/// every task cell is freed.
+///
+/// All three workers are busy while one wakes one more idle task than its run
+/// queue holds into that run queue, so the last push overflows. Before the
+/// batch reaches the global queue, another worker steals from the half the run
+/// queue kept and polls what it took, and the pool closes, so the global queue
+/// refuses the batch and its runnables are discarded.
+#[test]
+fn test_overflow_racing_a_thief_and_shutdown_accounts_for_every_runnable() {
+    /// One more task than a run queue holds, so waking them all overflows it.
+    const TASKS: usize = CAPACITY + 1;
+    let drops = Arc::new(AtomicUsize::new(0));
+    let polled = Arc::new(AtomicUsize::new(0));
+    let ran = Arc::new(AtomicUsize::new(0));
+    let retained = Arc::new(Mutex::new(None));
+    let watcher = Arc::new(Mutex::new(None));
+    Runner::new(config().with_worker_threads(3)).start(|context| {
+        let drops = drops.clone();
+        let polled = polled.clone();
+        let ran = ran.clone();
+        let retained = retained.clone();
+        let watcher = watcher.clone();
+        async move {
+            let pool = context.shared.pool.clone();
+            *retained.lock() = Some(pool.clone());
+            let mut senders = Vec::new();
+            for _ in 0..TASKS {
+                let (sender, receiver) = oneshot::channel::<()>();
+                senders.push(sender);
+                let guard = DropCount(drops.clone());
+                let polled = polled.clone();
+                let ran = ran.clone();
+                context.child("queued").spawn(move |_| async move {
+                    let _guard = guard;
+                    polled.fetch_add(1, Ordering::SeqCst);
+                    if receiver.await.is_ok() {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+
+            // Once every task has been polled and then every worker waits,
+            // every task is idle and none has a runnable left, and a worker
+            // seen waiting afterwards has finished its poll. The root then
+            // holds worker zero until the overflow releases it, a spinning task
+            // holds worker one, and the driver runs on worker two.
+            let (go, idle) = oneshot::channel::<()>();
+            let spinning = Arc::new(AtomicBool::new(false));
+            let release_root = Arc::new(AtomicBool::new(false));
+            *watcher.lock() = Some(thread::spawn({
+                let spinning = spinning.clone();
+                let release_root = release_root.clone();
+                let ran = ran.clone();
+                let spinner = context.child("spinner");
+                let driver = context.child("driver");
+                move || {
+                    spin_until(
+                        || polled.load(Ordering::SeqCst) == TASKS,
+                        "every task must be polled",
+                    );
+                    wait_until_every_worker_waits(&pool);
+                    go.send(()).unwrap();
+                    spin_until(|| spinning.load(Ordering::SeqCst), "the root must resume");
+
+                    let release_spinner = Arc::new(AtomicBool::new(false));
+                    let spinner_started = Arc::new(AtomicBool::new(false));
+                    spinner.spawn({
+                        let release_spinner = release_spinner.clone();
+                        let spinner_started = spinner_started.clone();
+                        move |_| async move {
+                            spinner_started.store(true, Ordering::SeqCst);
+                            while !release_spinner.load(Ordering::SeqCst) {
+                                std::hint::spin_loop();
+                            }
+                        }
+                    });
+                    spin_until(
+                        || spinner_started.load(Ordering::SeqCst),
+                        "the spinning task must start",
+                    );
+
+                    // The overflow lets the spinning worker steal from the kept
+                    // half and poll what it took, then lets the pool close
+                    // before the batch reaches the global queue.
+                    on_next_overflow(&pool, {
+                        let pool = pool.clone();
+                        move || {
+                            release_spinner.store(true, Ordering::SeqCst);
+                            spin_until(
+                                || ran.load(Ordering::SeqCst) >= 1,
+                                "a thief must poll the kept half",
+                            );
+                            release_root.store(true, Ordering::SeqCst);
+                            spin_until(|| pool.is_closed(), "the pool must close");
+                        }
+                    });
+                    driver.spawn(move |_| async move {
+                        for sender in senders {
+                            let _ = sender.send(());
+                        }
+                    });
+                }
+            }));
+            idle.await.unwrap();
+            spinning.store(true, Ordering::SeqCst);
+            spin_until(
+                || release_root.load(Ordering::SeqCst),
+                "the overflow must release the root",
+            );
+        }
+    });
+    watcher.lock().take().unwrap().join().unwrap();
+    assert_eq!(drops.load(Ordering::SeqCst), TASKS);
+    assert!(ran.load(Ordering::SeqCst) >= 1);
+
+    // Every task cell was freed, so no runnable leaked in a run queue or a
+    // batch, and dropping the pool checks its idle state.
+    check_pool(retained.lock().take().unwrap());
+}
+
+/// A parked worker steals tasks queued behind a long poll. The push that leaves
+/// the backlog stealable wakes it, and it takes half of what remains each time
+/// it runs dry, so all but a lone last one run elsewhere while the poll lasts.
+/// Waking exactly two tasks checks the kick's threshold.
+#[test]
+fn test_tasks_queued_behind_a_long_poll_wake_a_parked_worker_to_steal() {
+    for woken in [2, 8] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let root = thread::current().id();
+            let pool = context.shared.pool.clone();
+            let elsewhere = Arc::new(AtomicUsize::new(0));
+            let mut senders = Vec::new();
+            let mut tasks = Vec::new();
+            for _ in 0..woken {
+                let (sender, receiver) = oneshot::channel::<()>();
+                senders.push(sender);
+                let elsewhere = elsewhere.clone();
+                tasks.push(context.child("queued").spawn(move |_| async move {
+                    receiver.await.unwrap();
+                    if thread::current().id() != root {
+                        elsewhere.fetch_add(1, Ordering::SeqCst);
+                    }
+                }));
+            }
+
+            // Once both workers wait, every task's first poll has returned, so
+            // each is idle and worker one is parked.
+            every_worker_waits(&pool).await;
+
+            // Wake every task into this worker's run queue, then stay in the
+            // root's poll, as a long poll would.
+            for sender in senders {
+                sender.send(()).unwrap();
+            }
+            spin_until(
+                || elsewhere.load(Ordering::SeqCst) >= woken - 1,
+                "tasks queued behind the long poll must be stolen",
+            );
+            for task in tasks {
+                task.await.unwrap();
+            }
+        });
+    }
+}
+
+/// A worker returns its search count before it runs callbacks, since callbacks
+/// run user code. A kick claims worker one. It resumes holding the count the
+/// kick took for it, with nothing to poll and an expired timer. The timer's
+/// callback wakes two idle tasks into worker one's run queue and blocks until
+/// worker two, parked, has run one of them. A count held across the callback
+/// would keep worker two asleep.
+#[test]
+fn test_callback_waiting_for_a_stolen_task_makes_progress() {
+    /// Hook worker one's next wait. Once the timer due at `expiry` has expired
+    /// and worker two waits, the hook sets `kick` and blocks until a kick
+    /// claims worker one. A wait before the timer is registered installs the
+    /// hook again.
+    fn arm(pool: Arc<Pool>, kick: Arc<AtomicBool>, expiry: Arc<Mutex<Option<Instant>>>) {
+        on_next_park(&pool.clone(), 1, ParkPoint::BeforeWait, move || {
+            let Some(expiry) = *expiry.lock() else {
+                arm(pool, kick, expiry);
+                return;
+            };
+            spin_until(|| Instant::now() >= expiry, "the timer must expire");
+            spin_until(|| is_waiting(&pool, 2), "worker two must park");
+            kick.store(true, Ordering::SeqCst);
+            spin_until(|| !pool.idle().is_idle(1), "a kick must claim worker one");
+        });
+    }
+
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+
+        // Two tasks the callback wakes, and two the root wakes to kick.
+        let woken = Recorded::spawn(&context, 2);
+        let trigger = WakeAndWait::new(&woken);
+        let mut senders = Vec::new();
+        let mut kicked = Vec::new();
+        for _ in 0..2 {
+            let (sender, receiver) = oneshot::channel::<()>();
+            senders.push(sender);
+            kicked.push(context.child("kicked").spawn(move |_| async move {
+                receiver.await.unwrap();
+            }));
+        }
+
+        // Once every worker waits, every task is idle.
+        every_worker_waits(&pool).await;
+
+        // Worker one, about to wait once its timer is registered, lets its
+        // timer expire, waits for worker two to park, then lets the root kick
+        // and waits to be claimed.
+        let kick = Arc::new(AtomicBool::new(false));
+        let expiry = Arc::new(Mutex::new(None::<Instant>));
+        arm(pool.clone(), kick.clone(), expiry.clone());
+
+        // The lowest parked worker, worker one, starts a task that registers
+        // the timer whose callback is the trigger.
+        let (timer, _) = spawn_elsewhere(&context, {
+            let sleep = context.child("sleep");
+            let expiry = expiry.clone();
+            let trigger = trigger.clone();
+            async move {
+                assert_eq!(thread::current().name(), Some("iouring-pool-1"));
+                let sleep = sleep.sleep(Duration::from_millis(20));
+                let mut sleep = pin!(sleep);
+                let waker = waker(trigger);
+                assert!(
+                    sleep
+                        .as_mut()
+                        .poll(&mut TaskContext::from_waker(&waker))
+                        .is_pending()
+                );
+                *expiry.lock() = Some(Instant::now() + Duration::from_millis(25));
+                drop(waker);
+                pending::<()>().await;
+            }
+        });
+
+        // The root kicks from this worker's run queue, then stays in its poll
+        // until the callback has finished.
+        spin_until(|| kick.load(Ordering::SeqCst), "worker one must park");
+        for sender in senders {
+            sender.send(()).unwrap();
+        }
+        spin_until(|| trigger.is_done(), "the callback must finish");
+        for task in woken.tasks.into_iter().chain(kicked) {
+            task.await.unwrap();
+        }
+        timer.abort();
+    });
+}
+
+/// A worker a wake claimed returns the count it inherited before it polls a
+/// task, so a kick from inside that poll reaches a parked worker. A foreign
+/// spawn claims worker one. Its task wakes two idle tasks into worker one's run
+/// queue and blocks until another worker has run one, while the root holds
+/// worker zero.
+#[test]
+fn test_task_poll_returns_an_inherited_count() {
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let woken = Recorded::spawn(&context, 2);
+
+        // Once every worker waits, both tasks are idle.
+        every_worker_waits(&pool).await;
+
+        // The foreign spawn claims the lowest parked worker, worker one. It
+        // polls the task holding the count its wake took, unless it returned
+        // the count first.
+        let (_, other) = spawn_elsewhere(&context, {
+            let wakers = woken.wakers.clone();
+            let ran = woken.ran.clone();
+            async move {
+                for waker in mem::take(&mut *wakers.lock()) {
+                    waker.wake();
+                }
+                spin_until(
+                    || ran.load(Ordering::SeqCst) != 0,
+                    "a parked worker must take the backlog behind the poll",
+                );
+            }
+        });
+        assert_ne!(other, thread::current().id());
+
+        // The root holds this worker until a task has run.
+        spin_until(|| woken.ran() != 0, "a task must run");
+        for task in woken.tasks {
+            task.await.unwrap();
+        }
+    });
+}
+
+/// A worker a wake claimed returns the count it inherited before it polls its
+/// root, so a kick from the root reaches a parked worker. Two foreign spawns
+/// claim worker zero, parked, and then worker one. Worker one runs both and
+/// parks again. Worker zero then resumes with only its root to poll. The root
+/// wakes two idle tasks into its run queue and blocks until another worker has
+/// run one.
+#[test]
+fn test_root_poll_returns_an_inherited_count() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let woken = Recorded::spawn(&context, 2);
+
+        // Once every worker waits, both tasks are idle.
+        every_worker_waits(&pool).await;
+        let root_waker = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+
+        // Once worker zero is published, the first foreign spawn claims it and
+        // the second claims worker one. Worker one runs both, and once it has
+        // parked again, the hook makes the root ready, so worker zero resumes
+        // claimed with nothing but its root to poll.
+        let foreign_ran = Arc::new(AtomicUsize::new(0));
+        on_next_park(&pool, 0, ParkPoint::BeforeWait, {
+            let pool = pool.clone();
+            let context = context.child("foreign");
+            let foreign_ran = foreign_ran.clone();
+            move || {
+                thread::spawn({
+                    let foreign_ran = foreign_ran.clone();
+                    move || {
+                        for _ in 0..2 {
+                            let foreign_ran = foreign_ran.clone();
+                            context.child("spawned").spawn(move |_| async move {
+                                foreign_ran.fetch_add(1, Ordering::SeqCst);
+                            });
+                        }
+                    }
+                })
+                .join()
+                .unwrap();
+                assert!(
+                    !pool.idle().is_idle(0),
+                    "the first push must claim worker zero"
+                );
+                spin_until(
+                    || foreign_ran.load(Ordering::SeqCst) == 2,
+                    "worker one must run the foreign spawns",
+                );
+                spin_until(|| is_waiting(&pool, 1), "worker one must park again");
+                root_waker.wake_by_ref();
+            }
+        });
+
+        // The root waits here until the hook makes it ready.
+        let mut yielded = false;
+        poll_fn(|_| {
+            if mem::replace(&mut yielded, true) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+
+        // Wake both tasks into this worker's run queue, then stay in the
+        // root's poll until another worker has run one.
+        woken.wake();
+        spin_until(
+            || woken.ran() != 0,
+            "a parked worker must take the backlog behind the root's poll",
+        );
+        for task in woken.tasks {
+            task.await.unwrap();
+        }
+    });
+}
+
+/// A worker that unwinds while published as idle withdraws its publication
+/// before it destroys its root, so a kick from the root's destructor wakes a
+/// parked worker and cannot claim the unwinding worker itself.
+#[test]
+fn test_root_destructor_after_an_unwind_while_published_wakes_a_parked_worker() {
+    assert!(
+        root_destructor_after_an_unwind_at(ParkPoint::BeforeWait),
+        "the root's destructor must wake a parked worker"
+    );
+}
+
+/// A worker that unwinds while it holds the search count of a search that
+/// found nothing returns the count before it destroys its root, so a kick from
+/// the root's destructor reaches a parked worker.
+#[test]
+fn test_root_destructor_after_an_unwind_while_searching_wakes_a_parked_worker() {
+    assert!(
+        root_destructor_after_an_unwind_at(ParkPoint::BeforeIdle),
+        "the root's destructor must wake a parked worker"
+    );
+}
+
+/// A worker whose last look after publishing finds a backlog that another run
+/// queue gained meanwhile, while no worker holds a count, takes a count and
+/// searches. When that search finds the backlog gone, the worker publishes
+/// itself again and does not wait unpublished with a count held.
+///
+/// Worker one holds the count of its failed search before publishing until the
+/// root has queued a backlog in its own run queue, then lets the root's worker
+/// drain that backlog before the last look's search.
+#[test]
+fn test_failed_search_after_the_last_look_publishes_again() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let backlog = Recorded::spawn(&context, 2);
+
+        // Once every worker waits, both tasks are idle and worker one is
+        // parked.
+        every_worker_waits(&pool).await;
+
+        // Worker one, holding the count of a search that found nothing,
+        // waits before it publishes until the root's run queue holds a
+        // stealable backlog. Once its last look has taken a count to search,
+        // it lets the root's worker drain that backlog before the search.
+        let searching = Arc::new(AtomicBool::new(false));
+        let drain = Arc::new(AtomicBool::new(false));
+        let checked = Arc::new(AtomicBool::new(false));
+        on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
+            let pool = pool.clone();
+            let searching = searching.clone();
+            let drain = drain.clone();
+            let ran = backlog.ran.clone();
+            move || {
+                assert_eq!(
+                    pool.idle().search_count(),
+                    1,
+                    "a failed search must keep its count"
+                );
+                on_wake_point(WakePoint::BeforeParkSearch, move || {
+                    drain.store(true, Ordering::SeqCst);
+                    spin_until(
+                        || ran.load(Ordering::SeqCst) == 2,
+                        "the root's worker must drain its run queue",
+                    );
+                });
+                searching.store(true, Ordering::SeqCst);
+                spin_until(
+                    || pool.queue(0).is_stealable(),
+                    "the root must queue a stealable backlog",
+                );
+            }
+        });
+        on_next_park(&pool, 1, ParkPoint::BeforeWait, {
+            let pool = pool.clone();
+            let checked = checked.clone();
+            move || {
+                assert!(pool.idle().is_idle(1), "worker one must wait published");
+                assert_eq!(
+                    pool.idle().search_count(),
+                    0,
+                    "worker one must wait without a count"
+                );
+                checked.store(true, Ordering::SeqCst);
+            }
+        });
+
+        // A foreign spawn claims worker one, the lowest parked worker. It runs
+        // the task and then searches on its way back to park.
+        let (_, other) = spawn_elsewhere(&context, async {});
+        assert_ne!(other, thread::current().id());
+        spin_until(
+            || searching.load(Ordering::SeqCst),
+            "worker one must search",
+        );
+
+        // Wake both tasks into this worker's run queue. The kick finds the
+        // count held. Once worker one has taken a count to search, this worker
+        // polls both tasks, so the search finds nothing.
+        backlog.wake();
+        spin_until(
+            || drain.load(Ordering::SeqCst),
+            "worker one must take a count to search",
+        );
+        reschedule().await;
+        assert_eq!(backlog.ran(), 2);
+        spin_until(
+            || checked.load(Ordering::SeqCst),
+            "worker one must park again",
+        );
+        for task in backlog.tasks {
+            task.await.unwrap();
+        }
+    });
+}
+
+/// A worker going round again with a message pending returns its search count
+/// before the catch-up service's callbacks run.
+#[test]
+fn test_catch_up_callbacks_after_going_round_run_with_no_search_count() {
+    catch_up_callback_after_the_count_returns(CatchUp::GoRound);
+}
+
+/// A worker going round again because a deadline has passed returns its search
+/// count before the catch-up service's callbacks run.
+#[test]
+fn test_catch_up_callbacks_after_an_expired_deadline_run_with_no_search_count() {
+    catch_up_callback_after_the_count_returns(CatchUp::Deadline);
+}
+
+/// A worker whose search before parking took work returns its search count
+/// before the catch-up service's callbacks run.
+#[test]
+fn test_catch_up_callbacks_after_a_search_finds_work_run_with_no_search_count() {
+    catch_up_callback_after_the_count_returns(CatchUp::AfterSearch);
+}
+
 /// A paged replay keeps reads in flight between fills. The task that issued them may close its
 /// worker before they are observed, which discards their registrations whether they are still
 /// pending or have landed unobserved. The replay then reads those pages again on demand, so a
@@ -2674,7 +6020,7 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
         let buffer = 16 * physical;
         let data: Vec<u8> = (0..64 * PAGE as usize).map(|i| (i % 251) as u8).collect();
         let (blob, size) = context.open("partition", b"replay").await.unwrap();
-        let cache = CacheRef::from_pooler(&context, NZU16!(PAGE), NZUsize!(4));
+        let cache = CacheRef::new(NZU16!(PAGE), NZUsize!(4));
         let writer = Writer::new(blob, size, buffer, cache).await.unwrap();
         let (writer, _) = writer.append(&data).await.unwrap();
         let (sealed, sync) = writer.seal().await.unwrap();
@@ -2715,5 +6061,252 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
         assert!(replay.ensure(data.len()).await.unwrap());
         assert_eq!(replay.copy_to_bytes(data.len()).as_ref(), data);
         assert!(!replay.ensure(1).await.unwrap());
+    });
+}
+
+/// Direct reads registered on a dedicated worker complete when a plain thread observes them while
+/// that worker lives. A pending handle does not keep the worker alive, so a handle first observed
+/// after the worker finished its cleanup, or after the runner shut down, reports closure.
+#[test]
+#[allow(clippy::async_yields_async)]
+fn test_direct_reads_outlive_their_origin_worker() {
+    static RANGES: [(u64, usize); 4] = [(0, 4096), (100, 5000), (4096, 0), (8000, 4288)];
+    let unobserved = Runner::new(config()).start(|context| async move {
+        // A blob of three blocks of patterned bytes, and a check of a batch's buffers against it.
+        let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
+        let check = |bufs: Vec<IoBufsMut>| {
+            for (bufs, &(offset, len)) in bufs.into_iter().zip(&RANGES) {
+                let offset = offset as usize;
+                assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
+            }
+        };
+        let (blob, _) = context.open("partition", b"direct").await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+        let blob = Arc::new(blob);
+
+        // Observed from a plain thread while the origin worker services the reads.
+        let origin = blob.clone();
+        let bufs = context
+            .child("alive")
+            .dedicated()
+            .spawn(move |context| async move {
+                let handle = origin
+                    .start_read_many(&RANGES, ReadOptions::DONT_CACHE)
+                    .await;
+                let observer = thread::spawn(move || block_on(handle));
+                while !observer.is_finished() {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                observer.join().unwrap()
+            })
+            .await
+            .unwrap();
+        check(bufs.unwrap());
+
+        // First observed after the origin worker finished its cleanup.
+        let origin = blob.clone();
+        let handle = context
+            .child("exited")
+            .dedicated()
+            .spawn(move |_| async move {
+                origin
+                    .start_read_many(&RANGES, ReadOptions::DONT_CACHE)
+                    .await
+            })
+            .await
+            .unwrap();
+
+        // Wait until no worker is active, so the origin worker has finished its cleanup.
+        poll_fn(|cx| {
+            if context.shared.workers.state.lock().active == 0 {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+
+        // The reads were never observed while their origin lived, so they report closure.
+        let result = thread::spawn(move || block_on(handle)).join().unwrap();
+        assert!(matches!(result, Err(Error::ReadFailed)));
+
+        // First observed after the runner shut down.
+        blob.start_read_many(&RANGES, ReadOptions::DONT_CACHE).await
+    });
+
+    // The runner shut down before the handle was first polled, so it reports closure.
+    assert!(matches!(block_on(unobserved), Err(Error::ReadFailed)));
+}
+
+/// A storm of sleeps due at once, each owned by a task of its own, beside a
+/// task that requeues itself, with short polls and with polls that outlast the
+/// backlog slice. An expiry pass fires no more sleeps than the run queue has
+/// room for, so the storm never overflows the queue, which would move its
+/// newest runnables, the requeued task among them, behind the storm in the
+/// global queue. The requeued task keeps its turn, so no more sleepers than
+/// the queue holds complete between two of its polls.
+#[test]
+fn test_expiry_storm_keeps_a_requeued_task_in_the_run_queue() {
+    /// Sleeping tasks, sixteen budgets' worth.
+    const SLEEPERS: usize = 16 * BUDGET as usize;
+
+    /// Time from the storm's setup to its deadline, by which every sleeper
+    /// must have registered, with ample room for a slow host.
+    const LEAD: Duration = Duration::from_millis(500);
+
+    for work in [Duration::ZERO, 2 * BACKLOG_SLICE] {
+        Runner::new(config()).start(move |context| async move {
+            // A task that requeues itself and records the most sleepers that
+            // completed between two of its polls.
+            let completed = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let spinner = context.child("spinner").spawn({
+                let completed = completed.clone();
+                let stop = stop.clone();
+                move |_| async move {
+                    let (mut seen, mut most) = (0, 0);
+
+                    while !stop.load(Ordering::Relaxed) {
+                        let now = completed.load(Ordering::Relaxed);
+                        most = most.max(now - seen);
+                        seen = now;
+                        let began = Instant::now();
+
+                        while began.elapsed() < work {
+                            std::hint::spin_loop();
+                        }
+
+                        reschedule().await;
+                    }
+
+                    most
+                }
+            });
+
+            // Every sleeper registers its sleep in its first poll.
+            let registered = Arc::new(AtomicUsize::new(0));
+            let deadline = SystemTime::now() + LEAD;
+            let sleepers: Vec<_> = (0..SLEEPERS)
+                .map(|_| {
+                    let completed = completed.clone();
+                    let registered = registered.clone();
+                    context.child("sleeper").spawn(move |context| async move {
+                        let mut sleep = pin!(context.sleep_until(deadline));
+                        let mut polled = false;
+                        poll_fn(|cx| {
+                            let result = sleep.as_mut().poll(cx);
+
+                            if !mem::replace(&mut polled, true) {
+                                registered.fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            result
+                        })
+                        .await;
+
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    })
+                })
+                .collect();
+
+            // Spawning the sleepers overflowed the run queue. Watch it from
+            // the moment every sleeper waits.
+            while registered.load(Ordering::Relaxed) < SLEEPERS {
+                reschedule().await;
+            }
+
+            assert!(
+                SystemTime::now() < deadline,
+                "the storm's setup outlasted its lead"
+            );
+
+            let overflowed = Arc::new(AtomicBool::new(false));
+            on_next_overflow(&context.shared.pool, {
+                let overflowed = overflowed.clone();
+                move || overflowed.store(true, Ordering::Relaxed)
+            });
+
+            for sleeper in sleepers {
+                sleeper.await.unwrap();
+            }
+
+            stop.store(true, Ordering::Relaxed);
+            let most = spinner.await.unwrap();
+
+            assert!(
+                most <= CAPACITY,
+                "the requeued task waited for {most} sleepers with polls of {work:?}"
+            );
+            assert!(
+                !overflowed.load(Ordering::Relaxed),
+                "the storm overflowed the run queue with polls of {work:?}"
+            );
+        });
+    }
+}
+
+/// A due sleep fires while the run queue stays full of tasks that requeue
+/// themselves, since every expiry pass fires at least one sleep.
+#[test]
+fn test_due_sleep_fires_beside_a_full_run_queue() {
+    Runner::new(config()).start(|context| async move {
+        // The sleep registers in the sleeper's first poll, before the run
+        // queue fills.
+        let stop = Arc::new(AtomicBool::new(false));
+        let registered = Arc::new(AtomicBool::new(false));
+        let sleeper = context.child("sleeper").spawn({
+            let stop = stop.clone();
+            let registered = registered.clone();
+            move |context| async move {
+                registered.store(true, Ordering::Relaxed);
+                context.sleep(Duration::from_millis(20)).await;
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+
+        while !registered.load(Ordering::Relaxed) {
+            reschedule().await;
+        }
+
+        // Tasks that requeue themselves fill the run queue exactly, so every
+        // service pass finds it without room.
+        let spinners: Vec<_> = (0..CAPACITY)
+            .map(|_| {
+                let stop = stop.clone();
+                context.child("spinner").spawn(move |_| async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        reschedule().await;
+                    }
+                })
+            })
+            .collect();
+
+        // A watchdog thread raises an alarm if the sleep starves, so the test
+        // fails rather than hangs. It waits on a channel, not on a timer.
+        let (finished, done) = mpsc::channel::<()>();
+        let (alarm, alarmed) = oneshot::channel::<()>();
+        let watchdog = thread::spawn(move || {
+            if done.recv_timeout(Duration::from_secs(5)).is_err() {
+                let _ = alarm.send(());
+            }
+        });
+
+        select! {
+            result = sleeper => result.unwrap(),
+            _ = alarmed => {
+                stop.store(true, Ordering::Relaxed);
+                panic!("a full run queue starved a due sleep");
+            },
+        }
+
+        finished.send(()).unwrap();
+        watchdog.join().unwrap();
+
+        for spinner in spinners {
+            spinner.await.unwrap();
+        }
     });
 }

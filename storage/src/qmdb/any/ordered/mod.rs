@@ -1,17 +1,19 @@
+//! Ordered variants of the [Any database](crate::qmdb::any).
+//!
+//! Span lookups use the lexicographic byte order defined by [`Key`], including when the
+//! queried key is absent.
+
 use crate::{
     Context,
     index::Ordered as Index,
     journal::contiguous::Contiguous,
     merkle::{Family, Location},
-    qmdb::{
-        any::{ValueEncoding, db::Db},
-        operation::{Key, Operation as OperationTrait},
-    },
+    qmdb::{any::db::Db, operation::Key, value::ValueEncoding},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::range::contains_cyclic;
+use commonware_utils::{futures::try_join_all, range::contains_cyclic};
 use core::{
     future::Future,
     mem,
@@ -22,7 +24,6 @@ use core::{
 };
 use futures::{
     TryStreamExt as _,
-    future::try_join_all,
     stream::{self, Stream},
 };
 
@@ -63,20 +64,10 @@ impl<
     H: Hasher,
     const N: usize,
     S: Strategy,
-> Db<F, E, C, I, H, Update<K, V>, N, S>
+> Db<F, E, C, I, H, Update<K, V>, S, N>
 where
     Operation<F, K, V>: Codec,
 {
-    async fn get_update_op(
-        reader: &impl Contiguous<Item = Operation<F, K, V>>,
-        loc: Location<F>,
-    ) -> Result<Update<K, V>, crate::qmdb::Error<F>> {
-        match reader.read(*loc).await? {
-            Operation::Update(key_data) => Ok(key_data),
-            _ => unreachable!("expected update operation at location {}", loc),
-        }
-    }
-
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
@@ -85,7 +76,7 @@ where
     ) -> Result<LocatedKey<F, K, V>, crate::qmdb::Error<F>> {
         // Collision order is arbitrary, so check each candidate's cyclic span.
         for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
+            let data = self.read_update(loc).await?;
             if contains_cyclic(&data.key..&data.next_key, key) {
                 return Ok(Some((loc, data)));
             }
@@ -108,13 +99,16 @@ where
             }
 
             // If the translated key is in the index, search its conflicts for the span.
-            if let Some(span) = self.find_span(self.index.get(key).copied(), key).await? {
+            if let Some(span) = self
+                .find_span(self.index.get(key.as_ref()).copied(), key)
+                .await?
+            {
                 return Ok(Some(span));
             }
 
             // The remaining span owner is in the previous translated key. Allow wrapping because
             // spans connect the last active key back to the first.
-            let Some((iter, _)) = self.index.prev_translated_key(key) else {
+            let Some((iter, _)) = self.index.prev_translated_key(key.as_ref()) else {
                 // DB is empty.
                 return Ok(None);
             };
@@ -149,7 +143,7 @@ where
         async move {
             // The strict predecessor can share the query's translated key.
             if let Some(prev) = self
-                .find_strict_prev_key(self.index.get(key).copied(), key)
+                .find_strict_prev_key(self.index.get(key.as_ref()).copied(), key)
                 .await?
             {
                 return Ok(Some(prev));
@@ -157,7 +151,7 @@ where
 
             // The previous translated key is the only remaining candidate. Reject wrapping so
             // queries at or below the first active key have no predecessor.
-            let Some((iter, false)) = self.index.prev_translated_key(key) else {
+            let Some((iter, false)) = self.index.prev_translated_key(key.as_ref()) else {
                 return Ok(None);
             };
 
@@ -174,7 +168,7 @@ where
         // Predecessor ownership includes the next key, so an active query finds the prior key.
         // The owner's key must still be smaller to exclude cyclic wraparound.
         for loc in locs {
-            let data = Self::get_update_op(&self.log, loc).await?;
+            let data = self.read_update(loc).await?;
             if data.key < *key
                 && contains_cyclic((Excluded(&data.key), Included(&data.next_key)), key)
             {
@@ -184,43 +178,19 @@ where
         Ok(None)
     }
 
-    /// Get the (value, next-key) pair of `key` in the db, or None if it has no value.
-    pub async fn get_all(&self, key: &K) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
+    /// Returns the value of `key` and the next active key, wrapping from the last key to the first,
+    /// or `None` if `key` is not active.
+    pub async fn get_with_next_key(
+        &self,
+        key: &K,
+    ) -> Result<Option<(V::Value, K)>, crate::qmdb::Error<F>> {
         self.get_with_loc(key)
             .await
             .map(|res| res.map(|(data, _)| (data.value, data.next_key)))
     }
 
-    /// Returns the key data for `key` with its location, or None if the key is not active.
-    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
-    #[allow(clippy::manual_async_fn, clippy::type_complexity)]
-    pub(crate) fn get_with_loc(
-        &self,
-        key: &K,
-    ) -> impl Future<Output = Result<Option<(Update<K, V>, Location<F>)>, crate::qmdb::Error<F>>> + Send
-    {
-        async move {
-            // Resolve translated-key collisions before returning an update and its location.
-            for loc in self.index.get(key).copied() {
-                let op = self.log.read(*loc).await?;
-                assert!(
-                    op.is_update(),
-                    "location does not reference update operation. loc={loc}"
-                );
-                if op.key().expect("update operation must have key") == key {
-                    let Operation::Update(data) = op else {
-                        unreachable!("expected update operation");
-                    };
-                    return Ok(Some((data, loc)));
-                }
-            }
-
-            Ok(None)
-        }
-    }
-
     /// Streams active (key, value) pairs in ascending key order within `range`. Read errors are
-    /// yielded in place and the next poll retries the same bucket.
+    /// yielded in place, and the next poll reads the same bucket again.
     pub fn stream_range<'a>(
         &'a self,
         range: impl RangeBounds<K> + Send + 'a,
@@ -248,7 +218,7 @@ where
                         match self.fetch_scan_bucket(&cursor, range.start_bound()).await {
                             Ok(Some(updates)) => updates,
                             Ok(None) => return None,
-                            // Keep the cursor unchanged so a later poll retries this bucket.
+                            // Keep the cursor unchanged so a later poll reads this bucket again.
                             Err(e) => return Some((Err(e), (range, cursor, pending))),
                         };
 
@@ -285,7 +255,10 @@ where
     ) -> Result<Option<Vec<Update<K, V>>>, crate::qmdb::Error<F>> {
         let updates = match cursor {
             Cursor::Done => return Ok(None),
-            Cursor::Next(key) => self.fetch_all_updates(self.index.get(key).copied()).await?,
+            Cursor::Next(key) => {
+                self.fetch_all_updates(self.index.get(key.as_ref()).copied())
+                    .await?
+            }
             Cursor::Start => match start {
                 Unbounded => {
                     let Some(iter) = self.index.first_translated_key() else {
@@ -296,11 +269,12 @@ where
                 Included(start) | Excluded(start) => {
                     // The bound's own bucket may hold keys below it. When no active key shares
                     // its translated key, the following bucket starts.
-                    let mut locs = self.index.get(start).copied().peekable();
+                    let mut locs = self.index.get(start.as_ref()).copied().peekable();
                     if locs.peek().is_some() {
                         self.fetch_all_updates(locs).await?
                     } else {
-                        let Some((iter, false)) = self.index.next_translated_key(start) else {
+                        let Some((iter, false)) = self.index.next_translated_key(start.as_ref())
+                        else {
                             return Ok(None);
                         };
                         self.fetch_all_updates(iter.copied()).await?
@@ -318,7 +292,7 @@ where
         locs: impl Iterator<Item = Location<F>> + Send,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
         // Conflicting entries are independent, so their journal reads can run concurrently.
-        let futures = locs.map(|loc| Self::get_update_op(&self.log, loc));
+        let futures = locs.map(|loc| self.read_update(loc));
         let mut updates = try_join_all(futures).await?;
 
         // Descending order lets the stream emit ascending keys with constant-time pops.
@@ -457,46 +431,15 @@ fn find_prev_key_mut<'a, K: Ord, V>(
     (k, v)
 }
 
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
-    where {
-        F: crate::merkle::Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
-        I: Index<Value = crate::merkle::Location<F>> + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = F, Key = K, Value = V::Value, Digest = H::Digest
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_provable! {
-    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
-    where {
-        F: crate::merkle::Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
-        I: Index<Value = crate::merkle::Location<F>> + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = F, Operation = Operation<F, K, V>
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
     use crate::{
+        index::ordered::Index as OrderedIndex,
+        journal::{
+            Error as JournalError, authenticated,
+            contiguous::{self, fixed::Journal},
+        },
         merkle::Family,
         mmb, mmr,
         qmdb::{
@@ -505,24 +448,31 @@ mod test {
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current,
-            floor::Proportional,
         },
-        translator::OneCap,
+        translator::{OneCap, TwoCap},
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Runner as _, Supervisor as _,
+        Clock as _, ReadOptions, Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{probability, sequence::FixedBytes, test_rng};
+    use commonware_utils::{
+        channel::oneshot, probability, sequence::FixedBytes, sync::Mutex, test_rng,
+    };
     use core::{future::Future, pin::Pin};
-    use futures::{StreamExt as _, pin_mut};
+    use futures::{StreamExt as _, future::pending, pin_mut};
     use rand::{RngExt as _, seq::SliceRandom as _};
     use std::{
         collections::{BTreeMap, BTreeSet},
-        ops::Bound,
+        num::NonZeroUsize,
+        ops::{Bound, Range},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::Duration,
     };
 
     /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
@@ -566,7 +516,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_db_empty<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         db: D,
@@ -584,7 +534,8 @@ mod test {
         // Write without applying (unapplied batch should be lost on reopen).
         {
             let _batch = db.new_batch().write(d1, Some(d2));
-            // Don't merkleize/apply -- simulates uncommitted write
+
+            // Don't merkleize/apply. This simulates an uncommitted write.
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
@@ -594,10 +545,13 @@ mod test {
         let metadata = Sha256::fill(3u8);
         let merkleized = db
             .new_batch()
-            .merkleize(&db, Some(metadata), &mut Proportional)
+            .with_metadata(Some(metadata))
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, range) = db.apply_batch(merkleized).await.unwrap();
+        let applied_start = db.bounds().end;
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let range = applied_start..db.bounds().end;
         let db = db.commit().await.unwrap();
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -612,20 +566,12 @@ mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
             db = db.commit().await.unwrap();
         }
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
@@ -633,7 +579,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_db_basic<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         context: Context,
         db: D,
@@ -653,10 +599,10 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
@@ -665,10 +611,10 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
@@ -676,10 +622,10 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
@@ -688,30 +634,26 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(new_val))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(new_val))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // Empty commit batch (no preceding uncommitted writes).
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Make sure key1 is already active.
@@ -722,30 +664,26 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert!(db.get(&key2).await.unwrap().is_some());
         let merkleized = db
             .new_batch()
             .write(key2.clone(), None)
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
         // Empty commit batch.
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Multiple deletions of the same key should be a no-op.
@@ -756,12 +694,8 @@ mod test {
         assert!(db.get(&key3).await.unwrap().is_none());
 
         // Make sure closing/reopening gets us back to the same state.
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let op_count = db.bounds().end;
         let root = db.root();
@@ -774,55 +708,51 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val1))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val2))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Empty commit batch.
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
@@ -836,12 +766,8 @@ mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         assert!(db.root() != root);
@@ -860,7 +786,7 @@ mod test {
     #[boxed]
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
         F: Family,
-        D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
+        D: DbAny<Family = F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
     >(
         db: D,
     ) {
@@ -877,21 +803,17 @@ mod test {
             .write(key1.clone(), Some(val))
             .write(key2.clone(), Some(val))
             .write(key3.clone(), Some(val))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
@@ -937,7 +859,7 @@ mod test {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
 
-                    let config = $config("neighbors", &context);
+                    let config = $config("neighbors");
                     let mut db = TestDb::init(context.child("db"), config.clone(), None)
                         .await
                         .unwrap();
@@ -1003,7 +925,7 @@ mod test {
                             .collect(),
                     );
 
-                    // Leave one live collision behind the tombstones before emptying the view.
+                    // Leave one active collision behind the tombstones before emptying the view.
                     phases.push(
                         crowded
                             .iter()
@@ -1026,7 +948,7 @@ mod test {
                             batch = batch.write(key, value);
                         }
 
-                        let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                        let batch = batch.merkleize(&db).await.unwrap();
                         assert_neighbors!(
                             batch,
                             &active,
@@ -1060,7 +982,7 @@ mod test {
                             &[min, a, max],
                             format_args!("phase {phase}, merkleized db")
                         );
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
 
                         assert_neighbors!(
                             &db,
@@ -1165,7 +1087,7 @@ mod test {
                     deterministic::Runner::default().start(|context| async move {
                         type TestDb = $db;
 
-                        let config = $config("layered-neighbors", &context);
+                        let config = $config("layered-neighbors");
                         let db = TestDb::init(context.child("db"), config, None)
                             .await
                             .unwrap();
@@ -1191,9 +1113,8 @@ mod test {
                         for &key in base_keys.iter().rev() {
                             seed = seed.write(key, Some(value));
                         }
-                        let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-                        let (db, _) = db.apply_batch(seed).await.unwrap();
-                        let db = db.commit().await.unwrap();
+                        let seed = seed.merkleize(&db).await.unwrap();
+                        let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                         let parent_key = layered_neighbor_key(81);
                         let parent_deleted = layered_neighbor_key(120);
@@ -1239,10 +1160,7 @@ mod test {
                             &db
                         );
 
-                        let parent = parent
-                            .merkleize(&db, None, &mut Proportional)
-                            .await
-                            .unwrap();
+                        let parent = parent.merkleize(&db).await.unwrap();
                         assert_neighbors!(
                             parent,
                             &parent_active,
@@ -1252,8 +1170,8 @@ mod test {
                         );
                         assert_neighbors!(&db, &base_active, &queries, "parent pending db");
 
-                        // A floor raise may copy untouched keys into the local diff. Both directions
-                        // need a span owner absent from that diff to exercise DB fallback.
+                        // A floor raise may copy untouched keys into the local diff. Both
+                        // directions need a span owner outside that diff to read the DB.
                         let parent_diff = any_batch!($layer, parent).diff.as_slice();
                         assert!(
                             parent_diff
@@ -1273,7 +1191,7 @@ mod test {
                                         .iter()
                                         .all(|(diff_key, _)| diff_key != *key && diff_key != prev)
                             })
-                            .expect("enough base keys to retain a committed-only source");
+                            .expect("base keys must include a committed-only source");
                         let committed_n = committed_index as u16 * 4;
                         let committed_predecessor =
                             parent_active.range(..committed_only).next_back().unwrap();
@@ -1331,7 +1249,7 @@ mod test {
                             child_active.remove(&key);
                         }
                         child_active.insert(child_key);
-                        let child = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+                        let child = child.merkleize(&db).await.unwrap();
                         assert_neighbors!(child, &child_active, &queries, "child merkleized", &db);
 
                         let grandchild = child
@@ -1343,10 +1261,7 @@ mod test {
                         grandchild_active.remove(&child_key);
                         grandchild_active.insert(parent_key);
                         grandchild_active.insert(layered_neighbor_key(44));
-                        let grandchild = grandchild
-                            .merkleize(&db, None, &mut Proportional)
-                            .await
-                            .unwrap();
+                        let grandchild = grandchild.merkleize(&db).await.unwrap();
                         assert_neighbors!(
                             grandchild,
                             &grandchild_active,
@@ -1366,7 +1281,7 @@ mod test {
                                 "dropped unapplied ancestors",
                                 &db
                             );
-                            let (db, _) = db.apply_batch(grandchild).await.unwrap();
+                            let db = db.apply_batch(grandchild).await.unwrap();
                             assert_neighbors!(
                                 &db,
                                 &grandchild_active,
@@ -1377,9 +1292,8 @@ mod test {
                             return;
                         }
 
-                        // Advance the DB only along this chain. Descendants retain the same view while
-                        // an applied ancestor is live and after they fall through to the advanced DB.
-                        let (db, _) = db
+                        // Reads through descendants stay exact as ancestors are applied or dropped.
+                        let db = db
                             .apply_batch(std::sync::Arc::clone(&parent))
                             .await
                             .unwrap();
@@ -1426,7 +1340,7 @@ mod test {
                             &db
                         );
 
-                        let (db, _) = db.apply_batch(std::sync::Arc::clone(&child)).await.unwrap();
+                        let db = db.apply_batch(std::sync::Arc::clone(&child)).await.unwrap();
                         assert_neighbors!(&db, &child_active, &queries, "child applied");
                         drop(child);
                         assert_neighbors!(
@@ -1437,7 +1351,7 @@ mod test {
                             &db
                         );
 
-                        let (db, _) = db.apply_batch(grandchild).await.unwrap();
+                        let db = db.apply_batch(grandchild).await.unwrap();
                         assert_neighbors!(&db, &grandchild_active, &queries, "grandchild applied");
                         let db = db.commit().await.unwrap();
                         db.destroy().await.unwrap();
@@ -1474,19 +1388,18 @@ mod test {
                 32,
                 Sequential,
             >;
-            let config =
-                current::tests::variable_config_partitioned::<OneCap>("neighbors", &context);
-            let config = current::VariableConfig {
-                journal_config: crate::journal::contiguous::variable::Config {
+            let config = current::tests::variable_config_partitioned::<OneCap>("neighbors");
+            let config = current::ordered::variable::partitioned::Config {
+                log: crate::journal::contiguous::variable::Config {
                     codec_config: (((..=3).into(), ()), ((..=4096).into(), ())),
-                    partition: config.journal_config.partition,
-                    items_per_section: config.journal_config.items_per_section,
-                    compression: config.journal_config.compression,
-                    page_cache: config.journal_config.page_cache,
-                    write_buffer: config.journal_config.write_buffer,
-                    replay_buffer: config.journal_config.replay_buffer,
+                    partition: config.log.partition,
+                    items_per_section: config.log.items_per_section,
+                    compression: config.log.compression,
+                    page_cache: config.log.page_cache,
+                    write_buffer: config.log.write_buffer,
+                    replay_buffer: config.log.replay_buffer,
                 },
-                merkle_config: config.merkle_config,
+                merkle: config.merkle,
                 grafted_metadata_partition: config.grafted_metadata_partition,
                 translator: config.translator,
                 init_cache: config.init_cache,
@@ -1515,11 +1428,11 @@ mod test {
                 batch = batch.write(key.clone(), Some(vec![1; i * 100]));
             }
 
-            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let batch = batch.merkleize(&db).await.unwrap();
             assert_neighbors!(batch, &active, &queries, "merkleized", &db);
             let empty: BTreeSet<Vec<u8>> = BTreeSet::new();
             assert_neighbors!(&db, &empty, &queries, "pending db");
-            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
             for recovered in [false, true] {
                 if recovered {
                     db = db.commit().await.unwrap();
@@ -1545,7 +1458,7 @@ mod test {
             fn $name() {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
-                    let config = $config("scans", &context);
+                    let config = $config("scans");
                     let mut db = TestDb::init(context.child("db"), config.clone(), None)
                         .await
                         .unwrap();
@@ -1600,8 +1513,8 @@ mod test {
                                 }
                             }
                         }
-                        let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        let batch = batch.merkleize(&db).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
                         let expected: Vec<_> = active.iter().map(|(&k, &v)| (k, v)).collect();
 
                         let before = context.auditor().state();
@@ -1751,8 +1664,8 @@ mod test {
                 OneCap,
                 Sequential,
             >;
-            let config = any::test::fixed_db_config::<OneCap>("scan-errors", &context);
-            let cache = config.journal_config.page_cache.clone();
+            let config = any::test::fixed_db_config::<OneCap>("scan-errors");
+            let cache = config.log.page_cache.clone();
             let db = TestDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -1761,9 +1674,8 @@ mod test {
             for &key in &keys {
                 batch = batch.write(key, Some(key));
             }
-            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let batch = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
 
@@ -1777,7 +1689,7 @@ mod test {
             context.storage_fault_config().write().read_rate = None;
             assert_eq!(stream.next().await.unwrap().unwrap(), (keys[0], keys[0]));
 
-            // A later bucket also retries without losing or repeating a successful entry.
+            // A later bucket is also read again without losing or repeating a successful entry.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             assert!(stream.next().await.unwrap().is_err());
@@ -1788,7 +1700,7 @@ mod test {
             );
 
             // A lower bound with no bucket of its own starts at the next translated key, and
-            // that read retries too.
+            // that read is repeated too.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let stream = db.stream_range(neighbor_key([12, 0, 0])..);
@@ -1846,18 +1758,18 @@ mod test {
                 OneCap,
                 Sequential,
             >;
-            let base = any::test::variable_db_config::<OneCap>("scan-variable-keys", &context);
-            let config = any::VariableConfig {
-                journal_config: crate::journal::contiguous::variable::Config {
+            let base = any::test::variable_db_config::<OneCap>("scan-variable-keys");
+            let config = any::ordered::variable::Config {
+                log: crate::journal::contiguous::variable::Config {
                     codec_config: (((0..=32).into(), ()), ()),
-                    partition: base.journal_config.partition,
-                    items_per_section: base.journal_config.items_per_section,
-                    compression: base.journal_config.compression,
-                    page_cache: base.journal_config.page_cache,
-                    write_buffer: base.journal_config.write_buffer,
-                    replay_buffer: base.journal_config.replay_buffer,
+                    partition: base.log.partition,
+                    items_per_section: base.log.items_per_section,
+                    compression: base.log.compression,
+                    page_cache: base.log.page_cache,
+                    write_buffer: base.log.write_buffer,
+                    replay_buffer: base.log.replay_buffer,
                 },
-                merkle_config: base.merkle_config,
+                merkle: base.merkle,
                 translator: base.translator,
                 init_cache: base.init_cache,
                 init_buffer: base.init_buffer,
@@ -1878,8 +1790,8 @@ mod test {
             for key in keys.iter().rev() {
                 batch = batch.write(key.clone(), Some(Sha256::fill(key.len() as u8)));
             }
-            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let batch = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.keys(..).try_collect::<Vec<_>>().await.unwrap(), keys);
             let mut bounds = vec![Bound::Unbounded];
             for key in &keys {
@@ -1903,6 +1815,285 @@ mod test {
                 }
             }
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// How `Controlled` treats reads of its `blocked` and `failed` positions.
+    #[derive(Clone, Copy, Debug)]
+    enum Mode {
+        /// The `failed` read returns an error while the `blocked` read stays pending.
+        Error,
+        /// The `blocked` read stays pending until the test drops the outer future.
+        Cancel,
+        /// The `blocked` read waits until the `failed` read succeeds.
+        Reorder,
+    }
+
+    /// Progress of the controlled reads, shared between the journal and the test.
+    #[derive(Default)]
+    struct State {
+        /// Receiver the blocked read awaits in `Reorder` mode.
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+        /// Sender the `failed` read uses to release the blocked read in `Reorder` mode.
+        releaser: Mutex<Option<oneshot::Sender<()>>>,
+        /// Positions whose reads succeeded, in completion order.
+        completed: Mutex<Vec<u64>>,
+        /// Set when the blocked read starts.
+        blocked_started: AtomicBool,
+        /// Set when the blocked read stops waiting, whether released or dropped.
+        blocked_dropped: AtomicBool,
+        /// Set when the `failed` read returns its error.
+        error_seen: AtomicBool,
+    }
+
+    /// Sets `blocked_dropped` when the blocked read stops waiting, whether released or dropped.
+    struct PendingGuard(Arc<State>);
+
+    impl Drop for PendingGuard {
+        fn drop(&mut self) {
+            self.0.blocked_dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Wraps a journal so that reads of `blocked` and `failed` behave as `mode` directs.
+    struct Controlled<C> {
+        inner: C,
+        mode: Mode,
+        blocked: u64,
+        failed: u64,
+        state: Arc<State>,
+    }
+
+    impl<C: Contiguous> Contiguous for Controlled<C> {
+        type Item = C::Item;
+
+        fn bounds(&self) -> Range<u64> {
+            self.inner.bounds()
+        }
+
+        async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
+            if position == self.blocked {
+                let _guard = PendingGuard(self.state.clone());
+                self.state.blocked_started.store(true, Ordering::SeqCst);
+                if matches!(self.mode, Mode::Reorder) {
+                    let release = self.state.release.lock().take().unwrap();
+                    release.await.unwrap();
+                } else {
+                    pending::<()>().await;
+                }
+            }
+            if position == self.failed && matches!(self.mode, Mode::Error) {
+                self.state.error_seen.store(true, Ordering::SeqCst);
+                return Err(JournalError::Runtime(commonware_runtime::Error::ReadFailed));
+            }
+            let item = self.inner.read(position).await?;
+            self.state.completed.lock().push(position);
+            if position == self.failed && matches!(self.mode, Mode::Reorder) {
+                self.state.releaser.lock().take().unwrap().send(()).unwrap();
+            }
+            Ok(item)
+        }
+
+        async fn read_many(&self, positions: &[u64]) -> Result<Vec<Self::Item>, JournalError> {
+            self.inner.read_many(positions).await
+        }
+
+        fn try_read_sync(&self, position: u64) -> Option<Self::Item> {
+            self.inner.try_read_sync(position)
+        }
+
+        fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>> {
+            self.inner.try_read_many_sync(positions)
+        }
+
+        async fn replay(
+            &self,
+            range: Range<u64>,
+            buffer: NonZeroUsize,
+            read_options: ReadOptions,
+        ) -> Result<
+            impl Stream<Item = Result<contiguous::Batch<Self::Item>, JournalError>> + Send,
+            JournalError,
+        > {
+            self.inner.replay(range, buffer, read_options).await
+        }
+    }
+
+    /// An ordered fixed database whose log reads go through `Controlled`.
+    type ControlledDb = Db<
+        mmr::Family,
+        deterministic::Context,
+        Controlled<Journal<deterministic::Context, fixed::Operation<mmr::Family, Digest, Digest>>>,
+        OrderedIndex<TwoCap, Location<mmr::Family>>,
+        Sha256,
+        fixed::Update<Digest, Digest>,
+        Sequential,
+    >;
+
+    /// Builds a database holding `count` keys whose journal controls reads of the two lowest key
+    /// locations. Returns the database, the ascending key locations, and the shared read state.
+    async fn make_db(
+        context: deterministic::Context,
+        count: usize,
+        mode: Mode,
+    ) -> (ControlledDb, Vec<Location<mmr::Family>>, Arc<State>) {
+        // Write `count` keys that differ only in their last byte and collect their log locations.
+        let db = fixed::test::create_test_db(context).await;
+        let keys: Vec<_> = (0..count)
+            .map(|i| {
+                let mut key = [0u8; 32];
+                key[31] = i as u8;
+                Digest::from(key)
+            })
+            .collect();
+        let mut batch = db.new_batch();
+        for key in &keys {
+            batch = batch.write(*key, Some(Sha256::fill(7)));
+        }
+        let batch = batch.merkleize(&db).await.unwrap();
+        let db = db.apply_batch(batch).await.unwrap();
+        let mut locs = Vec::new();
+        for key in &keys {
+            locs.push(db.get_with_loc(key).await.unwrap().unwrap().1);
+        }
+        locs.sort();
+
+        // Rebuild the database around a controlled journal that blocks the lowest location and
+        // treats the next one as `mode` directs.
+        let (releaser, release) = oneshot::channel();
+        let state = Arc::new(State {
+            release: Mutex::new(Some(release)),
+            releaser: Mutex::new(Some(releaser)),
+            ..State::default()
+        });
+        let Db {
+            log,
+            root,
+            inactivity_floor_loc,
+            index,
+            active_keys,
+            bitmap,
+            metrics,
+            _update,
+        } = db;
+        let authenticated::Journal {
+            merkle,
+            frontier,
+            boundary_recorded,
+            journal,
+            hasher,
+        } = log;
+        let log = authenticated::Journal {
+            merkle,
+            frontier,
+            boundary_recorded,
+            journal: Controlled {
+                inner: journal,
+                mode,
+                blocked: *locs[0],
+                failed: *locs[1],
+                state: state.clone(),
+            },
+            hasher,
+        };
+        (
+            Db {
+                log,
+                root,
+                inactivity_floor_loc,
+                index,
+                active_keys,
+                bitmap,
+                metrics,
+                _update,
+            },
+            locs,
+            state,
+        )
+    }
+
+    /// Checks the read outcome for `mode` and returns the updates of a successful read.
+    ///
+    /// In `Error` mode, the batch polls the blocked read before the failing one on its first pass.
+    /// The error must then arrive without waiting for the blocked read, and that read must already
+    /// be dropped. In `Cancel` mode, the blocked read must still be held, so the caller can check
+    /// that dropping the outer future releases it. In `Reorder` mode, the second location's read
+    /// must complete before the first.
+    fn check_completion<T>(
+        result: Option<Result<T, crate::qmdb::Error<mmr::Family>>>,
+        state: &State,
+        mode: Mode,
+        locs: &[Location<mmr::Family>],
+    ) -> Option<T> {
+        assert!(state.blocked_started.load(Ordering::SeqCst));
+        match mode {
+            Mode::Error => {
+                assert!(state.error_seen.load(Ordering::SeqCst));
+                assert!(
+                    matches!(
+                        result,
+                        Some(Err(crate::qmdb::Error::Journal(JournalError::Runtime(
+                            commonware_runtime::Error::ReadFailed
+                        ))))
+                    ),
+                    "the batch must return the error while the blocked read is pending"
+                );
+                assert!(state.blocked_dropped.load(Ordering::SeqCst));
+                None
+            }
+            Mode::Cancel => {
+                assert!(result.is_none());
+                assert!(!state.blocked_dropped.load(Ordering::SeqCst));
+                None
+            }
+            Mode::Reorder => {
+                let completed = state.completed.lock();
+                let first = completed.iter().position(|loc| *loc == *locs[0]).unwrap();
+                let second = completed.iter().position(|loc| *loc == *locs[1]).unwrap();
+                assert!(second < first);
+                Some(
+                    result
+                        .expect("reordered reads must finish")
+                        .expect("reordered reads must succeed"),
+                )
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn test_ordered_concurrent_reads(
+        #[case] count: usize,
+        #[values(Mode::Error, Mode::Cancel, Mode::Reorder)] mode: Mode,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            // Production batches take either path, because the index iterators of `OrderedIndex`
+            // report an unknown size hint while those of the partitioned ordered index report an
+            // exact one. This test passes an exact-size slice, so the 30 case runs on the small
+            // collector and the larger cases on the unordered path. Error and Reorder batches must
+            // finish before the timeout, and a Cancel batch must still be pending when it fires.
+            let (db, locs, state) = make_db(context.child("db"), count, mode).await;
+            let mut read = Box::pin(db.fetch_all_updates(locs.iter().copied()));
+            let result = commonware_macros::select! {
+                result = &mut read => Some(result),
+                _ = context.sleep(Duration::from_secs(1)) => None,
+            };
+            let updates = check_completion(result, &state, mode, &locs);
+
+            // Dropping the batch must leave no blocked read alive in any mode.
+            drop(read);
+            assert!(state.blocked_dropped.load(Ordering::SeqCst));
+
+            // Updates come back in descending key order.
+            if let Some(updates) = updates {
+                let keys: Vec<_> = updates
+                    .iter()
+                    .map(|update| update.key.as_ref()[31])
+                    .collect();
+                assert_eq!(keys, (0..count as u8).rev().collect::<Vec<_>>());
+            }
         });
     }
 }

@@ -23,7 +23,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     let items = (16 * 1024 * 1024 / SIZE).min(10_000) as u64;
     for random in [false, true] {
-        for mode in ["read_many", "read_uncached", "replay"] {
+        for mode in ["read_many", "read_many_uncached", "read_uncached", "replay"] {
             c.bench_function(
                 &format!(
                     "{}/mode={mode} items={items} size={SIZE} random={random}",
@@ -33,8 +33,9 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
 
-                        // A two-page cache makes random reads miss and read frames from blobs.
-                        let cache_pages = if mode == "read_uncached" {
+                        // In the uncached modes, a two-page cache makes reads at sampled positions
+                        // miss and read their frames from blobs.
+                        let cache_pages = if mode.ends_with("_uncached") {
                             NZUsize!(2)
                         } else {
                             PAGE_CACHE_SIZE
@@ -46,7 +47,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                                 items_per_section: NZU64!(ITEMS_PER_SECTION),
                                 compression: Some(3),
                                 codec_config: (),
-                                page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, cache_pages),
+                                page_cache: CacheRef::new(PAGE_SIZE, cache_pages),
                                 write_buffer: WRITE_BUFFER,
                                 replay_buffer: REPLAY_BUFFER,
                             },
@@ -70,12 +71,21 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                         let sampled: Vec<u64> =
                             (0..items).map(|_| rng.random_range(0..items)).collect();
 
+                        // `read_many` requires strictly increasing positions, so the batched
+                        // uncached mode reads the sample sorted and deduplicated.
+                        let mut sorted = sampled.clone();
+                        sorted.sort_unstable();
+                        sorted.dedup();
+
                         let (journal, reader) = journal.snapshot().await.unwrap();
                         let start = Instant::now();
                         for _ in 0..iters {
                             match mode {
                                 "read_many" => {
                                     black_box(reader.read_many(&all).await.unwrap());
+                                }
+                                "read_many_uncached" => {
+                                    black_box(reader.read_many(&sorted).await.unwrap());
                                 }
                                 "read_uncached" => {
                                     for &pos in &sampled {

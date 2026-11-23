@@ -31,31 +31,36 @@ if possible in the current configuration, demonstrating the protocol's resilienc
 ### Invariant Checking
 
 After test completion, the framework verifies that all invariants defined
-in the `invariants` [module](./src/invariants.rs) hold true for correct nodes at each view.
+in the `invariants` [module](../src/fuzz/simplex/invariants.rs) hold true for correct nodes at each view.
 This ensures protocol safety properties are maintained despite a byzantine node.
 
 ### Running Tests
 
 #### Unit Tests
 
-Run deterministic tests with a fixed seed:
+Run deterministic tests, including the fixed seed regression and handoff boundaries:
 ```bash
-cargo test -p commonware-consensus-fuzz test_
+cargo test -p commonware-consensus fuzz::
 ```
 
 #### Property-Based Tests
 
-Run proptest-based tests that explore many seeds:
+Run minifuzz tests that explore 100 cases per signature scheme:
 ```bash
-cargo test -p commonware-consensus-fuzz property_test
+cargo test -p commonware-consensus fuzz::simplex::schemes::tests::minifuzz_
 ```
 
-Reproduce a failure with a specific seed:
+Reproduce a failure by passing the reported `MINIFUZZ_BRANCH` token to the same test:
 ```bash
-PROPTEST_CASES=1 PROPTEST_SEED=<seed> cargo test -p commonware-consensus-fuzz property_test_ed25519 -- --nocapture
+MINIFUZZ_BRANCH=0x... cargo test -p commonware-consensus minifuzz_ed25519_connected -- --nocapture
 ```
 
 #### Continuous Fuzzing
+
+The `consensus` target runs the shared Simplex property plan across signature schemes:
+```bash
+cargo fuzz run consensus
+```
 
 Run continuous fuzzing for a specific target:
 ```bash

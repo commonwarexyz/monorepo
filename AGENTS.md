@@ -9,8 +9,9 @@ Commonware is a Rust workspace of high-performance distributed-systems primitive
 - Protocol primitives must remain runtime-agnostic. Do not introduce direct `tokio` usage outside runtime-owning code, runtime utilities, command-line paths, benches, or tests. Use the traits in `runtime/src/lib.rs` instead.
 - Use `commonware_macros::select!` for concurrent operations. Async trait methods return `impl Future<Output = Result<T, Error>> + Send`; add `Send + 'static` bounds where required.
 - Implement core mechanisms and algorithms inside the workspace rather than adding a dependency for them. On hot paths, prefer `Bytes`, cheap `Arc` clones, and static dispatch over allocations and dynamic dispatch.
-- Use `commonware_codec::Buf` for generic readers of serialized values and their decoding helpers, including fixed-size reads and length or padding validation. Use `Input` at input-conversion entry points, then preserve codec `Buf` internally. Decode owned buffers by value. Use `Copying` at the call site for intentionally borrowed decoding. Retained byte fields decoded through it allocate and copy.
+- Use `commonware_codec::Buf` for generic readers of serialized values and their decoding helpers, including fixed-size reads and length or padding validation. Use `Input` at input-conversion entry points, then preserve codec `Buf` internally. Decode owned buffers by value. Use `Viewing` to borrow `Bytes` while preserving shared storage for retained fields. Use `Copying` for borrowed byte slices. Retained byte fields decoded through it allocate and copy.
 - Use `bytes::Buf` for raw buffer implementations and byte-stream inputs to I/O, encoding, or hashing. Import it as `Buf as _` when its cursor methods must be in scope alongside codec `Buf`.
+- Follow the Size Bounds policy in [the codec docs](codec/src/lib.rs). Scalars and length prefixes contribute their encoded types' maximum widths even when validation restricts their values. Caller-supplied limits bound variable contents.
 - Namespace strings must be globally unique and have the form `_COMMONWARE_<CRATE>_<OPERATION>`. Changing one is a breaking change.
 - Keep unsafe code minimal, prefer safe abstractions, and document every unsafe block with `// SAFETY:`.
 
@@ -26,6 +27,16 @@ All public APIs need a stability annotation. Use `#[stability(LEVEL)]`, `stabili
 Document public APIs clearly. Use `//!` for module docs, `///` for items, and include `# Examples` or `# Safety` where relevant. Keep comments concise, above the code they explain, and use plain ASCII characters. Do not write comments that narrate a change (e.g. "used to call bar() here") or describe implementation-specific behavior on a trait definition.
 
 ## Tests and validation
+
+### Toolchain policy
+
+- Floating `stable`: builds and tests must pass before merging.
+- Pinned MSRV: must pass before merging; the version lives in `Cargo.toml`.
+- Floating `nightly` builds: informational; report and investigate failures.
+- Required nightly tooling (Miri, dependency checks, API checks, coverage, and fuzzing) uses a pinned nightly; Dylint uses its own pinned compiler.
+- Clippy/rustfmt: pin when needed to avoid lint and formatting churn. Keep all tooling pins in `.github/toolchains.toml` for local checks and CI.
+
+Compiler upgrades are inputs CI should test immediately so we catch compatibility regressions when Rust releases ship.
 
 Use `just` commands, which run tests through `nextest`. Start with the narrowest useful check:
 
@@ -46,6 +57,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 - Keep `mod.rs` minimal, use `cfg_if!` for platform-specific implementations, and put imports at module scope.
 - Use `thiserror` for error types.
 - Label runtime actors with `context.child(...)`; use `context.shared(true).spawn()` for CPU-intensive work in async code.
+- Per-peer gauges report current state, so remove a peer's entry when that state ends, such as when it leaves the tracked set, disconnects, or is unblocked. Per-peer counters record history and keep their entries.
 - Benchmark names use `module_path!()` and the format `module::operation/key=value key=value`.
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.
 - Storage handles and runtime writers take `self` on asynchronous methods that mutate storage and return it on success, so an error or a dropped future destroys it. A method may borrow instead when a failure leaves its receiver unchanged or permanently failed. Synchronous methods that perform no I/O borrow.

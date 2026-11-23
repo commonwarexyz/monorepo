@@ -34,7 +34,8 @@ def reorder_table_inplace(tbl: Table):
 def walk(node):
     if hasattr(node, "items"):
         for k, v in list(node.items()):
-            if k.endswith("dependencies"):
+            # Skip scalar values such as lint levels in `[lints.cargo]`.
+            if k.endswith("dependencies") and hasattr(v, "keys"):
                 reorder_table_inplace(v)
             walk(v)
 
