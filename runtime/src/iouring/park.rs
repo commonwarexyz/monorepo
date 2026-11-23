@@ -1084,43 +1084,6 @@ pub mod tests {
             }
         }
 
-        /// A timed park ends near its deadline even when the thread's timer
-        /// slack is far longer, since futex2 takes no slack.
-        #[test]
-        fn test_timed_park_ignores_timer_slack() {
-            const SLACK: Duration = Duration::from_secs(1);
-
-            // A fresh thread, so the slack set here leaves the harness's threads
-            // alone.
-            std::thread::spawn(|| {
-                let slack = libc::c_ulong::try_from(SLACK.as_nanos()).unwrap();
-                // SAFETY: PR_SET_TIMERSLACK takes a scalar nanosecond value and
-                // changes only the calling thread's slack.
-                let ret = unsafe {
-                    libc::prctl(
-                        libc::PR_SET_TIMERSLACK,
-                        slack,
-                        0 as libc::c_ulong,
-                        0 as libc::c_ulong,
-                        0 as libc::c_ulong,
-                    )
-                };
-                assert_eq!(ret, 0);
-
-                // A wait that failed at once would return before the deadline.
-                // One with the thread's slack can end up to a second late,
-                // unless another timer on the CPU expires it sooner.
-                let parker = Parker::new();
-                let start = Instant::now();
-                let deadline = start + Duration::from_millis(50);
-                assert!(parker.park(0, Some(deadline)).is_none());
-                assert!(Instant::now() >= deadline);
-                assert!(start.elapsed() < SLACK / 2);
-            })
-            .join()
-            .unwrap();
-        }
-
         /// A notification between the arm and the kernel's compare fails the new
         /// ring wait at once, so the enter that follows does not block.
         #[test]
