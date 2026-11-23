@@ -398,17 +398,19 @@ mod tests {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor", 1);
             let selected = fixtures::finalization(&fixture, 0, Sha256::fill(0));
             let processed_block = TestBlock::new(1, 1);
+            let successor = TestBlock::child(&processed_block, 2);
+            let covering = fixtures::finalization(&fixture, 2, successor.digest());
             let MarshalFixture {
                 mailbox: marshal,
                 floor,
                 guards: _guards,
-            } = fixtures::marshal_fixture_with_finalized_block(
+            } = fixtures::marshal_fixture_with_covered_block(
                 context.child("marshal"),
                 "syncer-floor",
                 fixture.schemes[0].clone(),
                 &processed_block,
+                (&successor, covering),
                 NZUsize!(1),
-                true,
             )
             .await;
 

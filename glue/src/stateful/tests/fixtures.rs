@@ -277,6 +277,33 @@ pub(crate) async fn marshal_fixture_with_finalized_block(
     .await
 }
 
+/// Initializes a started marshal actor whose finalized-block archive is pre-seeded with `block`
+/// and whose finalization archive holds only `finalization`, stored under `successor`. Neither
+/// archive holds `successor` itself, so marshal delivers `block` under a higher finalization
+/// without one of its own.
+pub(crate) async fn marshal_fixture_with_covered_block(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    block: &TestBlock,
+    (successor, finalization): (&TestBlock, Finalization<TestScheme, Sha256Digest>),
+    max_pending_acks: NonZeroUsize,
+) -> MarshalFixture {
+    marshal_fixture_inner(
+        context,
+        prefix,
+        scheme,
+        Options {
+            seed: Some((successor, finalization)),
+            block: Some(block),
+            floor: None,
+            max_pending_acks,
+            reporter: Some(FixtureReporter::new(true)),
+        },
+    )
+    .await
+}
+
 /// Initializes a started marshal actor with `block` as its floor anchor and freezes the
 /// anchor acknowledgement so the durable processed height remains at its predecessor.
 pub(crate) async fn marshal_fixture_with_floor(

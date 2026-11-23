@@ -80,6 +80,7 @@ mod tests {
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
         Reporter,
         marshal::{
+            Identifier,
             ancestry::BlockProvider,
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
@@ -99,7 +100,7 @@ mod tests {
                     UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
                     opened_cache_epochs, setup_network_links, setup_network_with_participants,
                 },
-                store::{Op, Recording},
+                store::{Op, Recording, WithheldSync},
                 verifying::{
                     GatedVerifyingApp, MockVerifyingApp, RecordingVerifyingApp, Verification,
                     WalkingVerifyingApp,
@@ -137,7 +138,7 @@ mod tests {
         },
         utils::reschedule,
     };
-    use commonware_storage::archive::immutable;
+    use commonware_storage::archive::{Archive as _, Identifier as ArchiveID, immutable};
     use commonware_utils::{
         NZU16, NZU64, NZUsize,
         channel::oneshot::{self, error::TryRecvError},
@@ -1394,6 +1395,113 @@ mod tests {
     #[test_traced("WARN")]
     fn test_coding_ack_pipeline_backlog_persists_on_restart() {
         harness::ack_pipeline_backlog_persists_on_restart::<CodingHarness>();
+    }
+
+    /// When a crash loses an archived finalization but retains the coded block, restart restores
+    /// the finalization for the block's full coding commitment before delivering the block.
+    #[test_traced("WARN")]
+    fn test_coding_restart_restores_reported_finalization_after_interrupted_sync() {
+        const PREFIX: &str = "coding-interrupted-sync";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let ((provider, block, finalization), checkpoint) =
+            runner.start_and_recover(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let provider = ConstantProvider::new(schemes[0].clone());
+                let config = test_config(PREFIX, provider.clone());
+                let (certificates, blocks) =
+                    immutable_finalized_stores(&context, PREFIX, &config).await;
+                let (actor, mut mailbox, _) =
+                    core::Actor::<_, TestCodingVariant, _, _, _, _, _>::init(
+                        context.child("actor"),
+                        WithheldSync::new(certificates),
+                        blocks,
+                        config,
+                    )
+                    .await;
+                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let application = Application::<CodingB>::manual_ack();
+                let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+                assert_eq!(application.acknowledged().await, Height::zero());
+                assert_eq!(
+                    mailbox.get_processed().await,
+                    Some(Processed::Block(Height::zero()))
+                );
+
+                let genesis = genesis_block();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let ctx = CodingCtx {
+                    round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis_coding_commitment(&genesis)),
+                };
+                let block = make_coding_block(ctx, genesis.digest(), Height::new(1), 100);
+                let coded: TestCodedBlock = encode_block(
+                    block.clone(),
+                    coding_config_for_participants(NUM_VALIDATORS as u16),
+                );
+                assert!(mailbox.verified(round, coded.clone()).await);
+                let finalization = CodingHarness::make_finalization(
+                    Proposal::new(round, View::zero(), coded.commitment()),
+                    &schemes,
+                    QUORUM,
+                );
+                CodingHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+                assert_eq!(
+                    mailbox.get_info(Identifier::Latest).await,
+                    Some((block.height(), block.digest()))
+                );
+                context.sleep(Duration::from_secs(1)).await;
+                assert!(application.pending_ack_heights().is_empty());
+                (provider, block, finalization)
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let config = test_config(PREFIX, provider);
+            let (certificates, blocks) =
+                immutable_finalized_stores(&context, PREFIX, &config).await;
+            assert!(
+                blocks
+                    .has(ArchiveID::Index(block.height().get()))
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(certificates.last_index(), None);
+            let (actor, mailbox, _) = core::Actor::<_, TestCodingVariant, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<CodingB>::manual_ack();
+            let _handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            select! {
+                height = application.acknowledged() => assert_eq!(height, block.height()),
+                _ = context.sleep(Duration::from_secs(5)) => panic!("block must be delivered"),
+            }
+            assert_eq!(
+                application
+                    .blocks()
+                    .get(&block.height())
+                    .map(|value| value.digest()),
+                Some(block.digest())
+            );
+            assert_eq!(
+                mailbox.get_info(Identifier::Latest).await,
+                Some((block.height(), block.digest()))
+            );
+            assert_eq!(
+                mailbox.get_finalization(block.height()).await,
+                Some(finalization)
+            );
+            assert!(resolver.fetches().is_empty() && resolver.targeted().is_empty());
+        });
     }
 
     /// Dispatch uses the finalized coded block without rereading the finalized archive.

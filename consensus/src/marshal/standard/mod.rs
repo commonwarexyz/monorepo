@@ -96,7 +96,7 @@ mod tests {
                     ValidatorHandle, default_leader, make_raw_block, opened_cache_epochs,
                     setup_network_links, setup_network_with_participants,
                 },
-                store::{Op, Recording},
+                store::{Op, Recording, WithheldSync},
                 strategy::{Gate, GatedStrategy},
                 verifying::{
                     MockVerifyingApp, RecordingVerifyingApp, Verification, WalkingVerifyingApp,
@@ -138,7 +138,10 @@ mod tests {
         Clock, Handle, Metrics, Quota, Runner, Spawner, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
-        mocks::{MutationFaultContext, MutationFaults},
+        mocks::{
+            DelayedSyncContext, MutationFaultContext, MutationFaults, PendingSyncs,
+            next_pending_sync,
+        },
         telemetry::metrics::{
             MetricsExt as _,
             histogram::{Buckets, Timed},
@@ -1072,8 +1075,9 @@ mod tests {
     }
 
     // Verifies that a block persisted at a height beyond the last finalization
-    // is still surfaced via get_block and dispatched to the application. This
-    // can happen if a crash occurs after persisting the block but before
+    // is still surfaced via get_block, and that it is dispatched to the
+    // application only once a finalization at or above its height is stored.
+    // This can happen if a crash occurs after persisting the block but before
     // persisting its finalization.
     #[test_traced("WARN")]
     fn test_standard_restart_surfaces_block_without_finalization() {
@@ -1109,6 +1113,15 @@ mod tests {
                 &schemes,
                 3,
             );
+            let finalization_two = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    block_two.digest(),
+                ),
+                &schemes,
+                3,
+            );
 
             // Seed state: both blocks persisted, but only block_one has a
             // finalization. block_two is a block without a corresponding
@@ -1122,7 +1135,7 @@ mod tests {
             )
             .await;
 
-            let recovering = StandardHarness::setup_validator_with(
+            let mut recovering = StandardHarness::setup_validator_with(
                 context.child("recovering_validator"),
                 &mut oracle,
                 recovering_validator,
@@ -1153,19 +1166,48 @@ mod tests {
                 "block info should fall back to the finalized-block archive"
             );
 
-            // Walk the application through sequential acks. Even though
-            // block_two has no finalization, it is still dispatched because
-            // its block data exists in the archive.
+            // Walk the application through sequential acks. The stored
+            // finalization covers block_one. block_two has no finalization at
+            // or above its height, so it is not dispatched.
             assert_eq!(recovering.application.acknowledged().await, Height::zero());
-            for expected_height in 1..=2 {
-                let h = recovering.application.acknowledged().await;
-                assert_eq!(h, Height::new(expected_height));
+            assert_eq!(recovering.application.acknowledged().await, Height::new(1));
+            while recovering.mailbox.get_processed().await != Some(Processed::Block(Height::new(1)))
+            {
+                context.sleep(Duration::from_millis(10)).await;
             }
+            context.sleep(Duration::from_secs(1)).await;
+            assert!(
+                recovering.application.pending_ack_heights().is_empty(),
+                "block without a finalization at or above its height must not be dispatched"
+            );
+
+            // Reporting the finalization again stores it and releases the block.
+            StandardHarness::report_finalization(&mut recovering.mailbox, finalization_two.clone())
+                .await;
+            assert_eq!(recovering.application.acknowledged().await, Height::new(2));
+            let stored = recovering
+                .mailbox
+                .get_finalization(Height::new(2))
+                .await
+                .expect("finalization reported for a stored block must be kept");
+            assert_eq!(stored.proposal, finalization_two.proposal);
+            assert_eq!(
+                recovering.mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(2), block_two.digest())),
+                "latest finalized height must follow the reported finalization"
+            );
+            assert_eq!(
+                recovering.application.tip(),
+                Some((Height::new(2), block_two.digest())),
+                "application tip must follow the reported finalization"
+            );
         });
     }
 
     /// If a crash interrupts the sync of the height archives, the lookup recovers the finalization
-    /// from the digest cache when the block was stored by height without its certificate.
+    /// from the digest cache when the block was stored by height without its certificate. The
+    /// block above it has a stored finalization, so startup leaves the cached one in the cache and
+    /// the lookup must read it from there.
     #[test_traced("WARN")]
     fn test_standard_restart_reads_cached_finalization() {
         const PARTITION_PREFIX: &str = "restart-reads-cached-finalization";
@@ -1183,6 +1225,16 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
+            let above = make_raw_block(digest, Height::new(2), 200);
+            let above_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    above.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
 
             // The digest cache sync and the block archive sync completed before the crash.
             let storage = context.child("storage");
@@ -1191,8 +1243,8 @@ mod tests {
             seed_inconsistent_restart_state(
                 storage,
                 PARTITION_PREFIX,
-                &[genesis.inner().clone(), block],
-                &[],
+                &[genesis.inner().clone(), block, above.clone()],
+                &[(Height::new(2), above_finalization)],
             )
             .await;
 
@@ -1206,112 +1258,870 @@ mod tests {
             )
             .await;
 
+            assert_eq!(
+                mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(2), above.digest()))
+            );
             assert_eq!(mailbox.get_finalization(height).await, Some(finalization));
         });
     }
 
-    /// A finalized block can be durable without its finalization when a crash interrupts the
-    /// concurrent sync of both archives. Restart dispatches that block from the archive, so by the
-    /// time its finalization is reported again the processed height already covers it. The archive
-    /// keeps that finalization, and both the latest finalized height and the application tip
-    /// follow it.
+    /// How a finalization reaches marshal.
+    #[derive(Clone, Copy)]
+    enum Origin {
+        /// Consensus reports it, so marshal caches it before it writes the block.
+        Reported,
+        /// The resolver delivers it with its block after a hint, so marshal does not cache it.
+        Delivered,
+        /// Neither consensus nor the resolver delivers this block or its finalization.
+        Missing,
+    }
+
+    /// Hints the height of `block` to marshal and answers the resulting fetch with the block and
+    /// its finalization.
+    async fn hint_and_deliver_finalization(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<S, Standard<B>>,
+        resolver: &RecordingResolver,
+        peer: PublicKey,
+        (block, finalization): &(B, Finalization<S, D>),
+    ) {
+        let height = block.height();
+
+        // Marshal answers the hint with a targeted fetch for the height.
+        let hinted = resolver.targeted().len();
+        mailbox.hint_finalized(height, NonEmptyVec::new(peer));
+        wait_until(context, Duration::from_secs(5), "hinted fetch", || {
+            resolver.targeted().len() > hinted
+        })
+        .await;
+
+        // The response carries the finalization and its block, and marshal must resolve it.
+        let (response, response_rx) = oneshot::channel();
+        assert!(
+            resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Finalized { height },
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
+                            tracing::Span::none(),
+                        )),
+                    },
+                    value: (finalization.clone(), block.clone()).encode(),
+                    response,
+                })
+                .accepted()
+        );
+        assert_eq!(
+            response_rx.await.expect("marshal must answer the delivery"),
+            Outcome::Resolved(Resolution::Complete)
+        );
+    }
+
+    /// Builds a consecutive chain above genesis with one finalization per block.
+    fn consecutive_finalizations<const N: usize>(schemes: &[S]) -> [(B, Finalization<S, D>); N] {
+        let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+        std::array::from_fn(|index| {
+            let view = index as u64 + 1;
+            let round = Round::new(Epoch::zero(), View::new(view));
+            let block = make_raw_block(parent, Height::new(view), view * 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::new(view - 1), block.digest()),
+                schemes,
+                QUORUM,
+            );
+            parent = block.digest();
+            (block, finalization)
+        })
+    }
+
+    /// Builds a block and finalization for each entry of `origins`, delivering only the reported
+    /// and hinted entries. The block archive syncs while the certificate archive stays pending.
+    /// A crash preserves the delivered blocks and loses their archived finalizations.
+    async fn interrupt_finalized_sync<const N: usize>(
+        mut context: deterministic::Context,
+        partition_prefix: &str,
+        origins: [Origin; N],
+    ) -> (
+        ConstantProvider<S, Epoch>,
+        PublicKey,
+        [(B, Finalization<S, D>); N],
+    ) {
+        let Fixture {
+            schemes,
+            participants,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let provider = ConstantProvider::new(schemes[0].clone());
+        let peer = participants[1].clone();
+
+        // Marshal runs on a certificate archive whose syncs never complete.
+        let (certificates, blocks) =
+            prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+        let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("actor"),
+            WithheldSync::new(certificates),
+            blocks,
+            test_config(partition_prefix, provider.clone(), NZUsize!(1)),
+        )
+        .await;
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let application = Application::<B>::default();
+        let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+        wait_until(
+            &context,
+            Duration::from_secs(5),
+            "genesis processed",
+            || parse_processed_height(&context.encode()) == Some(0),
+        )
+        .await;
+
+        let chain = consecutive_finalizations(&schemes);
+        for (origin, finalized @ (block, finalization)) in origins.into_iter().zip(&chain) {
+            match origin {
+                Origin::Missing => {}
+                Origin::Reported => {
+                    assert!(
+                        mailbox
+                            .verified(finalization.round(), ready(block.clone()))
+                            .await
+                    );
+                    StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+                }
+                Origin::Delivered => {
+                    hint_and_deliver_finalization(
+                        &context,
+                        &mailbox,
+                        &resolver,
+                        peer.clone(),
+                        finalized,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // The block archive finishes its syncs and the certificate archive never does, so the
+        // running actor delivers none of the blocks.
+        context.sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            application.blocks().len(),
+            1,
+            "block must not be delivered before a finalization at or above it is durable"
+        );
+        (provider, peer, chain)
+    }
+
+    /// Reopens the stores after an interrupted sync. The supplied blocks must be durable and the
+    /// certificate archive must be empty.
+    async fn reopen_interrupted_sync(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        chain: &[(B, Finalization<S, D>)],
+    ) -> (Finalizations, FinalizedBlocks) {
+        let (certificates, blocks) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        for (block, _) in chain {
+            assert!(
+                blocks
+                    .has(ArchiveID::Index(block.height().get()))
+                    .await
+                    .expect("block lookup must succeed"),
+                "every block must survive the crash"
+            );
+        }
+        assert_eq!(
+            certificates.last_index(),
+            None,
+            "every finalization must be lost in the crash"
+        );
+        (certificates, blocks)
+    }
+
+    /// Starts marshal after an interrupted sync with an application that acknowledges blocks
+    /// manually.
+    async fn restart_after_interrupted_sync(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        provider: ConstantProvider<S, Epoch>,
+        chain: &[(B, Finalization<S, D>)],
+        max_pending_acks: NonZeroUsize,
+    ) -> (
+        Mailbox<S, Standard<B>>,
+        RecordingResolver,
+        Application<B>,
+        Handle<()>,
+    ) {
+        let (certificates, blocks) =
+            reopen_interrupted_sync(context, partition_prefix, chain).await;
+        let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("actor"),
+            certificates,
+            blocks,
+            test_config(partition_prefix, provider, max_pending_acks),
+        )
+        .await;
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let application = Application::<B>::manual_ack();
+        let handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+        (mailbox, resolver, application, handle)
+    }
+
+    /// Waits for the application to acknowledge `block` and checks that its finalization is
+    /// stored and reported as the tip.
+    async fn assert_processed_block_is_covered(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<S, Standard<B>>,
+        application: &Application<B>,
+        (block, finalization): &(B, Finalization<S, D>),
+    ) {
+        let height = block.height();
+        select! {
+            acknowledged = application.acknowledged() => assert_eq!(acknowledged, height),
+            _ = context.sleep(Duration::from_secs(5)) => panic!("block must be delivered"),
+        }
+        while mailbox.get_processed().await != Some(Processed::Block(height)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            mailbox.get_info(Identifier::Latest).await,
+            Some((height, block.digest())),
+            "the highest stored finalization must cover the processed height"
+        );
+        assert_eq!(application.tip(), Some((height, block.digest())));
+        assert_eq!(
+            mailbox.get_finalization(height).await.as_ref(),
+            Some(finalization)
+        );
+    }
+
+    /// Checks that marshal neither delivers the next block nor issues any resolver request.
+    async fn assert_next_block_is_held(
+        context: &deterministic::Context,
+        resolver: &RecordingResolver,
+        application: &Application<B>,
+    ) {
+        context.sleep(Duration::from_secs(1)).await;
+        assert!(
+            application.pending_ack_heights().is_empty(),
+            "block must not be delivered before a finalization at or above it is durable"
+        );
+        assert!(
+            resolver.fetches().is_empty() && resolver.targeted_is_empty(),
+            "marshal must not issue a resolver request for a held block"
+        );
+    }
+
+    /// A crash between the two finalized-archive syncs leaves a block durable without its
+    /// finalization. When consensus reported that finalization, restart stores it again from the
+    /// cache before it delivers the block, and requests nothing.
     #[test_traced("WARN")]
-    fn test_standard_stores_reported_finalization_for_processed_block() {
+    fn test_standard_restart_restores_reported_finalization_after_interrupted_sync() {
+        const PREFIX: &str = "interrupted-sync-reported";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let ((provider, _, chain), checkpoint) = runner.start_and_recover(|context| {
+            interrupt_finalized_sync(context, PREFIX, [Origin::Reported])
+        });
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let (mailbox, resolver, application, _handle) =
+                restart_after_interrupted_sync(&context, PREFIX, provider, &chain, NZUsize!(1))
+                    .await;
+            assert_processed_block_is_covered(&context, &mailbox, &application, &chain[0]).await;
+            assert!(resolver.fetches().is_empty() && resolver.targeted_is_empty());
+        });
+    }
+
+    /// A crash between the two finalized-archive syncs leaves a block durable without its
+    /// finalization. When the resolver delivered that finalization, no local copy survives.
+    /// Restart holds the block without requesting anything, and delivers it once its height is
+    /// hinted again and the finalization is stored.
+    #[test_traced("WARN")]
+    fn test_standard_restart_holds_block_until_delivered_finalization_is_stored() {
+        const PREFIX: &str = "interrupted-sync-delivered";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let ((provider, peer, chain), checkpoint) = runner.start_and_recover(|context| {
+            interrupt_finalized_sync(context, PREFIX, [Origin::Delivered])
+        });
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let (mailbox, resolver, application, _handle) =
+                restart_after_interrupted_sync(&context, PREFIX, provider, &chain, NZUsize!(1))
+                    .await;
+            assert_next_block_is_held(&context, &resolver, &application).await;
+            hint_and_deliver_finalization(&context, &mailbox, &resolver, peer, &chain[0]).await;
+            assert_processed_block_is_covered(&context, &mailbox, &application, &chain[0]).await;
+        });
+    }
+
+    /// A crash can leave blocks durable without their finalizations. Restart restores the highest
+    /// cached finalization and can deliver all blocks through that height before any are
+    /// acknowledged. The next block waits until the resolver delivers its finalization again.
+    #[test_traced("WARN")]
+    fn test_standard_restart_dispatches_through_highest_cached_finalization() {
+        const PREFIX: &str = "interrupted-sync-mixed";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let ((provider, peer, chain), checkpoint) = runner.start_and_recover(|context| {
+            interrupt_finalized_sync(
+                context,
+                PREFIX,
+                [
+                    Origin::Delivered,
+                    Origin::Reported,
+                    Origin::Reported,
+                    Origin::Delivered,
+                ],
+            )
+        });
+        let (_, checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(move |context| async move {
+                let (mailbox, resolver, application, _handle) =
+                    restart_after_interrupted_sync(&context, PREFIX, provider, &chain, NZUsize!(4))
+                        .await;
+                let processed = mailbox.get_processed().await;
+                assert_eq!(processed, Some(Processed::Block(Height::zero())));
+                assert_eq!(
+                    application.pending_ack_heights(),
+                    chain[..3]
+                        .iter()
+                        .map(|(block, _)| block.height())
+                        .collect::<Vec<_>>()
+                );
+                for (block, _) in &chain[..2] {
+                    select! {
+                        acknowledged = application.acknowledged() => {
+                            assert_eq!(acknowledged, block.height());
+                        },
+                        _ = context.sleep(Duration::from_secs(5)) => {
+                            panic!("block must be delivered under the higher finalization");
+                        },
+                    }
+                }
+                assert_processed_block_is_covered(&context, &mailbox, &application, &chain[2])
+                    .await;
+                assert_next_block_is_held(&context, &resolver, &application).await;
+
+                hint_and_deliver_finalization(&context, &mailbox, &resolver, peer, &chain[3]).await;
+                assert_processed_block_is_covered(&context, &mailbox, &application, &chain[3])
+                    .await;
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (certificates, _) = prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            for height in 1..=4 {
+                assert_eq!(
+                    certificates.has(ArchiveID::Index(height)).await.unwrap(),
+                    height >= 3,
+                    "only the highest cached finalization and the redelivered one must be archived"
+                );
+            }
+        });
+    }
+
+    /// Restart can find a reported finalization in the cache after a crash loses its archive
+    /// copy. It holds the block while the restored copy is still syncing.
+    #[test_traced("WARN")]
+    fn test_standard_restart_holds_block_while_restored_finalization_syncs() {
+        const PREFIX: &str = "interrupted-restore-sync";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let ((provider, _, chain), checkpoint) = runner.start_and_recover(|context| {
+            interrupt_finalized_sync(context, PREFIX, [Origin::Reported])
+        });
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let (certificates, blocks) = reopen_interrupted_sync(&context, PREFIX, &chain).await;
+            let certificates = WithheldSync::new(certificates);
+            let sync_started = certificates.sync_started();
+            let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                blocks,
+                test_config(PREFIX, provider, NZUsize!(1)),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "restore reaches its sync or dispatch",
+                || sync_started.load(Ordering::Acquire) || !application.blocks().is_empty(),
+            )
+            .await;
+            assert_next_block_is_held(&context, &resolver, &application).await;
+            assert!(
+                sync_started.load(Ordering::Acquire),
+                "the restored finalization must start syncing"
+            );
+        });
+    }
+
+    /// A store can already have processed a block whose finalization is only in the cache.
+    /// Restart resumes at the processed height and leaves the older archived tip in place.
+    /// A new report for the processed block then advances the tip without redelivering it.
+    #[test_traced("WARN")]
+    fn test_standard_restart_keeps_processed_height_above_archived_tip() {
+        const PREFIX: &str = "processed-above-archived-tip";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(3),
-                participants.clone(),
-                1024 * 1024,
-            )
-            .await;
-            setup_network_links(&mut oracle, &participants, LINK).await;
-
-            let recovering_validator = participants[0].clone();
-
-            // Both blocks are durable but only block_one's finalization is.
-            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
-            let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
-            let finalization_one = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    block_one.digest(),
-                ),
-                &schemes,
-                3,
-            );
-            let finalization_two = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(2)),
-                    View::new(1),
-                    block_two.digest(),
-                ),
-                &schemes,
-                3,
-            );
-            let partition_prefix = format!("validator-{recovering_validator}");
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let [(one, archived), (two, cached), (three, next)] =
+                consecutive_finalizations(&schemes);
+            let archived_round = archived.round();
             seed_inconsistent_restart_state(
-                context.child("storage"),
-                &partition_prefix,
-                &[block_one.clone(), block_two.clone()],
-                &[(Height::new(1), finalization_one)],
+                context.child("archives"),
+                PREFIX,
+                &[one.clone(), two.clone()],
+                &[(one.height(), archived)],
             )
             .await;
-
-            let mut recovering = StandardHarness::setup_validator_with(
-                context.child("recovering_validator"),
-                &mut oracle,
-                recovering_validator,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-                crate::marshal::mocks::application::Application::manual_ack(),
+            seed_processed_height(
+                context.child("metadata"),
+                PREFIX,
+                two.height(),
+                Some(archived_round),
             )
             .await;
-
-            // The application processes both blocks before the finalization is reported again.
-            assert_eq!(recovering.application.acknowledged().await, Height::zero());
-            for expected_height in 1..=2 {
-                let h = recovering.application.acknowledged().await;
-                assert_eq!(h, Height::new(expected_height));
-            }
-            while recovering.mailbox.get_processed().await != Some(Processed::Block(Height::new(2)))
-            {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert!(
-                recovering
-                    .mailbox
-                    .get_finalization(Height::new(2))
-                    .await
-                    .is_none()
-            );
-
-            StandardHarness::report_finalization(&mut recovering.mailbox, finalization_two.clone())
-                .await;
-            let stored = recovering
-                .mailbox
-                .get_finalization(Height::new(2))
+            init_seed_cache(context.child("cache"), PREFIX)
                 .await
-                .expect("finalization reported for a stored block must be kept");
-            assert_eq!(stored.proposal, finalization_two.proposal);
+                .put_finalization(cached.round(), two.digest(), &cached)
+                .await;
+
+            let application = Application::<B>::manual_ack();
+            let (mut mailbox, _, resolver, _handle) = start_standard_actor(
+                context.child("restart"),
+                PREFIX,
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis),
+            )
+            .await;
             assert_eq!(
-                recovering.mailbox.get_info(Identifier::Latest).await,
-                Some((Height::new(2), block_two.digest())),
-                "latest finalized height must follow the kept finalization"
+                mailbox.get_processed().await,
+                Some(Processed::Block(two.height()))
             );
             assert_eq!(
-                recovering.application.tip(),
-                Some((Height::new(2), block_two.digest())),
-                "application tip must follow the kept finalization"
+                mailbox.get_finalization(two.height()).await.as_ref(),
+                Some(&cached)
             );
+            let archived_tip = Some((one.height(), one.digest()));
+            assert_eq!(mailbox.get_info(Identifier::Latest).await, archived_tip);
+            assert_eq!(application.tip(), archived_tip);
+            assert_next_block_is_held(&context, &resolver, &application).await;
+
+            StandardHarness::report_finalization(&mut mailbox, cached).await;
+            let new_tip = Some((two.height(), two.digest()));
+            assert_eq!(mailbox.get_info(Identifier::Latest).await, new_tip);
+            assert_eq!(application.tip(), new_tip);
+            assert_next_block_is_held(&context, &resolver, &application).await;
+
+            assert!(mailbox.verified(next.round(), ready(three.clone())).await);
+            StandardHarness::report_finalization(&mut mailbox, next.clone()).await;
+            assert_processed_block_is_covered(&context, &mailbox, &application, &(three, next))
+                .await;
+        });
+    }
+
+    /// Restart restores a cached finalization even if a stored block above the gap has none.
+    /// It delivers the covered block and requests only missing blocks.
+    #[test_traced("WARN")]
+    fn test_standard_restart_delivers_covered_block_below_gap() {
+        const PREFIX: &str = "interrupted-sync-gap";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let ((provider, _, chain), checkpoint) = runner.start_and_recover(|context| {
+            interrupt_finalized_sync(
+                context,
+                PREFIX,
+                [Origin::Reported, Origin::Missing, Origin::Delivered],
+            )
+        });
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let [one, (two, _), three] = chain;
+            let stored = [one, three];
+            let (mailbox, resolver, application, _handle) =
+                restart_after_interrupted_sync(&context, PREFIX, provider, &stored, NZUsize!(1))
+                    .await;
+            assert!(mailbox.get_block(two.height()).await.is_none());
+            assert_processed_block_is_covered(&context, &mailbox, &application, &stored[0]).await;
+            assert!(application.pending_ack_heights().is_empty());
+            let fetches = resolver.fetches();
+            assert!(
+                fetches
+                    .iter()
+                    .any(|fetch| fetch.key == handler::Key::Block(two.digest()))
+            );
+            assert!(fetches.iter().all(|fetch| {
+                fetch.key == handler::Key::Block(two.digest())
+                    || fetch.key
+                        == handler::Key::Finalized {
+                            height: two.height(),
+                        }
+            }));
+            assert!(resolver.targeted_is_empty());
+        });
+    }
+
+    /// Restart can open an archive with a distant block and no finalization. The gap does not
+    /// prevent it from answering requests, and the distant block stays held.
+    #[test_traced("WARN")]
+    fn test_standard_restart_skips_empty_heights_above_tip() {
+        const PREFIX: &str = "sparse-interrupted-sync";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let height = Height::new(1 << 40);
+            let parent = make_raw_block(genesis.digest(), height.previous().unwrap(), 100);
+            let distant = make_raw_block(parent.digest(), height, 200);
+            let digest = distant.digest();
+            seed_inconsistent_restart_state(
+                context.child("archives"),
+                PREFIX,
+                &[genesis.inner().clone(), distant],
+                &[],
+            )
+            .await;
+            let application = Application::<B>::manual_ack();
+            let (mailbox, _, resolver, _handle) = start_standard_actor(
+                context.child("restart"),
+                PREFIX,
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis),
+            )
+            .await;
+
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(
+                mailbox.get_block(height).await.map(|block| block.digest()),
+                Some(digest)
+            );
+            assert_eq!(mailbox.get_info(Identifier::Latest).await, None);
+            assert_eq!(mailbox.get_finalization(height).await, None);
+            assert_eq!(application.blocks().len(), 1);
+            assert!(resolver.fetches().iter().all(|fetch| {
+                fetch.key != handler::Key::Finalized { height }
+                    && fetch.key != handler::Key::Block(digest)
+            }));
+            assert!(resolver.targeted_is_empty());
+        });
+    }
+
+    /// Restart restores a cached finalization below a gap before applying a configured floor.
+    /// The floor block is the first block delivered even if an older finalization was restored.
+    #[test_traced("WARN")]
+    fn test_standard_restart_restores_finalization_below_gap_before_floor() {
+        const PREFIX: &str = "interrupted-sync-gap-with-floor";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let ((provider, _, chain), checkpoint) = runner.start_and_recover(|context| {
+            interrupt_finalized_sync(
+                context,
+                PREFIX,
+                [Origin::Reported, Origin::Missing, Origin::Delivered],
+            )
+        });
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let [one, two, three] = chain;
+            let (certificates, blocks) =
+                reopen_interrupted_sync(&context, PREFIX, &[one.clone(), three]).await;
+            assert!(!blocks.has(ArchiveID::Index(2)).await.unwrap());
+
+            let config = Config {
+                start: Start::Floor(two.1.clone()),
+                ..test_config(PREFIX, provider, NZUsize!(1))
+            };
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                blocks,
+                config,
+            )
+            .await;
+            let (updates, mut received) = mpsc::unbounded_channel();
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            buffer.insert(two.0.clone());
+            let _handle = actor.start(
+                ApplicationReporter { updates },
+                buffer,
+                (resolver_rx, resolver.clone()),
+            );
+
+            for (block, finalization) in [&one, &two] {
+                assert!(
+                    matches!(
+                        received.recv().await,
+                        Some(Update::Tip(round, height, digest))
+                            if round == finalization.round()
+                                && height == block.height()
+                                && digest == block.digest()
+                    ),
+                    "tip at height {} must be reported before dispatch",
+                    block.height()
+                );
+            }
+            let Some(Update::Block(block, _ack)) = received.recv().await else {
+                panic!("configured floor block must be delivered");
+            };
+            assert_eq!(block.digest(), two.0.digest());
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(one.0.height()))
+            );
+            assert!(resolver.fetches().is_empty() && resolver.targeted_is_empty());
+        });
+    }
+
+    /// A repair at or below the archived tip adds a new block write. The preceding block's
+    /// acknowledgement must not release the repaired block until its write is durable.
+    #[test_traced("WARN")]
+    fn test_standard_repaired_block_waits_for_durability_at_or_below_tip() {
+        const PREFIX: &str = "repair-durability-at-or-below-tip";
+        const PACE: Duration = Duration::from_millis(400);
+        for repair_at_tip in [false, true] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |mut context| async move {
+                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let [(one, _), (two, second), (three, third)] =
+                        consecutive_finalizations(&schemes);
+                    let (tip, finalization) = if repair_at_tip {
+                        (&two, &second)
+                    } else {
+                        (&three, &third)
+                    };
+
+                    let (certificates, blocks) =
+                        prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+                    blocks
+                        .put(one.height().get(), one.digest(), &Arc::new(one.clone()))
+                        .await
+                        .unwrap()
+                        .put(
+                            three.height().get(),
+                            three.digest(),
+                            &Arc::new(three.clone()),
+                        )
+                        .await
+                        .unwrap()
+                        .sync()
+                        .await
+                        .unwrap();
+                    certificates
+                        .put(tip.height().get(), tip.digest(), finalization)
+                        .await
+                        .unwrap()
+                        .sync()
+                        .await
+                        .unwrap();
+                    init_seed_cache(context.child("cache"), PREFIX)
+                        .await
+                        .put_finalization(second.round(), two.digest(), &second)
+                        .await;
+
+                    let (certificates, blocks) =
+                        paced_finalized_stores(&context, PREFIX, PACE).await;
+                    let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                        context.child("actor"),
+                        certificates,
+                        blocks,
+                        test_config(
+                            PREFIX,
+                            ConstantProvider::new(schemes[0].clone()),
+                            NZUsize!(1),
+                        ),
+                    )
+                    .await;
+                    let (resolver_rx, resolver) =
+                        RecordingResolver::holding(context.child("resolver"));
+                    let application = Application::<B>::manual_ack();
+                    let _handle = actor
+                        .start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+                    assert_eq!(application.acknowledged().await, Height::zero());
+                    assert_eq!(
+                        mailbox.get_info(Identifier::Latest).await,
+                        Some((tip.height(), tip.digest()))
+                    );
+                    assert!(mailbox.get_block(two.height()).await.is_none());
+                    assert_eq!(
+                        mailbox.get_finalization(two.height()).await,
+                        repair_at_tip.then(|| second.clone())
+                    );
+                    assert_eq!(application.pending_ack_heights(), vec![one.height()]);
+
+                    let fetch = resolver
+                        .fetches()
+                        .into_iter()
+                        .find(|fetch| fetch.key == handler::Key::Block(two.digest()))
+                        .expect("marshal must request the missing block");
+                    let (response, response_rx) = oneshot::channel();
+                    assert!(
+                        resolver
+                            .enqueue(handler::Message::Deliver {
+                                delivery: Delivery {
+                                    key: fetch.key,
+                                    subscribers: NonEmptyVec::new((
+                                        fetch.subscriber,
+                                        tracing::Span::none()
+                                    )),
+                                },
+                                value: two.encode(),
+                                response,
+                            })
+                            .accepted()
+                    );
+                    assert_eq!(
+                        response_rx.await.unwrap(),
+                        Outcome::Resolved(Resolution::Complete)
+                    );
+                    assert_eq!(
+                        mailbox
+                            .get_block(two.height())
+                            .await
+                            .map(|stored| stored.digest()),
+                        Some(two.digest())
+                    );
+                    assert_eq!(application.acknowledge_next(), Some(one.height()));
+                    wait_until(
+                        &context,
+                        Duration::from_secs(5),
+                        "first block processed",
+                        || parse_processed_height(&context.encode()) == Some(one.height().get()),
+                    )
+                    .await;
+                    context.sleep(PACE / 8).await;
+                    assert!(
+                        application.pending_ack_heights().is_empty(),
+                        "the repair must sync before its block is delivered at tip {}",
+                        tip.height()
+                    );
+                    assert_eq!(application.acknowledged().await, two.height());
+                    if repair_at_tip {
+                        assert!(!application.blocks().contains_key(&three.height()));
+                    } else {
+                        assert_eq!(application.acknowledged().await, three.height());
+                    }
+                },
+            );
+        }
+    }
+
+    /// A block stored above every finalization waits for a finalization at or above it to become
+    /// durable. A finalization that is stored but still syncing does not release it when an
+    /// earlier sync completes or when an acknowledgement retries dispatch, because a crash could
+    /// lose that finalization after the application has processed the block.
+    #[test_traced("WARN")]
+    fn test_standard_block_waits_for_durable_finalization_above_it() {
+        const PREFIX: &str = "durable-finalization-above";
+        const PACE: Duration = Duration::from_millis(400);
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let two = make_raw_block(one.digest(), Height::new(2), 200);
+            let three = make_raw_block(two.digest(), Height::new(3), 300);
+            let finalize = |block: &B| {
+                let view = block.height().get();
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(view)),
+                        View::new(view - 1),
+                        block.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+
+            // Block two is stored and no finalization is.
+            let (_, finalized) = prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            finalized
+                .put(2, two.digest(), &Arc::new(two.clone()))
+                .await
+                .expect("seeded block must be stored")
+                .sync()
+                .await
+                .expect("seeded block must sync");
+            let storage = context.child("paced");
+            let (certificates, finalized) = paced_finalized_stores(&storage, PREFIX, PACE).await;
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                certificates,
+                finalized,
+                test_config(
+                    PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(4),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            // The finalization of block one starts a paced sync, and the finalization of block
+            // three starts a second one half a pace later.
+            for (block, wait) in [(&one, PACE / 2), (&three, Duration::ZERO)] {
+                let finalization = finalize(block);
+                assert!(
+                    mailbox
+                        .verified(finalization.round(), ready(block.clone()))
+                        .await
+                );
+                StandardHarness::report_finalization(&mut mailbox, finalization).await;
+                wait_until(
+                    &context,
+                    Duration::from_secs(5),
+                    "finalization stored",
+                    || application.tip() == Some((block.height(), block.digest())),
+                )
+                .await;
+                context.sleep(wait).await;
+            }
+
+            // The first sync completes and releases block one only.
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "block one delivered",
+                || !application.pending_ack_heights().is_empty(),
+            )
+            .await;
+            assert_eq!(
+                application.pending_ack_heights(),
+                vec![Height::new(1)],
+                "block must not be delivered before a finalization at or above it is durable"
+            );
+
+            // Acknowledging block one retries dispatch while the second sync is still in flight.
+            assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "block one processed",
+                || parse_processed_height(&context.encode()) == Some(1),
+            )
+            .await;
+            context.sleep(PACE / 8).await;
+            assert!(
+                application.pending_ack_heights().is_empty(),
+                "block must not be delivered before a finalization at or above it is durable"
+            );
+
+            // The second sync releases blocks two and three.
+            wait_until(&context, Duration::from_secs(5), "blocks delivered", || {
+                application.pending_ack_heights() == vec![Height::new(2), Height::new(3)]
+            })
+            .await;
         });
     }
 
@@ -1584,8 +2394,8 @@ mod tests {
     }
 
     /// A fetch admitted before block one is acknowledged can deliver its late finalization in the
-    /// same resolver batch that stores block two. Keeping that finalization must leave block two's
-    /// dispatch deferred, so the pooled sync that ends the batch still dispatches it.
+    /// same resolver batch that stores block three. Keeping that finalization must leave block
+    /// three's dispatch deferred, so the pooled sync that ends the batch still dispatches it.
     #[test_traced("WARN")]
     fn test_standard_late_finalization_in_batch_keeps_dispatch() {
         const PREFIX: &str = "late-finalization-batch";
@@ -1599,6 +2409,7 @@ mod tests {
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let one = make_raw_block(genesis.digest(), Height::new(1), 100);
             let two = make_raw_block(one.digest(), Height::new(2), 200);
+            let three = make_raw_block(two.digest(), Height::new(3), 300);
             let finalize = |block: &B| {
                 let view = block.height().get();
                 StandardHarness::make_finalization(
@@ -1612,16 +2423,28 @@ mod tests {
                 )
             };
 
-            // Block one is stored without its finalization.
+            // Blocks one and two are stored, and only block two has a finalization.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
-            let finalized = finalized
-                .put(1, one.digest(), &Arc::new(one.clone()))
+            let mut finalized = finalized;
+            for block in [&one, &two] {
+                finalized = finalized
+                    .put(
+                        block.height().get(),
+                        block.digest(),
+                        &Arc::new(block.clone()),
+                    )
+                    .await
+                    .expect("seeded block must be stored");
+            }
+            let finalized = finalized.sync().await.expect("seeded blocks must sync");
+            let certificates = certificates
+                .put(2, two.digest(), &finalize(&two))
                 .await
-                .expect("seeded block must be stored")
+                .expect("seeded finalization must be stored")
                 .sync()
                 .await
-                .expect("seeded block must sync");
+                .expect("seeded finalization must sync");
             let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                 context.child("actor"),
                 certificates,
@@ -1629,7 +2452,7 @@ mod tests {
                 test_config(
                     PREFIX,
                     ConstantProvider::new(schemes[0].clone()),
-                    NZUsize!(1),
+                    NZUsize!(2),
                 ),
             )
             .await;
@@ -1638,21 +2461,21 @@ mod tests {
             let _handle =
                 actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
             assert_eq!(application.acknowledged().await, Height::zero());
-            while application.pending_ack_heights() != vec![Height::new(1)] {
+            while application.pending_ack_heights() != vec![Height::new(1), Height::new(2)] {
                 reschedule().await;
             }
 
             // Both fetches are admitted while block one is still unacknowledged, and their
             // responses are queued before the acknowledgement moves the processed height to one.
             mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
-            mailbox.hint_finalized(Height::new(2), NonEmptyVec::new(participants[1].clone()));
+            mailbox.hint_finalized(Height::new(3), NonEmptyVec::new(participants[1].clone()));
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::zero()))
             );
             assert_eq!(resolver.targeted().len(), 2);
             let mut responses = Vec::new();
-            for block in [&two, &one] {
+            for block in [&three, &one] {
                 let height = block.height();
                 let (response, response_rx) = oneshot::channel();
                 assert!(
@@ -1676,8 +2499,8 @@ mod tests {
             }
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
 
-            // The batch stores block two, then keeps finalization one, and the pooled sync that
-            // follows dispatches block two.
+            // The batch stores block three, then keeps finalization one, and the pooled sync that
+            // follows dispatches block three while block two is still unacknowledged.
             for response in responses {
                 assert_eq!(
                     response.await.expect("marshal must answer each delivery"),
@@ -1685,14 +2508,15 @@ mod tests {
                 );
             }
             assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
-            assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
+            assert!(mailbox.get_finalization(Height::new(3)).await.is_some());
 
-            select! {
-                height = application.acknowledged() => assert_eq!(height, Height::new(2)),
-                _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("block two must be dispatched after the batch")
-                }
-            }
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "block three dispatched after the batch",
+                || application.pending_ack_heights() == vec![Height::new(2), Height::new(3)],
+            )
+            .await;
         });
     }
 
@@ -6479,6 +7303,95 @@ mod tests {
         });
     }
 
+    /// A locally available block cannot reach the finalized archive while its reported
+    /// finalization is still syncing in the cache.
+    #[test_traced("WARN")]
+    fn test_standard_reported_finalization_sync_precedes_block_write() {
+        const PREFIX: &str = "reported-finalization-sync";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let [(block, finalization)] = consecutive_finalizations(&schemes);
+            let (certificates, blocks) =
+                prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            let blocks = Recording::new(blocks, |block| Arc::as_ptr(block).addr());
+            let operations = blocks.ops();
+            let pending = PendingSyncs::default();
+            pending.unblock();
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                DelayedSyncContext {
+                    inner: context.child("actor"),
+                    pending: pending.clone(),
+                },
+                certificates,
+                blocks,
+                test_config(
+                    PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert!(
+                mailbox
+                    .verified(finalization.round(), ready(block.clone()))
+                    .await
+            );
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::zero()))
+            );
+            assert_eq!(
+                mailbox
+                    .get_block(&block.digest())
+                    .await
+                    .map(|stored| stored.digest()),
+                Some(block.digest())
+            );
+
+            // The gate applies to the cache and actor metadata. The finalized archives can
+            // write while the cache sync is held.
+            pending.arm();
+            let sync = next_pending_sync(&pending);
+            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+            select! {
+                entered = sync.blocked => {
+                    entered.expect("reported finalization must wait for its cache sync");
+                },
+                _ = application.acknowledged() => {
+                    panic!("block must not be delivered while the cache sync is pending");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => panic!("the cache sync must begin"),
+            }
+            let wrote_block = || {
+                operations
+                    .lock()
+                    .iter()
+                    .any(|op| matches!(op, Op::Put(height, _) if *height == block.height()))
+            };
+            assert!(
+                !wrote_block(),
+                "block must not be written while the cache sync is pending"
+            );
+
+            sync.release
+                .send(Ok(()))
+                .expect("the cache sync must still be waiting");
+            assert_processed_block_is_covered(
+                &context,
+                &mailbox,
+                &application,
+                &(block.clone(), finalization),
+            )
+            .await;
+            assert!(wrote_block());
+        });
+    }
+
     // Twin of `test_mailbox_verified_sync_failure_panics` for the certify barrier:
     // `certified` awaits the composed block + notarization sync handle.
     #[test_traced("WARN")]
@@ -10488,9 +11401,9 @@ mod tests {
 
             // Models a prunable deployment after section pruning: the application
             // processed through height 3, the section holding earlier heights was
-            // pruned, and height 3 was repaired by walkback without a direct
-            // finalization, so the recovered round floor lags every finalization
-            // on the chain.
+            // pruned, and heights 3 and 4 were repaired by walkback from height 5
+            // without direct finalizations, so the recovered round floor lags every
+            // finalization on the chain.
             let anchor_round = Round::new(Epoch::zero(), View::new(2));
             let anchor = make_raw_block(Sha256::hash(&[b"anchor-parent"]), Height::new(2), 200);
             let anchor_finalization = StandardHarness::make_finalization(
@@ -10514,6 +11427,16 @@ mod tests {
                 QUORUM,
             );
             let next = make_raw_block(processed.digest(), Height::new(4), 400);
+            let tip = make_raw_block(next.digest(), Height::new(5), 500);
+            let tip_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(5)),
+                    View::new(4),
+                    tip.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
             seed_processed_height(
                 context.child("metadata"),
                 partition_prefix,
@@ -10524,8 +11447,8 @@ mod tests {
             seed_inconsistent_restart_state(
                 context.child("storage"),
                 partition_prefix,
-                &[processed.clone(), next.clone()],
-                &[],
+                &[processed.clone(), next.clone(), tip],
+                &[(Height::new(5), tip_finalization)],
             )
             .await;
 
@@ -11461,8 +12384,35 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(4),
             );
+
+            // The finalization of the higher repair block is durable before the actor starts, so
+            // the finalization barrier admits both repair blocks and only the dispatch gate holds
+            // them.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let next = make_raw_block(block.digest(), Height::new(2), 200);
+            let above = make_raw_block(next.digest(), Height::new(3), 300);
+            let above_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(3)),
+                    View::new(2),
+                    above.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let (seeded, _) =
+                prunable_finalized_stores::<Arc<B>>(&context, "stale-floor-anchor").await;
+            seeded
+                .put(3, above.digest(), &above_finalization)
+                .await
+                .expect("seeded finalization must be stored")
+                .sync()
+                .await
+                .expect("seeded finalization must sync");
+            let storage = context.child("paced");
             let (finalizations_by_height, finalized_blocks) =
-                paced_finalized_stores(&context, "stale-floor-anchor", PACE).await;
+                paced_finalized_stores(&storage, "stale-floor-anchor", PACE).await;
             let (actor, mut mailbox, _) = Actor::init(
                 context.child("actor"),
                 finalizations_by_height,
@@ -11477,9 +12427,7 @@ mod tests {
 
             // Finalize block 1 and wait until the application has acknowledged
             // it, so the processed height reaches the anchor height below.
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             assert!(mailbox.verified(round, ready(block.clone())).await);
             let finalization = StandardHarness::make_finalization(
                 Proposal::new(round, View::zero(), block.digest()),
@@ -11538,7 +12486,6 @@ mod tests {
             // blocks at and above the dispatch frontier (buffered
             // finalized-archive writes, ascending), then the stale floor
             // anchor.
-            let next = make_raw_block(block.digest(), Height::new(2), 200);
             let (next_response, next_response_rx) = oneshot::channel();
             assert!(
                 resolver
@@ -11557,7 +12504,6 @@ mod tests {
                     })
                     .accepted()
             );
-            let above = make_raw_block(next.digest(), Height::new(3), 300);
             let (above_response, above_response_rx) = oneshot::channel();
             assert!(
                 resolver

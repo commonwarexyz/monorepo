@@ -1,9 +1,17 @@
-use crate::{Heightable, marshal::store::Blocks, types::Height};
+use crate::{
+    Heightable,
+    marshal::store::{Blocks, Certificates},
+    simplex::types::Finalization,
+    types::Height,
+};
 use commonware_cryptography::Digestible;
 use commonware_runtime::Handle;
 use commonware_storage::archive::Identifier;
 use commonware_utils::sync::Mutex;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// A finalized-block store operation observed by [`Recording`].
 #[derive(Debug, PartialEq, Eq)]
@@ -91,5 +99,82 @@ impl<T: Blocks> Blocks for Recording<T> {
 
     fn last_index(&self) -> Option<Height> {
         self.inner.last_index()
+    }
+}
+
+/// Wraps a certificate store so its syncs never complete. A crash then loses every
+/// finalization it buffered, and the block store keeps its synced writes.
+pub(crate) struct WithheldSync<T> {
+    inner: T,
+    sync_started: Arc<AtomicBool>,
+}
+
+impl<T> WithheldSync<T> {
+    /// Wraps the store without changing its reads or buffered writes.
+    pub(crate) fn new(inner: T) -> Self {
+        Self {
+            inner,
+            sync_started: Arc::default(),
+        }
+    }
+
+    /// Returns a flag set when a sync begins waiting.
+    pub(crate) fn sync_started(&self) -> Arc<AtomicBool> {
+        self.sync_started.clone()
+    }
+}
+
+impl<T: Certificates> Certificates for WithheldSync<T> {
+    type BlockDigest = T::BlockDigest;
+    type Commitment = T::Commitment;
+    type Scheme = T::Scheme;
+    type Error = T::Error;
+
+    async fn put(
+        mut self,
+        height: Height,
+        digest: Self::BlockDigest,
+        finalization: &Finalization<Self::Scheme, Self::Commitment>,
+    ) -> Result<Self, Self::Error> {
+        self.inner = self.inner.put(height, digest, finalization).await?;
+        Ok(self)
+    }
+
+    async fn sync(self) -> Result<Self, Self::Error> {
+        self.sync_started.store(true, Ordering::Release);
+        std::future::pending().await
+    }
+
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Self::Error> {
+        let started = self.sync_started.clone();
+        let handle = Handle::from_future(async move {
+            started.store(true, Ordering::Release);
+            std::future::pending().await
+        });
+        Ok((self, handle))
+    }
+
+    async fn get(
+        &self,
+        id: Identifier<'_, Self::BlockDigest>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+        self.inner.get(id).await
+    }
+
+    async fn has(&self, height: Height) -> Result<bool, Self::Error> {
+        self.inner.has(height).await
+    }
+
+    async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {
+        self.inner = self.inner.prune(min).await?;
+        Ok(self)
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        self.inner.last_index()
+    }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        self.inner.ranges_from(from)
     }
 }
