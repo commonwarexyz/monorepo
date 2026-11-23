@@ -945,12 +945,12 @@ pub mod tests {
         variable_config_full(partition_prefix, NZUsize!(1))
     }
 
-    /// Commit a set of writes as a single batch.
+    /// Apply a set of writes as a single batch, without committing it.
     ///
-    /// Returns a boxed future so the merkleize/apply/commit chain does not inflate the futures
-    /// (and poll frames) of every test composing commits, which overflow the stack on platforms
-    /// with small defaults.
-    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<Family = F> + 'a>(
+    /// Returns a boxed future so the merkleize/apply chain does not inflate the futures (and poll
+    /// frames) of every test composing batches, which overflow the stack on platforms with small
+    /// defaults.
+    fn apply_writes<'a, F: merkle::Graftable, C: DbAny<Family = F> + 'a>(
         db: C,
         writes: impl IntoIterator<Item = (C::Key, Option<C::Value>)> + 'a,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>> + 'a>> {
@@ -960,9 +960,16 @@ pub mod tests {
                 batch = batch.write(k, v);
             }
             let merkleized = batch.merkleize(&db).await?;
-            let db = db.apply_batch(merkleized).await?;
-            db.commit().await
+            db.apply_batch(merkleized).await
         })
+    }
+
+    /// Commit a set of writes as a single batch.
+    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<Family = F> + 'a>(
+        db: C,
+        writes: impl IntoIterator<Item = (C::Key, Option<C::Value>)> + 'a,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>> + 'a>> {
+        Box::pin(async move { apply_writes(db, writes).await?.commit().await })
     }
 
     /// Apply random operations to the database, committing periodically and at the end.
@@ -1114,8 +1121,8 @@ pub mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Reopen a pruned database after dropping an unapplied batch, then after committing a batch
-    /// without syncing Current's bitmap metadata.
+    /// Reopen a pruned database after applying a batch without committing it, then after committing
+    /// a batch without syncing Current's bitmap metadata.
     pub async fn test_simulate_write_failures<M, C, F, Fut>(
         mut context: Context,
         mut open_db: F,
@@ -1150,23 +1157,30 @@ pub mod tests {
             "fixture must prune operation history"
         );
 
-        // Drop the merkleized deletion before applying it. Reopen must recover the committed value.
-        let batch = db
-            .new_batch()
-            .write(key, None)
-            .merkleize(&db)
-            .await
-            .unwrap();
-        drop(batch);
+        // Apply, but don't commit, a batch that deletes `key` and rewrites every history key. The
+        // log then holds however much of the batch storage took before the drop, so the reopen
+        // must recover the whole batch or none of it.
+        let rewrite: WriteVec<C> = core::iter::once((key, None))
+            .chain((0..num_keys).map(|i| (TestKey::from_seed(i), Some(TestValue::from_seed(i)))))
+            .collect();
+        let db = apply_writes(db, rewrite.clone()).await.unwrap();
+        let applied_root = db.root();
+        let applied_end = db.bounds().end;
         drop(db);
         let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 1),
             partition.clone(),
         ))
         .await;
-        assert_eq!(db.root(), committed_root);
-        assert_eq!(db.bounds().end, committed_bounds.end);
-        assert_eq!(db.get(&key).await.unwrap(), Some(value.clone()));
+        let recovered_batch = db.root() == applied_root;
+        if recovered_batch {
+            assert_eq!(db.bounds().end, applied_end);
+            assert_eq!(db.get(&key).await.unwrap(), None);
+        } else {
+            assert_eq!(db.root(), committed_root);
+            assert_eq!(db.bounds().end, committed_bounds.end);
+            assert_eq!(db.get(&key).await.unwrap(), Some(value.clone()));
+        }
 
         // Commit the second history and the deletion. Drop before sync or prune so the journal
         // is durable but Current must recover using the older bitmap metadata.
@@ -1183,16 +1197,19 @@ pub mod tests {
         .await;
         assert_eq!(db.bounds().end, committed_op_count);
         assert_eq!(db.get(&key).await.unwrap(), None);
-        let recovered_root = db.root();
-        drop(db);
+        let recovered = db;
 
         // An uninterrupted database with the same commits must have the same root and op count.
+        // It commits the rewrite only if the first reopen recovered it.
         let fresh_partition = "build-random-fail-commit-fresh".to_string();
         let db: C = Box::pin(open_db(context.child("fresh"), fresh_partition)).await;
         let db = apply_random_ops::<M, C>(num_keys, rng_seed, db)
             .await
             .unwrap();
-        let db = commit_writes(db, [(key, Some(value))]).await.unwrap();
+        let mut db = commit_writes(db, [(key, Some(value))]).await.unwrap();
+        if recovered_batch {
+            db = commit_writes(db, rewrite).await.unwrap();
+        }
         let db = apply_random_ops::<M, C>(num_keys, rng_seed + 1, db)
             .await
             .unwrap();
@@ -1200,7 +1217,13 @@ pub mod tests {
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
         assert_eq!(db.bounds().end, committed_op_count);
-        assert_eq!(db.root(), recovered_root);
+        assert_eq!(db.root(), recovered.root());
+
+        // The root does not cover the snapshot index, so every key must also read the same.
+        for i in 0..=num_keys {
+            let k = <C::Key as TestKey>::from_seed(i);
+            assert_eq!(recovered.get(&k).await.unwrap(), db.get(&k).await.unwrap());
+        }
 
         db.destroy().await.unwrap();
     }
