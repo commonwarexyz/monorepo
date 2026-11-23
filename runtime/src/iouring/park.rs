@@ -171,6 +171,13 @@ const _: () = assert!(
     libc::SYS_io_uring_setup == 425,
     "target must use the kernel's generic system call numbers"
 );
+// futex2 reads its timeout as a `__kernel_timespec`, whose fields are 64 bits
+// on every architecture, so `libc::timespec` must have the same layout.
+#[cfg(not(feature = "loom"))]
+const _: () = assert!(
+    size_of::<libc::timespec>() == 16,
+    "target's timespec must match the kernel's 64-bit timespec"
+);
 
 /// RAII guard returned by [`Parker::arm`], which disarms the word on drop.
 pub struct ArmGuard<'a> {
