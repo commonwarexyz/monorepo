@@ -11,7 +11,10 @@ use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use commonware_storage::{
     Context,
-    journal::contiguous::Mutable,
+    journal::{
+        authenticated,
+        contiguous::{Mutable, Snapshottable},
+    },
     merkle::{Family, Location},
     qmdb::{
         Error,
@@ -142,13 +145,14 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
+    C: Mutable<Item = Operation<F, V>> + Snapshottable<Reader: 'static>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
     type Batch = UnmerkleizedBatch<F, H, V, S>;
     type MerkleizedBatch = MerkleizedBatch<F, H::Digest, V, S>;
+    type Snapshot = Arc<authenticated::Snapshot<F, C::Reader, H, S>>;
 
     fn new_batch(&self) -> Self::Batch {
         self.new_batch()
@@ -168,6 +172,11 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 }
 
@@ -324,7 +333,8 @@ mod tests {
                 let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+                let (database, _snapshot, sync) =
+                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
                 sync.await.expect("database sync failed");
             }

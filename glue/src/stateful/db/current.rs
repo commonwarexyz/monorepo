@@ -14,7 +14,10 @@ use commonware_runtime::Handle;
 use commonware_storage::{
     Context,
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
-    journal::contiguous::{Contiguous, Mutable},
+    journal::{
+        authenticated,
+        contiguous::{Contiguous, Mutable, Snapshottable},
+    },
     merkle::{Graftable, Location},
     qmdb::{
         Error,
@@ -279,7 +282,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
+    C: Mutable<Item = Operation<F, unordered::Update<K, V>>> + Snapshottable<Reader: 'static>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
@@ -287,6 +290,7 @@ where
 {
     type Batch = UnmerkleizedBatch<F, H, unordered::Update<K, V>, N, S>;
     type MerkleizedBatch = MerkleizedBatch<F, H::Digest, unordered::Update<K, V>, N, S>;
+    type Snapshot = Arc<authenticated::Snapshot<F, C::Reader, H, S>>;
 
     fn new_batch(&self) -> Self::Batch {
         self.new_batch()
@@ -306,6 +310,11 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 }
 
@@ -316,7 +325,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
+    C: Mutable<Item = Operation<F, ordered::Update<K, V>>> + Snapshottable<Reader: 'static>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
@@ -324,6 +333,7 @@ where
 {
     type Batch = UnmerkleizedBatch<F, H, ordered::Update<K, V>, N, S>;
     type MerkleizedBatch = MerkleizedBatch<F, H::Digest, ordered::Update<K, V>, N, S>;
+    type Snapshot = Arc<authenticated::Snapshot<F, C::Reader, H, S>>;
 
     fn new_batch(&self) -> Self::Batch {
         self.new_batch()
@@ -343,6 +353,11 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 }
 
@@ -389,7 +404,7 @@ mod tests {
         batch: D::Merkleized,
     ) -> D {
         let db = D::apply(db, batch).await.unwrap();
-        let (db, sync) = D::finalize(db).await.unwrap();
+        let (db, _snapshot, sync) = D::finalize(db).await.unwrap();
         sync.await.expect("database sync failed");
         db
     }
@@ -1081,6 +1096,7 @@ mod tests {
                     assert!(
                         <DbSet as DatabaseSet<_>>::finalize(&databases)
                             .await
+                            .1
                             .durable()
                             .await
                     );

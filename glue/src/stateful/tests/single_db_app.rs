@@ -50,7 +50,10 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{Contiguous as _, fixed::Config as FixedLogConfig},
+    },
     mmr::{self, Location},
     qmdb::{any::unordered::fixed, sync::Target},
     translator::TwoCap,
@@ -537,23 +540,26 @@ impl EngineDefinition for SingleDbEngine {
             .await;
         let sync_floor = plan.floor().cloned();
 
-        // QMDB state-sync resolver.
-        let (qmdb_resolver_actor, qmdb_sync_resolver) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, Qmdb<_>>::new(
-                context.child("qmdb_resolver"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    database: None,
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
-                    fetch_retry_delay: Duration::from_millis(100),
-                    max_serve_ops: SYNC_BATCH_SIZE,
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-            );
+        // Snapshot publication channel and the QMDB state-sync resolver serving from it.
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, snapshot_subscriber) =
+            crate::stateful::db::Publisher::new(&publication_context);
+        let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
+            context.child("qmdb_resolver"),
+            qmdb_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
+                max_serve_ops: SYNC_BATCH_SIZE,
+                serve_timeout: Duration::from_secs(2),
+                priority_requests: false,
+                priority_responses: false,
+            },
+            snapshot_subscriber.clone(),
+        );
         let _qmdb_resolver_handle = qmdb_resolver_actor.start(qmdb_resolver_network);
 
         // Stateful actor
@@ -568,6 +574,7 @@ impl EngineDefinition for SingleDbEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
+                snapshot_publisher,
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(5),
@@ -579,15 +586,10 @@ impl EngineDefinition for SingleDbEngine {
         );
 
         // Observe the oldest operation QMDB still retains, to assert pruning ran.
-        let prune_observer = stateful_mailbox.clone();
         let oldest_retained: OldestRetained = Arc::new(move || {
-            let mailbox = prune_observer.clone();
-            Box::pin(async move {
-                let databases = mailbox.subscribe_databases().await;
-                let guard = databases.read().await;
-                let bounds = guard.bounds();
-                *bounds.start
-            })
+            snapshot_subscriber
+                .latest()
+                .map(|snapshot| snapshot.bounds().start)
         });
 
         // Deferred wrapper

@@ -11,7 +11,7 @@ use crate::stateful::{
         processor::{Applied, Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{Anchor, AttachableResolverSet, DatabaseSet as _},
+    db::{Anchor, Publisher, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -58,11 +58,12 @@ pub(super) struct PendingFinalization<B> {
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
-pub(super) struct Syncing<E, A, V, R, T>
+pub(super) struct Syncing<E, A, V, T>
 where
     E: Context,
     A: Application<E>,
     V: Variant,
+    T: Strategy,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -85,8 +86,8 @@ where
     /// Database subscribers awaiting the handoff.
     pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
 
-    /// Resolvers used for state sync fetching and post-bootstrap serving.
-    pub(super) resolvers: R,
+    /// Publishes the latest snapshots.
+    pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     /// Strategy for computing the digests of blocks built by the application.
     pub(super) strategy: T,
 
@@ -102,12 +103,11 @@ where
     pub(super) metrics: StatefulMetrics,
 }
 
-impl<E, A, V, R, T> Syncing<E, A, V, R, T>
+impl<E, A, V, T> Syncing<E, A, V, T>
 where
     E: Spawner + Context,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
@@ -259,8 +259,13 @@ where
             artifact.anchor,
             self.metrics.clone(),
             self.pruning,
+            self.snapshot_publisher,
             self.strategy.clone(),
         );
+
+        // Serving must not wait for the next finalization, so the synced state
+        // alone publishes first.
+        processor.publish_snapshot().await;
 
         let mut pending_prune = None;
         let mut pending_acknowledgements = Vec::new();
@@ -273,9 +278,14 @@ where
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
-                        let Applied { prune, .. } = processor
+                        let Applied { barrier, prune } = processor
                             .finalize(self.context.as_present(), &self.marshal, &block, false)
                             .await;
+
+                        assert!(
+                            barrier.is_none(),
+                            "the handoff requests no barrier per block"
+                        );
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();
                     }
@@ -287,7 +297,7 @@ where
         // Acknowledge applied handoffs only after one barrier makes the whole applied suffix
         // durable.
         if !pending_acknowledgements.is_empty() {
-            let barrier = processor.databases().finalize().await;
+            let barrier = processor.start_sync().await;
             if !barrier.durable().await {
                 return;
             }
@@ -306,12 +316,12 @@ where
         let _ = self.metrics.sync_done.try_set(1);
         if let Some(prune) = pending_prune {
             prune.run(processor.databases(), &self.marshal).await;
+            // The published snapshots were captured before this prune. Republish
+            // so serving stops pinning the pruned state. Every handoff barrier
+            // was awaited above, so the republished state is already durable.
+            processor.publish_snapshot().await;
         }
 
-        // Attach the databases to peer resolvers before giving subscribers access.
-        self.resolvers
-            .attach_databases(processor.databases().clone())
-            .await;
         for subscriber in self.database_subscribers.drain(..) {
             subscriber.send_lossy(processor.databases().clone());
         }
@@ -401,7 +411,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, Artifact, SyncPlan},
         },
-        db::{Anchor, AttachableResolver, Shared},
+        db::{Anchor, Publisher, Shared},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -443,18 +453,11 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct NoopResolver;
-
-    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<DB>) {}
-    }
-
     struct TestHarness<E>
     where
         E: commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestVariant, NoopResolver, Sequential>,
+        syncing: Syncing<E, TestApp, TestVariant, Sequential>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -558,6 +561,7 @@ mod tests {
                 actor_mailbox::new(context.child("syncer"), NZUsize!(1));
             let (sender, completion) = oneshot::channel();
 
+            let publication_context = context.child("publication");
             let harness = Self {
                 syncing: Syncing {
                     context: ContextCell::new(context.child("syncing")),
@@ -569,7 +573,7 @@ mod tests {
                     syncer: syncer::Mailbox::new(syncer_sender),
                     deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
-                    resolvers: NoopResolver,
+                    snapshot_publisher: Publisher::new(&publication_context).0,
                     completion,
                     pending_finalizations: VecDeque::new(),
                     pruning: None,

@@ -12,7 +12,10 @@ use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use commonware_storage::{
     Context,
-    journal::contiguous::Mutable,
+    journal::{
+        authenticated,
+        contiguous::{Mutable, Snapshottable},
+    },
     merkle::{Family, Location},
     qmdb::{
         Error,
@@ -119,7 +122,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
+    C: Mutable<Item = Operation<F, K, V>> + Snapshottable<Reader: 'static>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -127,6 +130,7 @@ where
 {
     type Batch = UnmerkleizedBatch<F, H, K, V, S>;
     type MerkleizedBatch = MerkleizedBatch<F, H::Digest, K, V, S>;
+    type Snapshot = Arc<authenticated::Snapshot<F, C::Reader, H, S>>;
 
     fn new_batch(&self) -> Self::Batch {
         self.new_batch()
@@ -146,6 +150,11 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 }
 

@@ -6,10 +6,10 @@ use self::{
     },
     mocks::digested,
     multi_db_app::{
-        App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,
+        App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine,
         qmdb_config as multi_qmdb_config,
     },
-    single_db_app::{App, Block, Qmdb, SingleDatabaseSet, SingleDbEngine, qmdb_config},
+    single_db_app::{App, Block, SingleDatabaseSet, SingleDbEngine, qmdb_config},
 };
 use crate::{
     simulate::{
@@ -22,7 +22,7 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
-        db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
+        db::{DatabaseSet, Merkleized as _, Publisher, SyncEngineConfig},
     },
 };
 use commonware_actor::Feedback;
@@ -93,6 +93,7 @@ mod floor;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod properties;
+mod serving;
 mod single_db_app;
 
 const NUM_VALIDATORS: u32 = 5;
@@ -985,14 +986,6 @@ impl QmdbSource for NoopQmdbResolver {
     }
 }
 
-impl AttachableResolver<Qmdb<deterministic::Context>> for NoopQmdbResolver {
-    async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
-}
-
-impl AttachableResolver<Qmdb<DelayedContext>> for NoopQmdbResolver {
-    async fn attach_database(&self, _db: Shared<Qmdb<DelayedContext>>) {}
-}
-
 #[derive(Clone)]
 struct NoopCompactQmdbResolver;
 
@@ -1008,10 +1001,6 @@ impl QmdbSource for NoopCompactQmdbResolver {
     ) -> impl Future<Output = source::Result<Self>> + Send {
         std::future::pending()
     }
-}
-
-impl AttachableResolver<QmdbB<deterministic::Context>> for NoopCompactQmdbResolver {
-    async fn attach_database(&self, _db: Shared<QmdbB<deterministic::Context>>) {}
 }
 
 #[derive(Clone)]
@@ -1374,6 +1363,8 @@ fn out_of_order_certifications_complete_on_qmdb() {
         );
 
         let plan = SyncPlan::init(context.child("plan"), "certify-qmdb-stateful".to_string()).await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
@@ -1390,6 +1381,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                     max_outstanding_requests: NZUsize!(1),
                 },
                 prune_config: None,
+                snapshot_publisher,
                 strategy: Sequential,
             },
         );
@@ -1494,6 +1486,8 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
 
         let plan =
             SyncPlan::init(context.child("plan"), "deferred-qmdb-stateful".to_string()).await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
@@ -1509,6 +1503,7 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: NZUsize!(1),
                 },
+                snapshot_publisher,
                 prune_config: None,
                 strategy: Sequential,
             },
@@ -1700,6 +1695,8 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         .await;
         let mut db_config = qmdb_config("stable-leader-qmdb-stateful", page_cache);
         db_config.log.items_per_blob = NZU64!(1024);
+        let publication_context = delayed.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, mut stateful_mailbox) = StatefulActor::new(
             delayed.child("stateful"),
             StatefulConfig {
@@ -1716,6 +1713,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                     max_outstanding_requests: NZUsize!(1),
                 },
                 prune_config: None,
+                snapshot_publisher,
                 strategy: Sequential,
             },
         );
@@ -1878,6 +1876,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             "certify-multi-qmdb-stateful".to_string(),
         )
         .await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
@@ -1894,6 +1894,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                     max_outstanding_requests: NZUsize!(1),
                 },
                 prune_config: None,
+                snapshot_publisher,
                 strategy: Sequential,
             },
         );
@@ -2115,6 +2116,8 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             "deferred-multi-qmdb-stateful".to_string(),
         )
         .await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
@@ -2130,6 +2133,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: NZUsize!(1),
                 },
+                snapshot_publisher,
                 prune_config: None,
                 strategy: Sequential,
             },
@@ -2349,6 +2353,8 @@ fn pruning_joins_verification_on_real_qmdbs() {
             "prune-overlap-multi-qmdb-stateful".to_string(),
         )
         .await;
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, _snapshot_subscriber) = Publisher::new(&publication_context);
         let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
@@ -2371,6 +2377,7 @@ fn pruning_joins_verification_on_real_qmdbs() {
                     retained_marshal_blocks: 2,
                     retained_qmdb_blocks: 0,
                 }),
+                snapshot_publisher,
                 strategy: Sequential,
             },
         );

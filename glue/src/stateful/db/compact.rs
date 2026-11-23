@@ -4,7 +4,10 @@
 //! historical reads. Keyless batches add operations with `append` and immutable batches with
 //! `set` (see the `keyless` and `immutable` modules).
 
-use crate::stateful::db::qmdb::{Qmdb, Unmerkleized};
+use crate::stateful::db::{
+    CompactTips,
+    qmdb::{Qmdb, Unmerkleized},
+};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
@@ -55,6 +58,9 @@ where
 {
     type Batch = UnmerkleizedBatch<F, H, O, S>;
     type MerkleizedBatch = MerkleizedBatch<F, H::Digest, O, S>;
+    type Snapshot = CompactTips<F, O, H::Digest>;
+
+    const CHEAP_SNAPSHOT: bool = true;
 
     fn new_batch(&self) -> Self::Batch {
         self.new_batch()
@@ -74,6 +80,15 @@ where
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let snapshot = CompactTips::new(Self::snapshot(&self));
+        Ok((self, snapshot))
+    }
+
+    fn merge_snapshot(served: &Self::Snapshot, fresh: Self::Snapshot) -> Self::Snapshot {
+        CompactTips::merge(served, fresh)
     }
 }
 
@@ -633,9 +648,10 @@ mod tests {
                 let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
-                let (database, sync) = <AdapterDb<O> as ManagedDb<_>>::finalize(database)
-                    .await
-                    .unwrap();
+                let (database, _snapshot, sync) =
+                    <AdapterDb<O> as ManagedDb<_>>::finalize(database)
+                        .await
+                        .unwrap();
                 slot.put(database);
                 sync.await.expect("database sync failed");
             }
@@ -690,7 +706,7 @@ mod tests {
             let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, second)
                 .await
                 .unwrap();
-            let (database, sync) = <AdapterDb<O> as ManagedDb<_>>::finalize(database)
+            let (database, _snapshot, sync) = <AdapterDb<O> as ManagedDb<_>>::finalize(database)
                 .await
                 .unwrap();
             sync.await.expect("database sync failed");
@@ -763,7 +779,7 @@ mod tests {
             let batch = UnmerkleizedTrait::merkleize(batch).await.unwrap();
             DatabaseSet::apply(&db, batch).await;
             let target = DatabaseSet::committed_targets(&db).await;
-            assert!(DatabaseSet::finalize(&db).await.durable().await);
+            assert!(DatabaseSet::finalize(&db).await.1.durable().await);
             drop(db);
             let db = <Shared<AdapterDb<O>> as DatabaseSet<_>>::init(
                 context.child("aligned_cap"),
