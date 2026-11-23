@@ -269,7 +269,7 @@ mod tests {
             0
         }
 
-        async fn new_batches(&self) -> Self::Unmerkleized {
+        async fn new_batches(_readers: &Self::Readers) -> Self::Unmerkleized {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
@@ -283,21 +283,25 @@ mod tests {
 
         fn readers(&self) -> Self::Readers {}
 
-        async fn apply(&self, _batches: Self::Merkleized) {
+        async fn apply(self, _batches: Self::Merkleized) -> Self {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn finalize(&self) -> (Self::Snapshots, Barrier) {
+        async fn finalize(self) -> (Self, Self::Snapshots, Barrier) {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn snapshot(&self) -> Self::Snapshots {}
+        async fn snapshot(self) -> (Self, Self::Snapshots) {
+            (self, ())
+        }
 
-        async fn refresh_cheap(&self, _served: &Self::Snapshots) -> Self::Snapshots {}
+        async fn refresh_cheap(self, _served: &Self::Snapshots) -> (Self, Self::Snapshots) {
+            (self, ())
+        }
 
         fn merge_snapshots(_served: &Self::Snapshots, _fresh: Self::Snapshots) -> Self::Snapshots {}
 
-        async fn prune(&self, _targets: &Self::SyncTargets) {
+        async fn prune(self, _targets: &Self::SyncTargets) -> Self {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 

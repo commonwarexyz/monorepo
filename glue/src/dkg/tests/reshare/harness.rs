@@ -26,7 +26,7 @@ use crate::{
         Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
         PruneConfig, Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Single, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
     },
@@ -102,7 +102,7 @@ use std::{
 
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-type Database<E> = Shared<Qmdb<E>>;
+type Database<E> = Single<Qmdb<E>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;

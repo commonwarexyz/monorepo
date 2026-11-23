@@ -11,7 +11,7 @@ use crate::stateful::{
         processor::{Applied, Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{Anchor, Publisher, SnapshotsOf},
+    db::{Anchor, Publisher, ReadersOf, SnapshotsOf},
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -85,7 +85,7 @@ where
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 
     /// Database subscribers awaiting the handoff.
-    pub(super) database_subscribers: Vec<oneshot::Sender<A::Databases>>,
+    pub(super) database_subscribers: Vec<oneshot::Sender<ReadersOf<A::Databases, E>>>,
 
     /// Publishes the latest snapshots.
     pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
@@ -345,7 +345,7 @@ where
         self.plan = self.plan.set_completed(completed_height).await;
         let _ = self.metrics.sync_done.try_set(1);
         if let Some(prune) = pending_prune {
-            prune.run(processor.databases(), &self.marshal).await;
+            processor.prune(prune, &self.marshal).await;
             // The published snapshots were captured before this prune. Republish
             // so serving stops pinning the pruned state. Every handoff barrier
             // was awaited above, so the republished state is already durable.
@@ -353,7 +353,7 @@ where
         }
 
         for subscriber in self.database_subscribers.drain(..) {
-            subscriber.send_lossy(processor.databases().clone());
+            subscriber.send_lossy(processor.readers());
         }
 
         Processing {
@@ -441,7 +441,7 @@ mod tests {
             processor::Pruning,
             syncer::{self, Artifact, SyncPlan},
         },
-        db::{Anchor, Publisher, Shared},
+        db::{Anchor, Publisher, Single},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -778,7 +778,7 @@ mod tests {
                 0,
             ));
             let control = FlushControl::default();
-            artifact.databases = Shared::new("test", TestDb::gated(control.clone()));
+            artifact.databases = Single::from(TestDb::gated(control.clone()));
             let (application, hooks) = TestApp::observe_finalization();
             harness.syncing.application = application;
 
@@ -869,9 +869,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (harness, mut artifact) =
                 TestHarness::new(context.child("harness"), anchor(7, 9)).await;
-            artifact.databases = Shared::new(
-                "test",
-                TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))),
+            artifact.databases = Single::from(TestDb::with_sync(Handle::ready(Err(RuntimeError::Aborted))),
             );
 
             let (acknowledgement, waiter) = Exact::handle();
@@ -975,7 +973,7 @@ mod tests {
             // Its coordinator can finish before a later target update is recorded.
             let control = FlushControl::default();
             let artifact = Artifact {
-                databases: Shared::new("test", TestDb::gated(control.clone())),
+                databases: Single::from(TestDb::gated(control.clone())),
                 anchor: anchor(1, 1),
             };
 

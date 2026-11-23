@@ -161,7 +161,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::{ManagedDb, Merkleized as MerkleizedTrait, Shared};
+    use crate::stateful::db::{ManagedDb, Merkleized as MerkleizedTrait, split};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -209,10 +209,9 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
-            let parent = db
-                .new_batch_for_test::<_>()
+            let parent = ManagedDb::new_batch(reader.clone())
                 .await
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_inactivity_floor(mmr::Location::new(1));
@@ -235,38 +234,40 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let first = db
-                .new_batch_for_test::<_>()
+            let first = ManagedDb::new_batch(reader.clone())
                 .await
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_inactivity_floor(mmr::Location::new(1));
             let first = crate::stateful::db::Unmerkleized::merkleize(first)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, first)
-                    .await
-                    .unwrap();
-                slot.put(database);
-            }
+            let (writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                        .await
+                        .unwrap();
+                    (database, ())
+                })
+                .await;
 
-            let next = db
-                .new_batch_for_test::<_>()
+            let next = ManagedDb::new_batch(reader.clone())
                 .await
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]));
             let next = crate::stateful::db::Unmerkleized::merkleize(next)
                 .await
                 .unwrap();
             assert_eq!(next.bounds().inactivity_floor, mmr::Location::new(1));
-            let (slot, database) = db.write().await;
-            let database = <FixedDb as ManagedDb<_>>::apply(database, next)
-                .await
-                .unwrap();
-            assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
-            slot.put(database);
+            let (_writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <FixedDb as ManagedDb<_>>::apply(database, next)
+                        .await
+                        .unwrap();
+                    assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
+                    (database, ())
+                })
+                .await;
         });
     }
 }

@@ -4,7 +4,7 @@
 //! write, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
-    Shared,
+    Reader,
     qmdb::{Merkleized, Qmdb, Unmerkleized},
 };
 use commonware_codec::Codec;
@@ -54,7 +54,7 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, N, S>,
-    db: Shared<Db<F, E, C, I, H, U, N, S>>,
+    db: Reader<Db<F, E, C, I, H, U, N, S>>,
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> Unmerkleized<Db<F, E, C, I, H, U, N, S>>
@@ -364,7 +364,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::{DatabaseSet, InitError, ManagedDb, StateSyncDb, Unmerkleized};
+    use crate::stateful::db::{
+        DatabaseSet, InitError, ManagedDb, Reader, Single, StateSyncDb, Unmerkleized, Writer, split,
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
@@ -400,13 +402,18 @@ mod tests {
 
     #[boxed]
     async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
-        db: D,
+        writer: Writer<D>,
         batch: D::Merkleized,
-    ) -> D {
-        let db = D::apply(db, batch).await.unwrap();
-        let (db, _snapshot, sync) = D::finalize(db).await.unwrap();
+    ) -> Writer<D> {
+        let (writer, sync) = writer
+            .mutate(|db| async move {
+                let db = D::apply(db, batch).await.unwrap();
+                let (db, _snapshot, sync) = D::finalize(db).await.unwrap();
+                (db, sync)
+            })
+            .await;
         sync.await.expect("database sync failed");
-        db
+        writer
     }
 
     type FixedDb = fixed::Db<
@@ -523,15 +530,15 @@ mod tests {
         assert_managed_db::<OrderedVariableDb>();
         assert_state_sync_db::<OrderedFixedDb, Arc<OrderedFixedDb>>();
         assert_state_sync_db::<OrderedVariableDb, Arc<OrderedVariableDb>>();
-        assert_database_set::<Shared<OrderedFixedDb>>();
-        assert_database_set::<Shared<OrderedVariableDb>>();
+        assert_database_set::<Single<OrderedFixedDb>>();
+        assert_database_set::<Single<OrderedVariableDb>>();
     }
 
     #[test]
     fn variable_current_db_trait_impls_compile() {
         assert_managed_db::<VariableDb>();
         assert_state_sync_db::<VariableDb, Arc<VariableDb>>();
-        assert_database_set::<Shared<VariableDb>>();
+        assert_database_set::<Single<VariableDb>>();
     }
 
     #[test]
@@ -541,14 +548,13 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
             let metadata = Sha256::hash(&[b"metadata"]);
             let missing = Sha256::hash(&[b"missing"]);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = ManagedDb::new_batch(reader.clone())
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
@@ -557,12 +563,9 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            {
-                let (slot, database) = db.write().await;
-                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized).await);
-            }
+            let _writer = apply_and_finalize::<OrderedFixedDb>(writer, merkleized).await;
 
-            let guard = db.read().await;
+            let guard = reader.read().await;
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get(&key).await.unwrap(), Some(value));
 
@@ -583,24 +586,21 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
             let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and persist them.
-            let mut seed = db.new_batch_for_test::<_>().await;
+            let mut seed = ManagedDb::new_batch(reader.clone()).await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized).await);
-            }
+            let _writer = apply_and_finalize::<OrderedFixedDb>(writer, merkleized).await;
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let keys = [key(1), key(2), key(999)];
@@ -608,7 +608,7 @@ mod tests {
             let unstaged = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = db.new_batch_for_test::<_>().await;
+            let mut explicit = ManagedDb::new_batch(reader.clone()).await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (key, slot) in keys.iter().zip(&slots) {
                 let value = match slot {
@@ -628,7 +628,7 @@ mod tests {
                     .root();
 
             // Staged path, with metadata set on the staged handle.
-            let staged_batch = db.new_batch_for_test::<_>().await;
+            let staged_batch = ManagedDb::new_batch(reader.clone()).await;
             let split = 2;
             let (staged, mut staged_values) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (staged, range, suffix_values) = staged.expand(&keys[split..]).await.unwrap();
@@ -647,7 +647,9 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
+            let carried_batch = ManagedDb::new_batch(reader.clone())
+                .await
+                .with_metadata(metadata);
             let (staged, carried_values) = carried_batch.stage(&keys.each_ref()).await.unwrap();
             let carried_root = staged
                 .merkleize(slots.clone(), unstaged.clone())
@@ -666,14 +668,13 @@ mod tests {
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
             let metadata = Sha256::hash(&[b"metadata"]);
             let missing = Sha256::hash(&[b"missing"]);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = ManagedDb::new_batch(reader.clone())
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
@@ -682,12 +683,9 @@ mod tests {
                 .unwrap();
             let expected_root = merkleized.root();
 
-            {
-                let (slot, database) = db.write().await;
-                slot.put(apply_and_finalize::<OrderedVariableDb>(database, merkleized).await);
-            }
+            let _writer = apply_and_finalize::<OrderedVariableDb>(writer, merkleized).await;
 
-            let guard = db.read().await;
+            let guard = reader.read().await;
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get(&key).await.unwrap(), Some(value));
 
@@ -704,14 +702,13 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
                     .await
                     .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = ManagedDb::new_batch(reader.clone())
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
@@ -764,46 +761,38 @@ mod tests {
                 <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
                     .await
                     .unwrap();
-            let db = Shared::new("test", db);
+            let (mut writer, reader) = split(db);
 
             let key1 = Sha256::hash(&[b"key1"]);
             let value1 = Sha256::hash(&[b"value1"]);
             let metadata1 = Sha256::hash(&[b"metadata1"]);
-            let batch1 = db
-                .new_batch_for_test::<_>()
+            let batch1 = ManagedDb::new_batch(reader.clone())
                 .await
                 .write(key1, Some(value1))
                 .with_metadata(metadata1);
             let merkleized1 = crate::stateful::db::Unmerkleized::merkleize(batch1)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized1).await);
-            }
+            writer = apply_and_finalize::<OrderedFixedDb>(writer, merkleized1).await;
             let target_after_first = {
-                let guard = db.read().await;
+                let guard = reader.read().await;
                 <OrderedFixedDb as ManagedDb<_>>::sync_target(&guard)
             };
 
             let key2 = Sha256::hash(&[b"key2"]);
             let value2 = Sha256::hash(&[b"value2"]);
             let metadata2 = Sha256::hash(&[b"metadata2"]);
-            let batch2 = db
-                .new_batch_for_test::<_>()
+            let batch2 = ManagedDb::new_batch(reader.clone())
                 .await
                 .write(key2, Some(value2))
                 .with_metadata(metadata2);
             let merkleized2 = crate::stateful::db::Unmerkleized::merkleize(batch2)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized2).await);
-            }
+            let writer = apply_and_finalize::<OrderedFixedDb>(writer, merkleized2).await;
 
             // Reopen at the first checkpoint and verify the complete recovered target.
-            drop(db);
+            drop((writer, reader));
             let db = <OrderedFixedDb as ManagedDb<_>>::init(
                 context.child("cap"),
                 config.clone(),
@@ -857,14 +846,13 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = ManagedDb::new_batch(reader.clone())
                 .await
                 .write(key, Some(value))
                 .with_metadata(metadata);
@@ -942,11 +930,11 @@ mod tests {
 
         // Batch `id` writes `writes` keys and metadata that no other batch uses.
         async fn batch(
-            db: &Shared<FixedDb>,
+            reader: &Reader<FixedDb>,
             id: u8,
             writes: u8,
         ) -> <FixedDb as ManagedDb<deterministic::Context>>::Merkleized {
-            let mut batch = db.new_batch_for_test::<_>().await;
+            let mut batch = ManagedDb::new_batch(reader.clone()).await;
             for i in 0..writes {
                 batch = batch.write(
                     Sha256::hash(&[b"key", &[id, i]]),
@@ -970,22 +958,21 @@ mod tests {
                 let db = FixedDb::init(context.child("db"), config(), None)
                     .await
                     .unwrap();
-                let db = Shared::new("test", db);
+                let (mut writer, reader) = split(db);
 
                 // Finalize two targets. The second writes one more key than the applied batch
                 // below, so the applied batch cannot cover all of its operations.
                 let mut targets = Vec::new();
                 for (id, count) in [(1, 1), (2, writes + 1)] {
-                    let merkleized = batch(&db, id, count).await;
-                    let (slot, database) = db.write().await;
-                    slot.put(apply_and_finalize::<FixedDb>(database, merkleized).await);
-                    let guard = db.read().await;
+                    let merkleized = batch(&reader, id, count).await;
+                    writer = apply_and_finalize::<FixedDb>(writer, merkleized).await;
+                    let guard = reader.read().await;
                     targets.push(<FixedDb as ManagedDb<_>>::sync_target(&guard));
                 }
                 let second = targets.pop().unwrap();
                 let first = targets.pop().unwrap();
                 assert_ne!(first, second);
-                drop(db);
+                drop((writer, reader));
 
                 // Reopen at the first target, discarding the second. Initialization syncs the
                 // truncated journal before returning.
@@ -997,23 +984,26 @@ mod tests {
                 .await
                 .unwrap();
                 assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), first);
-                let db = Shared::new("test", db);
+                let (writer, reader) = split(db);
 
                 // Apply over the discarded target's bytes, then crash without finalizing. The
                 // batch is one journal append of its updates, floor walk moves, and commit: three
                 // operations for one key and six for four keys. Only the written case exceeds
                 // `CAPACITY`.
-                let merkleized = batch(&db, 3, writes).await;
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let applied = <FixedDb as ManagedDb<_>>::sync_target(&database);
+                let merkleized = batch(&reader, 3, writes).await;
+                let (_writer, applied) = writer
+                    .mutate(|database| async move {
+                        let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                            .await
+                            .unwrap();
+                        let applied = <FixedDb as ManagedDb<_>>::sync_target(&database);
+                        (database, applied)
+                    })
+                    .await;
                 assert_ne!(applied, first);
                 assert!(applied.range.end() < second.range.end());
                 let ops = *(applied.range.end() - first.range.end());
                 assert_eq!(ops > CAPACITY, written);
-                slot.put(database);
                 (first, second, applied)
             });
 
@@ -1074,16 +1064,16 @@ mod tests {
     #[test]
     fn database_set_current_prune_keeps_recovery_targets_initializable() {
         deterministic::Runner::default().start(|context| async move {
-            type DbSet = Shared<FixedDb>;
+            type DbSet = Single<FixedDb>;
             let config = fixed_config("current-prune-recovery-window");
-            let databases =
+            let mut databases =
                 <DbSet as DatabaseSet<_>>::init(context.child("db"), config.clone(), None).await;
 
             // Four generations rewrite the same keys. H1 through H3 are durable, and H4 is
             // applied without a barrier of its own when the prune to H2 runs.
             let mut targets = Vec::new();
             for generation in 0..4u64 {
-                let mut batch = databases.new_batch_for_test::<_>().await;
+                let mut batch = ManagedDb::new_batch(databases.reader()).await;
                 for i in 0..384u64 {
                     batch = batch.write(
                         Sha256::hash(&[&i.to_be_bytes()]),
@@ -1091,20 +1081,16 @@ mod tests {
                     );
                 }
                 let batch = Unmerkleized::merkleize(batch).await.unwrap();
-                <DbSet as DatabaseSet<_>>::apply(&databases, batch).await;
+                databases = <DbSet as DatabaseSet<_>>::apply(databases, batch).await;
                 if generation < 3 {
-                    assert!(
-                        <DbSet as DatabaseSet<_>>::finalize(&databases)
-                            .await
-                            .1
-                            .durable()
-                            .await
-                    );
+                    let barrier;
+                    (databases, _, barrier) = <DbSet as DatabaseSet<_>>::finalize(databases).await;
+                    assert!(barrier.durable().await);
                 }
                 targets.push(<DbSet as DatabaseSet<_>>::committed_targets(&databases).await);
             }
             assert!(*targets[1].range.start() > Location::<mmr::Family>::new(0));
-            <DbSet as DatabaseSet<_>>::prune(&databases, &targets[1]).await;
+            let databases = <DbSet as DatabaseSet<_>>::prune(databases, &targets[1]).await;
             drop(databases);
 
             // An unbounded reopen recovers H4, which the prune committed.

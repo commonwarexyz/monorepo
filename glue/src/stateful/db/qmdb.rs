@@ -18,8 +18,8 @@
 //! hold, and return a `StaleRead` error once the database is at no state of that chain.
 
 use super::{
-    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, validate_initialization,
+    InitError, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait, validate_initialization,
 };
 use commonware_runtime::Handle;
 use commonware_storage::qmdb::{
@@ -82,7 +82,7 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
 /// A [`Qmdb`] batch before merkleization, reading through to its database's applied state.
 pub struct Unmerkleized<D: Qmdb> {
     pub(super) batch: D::Batch,
-    pub(super) db: Shared<D>,
+    pub(super) db: Reader<D>,
 }
 
 impl<D: Qmdb> Deref for Unmerkleized<D> {
@@ -110,7 +110,7 @@ impl<D: Qmdb> UnmerkleizedTrait for Unmerkleized<D> {
 /// A [`Qmdb`] batch after merkleization, reading through to its database's applied state.
 pub struct Merkleized<D: Qmdb> {
     pub(super) inner: Arc<D::MerkleizedBatch>,
-    pub(super) db: Shared<D>,
+    pub(super) db: Reader<D>,
 }
 
 impl<D: Qmdb> Merkleized<D> {
@@ -182,12 +182,9 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
         D::initial_target()
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Unmerkleized<D> {
-        let (database, shared) = database.into_parts();
-        Unmerkleized {
-            batch: Qmdb::new_batch(database),
-            db: shared,
-        }
+    async fn new_batch(db: Reader<Self>) -> Unmerkleized<D> {
+        let batch = Qmdb::new_batch(&*db.read().await);
+        Unmerkleized { batch, db }
     }
 
     fn matches_sync_target(batch: &Merkleized<D>, target: &Self::SyncTarget) -> bool {

@@ -183,7 +183,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::{ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb};
+    use crate::stateful::db::{ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, split};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -244,10 +244,9 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
-            let parent = db
-                .new_batch_for_test::<_>()
+            let parent = ManagedDb::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1));
@@ -269,35 +268,40 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let first = db
-                .new_batch_for_test::<_>()
+            let first = ManagedDb::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1));
             let first = crate::stateful::db::Unmerkleized::merkleize(first)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, first)
-                    .await
-                    .unwrap();
-                slot.put(database);
-            }
+            let (writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                        .await
+                        .unwrap();
+                    (database, ())
+                })
+                .await;
 
-            let next = db.new_batch_for_test::<_>().await.append(U64::new(9));
+            let next = ManagedDb::new_batch(reader.clone())
+                .await
+                .append(U64::new(9));
             let next = crate::stateful::db::Unmerkleized::merkleize(next)
                 .await
                 .unwrap();
             assert_eq!(next.bounds().inactivity_floor, mmr::Location::new(1));
-            let (slot, database) = db.write().await;
-            let database = <FixedDb as ManagedDb<_>>::apply(database, next)
-                .await
-                .unwrap();
-            assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
-            slot.put(database);
+            let (_writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <FixedDb as ManagedDb<_>>::apply(database, next)
+                        .await
+                        .unwrap();
+                    assert_eq!(database.inactivity_floor(), mmr::Location::new(1));
+                    (database, ())
+                })
+                .await;
         });
     }
 
@@ -316,10 +320,9 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = ManagedDb::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -328,18 +331,19 @@ mod tests {
                 .await
                 .unwrap();
 
-            {
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
-                slot.put(database);
-                sync.await.expect("database sync failed");
-            }
+            let (_writer, sync) = writer
+                .mutate(|database| async move {
+                    let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
+                        .await
+                        .unwrap();
+                    let (database, _snapshot, sync) =
+                        <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+                    (database, sync)
+                })
+                .await;
+            sync.await.expect("database sync failed");
 
-            let guard = db.read().await;
+            let guard = reader.read().await;
             assert_eq!(
                 guard.get(mmr::Location::new(1)).await.unwrap(),
                 Some(U64::new(7))
@@ -360,10 +364,9 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = ManagedDb::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))

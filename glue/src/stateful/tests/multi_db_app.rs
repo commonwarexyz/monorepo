@@ -8,7 +8,7 @@ use crate::{
         Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
         PruneConfig, Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SnapshotsOf, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Single, SnapshotsOf, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
         probe::{self, Config as ProbeConfig, Probe},
@@ -78,8 +78,8 @@ pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
 /// A single QMDB database behind a lock.
-type DbA<E> = Shared<QmdbA<E>>;
-type DbB<E> = Shared<QmdbB<E>>;
+type DbA<E> = Single<QmdbA<E>>;
+type DbB<E> = Single<QmdbB<E>>;
 
 /// A full and a compact QMDB as a tuple.
 pub(crate) type MultiDatabaseSet<E> = (DbA<E>, DbB<E>);

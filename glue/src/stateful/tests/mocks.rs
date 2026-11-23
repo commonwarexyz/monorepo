@@ -1,6 +1,6 @@
 use crate::stateful::{
     Application, ExecutionError, Finality, Input, Proposed,
-    db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{DatabaseSet, InitError, ManagedDb, Merkleized, Reader, Single, Unmerkleized, Writer},
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use futures::task::AtomicWaker;
 use std::{
@@ -26,7 +26,7 @@ use std::{
     task::Poll,
 };
 
-pub(crate) type TestDatabases = Shared<TestDb>;
+pub(crate) type TestDatabases = Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -217,7 +217,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+    async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -499,7 +499,26 @@ impl<E: Send + Sync> Application<E> for TestApp {
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb::default())
+    Single::from(TestDb::default())
+}
+
+/// Applies and finalizes `batch` through the cell, returning the snapshot and flush handle.
+pub(crate) async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
+    writer: Writer<D>,
+    batch: D::Merkleized,
+) -> (Writer<D>, D::Snapshot, Handle<()>) {
+    let (writer, (snapshot, handle)) = writer
+        .mutate(|db| async move {
+            let db = D::apply(db, batch)
+                .await
+                .unwrap_or_else(|err| panic!("apply failed: {err:?}"));
+            let (db, snapshot, handle) = D::finalize(db)
+                .await
+                .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
+            (db, (snapshot, handle))
+        })
+        .await;
+    (writer, snapshot, handle)
 }
 
 /// Pairs a test block with its digest.

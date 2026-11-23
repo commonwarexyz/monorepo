@@ -334,7 +334,7 @@ pub trait Application<E>: Clone + Send + 'static {
     /// must leave the application's own state consistent.
     ///
     /// Processing may overlap finalization. Read through the provided batches without holding
-    /// database locks (see [`db::Shared::read`]).
+    /// database locks (see [`db::Reader::read`]).
     fn process(
         &mut self,
         context: (E, Self::Context),

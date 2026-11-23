@@ -1,6 +1,10 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{Application, actor::core::verifications::VerificationRequest};
+use crate::stateful::{
+    Application,
+    actor::core::verifications::VerificationRequest,
+    db::ReadersOf,
+};
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -138,9 +142,9 @@ where
         acknowledgement: Exact,
     },
 
-    /// Requests the database set (see [`Mailbox::subscribe_databases`]).
+    /// Requests readers over the database set (see [`Mailbox::subscribe_databases`]).
     SubscribeDatabases {
-        response: oneshot::Sender<A::Databases>,
+        response: oneshot::Sender<ReadersOf<A::Databases, E>>,
     },
 }
 
@@ -248,19 +252,16 @@ where
         Self { sender }
     }
 
-    /// Returns the database set once startup completes.
+    /// Returns read-only handles to the database set once startup completes.
     ///
     /// Resolves after state sync, if it runs, hands off the database set. After startup, each call
-    /// resolves when the actor reaches it in mailbox order.
-    ///
-    /// Holders MUST NOT prune these databases. [`Stateful`](super::Stateful) prunes according to
-    /// [`Config::prune_config`](crate::stateful::Config::prune_config) and never past the history
-    /// needed for crash recovery.
+    /// resolves when the actor reaches it in mailbox order. The readers observe applied state as
+    /// [`Stateful`](super::Stateful) finalizes blocks.
     ///
     /// # Panics
     ///
     /// Panics if the actor stops before replying.
-    pub async fn subscribe_databases(&self) -> A::Databases {
+    pub async fn subscribe_databases(&self) -> ReadersOf<A::Databases, E> {
         let (response, receiver) = oneshot::channel();
         let _ = self
             .sender

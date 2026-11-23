@@ -62,6 +62,10 @@ pub(super) use verifier::{Prepared, Verifier};
 
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type Unmerkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Unmerkleized;
+type Readers<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Readers;
+
+const DATABASES_LOST: &str =
+    "database set was lost by an earlier interrupted mutation; restart to recover";
 type PendingMap<A, E> = BTreeMap<BlockDigest<A, E>, PendingEntry<A, E>>;
 type FlightResult = Result<(), PrepareBatchesError>;
 
@@ -197,12 +201,12 @@ where
     }
 }
 
-/// Databases, speculative state, and metrics shared by the processor and its verifiers.
+/// Database readers, speculative state, and metrics shared by the processor and its verifiers.
 struct Execution<E, A>
 where
     A: Application<E>,
 {
-    databases: A::Databases,
+    readers: Readers<A, E>,
     state: Arc<Mutex<ExecutionState<A, E>>>,
     metrics: StatefulMetrics,
 }
@@ -213,7 +217,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            databases: self.databases.clone(),
+            readers: self.readers.clone(),
             state: self.state.clone(),
             metrics: self.metrics.clone(),
         }
@@ -273,14 +277,15 @@ impl<T> Prune<T> {
     ///
     /// The caller must ensure a completed database barrier covers `barrier_height` and that no
     /// database barrier is active.
-    pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
+    async fn run<E, DBs, S, V>(self, databases: DBs, marshal: &MarshalMailbox<S, V>) -> DBs
     where
         DBs: DatabaseSet<E, SyncTargets = T>,
         S: Scheme,
         V: MarshalVariant,
     {
-        databases.prune(&self.qmdb_target).await;
+        let databases = databases.prune(&self.qmdb_target).await;
         marshal.prune(self.marshal_height);
+        databases
     }
 }
 
@@ -381,6 +386,8 @@ where
     A: Application<E>,
 {
     app: A,
+    /// The database set, absent once a mutation was interrupted.
+    databases: Option<A::Databases>,
     execution: Execution<E, A>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
     publisher: Publisher<SnapshotsOf<A::Databases, E>>,
@@ -412,7 +419,7 @@ where
         Self {
             app,
             execution: Execution {
-                databases,
+                readers: databases.readers(),
                 state: Arc::new(Mutex::new(ExecutionState {
                     pending: BTreeMap::new(),
                     flights: BTreeMap::new(),
@@ -420,6 +427,7 @@ where
                 })),
                 metrics,
             },
+            databases: Some(databases),
             pruning,
             publisher: publisher.with_merge(A::Databases::merge_snapshots),
             strategy,
@@ -454,9 +462,28 @@ where
         }
     }
 
-    /// Returns a reference to the database set.
-    pub(super) const fn databases(&self) -> &A::Databases {
-        &self.execution.databases
+    /// Returns read-only handles to the database set.
+    pub(super) fn readers(&self) -> Readers<A, E> {
+        self.execution.readers.clone()
+    }
+
+    /// Takes the database set for a by-value mutation. Until the caller restores it, the set
+    /// counts as lost.
+    const fn take_databases(&mut self) -> A::Databases {
+        self.databases.take().expect(DATABASES_LOST)
+    }
+
+    /// Prunes the databases and marshal to `prune`'s targets (see [`Prune::run`]).
+    pub(super) async fn prune<S, V>(
+        &mut self,
+        prune: Prune<SyncTargets<A, E>>,
+        marshal: &MarshalMailbox<S, V>,
+    ) where
+        S: Scheme,
+        V: MarshalVariant,
+    {
+        let databases = self.take_databases();
+        self.databases = Some(prune.run(databases, marshal).await);
     }
 
     /// Returns the current branch anchor.
@@ -467,7 +494,8 @@ where
     /// Capture a snapshot of the database set's applied state and publish it at the branch
     /// anchor's height.
     pub(super) async fn publish_snapshot(&mut self) {
-        let snapshots = self.execution.databases.snapshot().await;
+        let (databases, snapshots) = self.take_databases().snapshot().await;
+        self.databases = Some(databases);
         self.publisher
             .publish(self.execution.branch_anchor().height, snapshots);
     }
@@ -476,7 +504,8 @@ where
     ///
     /// The caller must await the previous barrier before starting another.
     pub(super) async fn start_sync(&mut self) -> Barrier {
-        let (snapshots, barrier) = self.execution.databases.finalize().await;
+        let (databases, snapshots, barrier) = self.take_databases().finalize().await;
+        self.databases = Some(databases);
         self.publisher
             .publish(self.execution.branch_anchor().height, snapshots);
         barrier
@@ -488,7 +517,8 @@ where
         let Some(served) = self.publisher.served() else {
             return;
         };
-        let snapshots = self.execution.databases.refresh_cheap(&served).await;
+        let (databases, snapshots) = self.take_databases().refresh_cheap(&served).await;
+        self.databases = Some(databases);
         // Drop our reference before replacement releases the old served set.
         drop(served);
         self.publisher.refresh(height, snapshots);
@@ -751,7 +781,7 @@ where
         let batch = if let Some(batch) = cached {
             batch
         } else {
-            let batches = self.execution.databases.new_batches().await;
+            let batches = A::Databases::new_batches(&self.execution.readers).await;
 
             // The finalized block must reproduce its committed state.
             let ancestry = self.execution.ancestry(
@@ -786,24 +816,26 @@ where
                 (context.child("capture"), block.context()),
                 block.inner(),
                 &batch,
-                self.execution.databases.readers(),
+                self.execution.readers.clone(),
             )
             .await;
-        self.execution.databases.apply(batch).await;
-        let (snapshots, barrier) = if start_barrier {
-            let (snapshots, barrier) = self.execution.databases.finalize().await;
-            (Some(snapshots), Some(barrier))
+        let databases = self.take_databases().apply(batch).await;
+        let (databases, snapshots, barrier) = if start_barrier {
+            let (databases, snapshots, barrier) = databases.finalize().await;
+            (databases, Some(snapshots), Some(barrier))
         } else if A::Databases::CHEAP_SNAPSHOT {
-            (Some(self.execution.databases.snapshot().await), None)
+            let (databases, snapshots) = databases.snapshot().await;
+            (databases, Some(snapshots), None)
         } else {
-            (None, None)
+            (databases, None, None)
         };
+        self.databases = Some(databases);
         self.app
             .finalized(
                 (context.child("finalized"), block.context()),
                 block.inner(),
                 captured,
-                self.execution.databases.readers(),
+                self.execution.readers.clone(),
             )
             .await;
 
@@ -1005,7 +1037,7 @@ where
             }
         }
 
-        Ok(self.databases.new_batches().await)
+        Ok(A::Databases::new_batches(&self.readers).await)
     }
 
     /// Processes the first block of `ancestry` on its parent's state as a candidate and caches the
@@ -1226,7 +1258,7 @@ mod tests {
     use crate::stateful::{
         Application, ExecutionError, Finality, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
+        db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Single, Unmerkleized as _},
         tests::mocks::digested,
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -1288,7 +1320,7 @@ mod tests {
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
     type QmdbConfig = any::unordered::fixed::Config<TwoCap, Sequential>;
-    type DbSet<E> = Shared<Qmdb<E>>;
+    type DbSet<E> = Single<Qmdb<E>>;
     type TestMerkleized =
         <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
 
@@ -1956,7 +1988,8 @@ mod tests {
         }
 
         async fn view_at_height(&self, height: Height) -> Option<u64> {
-            let db = self.processor.databases().read().await;
+            let readers = self.processor.readers();
+            let db = readers.read().await;
             db.get(&height_key(height))
                 .await
                 .expect("database read should succeed")
@@ -1964,7 +1997,8 @@ mod tests {
         }
 
         async fn counter_value(&self) -> Option<u64> {
-            let db = self.processor.databases().read().await;
+            let readers = self.processor.readers();
+            let db = readers.read().await;
             db.get(&counter_key())
                 .await
                 .expect("database read should succeed")
@@ -2161,7 +2195,11 @@ mod tests {
             let mut harness = Harness::with_app(context, provider, config, app).await;
             harness.processor = Processor::new(
                 ExecutionApp::new(),
-                harness.processor.databases().clone(),
+                harness
+                    .processor
+                    .databases
+                    .take()
+                    .expect("harness holds its databases"),
                 Anchor {
                     height: Height::zero(),
                     round: Block::genesis().context().round,
@@ -2306,7 +2344,7 @@ mod tests {
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(winner.digest(), [hook_gate]));
             let execution = harness.processor.execution.clone();
-            let databases = harness.processor.databases().clone();
+            let databases = harness.processor.readers();
             let block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
@@ -2460,7 +2498,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let winner = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let databases = harness.processor.databases().clone();
+            let databases = harness.processor.readers();
             let read = databases.read().await;
             let execution = harness.processor.execution.clone();
 

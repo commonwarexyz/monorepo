@@ -434,7 +434,7 @@ where
                     }
                 }
                 Step::Action(Action::Message(Message::SubscribeDatabases { response })) => {
-                    response.send_lossy(self.processor.databases().clone());
+                    response.send_lossy(self.processor.readers());
                 }
                 Step::Prune(prune) => {
                     // Pruning waits for the active barrier. It can remove history any branch may
@@ -479,7 +479,7 @@ where
                         assert!(durability.covers(prune.barrier_height));
                     }
                     verifications
-                        .drive(prune.run(self.processor.databases(), &self.marshal), &mut actions)
+                        .drive(self.processor.prune(prune, &self.marshal), &mut actions)
                         .await;
                     // The published snapshots predate this prune and pin the pruned storage, so
                     // capture and publish afresh right away. Starting the successor barrier now
@@ -524,7 +524,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::{DatabaseSet, Publisher, Shared, Subscriber},
+        db::{DatabaseSet, Publisher, Reader, Single, Subscriber},
         tests::{
             fixtures,
             mocks::{
@@ -693,7 +693,7 @@ mod tests {
 
     #[derive(Clone)]
     struct ReadGatedApp {
-        database: Shared<TestDb>,
+        database: Reader<TestDb>,
         gate_height: Height,
         gate: Arc<Mutex<Option<ApplicationGate>>>,
     }
@@ -1057,7 +1057,7 @@ mod tests {
         .await;
 
         let control = FlushControl::default();
-        let databases = Shared::new("test", TestDb::gated(control.clone()));
+        let databases = Single::from(TestDb::gated(control.clone()));
         let pruning =
             prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
         let app = GatedApp {
@@ -1131,9 +1131,9 @@ mod tests {
         .await;
 
         let control = FlushControl::default();
-        let databases = Shared::new("test", TestDb::gated(control.clone()));
+        let databases = Single::from(TestDb::gated(control.clone()));
         let app = ReadGatedApp {
-            database: databases.clone(),
+            database: databases.reader(),
             gate_height: Height::new(3),
             gate: Arc::new(Mutex::new(Some(gate))),
         };
@@ -4199,7 +4199,7 @@ mod tests {
             let process_calls = app.process_calls.clone();
             let control = FlushControl::default();
             let (mut prune_started, prune_release) = control.gate_prune();
-            let databases = Shared::new("prune-replay", TestDb::gated(control.clone()));
+            let databases = Single::from(TestDb::gated(control.clone()));
             let pruning = Pruning::new(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
@@ -4325,7 +4325,7 @@ mod tests {
             };
             let control = FlushControl::default();
             let (mut prune_started, prune_release) = control.gate_prune();
-            let databases = Shared::new("prune-retry", TestDb::gated(control.clone()));
+            let databases = Single::from(TestDb::gated(control.clone()));
             let pruning = Pruning::new(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
@@ -4548,7 +4548,7 @@ mod tests {
             let control = FlushControl::default();
             let processor = Processor::new(
                 app,
-                Shared::new("test", TestDb::gated(control.clone())),
+                Single::from(TestDb::gated(control.clone())),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
@@ -4718,7 +4718,7 @@ mod tests {
                         process_valid: true,
                         observed_contexts: Arc::clone(&observed_contexts),
                     },
-                    Shared::new("test", TestDb::gated(control.clone())),
+                    Single::from(TestDb::gated(control.clone())),
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
@@ -5176,7 +5176,7 @@ mod tests {
             .await;
             let processor = Processor::new(
                 app,
-                Shared::new("finalize-join-shutdown", TestDb::gated(control.clone())),
+                Single::from(TestDb::gated(control.clone())),
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,

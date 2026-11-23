@@ -22,7 +22,7 @@ use crate::{
     stateful::{
         Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
         PruneConfig, Stateful as StatefulActor, SyncPlan,
-        db::{DatabaseSet, Merkleized as _, Publisher, SyncEngineConfig},
+        db::{DatabaseSet, ManagedDb, Merkleized as _, Publisher, SyncEngineConfig},
     },
 };
 use commonware_actor::Feedback;
@@ -1216,7 +1216,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     .await;
     let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases)
+    >>::new_batches(&databases.readers())
     .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
@@ -1271,7 +1271,7 @@ async fn build_multi_chain(
     .await;
     let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases)
+    >>::new_batches(&databases.readers())
     .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
@@ -1594,10 +1594,7 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
             "proposal must keep waiting for its parent",
         );
         drop(proposal);
-        let committed = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = ManagedDb::sync_target(&*databases.read().await);
         let expected = <App as Application<deterministic::Context>>::sync_targets(&blocks[2]);
         assert_eq!(committed, expected, "QMDB target diverged");
 
@@ -1786,10 +1783,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             calls_at_tip < BLOCKS as usize,
             "QMDB durability work was not coalesced (calls={calls_at_tip}, blocks={BLOCKS})",
         );
-        let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<DelayedContext>>::committed_targets(
-            &databases,
-        )
-        .await;
+        let committed = ManagedDb::sync_target(&*databases.read().await);
         assert_eq!(committed, expected, "stable-leader QMDB target diverged");
 
         flusher.abort();
@@ -2018,10 +2012,10 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             acknowledgement.expect("descendant block must become durable");
         }
 
-        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = (
+            ManagedDb::sync_target(&*databases.0.read().await),
+            ManagedDb::sync_target(&*databases.1.read().await),
+        );
         let expected =
             <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");
@@ -2262,10 +2256,10 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             acknowledgement.expect("descendant block should be durable");
         }
 
-        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = (
+            ManagedDb::sync_target(&*databases.0.read().await),
+            ManagedDb::sync_target(&*databases.1.read().await),
+        );
         let expected =
             <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");
@@ -2524,10 +2518,10 @@ fn pruning_joins_verification_on_real_qmdbs() {
             "pruning must preserve the full QMDB tip",
         );
 
-        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = (
+            ManagedDb::sync_target(&*databases.0.read().await),
+            ManagedDb::sync_target(&*databases.1.read().await),
+        );
         let expected =
             <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[3]);
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");

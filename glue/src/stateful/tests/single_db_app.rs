@@ -8,7 +8,7 @@ use crate::{
         Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
         PruneConfig, Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Single, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
         probe::{self, Config as ProbeConfig, Probe},
@@ -66,7 +66,7 @@ use std::{sync::Arc, time::Duration};
 pub(super) type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
+pub(crate) type SingleDatabaseSet<E> = Single<Qmdb<E>>;
 
 /// Builds the QMDB configuration used by single-database tests.
 pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {

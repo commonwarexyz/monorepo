@@ -1,5 +1,5 @@
 use super::{
-    App, Block, NoopQmdbResolver, SingleDatabaseSet, build_chain,
+    App, Block, NoopQmdbResolver, build_chain,
     common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
     fixtures,
     mocks::digested,
@@ -7,7 +7,7 @@ use super::{
 };
 use crate::stateful::{
     Application, Config, Stateful, SyncPlan,
-    db::{DatabaseSet, Publisher, SyncEngineConfig},
+    db::{ManagedDb, Publisher, SyncEngineConfig},
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
@@ -208,8 +208,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     Some(Processed::Block(predecessor))
                 );
                 assert_eq!(
-                    SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
-                        .await,
+                    ManagedDb::sync_target(&*databases.read().await),
                     predecessor_target,
                 );
                 if boot == 0 {
@@ -239,8 +238,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     Some(Processed::Block(floor_height))
                 );
                 assert_eq!(
-                    SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
-                        .await,
+                    ManagedDb::sync_target(&*databases.read().await),
                     floor_target,
                 );
             }
