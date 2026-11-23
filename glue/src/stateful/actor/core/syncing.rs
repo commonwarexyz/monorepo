@@ -31,8 +31,9 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
 };
+use futures::FutureExt as _;
 use std::{collections::VecDeque, mem};
-use tracing::{Instrument as _, debug, error, info_span};
+use tracing::{Instrument as _, debug, info_span};
 
 /// A retained finalization classified against the converged sync anchor.
 ///
@@ -112,6 +113,7 @@ where
     T: Strategy,
 {
     pub async fn run(mut self) {
+        let mut converged = None;
         select_loop! {
             self.context,
             on_start => {
@@ -121,16 +123,20 @@ where
                     .retain(|subscriber| !subscriber.is_closed());
             },
             on_stopped => {
-                debug!("processor received shutdown signal");
+                debug!("syncing loop received shutdown signal");
             },
             Ok(artifact) = &mut self.completion else {
-                error!("syncer stopped before publishing state sync artifact");
+                // The syncer stops only on shutdown, which can fire while this arm is polled.
+                assert!(
+                    self.context.stopped().now_or_never().is_some(),
+                    "syncer stopped before publishing state sync artifact"
+                );
                 break;
             } => {
                 let handoffs =
                     classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
-                self.transition(artifact, handoffs).await;
-                return;
+                converged = Some((artifact, handoffs));
+                break;
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down processor");
@@ -170,9 +176,9 @@ where
                         .finalized(block, acknowledgement)
                         .instrument(process)
                         .await;
-                    if let Some((artifact, handoffs)) = handoff {
-                        self.transition(artifact, handoffs).await;
-                        return;
+                    if handoff.is_some() {
+                        converged = handoff;
+                        break;
                     }
                 }
                 Message::SubscribeDatabases { response } => {
@@ -184,6 +190,11 @@ where
                 }
             },
         }
+
+        // Hand off after the loop, so its stop signal is not held for the node's lifetime.
+        if let Some((artifact, handoffs)) = converged {
+            self.transition(artifact, handoffs).await;
+        }
     }
 
     /// Retains `block` with its acknowledgement and advances the sync target once marshal's
@@ -192,7 +203,8 @@ where
     /// A full window records its newest block as the sync target and then acknowledges every
     /// retained block. Returns the converged [`Artifact`] with the classified handoffs if state
     /// sync finished first, and no handoff otherwise (including when the actor stops while
-    /// retargeting). Panics if marshal delivers more blocks than its window.
+    /// retargeting). Panics if marshal delivers more blocks than its window, or if the syncer
+    /// stops while the actor is not stopping.
     async fn finalized(
         mut self,
         block: Digested<A::Block>,
@@ -225,14 +237,30 @@ where
             .block
             .clone();
 
-        let artifact = select! {
+        let outcome = select! {
             _ = self.context.stopped() => return (self, None),
-            artifact = self.syncer.retarget(
+            outcome = self.syncer.retarget(
                 Anchor::from_block(&newest),
                 A::sync_targets(newest.inner()),
-            ) => artifact,
+            ) => outcome,
         };
-        if let Some(artifact) = artifact {
+        // The syncer exits only on shutdown, which can fire while `retarget` is polled.
+        let Some(outcome) = outcome else {
+            assert!(
+                self.context.stopped().now_or_never().is_some(),
+                "syncer stopped unexpectedly"
+            );
+            return (self, None);
+        };
+        if outcome == syncer::UpdateOutcome::SyncCompleted {
+            // The syncer sent the artifact on the completion channel. Collect it here so the
+            // retained finalizations are handed off under the newest recorded target.
+            let artifact = select! {
+                _ = self.context.stopped() => return (self, None),
+                artifact = &mut self.completion => {
+                    artifact.expect("syncer sends the artifact before reporting SyncCompleted")
+                },
+            };
             let handoffs = classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
             return (self, Some((artifact, handoffs)));
         }
@@ -251,6 +279,8 @@ where
         artifact: Artifact<E, A>,
         handoffs: impl IntoIterator<Item = FinalizedHandoff<Digested<A::Block>>>,
     ) {
+        // Nothing retargets or awaits the syncer from here on. Dropping its mailbox lets it exit.
+        drop(self.syncer);
         let mut completed_height = artifact.anchor.height;
 
         let mut processor = Processor::new(
@@ -521,7 +551,7 @@ mod tests {
                 assert!(poll!(waiter).is_pending());
             }
             assert!(poll!(&mut newest_waiter).is_pending());
-            assert!(response.send(None).is_ok());
+            assert!(response.send(syncer::UpdateOutcome::Observed).is_ok());
             for waiter in &mut waiters {
                 assert!(poll!(waiter).is_pending());
             }
@@ -936,7 +966,7 @@ mod tests {
             );
 
             // Start syncing from block 1.
-            let (mut harness, _mailbox, mut coordinator, _completion) =
+            let (mut harness, _mailbox, mut coordinator, completion) =
                 TestHarness::new_syncing(context.child("harness"), marshal.mailbox.clone()).await;
             harness.syncing.plan = harness.syncing.plan.set_floor(first_finalization).await;
             assert!(harness.syncing.plan.floor().is_some());
@@ -1016,7 +1046,8 @@ mod tests {
             else {
                 panic!("four actual receipts must fill the acknowledgement window");
             };
-            assert!(response.send(Some(artifact)).is_ok());
+            assert!(completion.send(artifact).is_ok());
+            assert!(response.send(syncer::UpdateOutcome::SyncCompleted).is_ok());
             drop(update);
             let (syncing, handoff) = process.await.unwrap();
             let (artifact, handoffs) = handoff.expect("completed artifact must hand off reports");
@@ -1064,7 +1095,18 @@ mod tests {
 
             // The flush releases every receipt, advancing marshal to block 3.
             release.send(Ok(())).unwrap();
-            drop(reporter.subscribe_databases().await);
+            // The syncing loop has handed off, so processing answers this empty proposal.
+            assert!(
+                reporter
+                    .clone()
+                    .propose(
+                        (context.child("fence"), TestBlock::new(0, 0).context()),
+                        ancestry::from_iter(std::iter::empty::<Digested<TestBlock>>()),
+                        (),
+                    )
+                    .await
+                    .is_none()
+            );
             assert_eq!(
                 marshal.mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(3)))
@@ -1096,7 +1138,7 @@ mod tests {
                 true,
             )
             .await;
-            let (harness, _mailbox, mut syncer_receiver, _completion) =
+            let (harness, _mailbox, mut syncer_receiver, completion) =
                 TestHarness::new_syncing(context.child("harness"), marshal).await;
 
             let (acknowledgement, mut waiter) = Exact::handle();
@@ -1110,12 +1152,15 @@ mod tests {
             };
             assert!(poll!(&mut waiter).is_pending());
             assert!(
-                response
-                    .send(Some(Artifact {
+                completion
+                    .send(Artifact {
                         databases: test_databases(),
                         anchor: anchor(7, 9),
-                    }))
-                    .is_ok(),
+                    })
+                    .is_ok()
+            );
+            assert!(
+                response.send(syncer::UpdateOutcome::SyncCompleted).is_ok(),
                 "target update must still await its response",
             );
             drop(update);

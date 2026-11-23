@@ -921,6 +921,48 @@ mod tests {
         )
     }
 
+    /// Queues an empty proposal, which marks a position in mailbox order. Once the actor reaches
+    /// it, it declines without calling the application or reading the databases.
+    fn queue_marker<A>(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<deterministic::Context, A>,
+    ) -> Pin<Box<impl Future<Output = Option<Digested<TestBlock>>> + use<A>>>
+    where
+        A: Application<
+                deterministic::Context,
+                Block = TestBlock,
+                Context = <TestApp as Application<deterministic::Context>>::Context,
+                Input = (),
+            >,
+    {
+        let mut mailbox = mailbox.clone();
+        let context = context.child("marker");
+        Box::pin(async move {
+            mailbox
+                .propose(
+                    (context, TestBlock::new(0, 0).context()),
+                    ancestry::from_iter(std::iter::empty::<Digested<TestBlock>>()),
+                    (),
+                )
+                .await
+        })
+    }
+
+    /// Waits until the actor has handled every earlier mailbox message.
+    async fn processing_fence<A>(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<deterministic::Context, A>,
+    ) where
+        A: Application<
+                deterministic::Context,
+                Block = TestBlock,
+                Context = <TestApp as Application<deterministic::Context>>::Context,
+                Input = (),
+            >,
+    {
+        assert!(queue_marker(context, mailbox).await.is_none());
+    }
+
     async fn spawn_gated_application(
         context: &deterministic::Context,
         prefix: &str,
@@ -1260,7 +1302,7 @@ mod tests {
                 mailbox.verify((context.child("acquiring"), pending.context()), unavailable),
             );
             assert!(poll!(&mut acquiring).is_pending());
-            drop(subscriber.subscribe_databases().await);
+            processing_fence(&context, &subscriber).await;
             drop(acquiring);
             released
                 .await
@@ -1294,7 +1336,7 @@ mod tests {
                 ancestry::from_iter([]),
             ));
             assert!(poll!(&mut incomplete).is_pending());
-            drop(subscriber.subscribe_databases().await);
+            processing_fence(&context, &subscriber).await;
             drop(incomplete);
 
             let mut first = Box::pin(mailbox.verify(
@@ -1316,7 +1358,7 @@ mod tests {
                 ancestry::from_iter([digested(block2.clone())]),
             ));
             assert!(poll!(&mut incomplete).is_pending());
-            drop(subscriber.subscribe_databases().await);
+            processing_fence(&context, &subscriber).await;
             drop(incomplete);
 
             let mut second = Box::pin(mailbox.verify(
@@ -1455,16 +1497,24 @@ mod tests {
 
     /// Resolves once the actor has received every earlier message and handled marshal's replies
     /// to the requests those messages started. The actor and marshal each answer in order: the
-    /// first database subscription shows that the actor has received the messages and sent their
-    /// marshal requests, the marshal query that marshal has answered those requests, and the
-    /// second subscription that the actor has handled the answers.
-    async fn await_marshal_replies<A: Application<deterministic::Context>>(
+    /// first fence shows that the actor has received the messages and sent their marshal requests,
+    /// the marshal query that marshal has answered those requests, and the second fence that the
+    /// actor has handled the answers.
+    async fn await_marshal_replies<A>(
+        context: &deterministic::Context,
         mailbox: &Mailbox<deterministic::Context, A>,
         marshal: &MarshalMailbox<TestScheme, TestVariant>,
-    ) {
-        drop(mailbox.subscribe_databases().await);
+    ) where
+        A: Application<
+                deterministic::Context,
+                Block = TestBlock,
+                Context = <TestApp as Application<deterministic::Context>>::Context,
+                Input = (),
+            >,
+    {
+        processing_fence(context, mailbox).await;
         marshal.get_processed().await;
-        drop(mailbox.subscribe_databases().await);
+        processing_fence(context, mailbox).await;
     }
 
     /// A proposal whose parent a verification is already replaying waits for that replay and
@@ -1504,7 +1554,7 @@ mod tests {
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
-            await_marshal_replies(&mailbox, &marshal).await;
+            await_marshal_replies(&context, &mailbox, &marshal).await;
             assert!(poll!(&mut proposal).is_pending());
             assert_eq!(process_calls.at(parent.height()), 1);
 
@@ -1557,7 +1607,7 @@ mod tests {
                 ancestry::from_iter([digested(child), digested(parent.clone())]),
             ));
             assert!(poll!(&mut verify).is_pending());
-            await_marshal_replies(&mailbox, &marshal).await;
+            await_marshal_replies(&context, &mailbox, &marshal).await;
             assert!(poll!(&mut verify).is_pending());
             assert_eq!(process_calls.at(parent.height()), 1);
 
@@ -1565,7 +1615,7 @@ mod tests {
             // database subscription it has observed the cancellation, and releasing the replay
             // answers the verification without processing the parent again.
             drop(proposal);
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert!(!release.is_closed());
             release
                 .send(())
@@ -1671,7 +1721,7 @@ mod tests {
 
         // The second request joins the first's execution once marshal has answered its ancestry
         // request.
-        await_marshal_replies(mailbox, marshal).await;
+        await_marshal_replies(context, mailbox, marshal).await;
         (verify, prepare)
     }
 
@@ -1776,7 +1826,7 @@ mod tests {
 
             // Once the actor answers a later database subscription, it has observed the
             // cancellation, and the execution is still running for the remaining request.
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert!(!release.is_closed());
             release
                 .send(())
@@ -1874,7 +1924,7 @@ mod tests {
                 ancestry::from_iter(blocks),
             ));
             assert!(poll!(&mut second).is_pending());
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert!(poll!(&mut second).is_pending());
             assert_eq!(process_calls.at(block.height()), 1);
 
@@ -2378,7 +2428,7 @@ mod tests {
                 .expect("first request must process the parent");
             if let Some(second) = &mut second {
                 assert!(poll!(&mut *second).is_pending());
-                await_marshal_replies(&mailbox, &marshal).await;
+                await_marshal_replies(&context, &mailbox, &marshal).await;
                 assert!(poll!(&mut *second).is_pending());
             }
             assert_eq!(process_calls.at(parent.height()), 1);
@@ -2627,7 +2677,7 @@ mod tests {
             // The build queues the database subscription. A later verification starts acquiring
             // its blocks once the actor has received both, so the subscription is queued before
             // the active verification completes.
-            let mut databases = Box::pin(subscriber.subscribe_databases());
+            let mut databases = queue_marker(&context, &subscriber);
             assert!(poll!(&mut databases).is_pending());
             let (acquiring_ancestry, acquired) = AcquiredAncestry::new();
             let mut acquiring_verifier = subscriber.clone();
@@ -2957,7 +3007,7 @@ mod tests {
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
-            await_marshal_replies(&mailbox, &marshal.mailbox).await;
+            await_marshal_replies(&context, &mailbox, &marshal.mailbox).await;
             assert!(poll!(&mut proposal).is_pending());
 
             // Ending the ancestor subscription declines the proposal.
@@ -3162,12 +3212,12 @@ mod tests {
             let (acknowledgement, first_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
             let first_subscriber = mailbox.clone();
-            let mut first_databases = Box::pin(first_subscriber.subscribe_databases());
+            let mut first_databases = queue_marker(&context, &first_subscriber);
             assert!(poll!(&mut first_databases).is_pending());
             let (acknowledgement, mut second_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(second), acknowledgement));
             let second_subscriber = mailbox.clone();
-            let mut second_databases = Box::pin(second_subscriber.subscribe_databases());
+            let mut second_databases = queue_marker(&context, &second_subscriber);
             assert!(poll!(&mut second_databases).is_pending());
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
@@ -4042,7 +4092,7 @@ mod tests {
                 ancestry::from_iter([digested(first.clone()), digested(genesis)]),
             ));
             assert!(poll!(&mut verify_first).is_pending());
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert!(poll!(&mut verify_first).is_pending());
 
             // The descendant's own processing is held once its ancestors are recovered.
@@ -4344,7 +4394,7 @@ mod tests {
                 .expect("proposal queued behind finalization should start");
 
             let subscriber = mailbox.clone();
-            let mut databases = Box::pin(subscriber.subscribe_databases());
+            let mut databases = queue_marker(&context, &subscriber);
             assert!(poll!(&mut databases).is_pending());
 
             assert!(
@@ -4569,12 +4619,12 @@ mod tests {
             let first = TestBlock::child(&TestBlock::new(0, 0), 1);
             let (ack, _waiter) = Exact::handle();
             mailbox.report(Update::Block(digested(first.clone()), ack));
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             let (ack, mut duplicate) = Exact::handle();
             mailbox.report(Update::Block(digested(first.clone()), ack));
 
             // The subscription is a FIFO fence after both reports have been handled.
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert_eq!(control.applied.load(Ordering::Relaxed), 1);
             assert!(poll!(&mut duplicate).is_pending());
             assert_eq!(control.flushes.lock().len(), 1);
@@ -4672,7 +4722,7 @@ mod tests {
 
             // Marshal reports genesis on startup. Cases with a processed genesis acknowledge it.
             assert_eq!(marshal.mailbox.get_processed().await, None);
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert_eq!(observer.pending_ack_heights(), [Height::zero()]);
             if genesis_processed {
                 assert_eq!(observer.acknowledge_next(), Some(Height::zero()));
@@ -4698,11 +4748,11 @@ mod tests {
                 };
                 ingress.report(Activity::Finalization(finalization));
                 let _ = marshal.mailbox.get_processed().await;
-                drop(mailbox.subscribe_databases().await);
+                processing_fence(&context, &mailbox).await;
                 assert_eq!(control.flushes.lock().len(), 1);
                 if block.height().get() <= floor_height {
                     control.flushes.lock().remove(0).send(Ok(())).unwrap();
-                    drop(mailbox.subscribe_databases().await);
+                    processing_fence(&context, &mailbox).await;
                 }
             }
 
@@ -4739,7 +4789,7 @@ mod tests {
                 marshal.mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(floor_height - 1)))
             );
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             let mut expected = heights.clone();
             expected.extend((floor_height..=floor_height + 2).map(Height::new));
             assert_eq!(observer.pending_ack_heights(), expected);
@@ -4782,7 +4832,7 @@ mod tests {
 
             // Releasing F+1's flush acknowledges it and starts the flush for F+2.
             control.flushes.lock().remove(0).send(Ok(())).unwrap();
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert_eq!(
                 marshal.mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(floor_height + 1))),
@@ -4791,7 +4841,7 @@ mod tests {
 
             // Releasing F+2's flush acknowledges it without applying any block again.
             control.flushes.lock().remove(0).send(Ok(())).unwrap();
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert_eq!(
                 marshal.mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(floor_height + 2))),
@@ -4875,7 +4925,7 @@ mod tests {
             );
 
             // Processing handles the floor block before this request and panics.
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
         });
     }
 
@@ -5756,7 +5806,7 @@ mod tests {
             let mut verification =
                 Box::pin(verifier.verify((context.child("verify"), child.context()), ancestry));
             assert!(poll!(&mut verification).is_pending());
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             let acquisitions = clones.load(Ordering::SeqCst);
             assert!(acquisitions > 0);
 
@@ -5792,14 +5842,14 @@ mod tests {
                 PendingAncestry(clones.clone()),
             ));
             assert!(poll!(&mut verify).is_pending());
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             let attempts = clones.load(Ordering::SeqCst);
 
             // Observe the redelivery before checking that acquisition was left running.
             let (ack, waiter) = Exact::handle();
             mailbox.report(Update::Block(digested(TestBlock::new(0, 0)), ack));
             waiter.await.expect("redelivered tip must be acknowledged");
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert_eq!(
                 clones.load(Ordering::SeqCst),
                 attempts,
@@ -5931,7 +5981,7 @@ mod tests {
                 second_mailbox.verify((context.child("second"), block.context()), ancestry),
             );
             assert!(poll!(&mut second).is_pending());
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
             assert!(
                 !ancestry_gate.lock().wakers.is_empty(),
                 "second acquisition must have registered its wakeup",
@@ -5941,7 +5991,7 @@ mod tests {
             // Acquisition admits the second step, then cancellation removes the first holder.
             AncestryGate::open(&ancestry_gate);
             drop(first);
-            drop(mailbox.subscribe_databases().await);
+            processing_fence(&context, &mailbox).await;
 
             assert!(
                 !process_release.is_closed(),
