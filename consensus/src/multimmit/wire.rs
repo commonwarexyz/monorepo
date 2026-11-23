@@ -620,14 +620,17 @@ pub(crate) mod fuzz {
     #[cfg(test)]
     mod tests {
         use super::exercise;
-        use proptest::prelude::*;
+        use commonware_invariants::minifuzz;
 
-        proptest! {
-            #![proptest_config(ProptestConfig::with_cases(64))]
-            #[test]
-            fn accepted_frames_reencode_canonically(input in proptest::collection::vec(any::<u8>(), 0..1024)) {
-                exercise(&input);
-            }
+        #[test]
+        fn accepted_frames_reencode_canonically() {
+            minifuzz::Builder::default()
+                .with_search_limit(64)
+                .test(|u| {
+                    let len = u.int_in_range(0usize..=1023)?;
+                    exercise(u.bytes(len)?);
+                    Ok(())
+                });
         }
     }
 }

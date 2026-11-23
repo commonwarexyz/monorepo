@@ -436,7 +436,7 @@ pub(crate) mod fuzz {
         };
         use commonware_codec::{Decode as _, Encode as _};
         use commonware_cryptography::{Hasher as _, Sha256};
-        use proptest::prelude::*;
+        use commonware_invariants::minifuzz;
         use std::sync::Arc;
 
         #[test]
@@ -460,14 +460,15 @@ pub(crate) mod fuzz {
             exercise(&input);
         }
 
-        proptest! {
-            #![proptest_config(ProptestConfig::with_cases(256))]
-            #[test]
-            fn accepted_responses_reencode_and_keep_their_linkage(
-                input in proptest::collection::vec(any::<u8>(), 0..2048),
-            ) {
-                exercise(&input);
-            }
+        #[test]
+        fn accepted_responses_reencode_and_keep_their_linkage() {
+            minifuzz::Builder::default()
+                .with_search_limit(256)
+                .test(|u| {
+                    let len = u.int_in_range(0usize..=2047)?;
+                    exercise(u.bytes(len)?);
+                    Ok(())
+                });
         }
     }
 }

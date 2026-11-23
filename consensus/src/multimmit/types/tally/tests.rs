@@ -19,9 +19,9 @@ use commonware_cryptography::{
     bls12381::primitives::variant::{MinPk, MinSig},
     sha256,
 };
+use commonware_invariants::minifuzz;
 use commonware_parallel::Sequential;
 use commonware_utils::test_rng;
-use proptest::{collection::vec as prop_vec, prelude::*};
 
 fn digest(marker: u64) -> sha256::Digest {
     Sha256::hash(&[&marker.to_be_bytes()])
@@ -55,51 +55,66 @@ fn leader() -> LeaderBlock<Bls<MinSig>, sha256::Digest> {
     .unwrap()
 }
 
-proptest! {
-    #[test]
-    fn compact_tally_round_trips_every_exact_vote(
-        positions in prop_vec(prop_vec(0u32..=1, 6), 6),
-        extension_flags in prop_vec(prop_vec(any::<bool>(), 6), 6),
-        count in 1usize..=6,
-    ) {
-        let config = config();
-        let leader = leader();
-        let votes = (0..count)
-            .map(|signer| {
-                let extensions = extension_flags[signer]
-                    .iter()
-                    .enumerate()
-                    .map(|(chain, present)| {
-                        let payloads = present.then(|| digest(1_000 + (signer * 6 + chain) as u64));
-                        Extension::new(payloads.into_iter().collect(), config.extension_bound()).unwrap()
-                    })
-                    .collect();
-                let body = VoteBody::for_leader(
-                    DigestedLeader::new::<Sha256>(&leader),
-                    positions[signer].iter().copied().map(Position::new).collect(),
-                    extensions,
-                    config)
-                .unwrap();
-                (Participant::from_usize(signer), body)
-            })
-            .collect::<Vec<_>>();
-        let tally = Tally::from_votes(
-            DigestedLeader::new::<Sha256>(&leader),
-            votes.iter().cloned(),
-            config)
-        .unwrap();
+#[test]
+fn compact_tally_round_trips_every_exact_vote() {
+    minifuzz::Builder::default()
+        .with_search_limit(256)
+        .test(|u| {
+            let mut positions = [[0u32; 6]; 6];
+            for position in positions.iter_mut().flatten() {
+                *position = u.int_in_range(0u32..=1)?;
+            }
+            let extension_flags: [[bool; 6]; 6] = u.arbitrary()?;
+            let count = u.int_in_range(1usize..=6)?;
+            let config = config();
+            let leader = leader();
+            let votes = (0..count)
+                .map(|signer| {
+                    let extensions = extension_flags[signer]
+                        .iter()
+                        .enumerate()
+                        .map(|(chain, present)| {
+                            let payloads =
+                                present.then(|| digest(1_000 + (signer * 6 + chain) as u64));
+                            Extension::new(payloads.into_iter().collect(), config.extension_bound())
+                                .unwrap()
+                        })
+                        .collect();
+                    let body = VoteBody::for_leader(
+                        DigestedLeader::new::<Sha256>(&leader),
+                        positions[signer]
+                            .iter()
+                            .copied()
+                            .map(Position::new)
+                            .collect(),
+                        extensions,
+                        config,
+                    )
+                    .unwrap();
+                    (Participant::from_usize(signer), body)
+                })
+                .collect::<Vec<_>>();
+            let tally = Tally::from_votes(
+                DigestedLeader::new::<Sha256>(&leader),
+                votes.iter().cloned(),
+                config,
+            )
+            .unwrap();
 
-        for (signer, expected) in &votes {
-            prop_assert_eq!(
-                tally.vote(DigestedLeader::new::<Sha256>(&leader), *signer, config).unwrap(),
-                expected.clone(),
-            );
-        }
-        let mut encoded = tally.encode();
-        let decoded = Tally::decode_for_leader(&mut encoded, &leader, config).unwrap();
-        prop_assert!(!encoded.has_remaining());
-        prop_assert_eq!(decoded, tally);
-    }
+            for (signer, expected) in &votes {
+                assert_eq!(
+                    tally
+                        .vote(DigestedLeader::new::<Sha256>(&leader), *signer, config)
+                        .unwrap(),
+                    expected.clone(),
+                );
+            }
+            let mut encoded = tally.encode();
+            let decoded = Tally::decode_for_leader(&mut encoded, &leader, config).unwrap();
+            assert!(!encoded.has_remaining());
+            assert_eq!(decoded, tally);
+            Ok(())
+        });
 }
 
 #[test]

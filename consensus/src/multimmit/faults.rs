@@ -70,7 +70,7 @@ impl MultimmitFaults for N5f1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
+    use commonware_invariants::minifuzz;
     use rstest::rstest;
     use std::panic::{UnwindSafe, catch_unwind};
 
@@ -185,32 +185,35 @@ mod tests {
         assert_panics(|| N5f1::da_quorum(u64::MAX));
     }
 
-    proptest! {
-        /// N5f1 quorum relationships must hold for all valid participant counts.
-        ///
-        /// For n >= 6 (where f >= 1):
-        /// - every helper equals its defining formula; and
-        /// - `f+1 <= 2f+1 <= 3f+1 <= n-2f <= n-f <= n`.
-        #[test]
-        fn test_n5f1_quorum_relationships(n in 6u32..10_000) {
-            let f = N5f1::max_faults(n);
-            let safe = N5f1::safe_rank(n);
-            let nullification = N5f1::nullification_quorum(n);
-            let finalized = N5f1::final_rank(n);
-            let da = N5f1::da_quorum(n);
-            let quorum = N5f1::quorum(n);
+    /// N5f1 quorum relationships must hold for all valid participant counts.
+    ///
+    /// For n >= 6 (where f >= 1):
+    /// - every helper equals its defining formula; and
+    /// - `f+1 <= 2f+1 <= 3f+1 <= n-2f <= n-f <= n`.
+    #[test]
+    fn test_n5f1_quorum_relationships() {
+        minifuzz::Builder::default()
+            .with_search_limit(512)
+            .test(|u| {
+                let n = u.int_in_range(6u32..=9_999)?;
+                let f = N5f1::max_faults(n);
+                let safe = N5f1::safe_rank(n);
+                let nullification = N5f1::nullification_quorum(n);
+                let finalized = N5f1::final_rank(n);
+                let da = N5f1::da_quorum(n);
+                let quorum = N5f1::quorum(n);
 
-            prop_assert_eq!(safe, f + 1);
-            prop_assert_eq!(nullification, 2 * f + 1);
-            prop_assert_eq!(finalized, 3 * f + 1);
-            prop_assert_eq!(da, n - 2 * f);
-            prop_assert_eq!(quorum, n - f);
-            prop_assert!(safe <= nullification);
-            prop_assert!(nullification <= finalized);
-            prop_assert!(finalized <= da);
-            prop_assert!(da <= quorum);
-            prop_assert!(quorum <= n);
-        }
-
+                assert_eq!(safe, f + 1);
+                assert_eq!(nullification, 2 * f + 1);
+                assert_eq!(finalized, 3 * f + 1);
+                assert_eq!(da, n - 2 * f);
+                assert_eq!(quorum, n - f);
+                assert!(safe <= nullification);
+                assert!(nullification <= finalized);
+                assert!(finalized <= da);
+                assert!(da <= quorum);
+                assert!(quorum <= n);
+                Ok(())
+            });
     }
 }

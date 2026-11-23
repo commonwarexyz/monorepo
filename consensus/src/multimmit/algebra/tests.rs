@@ -17,6 +17,7 @@ use crate::{
     },
     types::{Epoch, Height, Participant, Round, View},
 };
+use arbitrary::Unstructured;
 use commonware_cryptography::{
     Hasher, Sha256,
     bls12381::{
@@ -29,10 +30,13 @@ use commonware_cryptography::{
     },
     sha256,
 };
+use commonware_invariants::minifuzz;
 use commonware_utils::{Faults, N5f1, TestRng};
-use proptest::{collection::vec as prop_vec, prelude::*};
 use rand::seq::SliceRandom;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::RangeInclusive,
+};
 
 type Digest = sha256::Digest;
 
@@ -1540,74 +1544,91 @@ fn cross_certificate_safe_and_final_tips_match_reference() {
     }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+/// Generates between `votes` vote descriptions, each a position up to 2 and an extension of up to
+/// two application bytes.
+fn descriptions(
+    u: &mut Unstructured<'_>,
+    votes: RangeInclusive<usize>,
+) -> arbitrary::Result<Vec<(u32, Vec<u8>)>> {
+    let len = u.int_in_range(votes)?;
+    (0..len)
+        .map(|_| {
+            let position = u.int_in_range(0u32..=2)?;
+            let extension = u.int_in_range(0usize..=2)?;
+            let extension = (0..extension)
+                .map(|_| u.arbitrary::<u8>())
+                .collect::<arbitrary::Result<_>>()?;
+            Ok((position, extension))
+        })
+        .collect()
+}
 
-    #[test]
-    fn safe_tips_match_materialized_reference(
-        descriptions in prop_vec((0u32..=2, prop_vec(any::<u8>(), 0..=2)), 3..=5),
-    ) {
-        let config = config(6);
-        let leader = leader(6);
-        let votes = descriptions
-            .into_iter()
-            .map(|(position, extension)| {
-                let extension = application_digests(&leader, position, extension);
-                vote_with_digests(&leader, position, extension, config)
-            })
-            .collect::<Vec<_>>();
-        let production = Tips::from_votes::<Sha256, Bls<MinSig>, _>(
-            &leader,
-            indexed(&votes),
-            config,
-        )
-        .unwrap();
+#[test]
+fn safe_tips_match_materialized_reference() {
+    minifuzz::Builder::default()
+        .with_search_limit(128)
+        .test(|u| {
+            let descriptions = descriptions(u, 3..=5)?;
+            let config = config(6);
+            let leader = leader(6);
+            let votes = descriptions
+                .into_iter()
+                .map(|(position, extension)| {
+                    let extension = application_digests(&leader, position, extension);
+                    vote_with_digests(&leader, position, extension, config)
+                })
+                .collect::<Vec<_>>();
+            let production =
+                Tips::from_votes::<Sha256, Bls<MinSig>, _>(&leader, indexed(&votes), config)
+                    .unwrap();
 
-        prop_assert_eq!(production.blocks(), reference_safe(&leader, &votes, config));
-    }
+            assert_eq!(production.blocks(), reference_safe(&leader, &votes, config));
+            Ok(())
+        });
+}
 
-    #[test]
-    fn final_tips_match_materialized_reference(
-        descriptions in prop_vec((0u32..=2, prop_vec(any::<u8>(), 0..=2)), 5..=6),
-    ) {
-        let config = config(6);
-        let leader = leader(6);
-        let votes = descriptions
-            .into_iter()
-            .map(|(position, extension)| {
-                let extension = application_digests(&leader, position, extension);
-                vote_with_digests(&leader, position, extension, config)
-            })
-            .collect::<Vec<_>>();
-        let production = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
-            &leader,
-            indexed(&votes),
-            config,
-        )
-        .unwrap();
-        let (blocks, positions, settled) = reference_final(&leader, &votes, config);
-        let mut incremental = PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
-        for (index, vote) in votes.iter().enumerate() {
-            incremental
-                .insert::<Sha256, Bls<MinSig>>(&leader, Participant::new(index as u32), vote)
-                .unwrap();
-            if index + 1 >= config.view_quorum() {
-                let expected = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
-                    &leader,
-                    indexed(&votes[..=index]),
-                    config,
-                )
-                .unwrap();
-                prop_assert_eq!(incremental.final_tips().unwrap(), expected);
+#[test]
+fn final_tips_match_materialized_reference() {
+    minifuzz::Builder::default()
+        .with_search_limit(128)
+        .test(|u| {
+            let descriptions = descriptions(u, 5..=6)?;
+            let config = config(6);
+            let leader = leader(6);
+            let votes = descriptions
+                .into_iter()
+                .map(|(position, extension)| {
+                    let extension = application_digests(&leader, position, extension);
+                    vote_with_digests(&leader, position, extension, config)
+                })
+                .collect::<Vec<_>>();
+            let production =
+                FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(&leader, indexed(&votes), config)
+                    .unwrap();
+            let (blocks, positions, settled) = reference_final(&leader, &votes, config);
+            let mut incremental =
+                PoolExtractor::new::<Sha256, Bls<MinSig>>(&leader, config).unwrap();
+            for (index, vote) in votes.iter().enumerate() {
+                incremental
+                    .insert::<Sha256, Bls<MinSig>>(&leader, Participant::new(index as u32), vote)
+                    .unwrap();
+                if index + 1 >= config.view_quorum() {
+                    let expected = FinalTips::from_pool::<Sha256, Bls<MinSig>, _>(
+                        &leader,
+                        indexed(&votes[..=index]),
+                        config,
+                    )
+                    .unwrap();
+                    assert_eq!(incremental.final_tips().unwrap(), expected);
+                }
             }
-        }
 
-        prop_assert_eq!(production.blocks(), blocks);
-        for index in 0..config.chains() {
-            let chain = ChainId::new(index as u32);
-            prop_assert_eq!(production.position(chain), Some(positions[index]));
-            prop_assert_eq!(production.settled(chain), Some(settled[index]));
-        }
-    }
-
+            assert_eq!(production.blocks(), blocks);
+            for index in 0..config.chains() {
+                let chain = ChainId::new(index as u32);
+                assert_eq!(production.position(chain), Some(positions[index]));
+                assert_eq!(production.settled(chain), Some(settled[index]));
+            }
+            Ok(())
+        });
 }
