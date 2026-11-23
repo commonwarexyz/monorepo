@@ -1,3 +1,7 @@
+//! Warns when a release build sets no stability cfg, or more than one stability level.
+//!
+//! It reads the cfgs this crate is built with, which match those of the crates it gates.
+
 use std::env;
 
 /// Stability levels in order of increasing stability.
@@ -31,15 +35,6 @@ fn stability_cfgs() -> Vec<&'static str> {
         return found;
     }
 
-    // Check RUSTFLAGS directly
-    let rustflags = env::var("RUSTFLAGS").unwrap_or_default();
-    let found: Vec<_> = all_levels()
-        .filter(|level| rustflags.contains(&format!("commonware_stability_{}", level)))
-        .collect();
-    if !found.is_empty() {
-        return found;
-    }
-
     // Check CARGO_ENCODED_RUSTFLAGS
     let encoded = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
     all_levels()
@@ -51,7 +46,6 @@ fn stability_cfgs() -> Vec<&'static str> {
 }
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
     println!("cargo:rerun-if-env-changed=PROFILE");
 
