@@ -44,28 +44,89 @@ const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
 /// Regions filled concurrently by one request.
 const CONCURRENT_FILLS: usize = 8;
 
+/// Digests in each sealed chunk of a [Level].
+const LEVEL_CHUNK: usize = 1024;
+
 /// Born nodes of one resident height at or past the boundary, in ordinal order.
+///
+/// Nodes are only appended and dropped from the front, so full chunks are sealed and shared:
+/// a clone shares them and copies only the unsealed tail.
+#[derive(Clone)]
 struct Level<D> {
     /// Ordinal of the first node.
     first: u64,
-    /// Digests of the nodes from ordinal `first` on, in ordinal order.
-    nodes: VecDeque<D>,
+    /// Sealed chunks of [LEVEL_CHUNK] digests. The first `skip` digests of the front chunk are
+    /// dropped. `skip` is 0 when there are no chunks.
+    chunks: VecDeque<Arc<[D]>>,
+    skip: usize,
+    /// Digests after the last sealed chunk, fewer than [LEVEL_CHUNK].
+    tail: Vec<D>,
 }
 
 impl<D: Copy> Level<D> {
+    const fn new(first: u64) -> Self {
+        Self {
+            first,
+            chunks: VecDeque::new(),
+            skip: 0,
+            tail: Vec::new(),
+        }
+    }
+
     fn get(&self, ordinal: u64) -> Option<D> {
-        let index = usize::try_from(ordinal.checked_sub(self.first)?).ok()?;
-        self.nodes.get(index).copied()
+        let index = usize::try_from(ordinal.checked_sub(self.first)?).ok()? + self.skip;
+        let sealed = self.chunks.len() * LEVEL_CHUNK;
+        if index < sealed {
+            return Some(self.chunks[index / LEVEL_CHUNK][index % LEVEL_CHUNK]);
+        }
+        self.tail.get(index - sealed).copied()
+    }
+
+    /// The number of nodes held.
+    fn len(&self) -> usize {
+        self.chunks.len() * LEVEL_CHUNK - self.skip + self.tail.len()
     }
 
     /// The number of nodes of this height born so far.
     fn end(&self) -> u64 {
-        self.first + self.nodes.len() as u64
+        self.first + self.len() as u64
+    }
+
+    fn push(&mut self, digest: D) {
+        self.tail.push(digest);
+        if self.tail.len() == LEVEL_CHUNK {
+            self.chunks.push_back(core::mem::take(&mut self.tail).into());
+        }
+    }
+
+    /// Drop the first `count` nodes, which must be held.
+    fn drop_front(&mut self, mut count: usize) {
+        self.first += count as u64;
+        while count > 0 {
+            if self.chunks.is_empty() {
+                self.tail.drain(..count);
+                return;
+            }
+            let held = LEVEL_CHUNK - self.skip;
+            if count < held {
+                self.skip += count;
+                return;
+            }
+            self.chunks.pop_front();
+            self.skip = 0;
+            count -= held;
+        }
+    }
+
+    /// Digests this level has room for.
+    fn capacity(&self) -> usize {
+        self.chunks.len() * LEVEL_CHUNK + self.tail.capacity()
     }
 }
 
 /// Nodes at or above `height`. Nodes of one height are born in ordinal order, including delayed
 /// MMB parents.
+#[derive(Clone)]
 struct Resident<D> {
     /// The lowest resident height.
     height: u32,
@@ -78,10 +139,7 @@ impl<D: Copy> Resident<D> {
     fn new<F: Family>(height: u32, boundary: Position<F>) -> Self {
         let levels = born(boundary)[height as usize..]
             .iter()
-            .map(|&first| Level {
-                first,
-                nodes: VecDeque::new(),
-            })
+            .map(|&first| Level::new(first))
             .collect();
         Self { height, levels }
     }
@@ -119,7 +177,7 @@ impl<D: Copy> Resident<D> {
         {
             let height = self.height + index as u32;
             for ordinal in level.end()..to {
-                level.nodes.push_back(node(height, ordinal)?);
+                level.push(node(height, ordinal)?);
             }
         }
         Ok(())
@@ -129,20 +187,14 @@ impl<D: Copy> Resident<D> {
     fn trim<F: Family>(&mut self, boundary: Position<F>) {
         let born = born(boundary);
         for (level, &end) in self.levels.iter_mut().zip(&born[self.height as usize..]) {
-            let stale = end
-                .saturating_sub(level.first)
-                .min(level.nodes.len() as u64);
-            level.nodes.drain(..stale as usize);
-            level.first += stale;
-            if level.nodes.len() <= level.nodes.capacity() / 4 {
-                level.nodes.shrink_to_fit();
-            }
+            let stale = end.saturating_sub(level.first).min(level.len() as u64);
+            level.drop_front(stale as usize);
         }
     }
 
-    /// Digests the levels have room for, which growth can leave at up to twice the digests held.
+    /// Digests the levels have room for.
     fn capacity(&self) -> usize {
-        self.levels.iter().map(|level| level.nodes.capacity()).sum()
+        self.levels.iter().map(Level::capacity).sum()
     }
 }
 
@@ -164,6 +216,7 @@ fn born<F: Family>(size: Position<F>) -> [u64; u64::BITS as usize] {
 type Region<D> = Box<[Option<D>]>;
 
 /// The layout of the regions below the resident height.
+#[derive(Clone)]
 struct Regions {
     /// The resident height, so each region spans `2^height` leaves.
     height: u32,
@@ -445,6 +498,10 @@ struct TaskJournal<C> {
 }
 
 /// The Merkle digests of an authenticated journal. Only `mem` is shared with batches.
+///
+/// A clone shares `mem` and the sealed resident chunks, so it is cheap, and it is frozen: neither
+/// copy observes the other's later appends, flushes, or prunes.
+#[derive(Clone)]
 pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     /// Peaks of the current size and of earlier sizes until [Self::flush], plus the boundary pins.
     mem: Arc<Mem<F, D>>,
@@ -1203,8 +1260,8 @@ mod tests {
     }
 
     /// Digests `resident` holds.
-    fn resident_len<D>(resident: &Resident<D>) -> usize {
-        resident.levels.iter().map(|level| level.nodes.len()).sum()
+    fn resident_len<D: Copy>(resident: &Resident<D>) -> usize {
+        resident.levels.iter().map(Level::len).sum()
     }
 
     fn config(resident_height: u32) -> Config<Sequential> {
@@ -1214,6 +1271,60 @@ mod tests {
             replay_buffer: NonZeroUsize::MIN,
             strategy: Sequential,
         }
+    }
+
+    /// A level reads every held ordinal across sealed chunks and its tail, and drops from the
+    /// front within a chunk, exactly one chunk, and into the tail.
+    #[test]
+    fn level_reads_across_chunks_and_drops_from_front() {
+        let chunk = LEVEL_CHUNK as u64;
+        let mut level = Level::new(7);
+        for ordinal in 7..7 + 2 * chunk + 5 {
+            level.push(ordinal);
+        }
+        assert_eq!(level.chunks.len(), 2);
+        assert_eq!(level.end(), 7 + 2 * chunk + 5);
+        for ordinal in [7, 6 + chunk, 7 + chunk, 7 + 2 * chunk, 11 + 2 * chunk] {
+            assert_eq!(level.get(ordinal), Some(ordinal));
+        }
+        assert_eq!(level.get(6), None);
+        assert_eq!(level.get(level.end()), None);
+
+        level.drop_front(3);
+        assert_eq!((level.get(9), level.get(10)), (None, Some(10)));
+        level.drop_front(chunk as usize);
+        assert_eq!(level.chunks.len(), 1);
+        assert_eq!(level.get(10 + chunk), Some(10 + chunk));
+        level.drop_front(chunk as usize);
+        assert!(level.chunks.is_empty());
+        assert_eq!(level.skip, 0);
+        assert_eq!(level.get(10 + 2 * chunk), Some(10 + 2 * chunk));
+        level.drop_front(2);
+        assert_eq!(level.len(), 0);
+        assert_eq!(level.end(), 7 + 2 * chunk + 5);
+    }
+
+    /// A clone keeps serving its nodes while the original appends and drops past them.
+    #[test]
+    fn level_clone_is_frozen() {
+        let chunk = LEVEL_CHUNK as u64;
+        let mut level = Level::new(0);
+        for ordinal in 0..chunk + 3 {
+            level.push(ordinal);
+        }
+        let frozen = level.clone();
+        for ordinal in chunk + 3..3 * chunk {
+            level.push(ordinal);
+        }
+        level.drop_front(2 * chunk as usize);
+
+        assert_eq!(frozen.end(), chunk + 3);
+        for ordinal in 0..chunk + 3 {
+            assert_eq!(frozen.get(ordinal), Some(ordinal));
+        }
+        assert_eq!(frozen.get(chunk + 3), None);
+        assert_eq!(level.get(0), None);
+        assert_eq!(level.get(3 * chunk - 1), Some(3 * chunk - 1));
     }
 
     /// A replay batch holds at most `max_items` items, carrying the rest of a journal batch over.

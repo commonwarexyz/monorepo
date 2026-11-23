@@ -4,6 +4,7 @@ use commonware_runtime::{
 };
 
 /// Digest cache and region fill metrics of an authenticated journal.
+#[derive(Clone)]
 pub(crate) struct Metrics {
     pub resident_hits: Counter,
     pub region_fills: Counter,
