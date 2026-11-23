@@ -38,12 +38,11 @@
 //! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
 //! ancestor batches to still be alive.
 //!
-//! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
-//! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
-//! data in the committed [`Mem`]. Each retained record carries the size and peaks before
-//! and after its changes, so [`Mem::apply_batch`] can find the structure's state in the
-//! chain and replay only the records that follow it.
+//! [`MerkleizedBatch::get_node`] reads from the retained ancestor data. A `Weak` parent
+//! pointer supports collecting ancestor data for new descendants. Dropping a committed
+//! ancestor ends that walk, with its data available in the committed [`Mem`]. Each retained
+//! record carries the size and peaks before and after its changes, so [`Mem::apply_batch`]
+//! can find the structure's state in the chain and replay only the records that follow it.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect
@@ -60,11 +59,12 @@
 //!
 //! # Batch invalidation
 //!
-//! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
-//! applied. Invalid batches must not be used, because their methods may return incorrect data or
-//! panic. [`Mem::apply_batch`] is the exception. It returns an error unless the structure is at
-//! a state the chain reached before the batch: the base of its oldest retained ancestor or the
-//! tip of one of them.
+//! Unapplied ancestor batches must stay alive while merkleizing descendants. Once merkleized,
+//! a batch retains the data needed for node reads and application even after its ancestors are
+//! dropped. Applying a sibling fork to the base invalidates the chain. Applying a descendant
+//! can invalidate a batch's proofs by overwriting nodes those proofs read from the base.
+//! [`Mem::apply_batch`] returns an error unless the structure is at a state the chain reached
+//! before the batch: the base of its oldest retained ancestor or the tip of one of them.
 //!
 //! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
 //! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
@@ -597,10 +597,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// # Panics
     ///
-    /// Panics if a node it reads is in neither the batch chain nor `base`. This happens when an
-    /// unapplied ancestor that appended the node has been dropped, or when `base` has been pruned
-    /// past a leaf this batch updates. The [module docs](crate::merkle::batch) describe both cases
-    /// under "Batch invalidation".
+    /// Panics if a node it reads is in neither the batch chain nor `base`. That happens when `base`
+    /// has been pruned past a leaf this batch updates, or when an unapplied ancestor was dropped
+    /// before the parent was merkleized and appended a node this batch reads, such as a peak of
+    /// its tip. A batch merkleized after an unapplied ancestor was dropped does not retain that
+    /// ancestor's records, so [`Mem::apply_batch`] rejects it unless the structure already holds
+    /// them. The [module docs](crate::merkle::batch) describe these cases under "Batch
+    /// invalidation".
     pub fn merkleize(
         mut self,
         base: &Mem<F, D>,
@@ -841,35 +844,24 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         self.ancestors.len()
     }
 
-    /// Resolve a node: own data -> Weak parent chain.
+    /// Resolve a node from this batch and its retained ancestor data, newest first.
     ///
-    /// Returns `None` for positions that only exist in the committed [`Mem`].
-    /// Callers that need committed data should fall back to [`Mem::get_node`]
-    /// (or use a layered adapter such as the one in `qmdb::current::batch`).
+    /// Returns `None` for positions that exist only in the committed [`Mem`]. Read those
+    /// positions with [`Mem::get_node`] or a reader that combines the batch and base.
     pub fn get_node(&self, pos: Position<F>) -> Option<D> {
         if pos >= self.size() {
             return None;
         }
 
-        // A batch's overwrites only hold positions below its parent's size.
-        if pos >= self.data.parent_size {
-            let i = (*pos - *self.data.parent_size) as usize;
-            return self.data.appended.get(i).copied();
-        }
-        if let Some(d) = self.data.overwrites.get(&pos) {
-            return Some(*d);
-        }
-        // Walk Weak parent chain.
-        let mut current = self.parent.as_ref().and_then(Weak::upgrade);
-        while let Some(batch) = current {
-            if pos >= batch.data.parent_size {
-                let i = (*pos - *batch.data.parent_size) as usize;
-                return batch.data.appended.get(i).copied();
+        // A record's overwrites only hold positions below its parent's size.
+        for data in core::iter::once(&self.data).chain(self.ancestors.iter().rev()) {
+            if pos >= data.parent_size {
+                let i = (*pos - *data.parent_size) as usize;
+                return data.appended.get(i).copied();
             }
-            if let Some(d) = batch.data.overwrites.get(&pos) {
+            if let Some(d) = data.overwrites.get(&pos) {
                 return Some(*d);
             }
-            current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
         None
     }
@@ -947,8 +939,8 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Create a child batch on top of this merkleized batch.
     ///
-    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
-    /// fork has been applied.
+    /// The child must be merkleized before unapplied ancestor batches are dropped. Applying a
+    /// sibling fork to the base invalidates it.
     pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D, S> {
         UnmerkleizedBatch::new(Arc::clone(self))
     }
@@ -956,6 +948,30 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// Number of nodes in the committed Mem when the batch chain was forked.
     pub const fn base_size(&self) -> Position<F> {
         self.base_size
+    }
+
+    /// The appended nodes of this batch and its retained ancestors that `mem` has not applied,
+    /// in root-to-tip order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Mem::validate_batch`], and [`Error::DataCorrupted`] if any of
+    /// those records overwrites a node.
+    #[cfg(feature = "std")]
+    pub(crate) fn unapplied<'a>(
+        &'a self,
+        mem: &Mem<F, D>,
+    ) -> Result<impl Iterator<Item = &'a [D]> + use<'a, F, D, S>, Error<F>> {
+        let start = mem.validate_batch(self)?;
+        let records = || {
+            self.ancestors[start..]
+                .iter()
+                .chain(core::iter::once(&self.data))
+        };
+        if records().any(|data| !data.overwrites.is_empty()) {
+            return Err(Error::DataCorrupted("batch overwrites nodes"));
+        }
+        Ok(records().map(|data| data.appended.as_slice()))
     }
 
     /// Return a reference to the batch's strategy.
@@ -988,7 +1004,6 @@ mod tests {
     use commonware_parallel::mocks::explore;
     #[cfg(feature = "std")]
     use commonware_parallel::mocks::{self, Explorer};
-    use commonware_runtime::{Runner as _, deterministic};
     #[cfg(feature = "std")]
     use commonware_utils::NZUsize;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1022,503 +1037,441 @@ mod tests {
     }
 
     fn consistency_with_reference<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            for &n in &[1u64, 2, 10, 100, 199] {
-                let reference = build_reference::<F>(&hasher, n);
-                let base = Mem::<F, D>::new();
-                let mut batch = base.new_batch();
-                for i in 0..n {
-                    let element = hasher.digest(&i.to_be_bytes());
-                    batch = batch.add(&hasher, &element);
-                }
-                let merkleized = batch.merkleize(&base, &hasher);
-                let mut result = Mem::<F, D>::new();
-                result.apply_batch(&merkleized).unwrap();
-                assert_eq!(
-                    mem_root(&result, &hasher),
-                    mem_root(&reference, &hasher),
-                    "root mismatch for n={n}"
-                );
+        let hasher: H = Standard::new(ForwardFold);
+        for &n in &[1u64, 2, 10, 100, 199] {
+            let reference = build_reference::<F>(&hasher, n);
+            let base = Mem::<F, D>::new();
+            let mut batch = base.new_batch();
+            for i in 0..n {
+                let element = hasher.digest(&i.to_be_bytes());
+                batch = batch.add(&hasher, &element);
             }
-        });
+            let merkleized = batch.merkleize(&base, &hasher);
+            let mut result = Mem::<F, D>::new();
+            result.apply_batch(&merkleized).unwrap();
+            assert_eq!(
+                mem_root(&result, &hasher),
+                mem_root(&reference, &hasher),
+                "root mismatch for n={n}"
+            );
+        }
     }
 
     fn lifecycle<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let base_root = mem_root(&base, &hasher);
-            let mut batch = base.new_batch();
-            for i in 50u64..60 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let merkleized = batch.merkleize(&base, &hasher);
-            assert_ne!(batch_root(&merkleized, &hasher), base_root);
-            assert_eq!(mem_root(&base, &hasher), base_root);
-            // Apply and verify proof from the resulting Mem.
-            let mut applied = base;
-            applied.apply_batch(&merkleized).unwrap();
-            let loc = Location::<F>::new(55);
-            let element = hasher.digest(&55u64.to_be_bytes());
-            let proof = applied.proof(&hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(
-                &hasher,
-                loc,
-                &element,
-                &batch_root(&merkleized, &hasher)
-            ));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let base_root = mem_root(&base, &hasher);
+        let mut batch = base.new_batch();
+        for i in 50u64..60 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let merkleized = batch.merkleize(&base, &hasher);
+        assert_ne!(batch_root(&merkleized, &hasher), base_root);
+        assert_eq!(mem_root(&base, &hasher), base_root);
+        // Apply and verify proof from the resulting Mem.
+        let mut applied = base;
+        applied.apply_batch(&merkleized).unwrap();
+        let loc = Location::<F>::new(55);
+        let element = hasher.digest(&55u64.to_be_bytes());
+        let proof = applied.proof(&hasher, loc, 0).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &hasher,
+            loc,
+            &element,
+            &batch_root(&merkleized, &hasher)
+        ));
     }
 
     fn apply_batch<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut base = build_reference::<F>(&hasher, 50);
-            let mut batch = base.new_batch();
-            for i in 50u64..75 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let merkleized = batch.merkleize(&base, &hasher);
-            let new_root = batch_root(&merkleized, &hasher);
-            base.apply_batch(&merkleized).unwrap();
-            assert_eq!(mem_root(&base, &hasher), new_root);
-            let reference = build_reference::<F>(&hasher, 75);
-            assert_eq!(mem_root(&base, &hasher), mem_root(&reference, &hasher));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut base = build_reference::<F>(&hasher, 50);
+        let mut batch = base.new_batch();
+        for i in 50u64..75 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let merkleized = batch.merkleize(&base, &hasher);
+        let new_root = batch_root(&merkleized, &hasher);
+        base.apply_batch(&merkleized).unwrap();
+        assert_eq!(mem_root(&base, &hasher), new_root);
+        let reference = build_reference::<F>(&hasher, 75);
+        assert_eq!(mem_root(&base, &hasher), mem_root(&reference, &hasher));
     }
 
     fn multiple_forks<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let base_root = mem_root(&base, &hasher);
-            let mut ba = base.new_batch();
-            for i in 50u64..60 {
-                let element = hasher.digest(&i.to_be_bytes());
-                ba = ba.add(&hasher, &element);
-            }
-            let ma = ba.merkleize(&base, &hasher);
-            let mut bb = base.new_batch();
-            for i in 100u64..105 {
-                let element = hasher.digest(&i.to_be_bytes());
-                bb = bb.add(&hasher, &element);
-            }
-            let mb = bb.merkleize(&base, &hasher);
-            assert_ne!(batch_root(&ma, &hasher), batch_root(&mb, &hasher));
-            assert_ne!(batch_root(&ma, &hasher), base_root);
-            assert_eq!(mem_root(&base, &hasher), base_root);
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let base_root = mem_root(&base, &hasher);
+        let mut ba = base.new_batch();
+        for i in 50u64..60 {
+            let element = hasher.digest(&i.to_be_bytes());
+            ba = ba.add(&hasher, &element);
+        }
+        let ma = ba.merkleize(&base, &hasher);
+        let mut bb = base.new_batch();
+        for i in 100u64..105 {
+            let element = hasher.digest(&i.to_be_bytes());
+            bb = bb.add(&hasher, &element);
+        }
+        let mb = bb.merkleize(&base, &hasher);
+        assert_ne!(batch_root(&ma, &hasher), batch_root(&mb, &hasher));
+        assert_ne!(batch_root(&ma, &hasher), base_root);
+        assert_eq!(mem_root(&base, &hasher), base_root);
     }
 
     fn fork_of_fork_reads<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let mut ba = base.new_batch();
-            for i in 50u64..60 {
-                let element = hasher.digest(&i.to_be_bytes());
-                ba = ba.add(&hasher, &element);
-            }
-            let ma = ba.merkleize(&base, &hasher);
-            let mut bb = ma.new_batch();
-            for i in 60u64..70 {
-                let element = hasher.digest(&i.to_be_bytes());
-                bb = bb.add(&hasher, &element);
-            }
-            let mb = bb.merkleize(&base, &hasher);
-            let reference = build_reference::<F>(&hasher, 70);
-            assert_eq!(batch_root(&mb, &hasher), mem_root(&reference, &hasher));
-            // Apply both batches and verify proofs from the resulting Mem.
-            let mut applied = base;
-            applied.apply_batch(&ma).unwrap();
-            applied.apply_batch(&mb).unwrap();
-            for i in [0u64, 25, 55, 65, 69] {
-                let loc = Location::<F>::new(i);
-                let element = hasher.digest(&i.to_be_bytes());
-                let proof = applied.proof(&hasher, loc, 0).unwrap();
-                assert!(proof.verify_element_inclusion(
-                    &hasher,
-                    loc,
-                    &element,
-                    &batch_root(&mb, &hasher)
-                ));
-            }
-        });
-    }
-
-    fn update_leaf_digest_roundtrip<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 100);
-            let base_root = mem_root(&base, &hasher);
-            let updated = Sha256::fill(0xFF);
-            let m = base
-                .new_batch()
-                .update_leaf_digest(Location::new(5), updated)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            assert_ne!(batch_root(&m, &hasher), base_root);
-            let pos5 = Position::<F>::try_from(Location::new(5)).unwrap();
-            let original = base.get_node(pos5).unwrap();
-            let m2 = base
-                .new_batch()
-                .update_leaf_digest(Location::new(5), original)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            assert_eq!(batch_root(&m2, &hasher), base_root);
-        });
-    }
-
-    fn update_and_add<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let base_root = mem_root(&base, &hasher);
-            let updated = Sha256::fill(0xAA);
-            let mut batch = base
-                .new_batch()
-                .update_leaf_digest(Location::new(10), updated)
-                .unwrap();
-            for i in 50u64..55 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let m = batch.merkleize(&base, &hasher);
-            assert_ne!(batch_root(&m, &hasher), base_root);
-            let pos10 = Position::<F>::try_from(Location::new(10)).unwrap();
-            assert_eq!(m.get_node(pos10), Some(updated));
-        });
-    }
-
-    fn update_leaf_batched_roundtrip<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 100);
-            let base_root = mem_root(&base, &hasher);
-            let updated = Sha256::fill(0xBB);
-            let locs = [0u64, 10, 50, 99];
-            let updates: Vec<(Location<F>, D)> =
-                locs.iter().map(|&i| (Location::new(i), updated)).collect();
-            let m = base
-                .new_batch()
-                .update_leaf_batched(&updates)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            assert_ne!(batch_root(&m, &hasher), base_root);
-            let restore: Vec<(Location<F>, D)> = locs
-                .iter()
-                .map(|&l| {
-                    let pos = Position::<F>::try_from(Location::new(l)).unwrap();
-                    (Location::new(l), base.get_node(pos).unwrap())
-                })
-                .collect();
-            let m2 = base
-                .new_batch()
-                .update_leaf_batched(&restore)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            assert_eq!(batch_root(&m2, &hasher), base_root);
-        });
-    }
-
-    fn proof_verification<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let mut batch = base.new_batch();
-            for i in 50u64..60 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let m = batch.merkleize(&base, &hasher);
-            // Apply and verify proofs from the resulting Mem.
-            let mut applied = base;
-            applied.apply_batch(&m).unwrap();
-            let loc = Location::<F>::new(55);
-            let element = hasher.digest(&55u64.to_be_bytes());
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let mut ba = base.new_batch();
+        for i in 50u64..60 {
+            let element = hasher.digest(&i.to_be_bytes());
+            ba = ba.add(&hasher, &element);
+        }
+        let ma = ba.merkleize(&base, &hasher);
+        let mut bb = ma.new_batch();
+        for i in 60u64..70 {
+            let element = hasher.digest(&i.to_be_bytes());
+            bb = bb.add(&hasher, &element);
+        }
+        let mb = bb.merkleize(&base, &hasher);
+        let reference = build_reference::<F>(&hasher, 70);
+        assert_eq!(batch_root(&mb, &hasher), mem_root(&reference, &hasher));
+        // Apply both batches and verify proofs from the resulting Mem.
+        let mut applied = base;
+        applied.apply_batch(&ma).unwrap();
+        applied.apply_batch(&mb).unwrap();
+        for i in [0u64, 25, 55, 65, 69] {
+            let loc = Location::<F>::new(i);
+            let element = hasher.digest(&i.to_be_bytes());
             let proof = applied.proof(&hasher, loc, 0).unwrap();
             assert!(proof.verify_element_inclusion(
                 &hasher,
                 loc,
                 &element,
-                &batch_root(&m, &hasher)
+                &batch_root(&mb, &hasher)
             ));
-            let range = Location::<F>::new(50)..Location::new(55);
-            let rp = applied.range_proof(&hasher, range.clone(), 0).unwrap();
-            let elements: Vec<D> = (50u64..55)
-                .map(|i| hasher.digest(&i.to_be_bytes()))
-                .collect();
-            assert!(rp.verify_range_inclusion(
-                &hasher,
-                range.start,
-                &elements,
-                &batch_root(&m, &hasher)
-            ));
-        });
+        }
+    }
+
+    fn update_leaf_digest_roundtrip<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 100);
+        let base_root = mem_root(&base, &hasher);
+        let updated = Sha256::fill(0xFF);
+        let m = base
+            .new_batch()
+            .update_leaf_digest(Location::new(5), updated)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        assert_ne!(batch_root(&m, &hasher), base_root);
+        let pos5 = Position::<F>::try_from(Location::new(5)).unwrap();
+        let original = base.get_node(pos5).unwrap();
+        let m2 = base
+            .new_batch()
+            .update_leaf_digest(Location::new(5), original)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        assert_eq!(batch_root(&m2, &hasher), base_root);
+    }
+
+    fn update_and_add<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let base_root = mem_root(&base, &hasher);
+        let updated = Sha256::fill(0xAA);
+        let mut batch = base
+            .new_batch()
+            .update_leaf_digest(Location::new(10), updated)
+            .unwrap();
+        for i in 50u64..55 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let m = batch.merkleize(&base, &hasher);
+        assert_ne!(batch_root(&m, &hasher), base_root);
+        let pos10 = Position::<F>::try_from(Location::new(10)).unwrap();
+        assert_eq!(m.get_node(pos10), Some(updated));
+    }
+
+    fn update_leaf_batched_roundtrip<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 100);
+        let base_root = mem_root(&base, &hasher);
+        let updated = Sha256::fill(0xBB);
+        let locs = [0u64, 10, 50, 99];
+        let updates: Vec<(Location<F>, D)> =
+            locs.iter().map(|&i| (Location::new(i), updated)).collect();
+        let m = base
+            .new_batch()
+            .update_leaf_batched(&updates)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        assert_ne!(batch_root(&m, &hasher), base_root);
+        let restore: Vec<(Location<F>, D)> = locs
+            .iter()
+            .map(|&l| {
+                let pos = Position::<F>::try_from(Location::new(l)).unwrap();
+                (Location::new(l), base.get_node(pos).unwrap())
+            })
+            .collect();
+        let m2 = base
+            .new_batch()
+            .update_leaf_batched(&restore)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        assert_eq!(batch_root(&m2, &hasher), base_root);
+    }
+
+    fn proof_verification<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let mut batch = base.new_batch();
+        for i in 50u64..60 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let m = batch.merkleize(&base, &hasher);
+        // Apply and verify proofs from the resulting Mem.
+        let mut applied = base;
+        applied.apply_batch(&m).unwrap();
+        let loc = Location::<F>::new(55);
+        let element = hasher.digest(&55u64.to_be_bytes());
+        let proof = applied.proof(&hasher, loc, 0).unwrap();
+        assert!(proof.verify_element_inclusion(&hasher, loc, &element, &batch_root(&m, &hasher)));
+        let range = Location::<F>::new(50)..Location::new(55);
+        let rp = applied.range_proof(&hasher, range.clone(), 0).unwrap();
+        let elements: Vec<D> = (50u64..55)
+            .map(|i| hasher.digest(&i.to_be_bytes()))
+            .collect();
+        assert!(rp.verify_range_inclusion(
+            &hasher,
+            range.start,
+            &elements,
+            &batch_root(&m, &hasher)
+        ));
     }
 
     /// A proof requested directly from a speculative [`MerkleizedBatch`], before it is applied to
     /// `base`, must succeed even when the Merkle path needs nodes that only exist in `base`. The
     /// batch chain alone does not contain nodes committed before the fork.
     fn speculative_proof_uses_base_fallback<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let mut batch = base.new_batch();
-            for i in 50u64..55 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let m = batch.merkleize(&base, &hasher);
-            let expected_root = batch_root(&m, &hasher);
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let mut batch = base.new_batch();
+        for i in 50u64..55 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let m = batch.merkleize(&base, &hasher);
+        let expected_root = batch_root(&m, &hasher);
 
-            // A newly appended leaf: the path needs the committed peaks.
-            let loc = Location::<F>::new(52);
-            let element = hasher.digest(&52u64.to_be_bytes());
-            let proof = m.proof(&base, &hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
+        // A newly appended leaf: the path needs the committed peaks.
+        let loc = Location::<F>::new(52);
+        let element = hasher.digest(&52u64.to_be_bytes());
+        let proof = m.proof(&base, &hasher, loc, 0).unwrap();
+        assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
 
-            // A committed leaf: the path needs committed siblings as well as committed peaks.
-            let loc = Location::<F>::new(49);
-            let element = hasher.digest(&49u64.to_be_bytes());
-            let proof = m.proof(&base, &hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
+        // A committed leaf: the path needs committed siblings as well as committed peaks.
+        let loc = Location::<F>::new(49);
+        let element = hasher.digest(&49u64.to_be_bytes());
+        let proof = m.proof(&base, &hasher, loc, 0).unwrap();
+        assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
 
-            // A range of new leaves and a range spanning the fork boundary.
-            for range in [
-                Location::<F>::new(50)..Location::<F>::new(55),
-                Location::<F>::new(45)..Location::<F>::new(55),
-            ] {
-                let elements: Vec<D> = (*range.start..*range.end)
-                    .map(|i| hasher.digest(&i.to_be_bytes()))
-                    .collect();
-                let rp = m.range_proof(&base, &hasher, range.clone(), 0).unwrap();
-                assert!(rp.verify_range_inclusion(&hasher, range.start, &elements, &expected_root));
-            }
-        });
+        // A range of new leaves and a range spanning the fork boundary.
+        for range in [
+            Location::<F>::new(50)..Location::<F>::new(55),
+            Location::<F>::new(45)..Location::<F>::new(55),
+        ] {
+            let elements: Vec<D> = (*range.start..*range.end)
+                .map(|i| hasher.digest(&i.to_be_bytes()))
+                .collect();
+            let rp = m.range_proof(&base, &hasher, range.clone(), 0).unwrap();
+            assert!(rp.verify_range_inclusion(&hasher, range.start, &elements, &expected_root));
+        }
     }
 
     fn empty_batch<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut base = build_reference::<F>(&hasher, 50);
-            let base_root = mem_root(&base, &hasher);
-            let m = base.new_batch().merkleize(&base, &hasher);
-            assert_eq!(batch_root(&m, &hasher), base_root);
-            let child = m.new_batch().merkleize(&base, &hasher);
-            base.apply_batch(&child).unwrap();
-            assert_eq!(mem_root(&base, &hasher), base_root);
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut base = build_reference::<F>(&hasher, 50);
+        let base_root = mem_root(&base, &hasher);
+        let m = base.new_batch().merkleize(&base, &hasher);
+        assert_eq!(batch_root(&m, &hasher), base_root);
+        let child = m.new_batch().merkleize(&base, &hasher);
+        base.apply_batch(&child).unwrap();
+        assert_eq!(mem_root(&base, &hasher), base_root);
     }
 
     fn batch_roundtrip<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let mut batch = base.new_batch();
-            for i in 50u64..55 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let merkleized = batch.merkleize(&base, &hasher);
-            let mut batch_again = merkleized.new_batch();
-            for i in 55u64..60 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch_again = batch_again.add(&hasher, &element);
-            }
-            let reference = build_reference::<F>(&hasher, 60);
-            assert_eq!(
-                batch_root(&batch_again.merkleize(&base, &hasher), &hasher),
-                mem_root(&reference, &hasher)
-            );
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let mut batch = base.new_batch();
+        for i in 50u64..55 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let merkleized = batch.merkleize(&base, &hasher);
+        let mut batch_again = merkleized.new_batch();
+        for i in 55u64..60 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch_again = batch_again.add(&hasher, &element);
+        }
+        let reference = build_reference::<F>(&hasher, 60);
+        assert_eq!(
+            batch_root(&batch_again.merkleize(&base, &hasher), &hasher),
+            mem_root(&reference, &hasher)
+        );
     }
 
     fn sequential_apply_batch<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut base = build_reference::<F>(&hasher, 50);
-            let mut b1 = base.new_batch();
-            for i in 50u64..60 {
-                let element = hasher.digest(&i.to_be_bytes());
-                b1 = b1.add(&hasher, &element);
-            }
-            let m1 = b1.merkleize(&base, &hasher);
-            base.apply_batch(&m1).unwrap();
-            let mut b2 = base.new_batch();
-            for i in 60u64..70 {
-                let element = hasher.digest(&i.to_be_bytes());
-                b2 = b2.add(&hasher, &element);
-            }
-            let m2 = b2.merkleize(&base, &hasher);
-            base.apply_batch(&m2).unwrap();
-            let reference = build_reference::<F>(&hasher, 70);
-            assert_eq!(mem_root(&base, &hasher), mem_root(&reference, &hasher));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut base = build_reference::<F>(&hasher, 50);
+        let mut b1 = base.new_batch();
+        for i in 50u64..60 {
+            let element = hasher.digest(&i.to_be_bytes());
+            b1 = b1.add(&hasher, &element);
+        }
+        let m1 = b1.merkleize(&base, &hasher);
+        base.apply_batch(&m1).unwrap();
+        let mut b2 = base.new_batch();
+        for i in 60u64..70 {
+            let element = hasher.digest(&i.to_be_bytes());
+            b2 = b2.add(&hasher, &element);
+        }
+        let m2 = b2.merkleize(&base, &hasher);
+        base.apply_batch(&m2).unwrap();
+        let reference = build_reference::<F>(&hasher, 70);
+        assert_eq!(mem_root(&base, &hasher), mem_root(&reference, &hasher));
     }
 
     fn batch_on_pruned_base<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut base = build_reference::<F>(&hasher, 100);
-            base.prune(Location::new(27)).unwrap();
-            let mut batch = base.new_batch();
-            for i in 100u64..110 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let m = batch.merkleize(&base, &hasher);
-            let expected_root = batch_root(&m, &hasher);
-            // Apply and verify proofs from the resulting Mem.
-            let mut applied = base;
-            applied.apply_batch(&m).unwrap();
-            let loc = Location::<F>::new(80);
-            let element = hasher.digest(&80u64.to_be_bytes());
-            let proof = applied.proof(&hasher, loc, 0).unwrap();
-            assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
-            assert!(matches!(
-                applied.proof(&hasher, Location::new(0), 0),
-                Err(Error::ElementPruned(_))
-            ));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut base = build_reference::<F>(&hasher, 100);
+        base.prune(Location::new(27)).unwrap();
+        let mut batch = base.new_batch();
+        for i in 100u64..110 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let m = batch.merkleize(&base, &hasher);
+        let expected_root = batch_root(&m, &hasher);
+        // Apply and verify proofs from the resulting Mem.
+        let mut applied = base;
+        applied.apply_batch(&m).unwrap();
+        let loc = Location::<F>::new(80);
+        let element = hasher.digest(&80u64.to_be_bytes());
+        let proof = applied.proof(&hasher, loc, 0).unwrap();
+        assert!(proof.verify_element_inclusion(&hasher, loc, &element, &expected_root));
+        assert!(matches!(
+            applied.proof(&hasher, Location::new(0), 0),
+            Err(Error::ElementPruned(_))
+        ));
     }
 
     fn three_deep_stacking<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut base = build_reference::<F>(&hasher, 100);
-            let da = Sha256::fill(0xDD);
-            let db = Sha256::fill(0xEE);
-            let ma = base
-                .new_batch()
-                .update_leaf_digest(Location::new(5), da)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            let mb = ma
-                .new_batch()
-                .update_leaf_digest(Location::new(10), db)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            let mut bc = mb.new_batch();
-            for i in 300u64..310 {
-                let element = hasher.digest(&i.to_be_bytes());
-                bc = bc.add(&hasher, &element);
-            }
-            let mc = bc.merkleize(&base, &hasher);
-            let c_root = batch_root(&mc, &hasher);
-            base.apply_batch(&mc).unwrap();
-            assert_eq!(mem_root(&base, &hasher), c_root);
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut base = build_reference::<F>(&hasher, 100);
+        let da = Sha256::fill(0xDD);
+        let db = Sha256::fill(0xEE);
+        let ma = base
+            .new_batch()
+            .update_leaf_digest(Location::new(5), da)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let mb = ma
+            .new_batch()
+            .update_leaf_digest(Location::new(10), db)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let mut bc = mb.new_batch();
+        for i in 300u64..310 {
+            let element = hasher.digest(&i.to_be_bytes());
+            bc = bc.add(&hasher, &element);
+        }
+        let mc = bc.merkleize(&base, &hasher);
+        let c_root = batch_root(&mc, &hasher);
+        base.apply_batch(&mc).unwrap();
+        assert_eq!(mem_root(&base, &hasher), c_root);
     }
 
     fn overwrite_collision<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut base = build_reference::<F>(&hasher, 100);
-            let dx = Sha256::fill(0xAA);
-            let dy = Sha256::fill(0xBB);
-            let ma = base
-                .new_batch()
-                .update_leaf_digest(Location::new(5), dx)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            let mb = ma
-                .new_batch()
-                .update_leaf_digest(Location::new(5), dy)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            let b_root = batch_root(&mb, &hasher);
-            base.apply_batch(&mb).unwrap();
-            assert_eq!(mem_root(&base, &hasher), b_root);
-            let pos5 = Position::<F>::try_from(Location::new(5)).unwrap();
-            assert_eq!(base.get_node(pos5), Some(dy));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut base = build_reference::<F>(&hasher, 100);
+        let dx = Sha256::fill(0xAA);
+        let dy = Sha256::fill(0xBB);
+        let ma = base
+            .new_batch()
+            .update_leaf_digest(Location::new(5), dx)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let mb = ma
+            .new_batch()
+            .update_leaf_digest(Location::new(5), dy)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let b_root = batch_root(&mb, &hasher);
+        base.apply_batch(&mb).unwrap();
+        assert_eq!(mem_root(&base, &hasher), b_root);
+        let pos5 = Position::<F>::try_from(Location::new(5)).unwrap();
+        assert_eq!(base.get_node(pos5), Some(dy));
     }
 
     fn update_appended_leaf<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let mut batch = base.new_batch();
-            for i in 50u64..60 {
-                let element = hasher.digest(&i.to_be_bytes());
-                batch = batch.add(&hasher, &element);
-            }
-            let updated = Sha256::fill(0xEE);
-            let m = batch
-                .update_leaf_digest(Location::new(52), updated)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            let pos52 = Position::<F>::try_from(Location::new(52)).unwrap();
-            assert_eq!(m.get_node(pos52), Some(updated));
-            let mut reference = build_reference::<F>(&hasher, 60);
-            let batch = reference
-                .new_batch()
-                .update_leaf_digest(Location::new(52), updated)
-                .unwrap()
-                .merkleize(&reference, &hasher);
-            reference.apply_batch(&batch).unwrap();
-            assert_eq!(batch_root(&m, &hasher), mem_root(&reference, &hasher));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let mut batch = base.new_batch();
+        for i in 50u64..60 {
+            let element = hasher.digest(&i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let updated = Sha256::fill(0xEE);
+        let m = batch
+            .update_leaf_digest(Location::new(52), updated)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let pos52 = Position::<F>::try_from(Location::new(52)).unwrap();
+        assert_eq!(m.get_node(pos52), Some(updated));
+        let mut reference = build_reference::<F>(&hasher, 60);
+        let batch = reference
+            .new_batch()
+            .update_leaf_digest(Location::new(52), updated)
+            .unwrap()
+            .merkleize(&reference, &hasher);
+        reference.apply_batch(&batch).unwrap();
+        assert_eq!(batch_root(&m, &hasher), mem_root(&reference, &hasher));
     }
 
     fn update_leaf_element<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let base_root = mem_root(&base, &hasher);
-            let element = b"updated-element";
-            let m = base
-                .new_batch()
-                .update_leaf(&hasher, Location::new(5), element)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            assert_ne!(batch_root(&m, &hasher), base_root);
-            let mut base = base;
-            let batch = base
-                .new_batch()
-                .update_leaf(&hasher, Location::new(5), element)
-                .unwrap()
-                .merkleize(&base, &hasher);
-            base.apply_batch(&batch).unwrap();
-            assert_eq!(batch_root(&m, &hasher), mem_root(&base, &hasher));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let base_root = mem_root(&base, &hasher);
+        let element = b"updated-element";
+        let m = base
+            .new_batch()
+            .update_leaf(&hasher, Location::new(5), element)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        assert_ne!(batch_root(&m, &hasher), base_root);
+        let mut base = base;
+        let batch = base
+            .new_batch()
+            .update_leaf(&hasher, Location::new(5), element)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        base.apply_batch(&batch).unwrap();
+        assert_eq!(batch_root(&m, &hasher), mem_root(&base, &hasher));
     }
 
     fn update_out_of_bounds<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 50);
-            let r1 = base
-                .new_batch()
-                .update_leaf_digest(Location::new(50), Sha256::fill(0xFF));
-            assert!(matches!(r1, Err(Error::LeafOutOfBounds(_))));
-            let updates = [(Location::<F>::new(50), Sha256::fill(0xFF))];
-            let r2 = base.new_batch().update_leaf_batched(&updates);
-            assert!(matches!(r2, Err(Error::LeafOutOfBounds(_))));
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+        let r1 = base
+            .new_batch()
+            .update_leaf_digest(Location::new(50), Sha256::fill(0xFF));
+        assert!(matches!(r1, Err(Error::LeafOutOfBounds(_))));
+        let updates = [(Location::<F>::new(50), Sha256::fill(0xFF))];
+        let r2 = base.new_batch().update_leaf_batched(&updates);
+        assert!(matches!(r2, Err(Error::LeafOutOfBounds(_))));
     }
 
     /// A strategy that splits work into up to `parallelism` batches, run on one thread.
@@ -1531,47 +1484,44 @@ mod tests {
     /// tallest node.
     #[cfg(feature = "std")]
     fn add_many_at_limit<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let tallest = (1..63)
-                .take_while(|&h| F::birth_offset(h) <= *F::MAX_LEAVES)
-                .last()
-                .unwrap();
-            // Add the leaf that creates the tallest node, then fill up to `MAX_LEAVES` from 7 and
-            // from 300 leaves short. Each batch splits into up to three ranges.
-            for (first, count) in [
-                (F::birth_offset(tallest) - 1, 1u64),
-                (*F::MAX_LEAVES - 7, 7),
-                (*F::MAX_LEAVES - 300, 300),
-            ] {
-                let first = Location::new(first);
-                // Distinct pins, so reading the wrong one changes the root.
-                let pinned = F::nodes_to_pin(first)
-                    .enumerate()
-                    .map(|(i, _)| Sha256::fill(i as u8))
-                    .collect();
-                let base = Mem::<F, D>::from_components(Vec::new(), first, pinned).unwrap();
-                let items: Vec<u64> = (0..count).collect();
+        let hasher: H = Standard::new(ForwardFold);
+        let tallest = (1..63)
+            .take_while(|&h| F::birth_offset(h) <= *F::MAX_LEAVES)
+            .last()
+            .unwrap();
+        // Add the leaf that creates the tallest node, then fill up to `MAX_LEAVES` from 7 and
+        // from 300 leaves short. Each batch splits into up to three ranges.
+        for (first, count) in [
+            (F::birth_offset(tallest) - 1, 1u64),
+            (*F::MAX_LEAVES - 7, 7),
+            (*F::MAX_LEAVES - 300, 300),
+        ] {
+            let first = Location::new(first);
+            // Distinct pins, so reading the wrong one changes the root.
+            let pinned = F::nodes_to_pin(first)
+                .enumerate()
+                .map(|(i, _)| Sha256::fill(i as u8))
+                .collect();
+            let base = Mem::<F, D>::from_components(Vec::new(), first, pinned).unwrap();
+            let items: Vec<u64> = (0..count).collect();
 
-                let batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(3))
-                    .new_batch()
-                    .add_many(&hasher, &items)
-                    .merkleize(&base, &hasher);
-                let mut expected = base.new_batch();
-                for item in &items {
-                    expected = expected.add(&hasher, &item.to_be_bytes());
-                }
-                let expected = expected.merkleize(&base, &hasher);
-
-                assert_eq!(batch.data.appended, expected.data.appended, "first={first}");
-                assert_eq!(
-                    batch.root(&hasher, 0).unwrap(),
-                    expected.root(&hasher, 0).unwrap(),
-                    "first={first}"
-                );
+            let batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(3))
+                .new_batch()
+                .add_many(&hasher, &items)
+                .merkleize(&base, &hasher);
+            let mut expected = base.new_batch();
+            for item in &items {
+                expected = expected.add(&hasher, &item.to_be_bytes());
             }
-        });
+            let expected = expected.merkleize(&base, &hasher);
+
+            assert_eq!(batch.data.appended, expected.data.appended, "first={first}");
+            assert_eq!(
+                batch.root(&hasher, 0).unwrap(),
+                expected.root(&hasher, 0).unwrap(),
+                "first={first}"
+            );
+        }
     }
 
     /// Repeated `add_many` calls on real worker threads, interleaved with `add` and `update_leaf`
@@ -1579,161 +1529,148 @@ mod tests {
     /// parent batch.
     #[cfg(feature = "std")]
     fn add_many_mixed_operations<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            for parallelism in [1, 2, 3, 8] {
-                let strategy = Explorer::parallel(&mocks::pooled(
-                    NZUsize!(parallelism),
-                    NZUsize!(parallelism),
-                ));
-                let mut base = build_reference::<F>(&hasher, 63);
-                base.prune_all();
-                let parent = base
-                    .new_batch()
-                    .add(&hasher, b"parent")
-                    .merkleize(&base, &hasher);
+        let hasher: H = Standard::new(ForwardFold);
+        for parallelism in [1, 2, 3, 8] {
+            let strategy =
+                Explorer::parallel(&mocks::pooled(NZUsize!(parallelism), NZUsize!(parallelism)));
+            let mut base = build_reference::<F>(&hasher, 63);
+            base.prune_all();
+            let parent = base
+                .new_batch()
+                .add(&hasher, b"parent")
+                .merkleize(&base, &hasher);
 
-                let mut actual = MerkleizedBatch::from_mem_with_strategy(&base, strategy)
-                    .new_batch()
-                    .add(&hasher, b"parent");
-                let mut expected = parent.new_batch();
-                for count in [0, 1, 2, 63, 64, 127, 128, 129, 256, 511, 1000] {
-                    actual = actual.add(&hasher, b"prefix");
-                    expected = expected.add(&hasher, b"prefix");
-                    let items: Vec<u64> = (0..count).collect();
-                    actual = actual.add_many(&hasher, &items);
-                    for item in &items {
-                        expected = expected.add(&hasher, &item.to_be_bytes());
-                    }
-                    // Leaf 63 is new in `actual` but a parent leaf in `expected`.
-                    for loc in [63, *actual.leaves() / 2 + 32, *actual.leaves() - 1] {
-                        let loc = Location::new(loc);
-                        actual = actual.update_leaf(&hasher, loc, b"update").unwrap();
-                        expected = expected.update_leaf(&hasher, loc, b"update").unwrap();
-                    }
+            let mut actual = MerkleizedBatch::from_mem_with_strategy(&base, strategy)
+                .new_batch()
+                .add(&hasher, b"parent");
+            let mut expected = parent.new_batch();
+            for count in [0, 1, 2, 63, 64, 127, 128, 129, 256, 511, 1000] {
+                actual = actual.add(&hasher, b"prefix");
+                expected = expected.add(&hasher, b"prefix");
+                let items: Vec<u64> = (0..count).collect();
+                actual = actual.add_many(&hasher, &items);
+                for item in &items {
+                    expected = expected.add(&hasher, &item.to_be_bytes());
                 }
-                let actual = actual.merkleize(&base, &hasher);
-                let expected = expected.merkleize(&base, &hasher);
-
-                assert_eq!(
-                    actual.root(&hasher, 0).unwrap(),
-                    expected.root(&hasher, 0).unwrap(),
-                    "workers={parallelism}"
-                );
-                for pos in *parent.size()..*actual.size() {
-                    let pos = Position::new(pos);
-                    assert_eq!(
-                        actual.get_node(pos),
-                        expected.get_node(pos),
-                        "workers={parallelism} pos={pos}"
-                    );
+                // Leaf 63 is new in `actual` but a parent leaf in `expected`.
+                for loc in [63, *actual.leaves() / 2 + 32, *actual.leaves() - 1] {
+                    let loc = Location::new(loc);
+                    actual = actual.update_leaf(&hasher, loc, b"update").unwrap();
+                    expected = expected.update_leaf(&hasher, loc, b"update").unwrap();
                 }
             }
-        });
+            let actual = actual.merkleize(&base, &hasher);
+            let expected = expected.merkleize(&base, &hasher);
+
+            assert_eq!(
+                actual.root(&hasher, 0).unwrap(),
+                expected.root(&hasher, 0).unwrap(),
+                "workers={parallelism}"
+            );
+            for pos in *parent.size()..*actual.size() {
+                let pos = Position::new(pos);
+                assert_eq!(
+                    actual.get_node(pos),
+                    expected.get_node(pos),
+                    "workers={parallelism} pos={pos}"
+                );
+            }
+        }
     }
 
     /// `add_many` split across workers matches adding the same items one at a time, on top of
     /// committed leaves and an unapplied parent batch.
     #[cfg(feature = "std")]
     fn add_many_matches_add<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            for parallelism in [2, 3, 8] {
-                let strategy = split_strategy(parallelism);
-                // Includes sizes one and two short of a power of two.
-                for committed in [0u64, 1, 2, 3, 6, 7, 14, 30, 62, 63, 100] {
-                    let base = build_reference::<F>(&hasher, committed);
-                    for (parent_count, count) in [
-                        (0, 1),
-                        (0, 127),
-                        (0, 128),
-                        (0, 129),
-                        (0, 300),
-                        (0, 1000),
-                        // Eight workers split this parent into one-leaf ranges.
-                        (5, 200),
-                        (130, 777),
-                    ] {
-                        let items: Vec<u64> = (0..(parent_count + count) as u64).collect();
-                        let (parent_items, child_items) = items.split_at(parent_count);
+        let hasher: H = Standard::new(ForwardFold);
+        for parallelism in [2, 3, 8] {
+            let strategy = split_strategy(parallelism);
+            // Includes sizes one and two short of a power of two.
+            for committed in [0u64, 1, 2, 3, 6, 7, 14, 30, 62, 63, 100] {
+                let base = build_reference::<F>(&hasher, committed);
+                for (parent_count, count) in [
+                    (0, 1),
+                    (0, 127),
+                    (0, 128),
+                    (0, 129),
+                    (0, 300),
+                    (0, 1000),
+                    // Eight workers split this parent into one-leaf ranges.
+                    (5, 200),
+                    (130, 777),
+                ] {
+                    let items: Vec<u64> = (0..(parent_count + count) as u64).collect();
+                    let (parent_items, child_items) = items.split_at(parent_count);
 
-                        let parent =
-                            MerkleizedBatch::from_mem_with_strategy(&base, strategy.clone())
-                                .new_batch()
-                                .add_many(&hasher, parent_items)
-                                .merkleize(&base, &hasher);
-                        let child = parent
-                            .new_batch()
-                            .add_many(&hasher, child_items)
-                            .merkleize(&base, &hasher);
+                    let parent = MerkleizedBatch::from_mem_with_strategy(&base, strategy.clone())
+                        .new_batch()
+                        .add_many(&hasher, parent_items)
+                        .merkleize(&base, &hasher);
+                    let child = parent
+                        .new_batch()
+                        .add_many(&hasher, child_items)
+                        .merkleize(&base, &hasher);
 
-                        let mut expected_parent = base.new_batch();
-                        for item in parent_items {
-                            expected_parent = expected_parent.add(&hasher, &item.to_be_bytes());
-                        }
-                        let expected_parent = expected_parent.merkleize(&base, &hasher);
-                        let mut expected_child = expected_parent.new_batch();
-                        for item in child_items {
-                            expected_child = expected_child.add(&hasher, &item.to_be_bytes());
-                        }
-                        let expected_child = expected_child.merkleize(&base, &hasher);
-
-                        let case = format!(
-                            "workers={parallelism} leaves={committed}+{parent_count}+{count}"
-                        );
-                        assert_eq!(
-                            parent.data.appended, expected_parent.data.appended,
-                            "{case}"
-                        );
-                        assert_eq!(child.data.appended, expected_child.data.appended, "{case}");
-                        assert_eq!(
-                            child.root(&hasher, 0).unwrap(),
-                            expected_child.root(&hasher, 0).unwrap(),
-                            "{case}"
-                        );
+                    let mut expected_parent = base.new_batch();
+                    for item in parent_items {
+                        expected_parent = expected_parent.add(&hasher, &item.to_be_bytes());
                     }
+                    let expected_parent = expected_parent.merkleize(&base, &hasher);
+                    let mut expected_child = expected_parent.new_batch();
+                    for item in child_items {
+                        expected_child = expected_child.add(&hasher, &item.to_be_bytes());
+                    }
+                    let expected_child = expected_child.merkleize(&base, &hasher);
+
+                    let case =
+                        format!("workers={parallelism} leaves={committed}+{parent_count}+{count}");
+                    assert_eq!(
+                        parent.data.appended, expected_parent.data.appended,
+                        "{case}"
+                    );
+                    assert_eq!(child.data.appended, expected_child.data.appended, "{case}");
+                    assert_eq!(
+                        child.root(&hasher, 0).unwrap(),
+                        expected_child.root(&hasher, 0).unwrap(),
+                        "{case}"
+                    );
                 }
             }
-        });
+        }
     }
 
     /// Updates to committed and new leaves, then an append, after `add_many` match the same
     /// operations after `add`.
     #[cfg(feature = "std")]
     fn add_many_then_mutate<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 30);
-            let items: Vec<u64> = (0..600).collect();
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 30);
+        let items: Vec<u64> = (0..600).collect();
 
-            let mut batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(4))
-                .new_batch()
-                .add_many(&hasher, &items);
-            let mut expected = base.new_batch();
-            for item in &items {
-                expected = expected.add(&hasher, &item.to_be_bytes());
-            }
-            for loc in [3, 47, 629] {
-                batch = batch
-                    .update_leaf(&hasher, Location::new(loc), b"updated")
-                    .unwrap();
-                expected = expected
-                    .update_leaf(&hasher, Location::new(loc), b"updated")
-                    .unwrap();
-            }
-            let batch = batch.add(&hasher, b"extra").merkleize(&base, &hasher);
-            let expected = expected.add(&hasher, b"extra").merkleize(&base, &hasher);
+        let mut batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(4))
+            .new_batch()
+            .add_many(&hasher, &items);
+        let mut expected = base.new_batch();
+        for item in &items {
+            expected = expected.add(&hasher, &item.to_be_bytes());
+        }
+        for loc in [3, 47, 629] {
+            batch = batch
+                .update_leaf(&hasher, Location::new(loc), b"updated")
+                .unwrap();
+            expected = expected
+                .update_leaf(&hasher, Location::new(loc), b"updated")
+                .unwrap();
+        }
+        let batch = batch.add(&hasher, b"extra").merkleize(&base, &hasher);
+        let expected = expected.add(&hasher, b"extra").merkleize(&base, &hasher);
 
-            assert_eq!(batch.data.appended, expected.data.appended);
-            assert_eq!(batch.data.overwrites, expected.data.overwrites);
-            assert_eq!(
-                batch.root(&hasher, 0).unwrap(),
-                expected.root(&hasher, 0).unwrap()
-            );
-        });
+        assert_eq!(batch.data.appended, expected.data.appended);
+        assert_eq!(batch.data.overwrites, expected.data.overwrites);
+        assert_eq!(
+            batch.root(&hasher, 0).unwrap(),
+            expected.root(&hasher, 0).unwrap()
+        );
     }
 
     /// `add_many` on one range hashes every new node whose leaves all lie in the range.
@@ -2073,6 +2010,7 @@ mod tests {
     /// locates its appended nodes from its own parent size. Nodes that exist only in the committed
     /// base read as `None`.
     fn get_node_resolves_from_writing_batch<F: Family>() {
+        // Use distinct digests to identify which batch supplies each node above a committed base.
         let hasher: H = Standard::new(ForwardFold);
         let base = build_reference::<F>(&hasher, 10);
         let (x, y, z, w) = (
@@ -2116,11 +2054,11 @@ mod tests {
                 assert_eq!(batch.get_node(batch.size()), None);
             };
 
-        // An empty batch holds no nodes of its own, so every read walks its ancestors.
+        // An empty batch holds no nodes of its own, so every read uses retained ancestor records.
         let empty = b.new_batch().merkleize(&base, &hasher);
         check_ancestor_nodes(&empty);
 
-        // C returns its own leaf 9 and leaf 11 and reads other nodes through `empty`.
+        // C returns its own leaf 9 and leaf 11 and reads older nodes from retained records.
         let c = empty
             .new_batch()
             .update_leaf_digest(Location::new(9), z)
@@ -2131,6 +2069,23 @@ mod tests {
         assert_eq!(c.get_node(leaf_9), Some(z));
         assert_eq!(c.get_node(leaf_11), Some(w));
         check_ancestor_nodes(&c);
+
+        // Overwrite leaf 0 again, then give the last batch no nodes of its own.
+        let d = c
+            .new_batch()
+            .update_leaf_digest(Location::new(0), w)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let e = d.new_batch().merkleize(&base, &hasher);
+
+        // Drop every ancestor handle. The empty tip must retain the latest values from the chain.
+        drop((a, b, empty, c, d));
+        assert_eq!(e.get_node(leaf_0), Some(w));
+        assert_eq!(e.get_node(leaf_9), Some(z));
+        assert_eq!(e.get_node(leaf_10), Some(x));
+        assert_eq!(e.get_node(leaf_11), Some(w));
+        assert_eq!(e.get_node(leaf_5), None);
+        assert_eq!(e.get_node(e.size()), None);
     }
 
     #[cfg(feature = "std")]
@@ -2342,39 +2297,35 @@ mod tests {
     /// A structure rebuilt from the pinned nodes at `n - 1` plus the final element generates a
     /// verifiable proof for that element against the root at `n`.
     fn tip_proof_from_pins<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            for &n in &[1u64, 2, 3, 8, 100, 199] {
-                let reference = build_reference::<F>(&hasher, n);
-                let boundary = Location::new(n - 1);
-                let pin_map = reference.nodes_to_pin(boundary);
-                let pinned_nodes: Vec<D> =
-                    F::nodes_to_pin(boundary).map(|pos| pin_map[&pos]).collect();
-                let element = hasher.digest(&(n - 1).to_be_bytes());
+        let hasher: H = Standard::new(ForwardFold);
+        for &n in &[1u64, 2, 3, 8, 100, 199] {
+            let reference = build_reference::<F>(&hasher, n);
+            let boundary = Location::new(n - 1);
+            let pin_map = reference.nodes_to_pin(boundary);
+            let pinned_nodes: Vec<D> = F::nodes_to_pin(boundary).map(|pos| pin_map[&pos]).collect();
+            let element = hasher.digest(&(n - 1).to_be_bytes());
 
-                let peaks = F::peaks(F::location_to_position(Location::new(n))).count();
-                for inactive_peaks in 0..=peaks.min(2) {
-                    let root = reference.root(&hasher, inactive_peaks).unwrap();
+            let peaks = F::peaks(F::location_to_position(Location::new(n))).count();
+            for inactive_peaks in 0..=peaks.min(2) {
+                let root = reference.root(&hasher, inactive_peaks).unwrap();
 
-                    let mut rebuilt = Mem::<F, D>::init(crate::merkle::mem::Config {
-                        nodes: Vec::new(),
-                        pruning_boundary: boundary,
-                        pinned_nodes: pinned_nodes.clone(),
-                    })
-                    .unwrap();
-                    let batch = rebuilt
-                        .new_batch()
-                        .add(&hasher, &element)
-                        .merkleize(&rebuilt, &hasher);
-                    rebuilt.apply_batch(&batch).unwrap();
-                    assert_eq!(rebuilt.root(&hasher, inactive_peaks).unwrap(), root);
+                let mut rebuilt = Mem::<F, D>::init(crate::merkle::mem::Config {
+                    nodes: Vec::new(),
+                    pruning_boundary: boundary,
+                    pinned_nodes: pinned_nodes.clone(),
+                })
+                .unwrap();
+                let batch = rebuilt
+                    .new_batch()
+                    .add(&hasher, &element)
+                    .merkleize(&rebuilt, &hasher);
+                rebuilt.apply_batch(&batch).unwrap();
+                assert_eq!(rebuilt.root(&hasher, inactive_peaks).unwrap(), root);
 
-                    let proof = rebuilt.proof(&hasher, boundary, inactive_peaks).unwrap();
-                    assert!(proof.verify_range_inclusion(&hasher, boundary, &[element], &root));
-                }
+                let proof = rebuilt.proof(&hasher, boundary, inactive_peaks).unwrap();
+                assert!(proof.verify_range_inclusion(&hasher, boundary, &[element], &root));
             }
-        });
+        }
     }
 
     #[test]

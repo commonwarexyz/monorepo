@@ -330,6 +330,14 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
+    /// Return the retained start that [Self::prune] with `min_position` would leave.
+    ///
+    /// The default assumes pruning is exact. Journals that prune coarser must override it.
+    fn prune_target(&self, min_position: u64) -> u64 {
+        let bounds = self.bounds();
+        min_position.min(bounds.end).max(bounds.start)
+    }
+
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
@@ -363,28 +371,4 @@ pub trait Mutable: Contiguous + Sized {
     /// If destruction is interrupted, reopening either recovers the journal normally or creates an
     /// empty journal at position zero.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-}
-
-/// A [Contiguous] journal that can capture an owned snapshot reader of itself.
-#[commonware_macros::stability(ALPHA)]
-pub trait Snapshottable: Contiguous + Sized {
-    /// The owned reader type produced by [Self::snapshot], with bounds frozen at capture.
-    type Reader: Contiguous<Item = Self::Item>;
-
-    /// Capture an owned snapshot reader over the current journal. Bounds freeze at capture,
-    /// and the reader stays readable across appends and prunes.
-    ///
-    /// Capture writes buffered items to the tail blob without making them durable, first waiting
-    /// for any in-flight sync of that blob when there are buffered items to write.
-    ///
-    /// The snapshot keeps the journal's blobs open. While it is alive, an initialization that
-    /// reopens one of those blobs fails with `BlobAlreadyOpen`, though a blob removed since the
-    /// capture (for example by a prune) can be recreated. On filesystem-backed storage the
-    /// snapshot also holds the storage directory, so a second storage instance on that directory
-    /// waits for it to drop.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the capture fails, which consumes the journal.
-    fn snapshot(self) -> impl Future<Output = Result<(Self, Self::Reader), Error>> + Send;
 }

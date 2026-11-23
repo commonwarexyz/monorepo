@@ -5,8 +5,8 @@ use crate::dkg::{
     fence::Gate,
     network::{Directory, Manager},
     orchestrator::{Mailbox, mailbox::Message},
-    state_sync::{self, Plan as StateSyncPlan},
-    types::{EpochInfo, Payload},
+    state_sync::{self, BlsVariant as DkgVariant, Checkpoint, Plan as StateSyncPlan},
+    types::EpochInfo,
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
@@ -21,7 +21,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, Digested, PublicKey,
+    Digest, PublicKey,
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
@@ -141,13 +141,12 @@ pub struct SimplexConfig<L> {
 }
 
 /// Configuration for the [`Actor`].
-pub struct Config<B, M, P, MV, DV, A, L, T>
+pub struct Config<B, M, P, MV, A, L, T>
 where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
     MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
-    DV: BlsVariant,
 {
     /// Network blocker shared with each epoch consensus engine.
     pub oracle: B,
@@ -175,13 +174,8 @@ where
     /// The actor enters an epoch only after this gate reaches it.
     pub gate: Gate,
 
-    /// State-sync startup plan shared with the reshare actor.
-    pub state_sync: StateSyncPlan<
-        P::Scheme,
-        MV::Commitment,
-        DV,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    /// State-sync startup plan shared with the reshare actor and the probe.
+    pub state_sync: StateSyncPlan<P::Scheme, MV>,
 
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
@@ -195,7 +189,7 @@ where
 
 /// Runs one Simplex engine per epoch (see the
 /// [module docs](crate::dkg::orchestrator)).
-pub struct Actor<E, B, M, P, MV, DV, A, L, T, ACK = Exact>
+pub struct Actor<E, B, M, P, MV, A, L, T, ACK = Exact>
 where
     E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -206,9 +200,7 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock:
-        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
-    DV: BlsVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -231,18 +223,13 @@ where
     strategy: T,
     simplex: SimplexConfig<L>,
     gate: Gate,
-    state_sync: StateSyncPlan<
-        P::Scheme,
-        MV::Commitment,
-        DV,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    state_sync: StateSyncPlan<P::Scheme, MV>,
     blocks_per_epoch: NonZeroU64,
     partition_prefix: String,
     latest_epoch: Gauge,
 }
 
-impl<E, B, M, P, MV, DV, A, L, T, ACK> Actor<E, B, M, P, MV, DV, A, L, T, ACK>
+impl<E, B, M, P, MV, A, L, T, ACK> Actor<E, B, M, P, MV, A, L, T, ACK>
 where
     E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -253,9 +240,7 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock:
-        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
-    DV: BlsVariant,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -275,7 +260,7 @@ where
     /// [`Actor::start`].
     pub fn new(
         context: E,
-        config: Config<B, M, P, MV, DV, A, L, T>,
+        config: Config<B, M, P, MV, A, L, T>,
     ) -> (Self, Mailbox<MV::ApplicationBlock, ACK>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let latest_epoch = context.gauge("latest_epoch", "current epoch");
@@ -407,7 +392,7 @@ where
                         .handle_finalized(
                             &epocher,
                             &mut active,
-                            block,
+                            block.height(),
                             acknowledgement,
                             &mut channels,
                         )
@@ -421,10 +406,10 @@ where
     }
 
     /// Resolves the startup epoch from state-sync material if the plan resolves
-    /// to any, and otherwise from the boundary block of marshal's recovered
-    /// epoch.
+    /// to any, then from the recovered epoch's checkpoint, and otherwise from the
+    /// epoch's boundary block.
     ///
-    /// Returns `None` if marshal cannot supply that boundary block.
+    /// Returns `None` if no source can supply the epoch.
     async fn resolve_start(
         &mut self,
         epocher: &FixedEpocher,
@@ -432,7 +417,7 @@ where
         ResolvedStart<
             P::Scheme,
             MV::Commitment,
-            DV,
+            DkgVariant<MV>,
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
@@ -457,12 +442,20 @@ where
             });
         }
 
-        self.resolve_boundary(recovered_epoch.unwrap_or_else(Epoch::zero), epocher)
-            .await
+        let epoch = recovered_epoch.unwrap_or_else(Epoch::zero);
+        if let Some(checkpoint) = self.state_sync.checkpoint(epoch).await {
+            return Some(ResolvedStart {
+                epoch,
+                floor: Floor::Genesis(checkpoint.commitment()),
+                info: checkpoint.info(),
+            });
+        }
+
+        self.resolve_boundary(epoch, epocher).await
     }
 
     /// Resolves `epoch` from the finalized boundary block that carries its
-    /// [`EpochInfo`].
+    /// [`EpochInfo`] and records the epoch's checkpoint.
     ///
     /// Returns `None` if marshal cannot supply the block. Panics if the block
     /// carries no [`EpochInfo`] or one for another epoch.
@@ -474,7 +467,7 @@ where
         ResolvedStart<
             P::Scheme,
             MV::Commitment,
-            DV,
+            DkgVariant<MV>,
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,
@@ -483,22 +476,40 @@ where
             .previous()
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
+
+        // Read the optional certificate first so shutdown between requests fails the block lookup
+        // before we record a checkpoint.
+        let finalization = self.marshal.get_finalization(height).await;
         let Some(boundary) = self.marshal.get_block(height).await else {
             error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
-        let commitment = MV::commitment(&boundary);
-        let block = MV::into_shared(boundary);
-        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
-            panic!("boundary block {height} missing epoch info");
-        };
-        if info.epoch != epoch {
-            panic!(
-                "boundary block {height} carries epoch info for {}, expected {epoch}",
-                info.epoch
-            );
-        }
 
+        let checkpoint = Checkpoint::new(boundary, finalization);
+        let commitment = checkpoint.commitment();
+        let info = checkpoint.info();
+        assert_eq!(
+            info.epoch, epoch,
+            "boundary block {height} carries the wrong epoch"
+        );
+
+        // An acknowledgement can advance marshal past the boundary. Persist the checkpoint
+        // first, keeping every epoch a restart from the processed height could still need.
+        let retained_from = self
+            .marshal
+            .get_processed()
+            .await
+            .map_or_else(Epoch::zero, |processed| {
+                state_sync::recovered_epoch(processed, epocher)
+            });
+        self.state_sync
+            .record(
+                self.context.as_present().child("checkpoint"),
+                epoch,
+                checkpoint,
+                retained_from,
+            )
+            .await;
         Some(ResolvedStart {
             epoch,
             floor: Floor::Genesis(commitment),
@@ -581,24 +592,23 @@ where
     /// Handles a finalized block and returns whether the actor keeps running.
     ///
     /// Acknowledges any block below the active epoch's final block
-    /// immediately. For the final block, enters the next epoch and acknowledges
-    /// the block once the new engine has started. Returns `false` if marshal
-    /// cannot supply the block or the next epoch cannot be entered. Panics if
-    /// the block is above the active epoch's final block (marshal skipped the
-    /// final block) or if the final block does not carry the next epoch's
-    /// [`EpochInfo`].
+    /// immediately. For the final block, records the next epoch's checkpoint,
+    /// enters the next epoch, and acknowledges the block once the new engine
+    /// has started. Returns `false` if marshal cannot supply the block or the
+    /// next epoch cannot be entered. Panics if the block is above the active
+    /// epoch's final block (marshal skipped the final block) or if the final
+    /// block does not carry the next epoch's [`EpochInfo`].
     async fn handle_finalized<S>(
         &mut self,
         epocher: &FixedEpocher,
         active: &mut ActiveEpoch,
-        block: Digested<MV::ApplicationBlock>,
+        height: Height,
         acknowledgement: ACK,
         channels: &mut Channels<S>,
     ) -> bool
     where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let height = block.height();
         let current = active.epoch;
         let last = epocher
             .last(current)
@@ -613,23 +623,12 @@ where
         }
 
         let next_epoch = current.next();
-        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
-            panic!("boundary block of epoch {current} missing EpochInfo");
-        };
-        if info.epoch != next_epoch {
-            panic!(
-                "boundary block of epoch {current} carries epoch info for wrong epoch (got: {}, expected: {next_epoch})",
-                info.epoch
-            );
-        }
-
-        let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+        let Some(start) = self.resolve_boundary(next_epoch, epocher).await else {
             return false;
         };
-        let floor = Floor::Genesis(MV::commitment(&boundary));
-
-        let next = self.enter_epoch(next_epoch, floor, &info, channels).await;
+        let next = self
+            .enter_epoch(next_epoch, start.floor, &start.info, channels)
+            .await;
         let next = match next {
             Ok(next) => next,
             Err(EnterEpochError::GateClosed) => {
@@ -667,7 +666,7 @@ where
         epoch: Epoch,
         floor: Floor<P::Scheme, MV::Commitment>,
         info: &EpochInfo<
-            DV,
+            DkgVariant<MV>,
             <P::Scheme as Verifier>::PublicKey,
             <MV::ApplicationBlock as ReshareBlock>::Directory,
         >,

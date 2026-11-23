@@ -11,12 +11,20 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 /// Digests extracted from a verified proof, paired with their Merkle positions.
 pub type ExtractedDigests<F, H> = Vec<(Position<F>, DigestOf<H>)>;
 
+mod sealed {
+    /// Carries [`super::ProofExt`]'s parameters, so a proof cannot be given an implementation for
+    /// another family or digest.
+    pub trait Sealed<F, D> {}
+}
+
 /// Verification of [Proof]s over QMDB operations.
 ///
 /// Unlike [Proof]'s own methods, which take pre-encoded elements and a hasher, these take the
 /// operations and a [Hasher] type, and encode and hash them the same way QMDB databases do. A
 /// proof from a database therefore verifies against that database's root.
-pub trait ProofExt<F: Family, D: Digest> {
+///
+/// Sealed: implemented by a [Proof] for its own family and digest.
+pub trait ProofExt<F: Family, D: Digest>: sealed::Sealed<F, D> {
     /// Return true if the proof authenticates `ops` at the locations starting at `start_loc` in
     /// the database with the provided `root`.
     ///
@@ -86,6 +94,8 @@ fn encode_ops<'a, O: Encode + 'a>(
 ) -> impl ExactSizeIterator<Item = Bytes> {
     ops.into_iter().map(Encode::encode)
 }
+
+impl<F: Family, D: Digest> sealed::Sealed<F, D> for Proof<F, D> {}
 
 impl<F: Family, D: Digest> ProofExt<F, D> for Proof<F, D> {
     fn verify<'a, H: Hasher<Digest = D>, O: Encode + 'a>(
@@ -158,7 +168,6 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::{Runner, deterministic};
     use core::ops::Range;
 
     fn test_digest(v: u8) -> Digest {
@@ -226,14 +235,12 @@ mod tests {
 
     #[test_traced]
     fn test_verify_proof_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_proof_inner::<mmr::Family>() });
+        verify_proof_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_verify_proof_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_proof_inner::<mmb::Family>() });
+        verify_proof_inner::<mmb::Family>();
     }
 
     fn verify_proof_with_offset_inner<F: Family>() {
@@ -278,14 +285,12 @@ mod tests {
 
     #[test_traced]
     fn test_verify_proof_with_offset_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_proof_with_offset_inner::<mmr::Family>() });
+        verify_proof_with_offset_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_verify_proof_with_offset_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_proof_with_offset_inner::<mmb::Family>() });
+        verify_proof_with_offset_inner::<mmb::Family>();
     }
 
     fn verify_and_extract_digests_inner<F: Family>() {
@@ -332,14 +337,12 @@ mod tests {
 
     #[test_traced]
     fn test_verify_and_extract_digests_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_and_extract_digests_inner::<mmr::Family>() });
+        verify_and_extract_digests_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_verify_and_extract_digests_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_and_extract_digests_inner::<mmb::Family>() });
+        verify_and_extract_digests_inner::<mmb::Family>();
     }
 
     fn to_proof_store_inner<F: Family>() {
@@ -385,14 +388,12 @@ mod tests {
 
     #[test_traced]
     fn test_to_proof_store_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { to_proof_store_inner::<mmr::Family>() });
+        to_proof_store_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_to_proof_store_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { to_proof_store_inner::<mmb::Family>() });
+        to_proof_store_inner::<mmb::Family>();
     }
 
     fn to_proof_store_invalid_proof_inner<F: Family>() {
@@ -424,14 +425,12 @@ mod tests {
 
     #[test_traced]
     fn test_to_proof_store_invalid_proof_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { to_proof_store_invalid_proof_inner::<mmr::Family>() });
+        to_proof_store_invalid_proof_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_to_proof_store_invalid_proof_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { to_proof_store_invalid_proof_inner::<mmb::Family>() });
+        to_proof_store_invalid_proof_inner::<mmb::Family>();
     }
 
     fn multi_proof_inner<F: Family>() {
@@ -500,14 +499,12 @@ mod tests {
 
     #[test_traced]
     fn test_multi_proof_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { multi_proof_inner::<mmr::Family>() });
+        multi_proof_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_multi_proof_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { multi_proof_inner::<mmb::Family>() });
+        multi_proof_inner::<mmb::Family>();
     }
 
     fn multi_proof_with_fold_prefix_peaks_inner<F: Family>() {
@@ -610,16 +607,12 @@ mod tests {
 
     #[test_traced]
     fn test_multi_proof_with_fold_prefix_peaks_mmr() {
-        let executor = deterministic::Runner::default();
-        executor
-            .start(|_| async move { multi_proof_with_fold_prefix_peaks_inner::<mmr::Family>() });
+        multi_proof_with_fold_prefix_peaks_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_multi_proof_with_fold_prefix_peaks_mmb() {
-        let executor = deterministic::Runner::default();
-        executor
-            .start(|_| async move { multi_proof_with_fold_prefix_peaks_inner::<mmb::Family>() });
+        multi_proof_with_fold_prefix_peaks_inner::<mmb::Family>();
     }
 
     fn verify_multi_inner<F: Family>() {
@@ -688,14 +681,12 @@ mod tests {
 
     #[test_traced]
     fn test_verify_multi_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_multi_inner::<mmr::Family>() });
+        verify_multi_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_verify_multi_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { verify_multi_inner::<mmb::Family>() });
+        verify_multi_inner::<mmb::Family>();
     }
 
     fn multi_proof_empty_inner<F: Family>() {
@@ -731,14 +722,12 @@ mod tests {
 
     #[test_traced]
     fn test_multi_proof_empty_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { multi_proof_empty_inner::<mmr::Family>() });
+        multi_proof_empty_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_multi_proof_empty_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { multi_proof_empty_inner::<mmb::Family>() });
+        multi_proof_empty_inner::<mmb::Family>();
     }
 
     fn multi_proof_single_element_inner<F: Family>() {
@@ -782,13 +771,11 @@ mod tests {
 
     #[test_traced]
     fn test_multi_proof_single_element_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { multi_proof_single_element_inner::<mmr::Family>() });
+        multi_proof_single_element_inner::<mmr::Family>();
     }
 
     #[test_traced]
     fn test_multi_proof_single_element_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move { multi_proof_single_element_inner::<mmb::Family>() });
+        multi_proof_single_element_inner::<mmb::Family>();
     }
 }

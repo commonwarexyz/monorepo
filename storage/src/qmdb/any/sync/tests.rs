@@ -48,29 +48,24 @@ pub(crate) trait Destructible {
     ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
-// Implement Destructible once for the generic full Merkle type used in tests.
+// Implement Destructible once for the frontier used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl<F: merkle::Family> Destructible
-    for crate::merkle::full::Merkle<
-        F,
-        deterministic::Context,
-        Digest,
-        commonware_parallel::Sequential,
-    >
+    for crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>
 {
     type Family = F;
 
     async fn destroy(self) -> Result<(), qmdb::Error<F>> {
-        self.destroy().await.map_err(qmdb::Error::Merkle)
+        self.destroy().await.map_err(Into::into)
     }
 }
 
 /// Trait providing internal access for from_sync_result tests.
 pub(crate) trait FromSyncTestable: qmdb::sync::Database {
-    type Merkle: Destructible<Family = Self::Family> + Send;
+    type Frontier: Destructible<Family = Self::Family> + Send;
 
-    /// Get the Merkle structure and journal from the database.
-    fn into_log_components(self) -> (Self::Merkle, Self::Journal);
+    /// Get the frontier and journal from the database.
+    fn into_log_components(self) -> (Self::Frontier, Self::Journal);
 
     /// Get the pinned nodes at a given location
     fn pinned_nodes_at(
@@ -663,7 +658,7 @@ where
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
         let (_, journal) = db.into_log_components();
 
-        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             context.child("synced"),
             db_config,
             journal,
@@ -733,10 +728,10 @@ where
         // Get pinned nodes at the sync lower bound from the target db (which has all the data).
         let pinned_nodes = target_db.pinned_nodes_at(sync_lower_bound).await;
 
-        let (mmr, journal) = target_db.into_log_components();
+        let (frontier, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
-        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             client_context.child("synced"),
             sync_db_config,
             journal,
@@ -759,7 +754,7 @@ where
         assert_eq!(H::canonical_root(&sync_db), target_hash);
 
         H::destroy(sync_db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
@@ -791,12 +786,12 @@ where
         let target_op_count = H::bounds(&source_db).end;
         let target_inactivity_floor = H::inactivity_floor(&source_db);
 
-        let (mmr, journal) = source_db.into_log_components();
+        let (frontier, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string());
 
-        let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
@@ -816,7 +811,7 @@ where
         assert_eq!(H::canonical_root(&db), target_hash);
 
         H::destroy(db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
@@ -837,12 +832,12 @@ where
         assert_eq!(H::bounds(&source_db).end, Location::new(1));
 
         let target_hash = H::canonical_root(&source_db);
-        let (mmr, journal) = source_db.into_log_components();
+        let (frontier, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string());
 
-        let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
+        let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Hooks<_>>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
@@ -866,7 +861,7 @@ where
         assert!(H::bounds(&synced_db).end > Location::new(1));
 
         H::destroy(synced_db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
@@ -1516,7 +1511,7 @@ pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
         )
         .await
         .unwrap();
-        let pinned = <DbOf<H> as sync::Database>::local_pinned_nodes(
+        let pinned = <DbOf<H> as sync::Hooks<_>>::local_pinned_nodes(
             context.child("probe"),
             &config,
             &target,
@@ -1547,12 +1542,6 @@ macro_rules! db_any_harness_methods {
             db.destroy().await
         }
 
-        fn merkle_config(
-            config: &$crate::qmdb::sync::harness::ConfigOf<Self>,
-        ) -> $crate::merkle::full::Config<commonware_parallel::Sequential> {
-            config.merkle.clone()
-        }
-
         async fn db_sync(db: Self::Db) -> Self::Db {
             db.sync().await.unwrap()
         }
@@ -1575,7 +1564,7 @@ macro_rules! db_any_harness_methods {
         }
 
         fn ops_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {
-            $crate::qmdb::sync::Database::ops_root(db)
+            $crate::qmdb::sync::Database::target(db).root
         }
 
         fn canonical_root(db: &Self::Db) -> commonware_cryptography::sha256::Digest {
@@ -1636,7 +1625,7 @@ mod harnesses {
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
     use commonware_runtime::deterministic::Context;
-    use commonware_utils::TestRng;
+    use commonware_utils::{NZUsize, TestRng};
     use rand::Rng;
 
     // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
@@ -1833,7 +1822,7 @@ mod harnesses {
         fn config(suffix: &str) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                (),
+                NZUsize!(2),
             )
         }
 
@@ -1856,7 +1845,8 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, ());
+            let config =
+                crate::qmdb::any::ordered::variable::test::create_test_config(seed, NZUsize!(2));
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 

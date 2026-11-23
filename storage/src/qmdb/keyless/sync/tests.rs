@@ -5,8 +5,8 @@
 //! modules the shared macro generates.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{Family, Location, Proof, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous},
+    merkle::{Family, Location, Proof, mmb, mmr},
     qmdb::{
         self,
         keyless::{self, Operation, fixed, variable},
@@ -118,7 +118,7 @@ where
             .await
             .unwrap()
             .0;
-        let target = Target {
+        let target = sync::Target {
             root: target_root,
             range: non_empty_range!(start, size),
         };
@@ -319,19 +319,19 @@ where
         let target_db = H::prune(target_db, Location::new(5)).await;
         let start = H::bounds(&target_db).start;
         assert!(*start > 0);
-        let initial_target = Target {
+        let initial_target = sync::Target {
             root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
-        let next_target = Target {
+        let next_target = sync::Target {
             root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 2), None).await;
-        let final_target = Target {
+        let final_target = sync::Target {
             root: H::ops_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
@@ -447,14 +447,14 @@ where
         let target_db = H::prune(target_db, Location::new(5)).await;
         let floor = H::bounds(&target_db).start;
         assert!(*floor > 0);
-        let initial_target = Target {
+        let initial_target = sync::Target {
             root: H::ops_root(&target_db),
             range: non_empty_range!(floor, H::bounds(&target_db).end),
         };
         let target_db =
             H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
         let next_floor = floor.checked_add(2).unwrap();
-        let next_target = Target {
+        let next_target = sync::Target {
             root: H::ops_root(&target_db),
             range: non_empty_range!(next_floor, H::bounds(&target_db).end),
         };
@@ -507,7 +507,6 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let fine_config = |sfx: &str| {
             let mut config = harnesses::VariableHarness::<F>::config(sfx);
             config.log.items_per_section = NZU64!(1);
-            config.merkle.items_per_blob = NZU64!(1);
             config
         };
         let source = DbOf::<harnesses::VariableHarness<F>>::init(
@@ -607,9 +606,9 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
         let source = H::apply_full(source, &values, Some(H::value(9)), Location::new(0)).await;
         let source = H::commit_full(source).await;
         let size = H::full_bounds(&source).end;
-        let canonical_target = sync::CompactTarget {
+        let canonical_target = sync::Target {
             root: H::full_root(&source),
-            size,
+            range: non_empty_range!(size - 1, size),
         };
         let source = Arc::new(source);
         let response = fetch_compact_state(&source, canonical_target)
@@ -636,9 +635,9 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
                 op,
                 pinned_nodes,
             }]),
-            sync::CompactTarget {
+            sync::Target {
                 root: noncanonical_root,
-                size,
+                range: non_empty_range!(size - 1, size),
             },
             sync_cfg,
         ))
@@ -656,7 +655,7 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
         let reopened = H::init(
             context.child("reopen_history"),
             client_cfg,
-            Some(seeded_targets[0].size),
+            Some(seeded_targets[0].range.end()),
         )
         .await;
         assert_eq!(H::target(&reopened), seeded_targets[0]);
@@ -695,9 +694,12 @@ pub(crate) fn test_compact_sync_replaces_undecodable_witnesses<F: Family>() {
         let source = H::<F>::init_full(context.child("source"), &suffix).await;
         let source = H::<F>::apply_full(source, &[vec![9]], Some(vec![9]), Location::new(0)).await;
         let source = H::<F>::commit_full(source).await;
-        let target = sync::CompactTarget {
+        let target = sync::Target {
             root: H::<F>::full_root(&source),
-            size: H::<F>::full_bounds(&source).end,
+            range: non_empty_range!(
+                H::<F>::full_bounds(&source).end - 1,
+                H::<F>::full_bounds(&source).end
+            ),
         };
         let synced: <H<F> as CompactSyncTestHarness>::Db = sync::sync(compact_engine_config(
             context.child("client"),
@@ -734,13 +736,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -751,6 +750,7 @@ pub(crate) mod harnesses {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -835,10 +835,6 @@ pub(crate) mod harnesses {
             db.destroy().await
         }
 
-        fn merkle_config(config: &ConfigOf<Self>) -> MerkleConfig<Sequential> {
-            config.merkle.clone()
-        }
-
         async fn db_sync(db: Self::Db) -> Self::Db {
             db.sync().await.unwrap()
         }
@@ -891,11 +887,12 @@ pub(crate) mod harnesses {
             start: Location<Self::Family>,
             ops: &[OpOf<Self>],
         ) {
+            // Read the log itself, since the floor may have retired these locations from reads.
             for (loc, op) in (*start..).zip(ops) {
                 let Operation::Append(value) = op else {
                     panic!("apply_ops does not apply commit operations");
                 };
-                let got = db.get(Location::new(loc)).await.unwrap();
+                let got = db.journal.read(loc).await.unwrap().into_value();
                 assert_eq!(got.as_ref(), Some(value), "wrong value at location {loc}");
             }
         }
@@ -903,7 +900,7 @@ pub(crate) mod harnesses {
         async fn assert_ops_absent(db: &Self::Db, ops: &[OpOf<Self>]) {
             let bounds = db.bounds();
             for loc in *bounds.start..*bounds.end {
-                if let Some(value) = db.get(Location::new(loc)).await.unwrap() {
+                if let Some(value) = db.journal.read(loc).await.unwrap().into_value() {
                     assert!(
                         !ops.iter()
                             .any(|op| matches!(op, Operation::Append(v) if *v == value)),
@@ -939,13 +936,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),
@@ -954,6 +948,7 @@ pub(crate) mod harnesses {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 
@@ -1040,10 +1035,9 @@ pub(crate) mod harnesses {
     {
         let hasher = qmdb::hasher::<Sha256>();
         let size = db.bounds().end;
-        let proof = db
+        let (proof, _) = db
             .journal
-            .merkle
-            .historical_proof(&hasher, size, size - 1, inactive_peaks)
+            .historical_proof(size, size - 1, NZU64!(1), inactive_peaks)
             .await
             .unwrap();
         let root = db.journal.merkle.root(&hasher, inactive_peaks).unwrap();
@@ -1149,7 +1143,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -1284,7 +1278,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -1459,12 +1453,12 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         .await
         .unwrap();
 
-        let stale_target = Target {
+        let stale_target = sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
@@ -1475,12 +1469,12 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             .is_none()
         );
 
-        let matching_target = Target {
+        let matching_target = sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+            <DbOf<H> as qmdb::sync::Hooks<_>>::local_pinned_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,

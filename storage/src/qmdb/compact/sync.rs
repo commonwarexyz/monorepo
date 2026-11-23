@@ -30,13 +30,42 @@ where
     type Context = E;
     type Hasher = H;
 
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        Self::init(context, config, max_size).await
+    }
+
+    /// The range covers only the last commit, the one operation a compact db holds.
+    fn target(&self) -> sync::Target<F, Self::Digest> {
+        self.target()
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &sync::Target<F, Self::Digest>,
+    ) -> Result<Self, Error<F>> {
+        self.prune(target.range.end()).await
+    }
+}
+
+impl<F, E, O, H, S> sync::Hooks<Self> for Db<F, E, O, H, S>
+where
+    F: Family,
+    E: Context,
+    O: Operation<F>,
+    H: Hasher,
+    S: Strategy,
+{
     /// Build a compact db from the synced log, which must hold exactly the commit operation at
     /// the start of `range`.
     async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        context: E,
+        config: <Self as sync::Database>::Config,
+        log: Memory<F, E, O>,
+        pinned_nodes: Option<Vec<H::Digest>>,
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
@@ -70,22 +99,30 @@ where
     /// Discards nothing. The sync journal lives in memory, and the stored witnesses are never
     /// read to build the synced state.
     async fn discard_local_state(
-        _context: Self::Context,
-        _config: &Self::Config,
+        _context: E,
+        _config: &<Self as sync::Database>::Config,
     ) -> Result<(), Error<F>> {
         Ok(())
     }
 
     async fn local_pinned_nodes(
-        _context: Self::Context,
-        _config: &Self::Config,
-        _target: &sync::Target<F, Self::Digest>,
-        _journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        _context: E,
+        _config: &<Self as sync::Database>::Config,
+        _target: &sync::Target<F, H::Digest>,
+        _journal: &Memory<F, E, O>,
+    ) -> Result<Option<Vec<H::Digest>>, Error<F>> {
         Ok(None)
     }
 
-    fn ops_root(&self) -> Self::Digest {
-        self.root()
+    /// Reject a target that covers more than the last commit.
+    fn validate_target(
+        target: &sync::Target<F, H::Digest>,
+    ) -> Result<(), sync::EngineError<F, H::Digest>> {
+        if target.range.start() + 1 != target.range.end() {
+            return Err(sync::EngineError::InvalidTarget {
+                bounds: target.range.clone(),
+            });
+        }
+        Ok(())
     }
 }

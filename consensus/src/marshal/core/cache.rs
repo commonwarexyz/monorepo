@@ -132,10 +132,10 @@ where
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
-    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. A write above
-    /// the ceiling raises it without creating the epochs in between. A node whose first write
-    /// lands far from genesis (a floor finalization or consensus activity at the current epoch)
-    /// therefore has nothing stored for most of the range.
+    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. A write keyed by
+    /// a round in an epoch above the ceiling raises it without creating the epochs in between. A
+    /// node whose first write lands far from genesis (a floor finalization or consensus activity at
+    /// the current epoch) therefore has nothing stored for most of the range.
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
@@ -415,7 +415,12 @@ where
         (self, handle.unwrap_or_else(|| Handle::ready(Ok(()))))
     }
 
-    /// Add a block to the height-indexed certified archive.
+    /// Add a block to the height-indexed certified archive, whether or not the block is certified.
+    ///
+    /// A block whose epoch lies below the epoch floor is not stored, because that epoch has been
+    /// pruned. A block whose epoch lies above the epoch ceiling is not stored, because storing the
+    /// block would raise the ceiling to an epoch derived from the block's own height, and that
+    /// height can be an unchecked claim.
     pub(crate) async fn put_certified(
         mut self,
         epoch: Epoch,
@@ -423,6 +428,12 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: &V::Block,
     ) -> Self {
+        // Startup checks each epoch from the floor to the ceiling for persisted archives, so an
+        // epoch derived from a possibly unchecked height must not raise the ceiling.
+        let (_, ceiling) = self.get_metadata();
+        if epoch > ceiling {
+            return self;
+        }
         (self, _) = self
             .with_epoch(epoch, |mut cache| async move {
                 // A digest determines its height, so scoping the dedup to this height

@@ -115,8 +115,6 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     fn root(&self) -> Self::Digest;
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     fn bounds(&self) -> Range<Location<Self::Family>>;
 
     /// Get the metadata associated with the last commit.
@@ -146,8 +144,7 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
     fn commit(self) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 
-    /// Durably persist the database, guaranteeing the current state will survive a crash, and that
-    /// no recovery will be needed on startup.
+    /// Durably persist the database so the operation journal needs no recovery on startup.
     ///
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
     fn sync(self) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;

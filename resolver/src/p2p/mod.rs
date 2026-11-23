@@ -2580,7 +2580,7 @@ mod tests {
     /// A blocker whose blocked-set subscription closes immediately, as test
     /// mocks elsewhere in the workspace do.
     #[derive(Clone)]
-    struct ClosedBlocker;
+    pub(super) struct ClosedBlocker;
 
     impl Blocker for ClosedBlocker {
         type PublicKey = PublicKey;
@@ -4102,7 +4102,7 @@ mod tests {
             let mut results = HashMap::new();
             for _ in 0..2 {
                 let (key, value) = cons_out1.recv().await.unwrap();
-                results.insert(key.clone(), value);
+                results.insert(key, value);
             }
 
             // Verify both keys were fetched successfully
@@ -4188,7 +4188,7 @@ mod tests {
             let mut results = HashMap::new();
             for _ in 0..3 {
                 let (key, value) = cons_out1.recv().await.unwrap();
-                results.insert(key.clone(), value);
+                results.insert(key, value);
             }
 
             assert_eq!(results.len(), 3);

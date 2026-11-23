@@ -1,10 +1,9 @@
 //! The unordered variant of a partitioned index.
 
-#[commonware_macros::stability(ALPHA)]
-use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
-        Unordered as UnorderedTrait, partitioned::partition_index_and_sub_key,
+        Unordered as UnorderedTrait,
+        partitioned::{PartitionRange, Partitioned, partition_index_and_sub_key},
         unordered::Index as UnorderedIndex,
     },
     translator::Translator,
@@ -50,7 +49,6 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for Index<T, V, P> {
     type Range = RangeIndex<T, V, P>;
 
@@ -85,7 +83,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 /// [Index::install_range]). It exposes only the cursor operations, which map a key's global
 /// partition index to the worker's local slot. The other [UnorderedTrait] operations index
 /// partitions globally and are deliberately unavailable, so they cannot be miscalled on a worker.
-#[commonware_macros::stability(ALPHA)]
 pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     /// The worker's partition slots, addressed by local slot (`global partition - offset`).
     partitions: Vec<UnorderedIndex<T, V>>,
@@ -94,7 +91,6 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     offset: usize,
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
     type Cursor<'a>

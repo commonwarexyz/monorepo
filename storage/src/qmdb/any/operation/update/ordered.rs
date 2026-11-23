@@ -71,8 +71,8 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
         write!(
             f,
             "[key:{} next_key:{} value:{}]",
-            hex(&self.key),
-            hex(&self.next_key),
+            hex(self.key.as_ref()),
+            hex(self.next_key.as_ref()),
             hex(&self.value.encode())
         )
     }

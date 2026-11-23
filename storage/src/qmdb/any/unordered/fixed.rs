@@ -15,16 +15,8 @@ pub type Operation<F, K, V> = unordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<F, E, K, V, H, T, S> = super::Db<
-    F,
-    E,
-    Journal<E, Operation<F, K, V>>,
-    Index<T, Location<F>>,
-    H,
-    Update<K, V>,
-    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
-    S,
->;
+pub type Db<F, E, K, V, H, T, S> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>, S>;
 
 /// Configuration for a [Db].
 pub type Config<T, S> = any::Config<T, JournalConfig, S>;
@@ -35,12 +27,10 @@ pub type Config<T, S> = any::Config<T, JournalConfig, S>;
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
 pub mod partitioned {
-    use super::{JournalConfig, any};
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::{
         index::partitioned::unordered::Index, journal::contiguous::fixed::Journal, merkle::Location,
     };
-    use core::num::NonZeroUsize;
 
     /// A key-value QMDB with a partitioned key index.
     ///
@@ -59,12 +49,8 @@ pub mod partitioned {
         Index<T, Location<F>, P>,
         H,
         Update<K, V>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
-
-    /// Configuration for a [Db].
-    pub type Config<T, S> = any::Config<T, JournalConfig, S, NonZeroUsize>;
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -96,7 +82,7 @@ pub(crate) mod test {
             mmr::{self, Location},
         },
         qmdb::{
-            Error, IndexBuild as _, ProofExt as _,
+            Error, ProofExt as _,
             any::{
                 batch::Slot,
                 test::{
@@ -107,12 +93,10 @@ pub(crate) mod test {
             },
             cache::Cache,
             floor::{Bounded, Proportional},
-            index_build::{delete_key, update_key},
-            sync::{Request, Source as _},
+            index_build::{Rebuild, delete_key, update_key},
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_codec::Encode as _;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
@@ -147,7 +131,6 @@ pub(crate) mod test {
         Index<TwoCap, GenericLocation<F>>,
         Sha256,
         crate::qmdb::any::operation::update::Unordered<Digest, FixedEncoding<Digest>>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;
 
@@ -179,19 +162,21 @@ pub(crate) mod test {
         Sequential,
     >;
 
-    /// Open a [DelayedTest] whose blob syncs park on `pending`.
+    /// Open a [DelayedTest] with `items_per_blob` operations per blob, whose blob syncs park on
+    /// `pending`.
     ///
     /// Init durably persists the recovered database, so while syncs park the returned future
-    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). The journal
-    /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
-    /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
+    /// must be driven with [drive_pending_syncs] (or the mock unblocked first). An apply that fills
+    /// the journal's write buffer or rolls a blob over waits for the in-flight sync, so mid-sync
+    /// applies must stay clear of both.
     fn open_delayed_db(
         context: Context,
         suffix: &str,
         pending: &PendingSyncs,
+        items_per_blob: std::num::NonZeroU64,
     ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
         let mut cfg = fixed_db_config::<TwoCap>(suffix);
-        cfg.log.items_per_blob = NZU64!(1000);
+        cfg.log.items_per_blob = items_per_blob;
         cfg.log.page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
         DelayedTest::init(
             DelayedSyncContext {
@@ -289,7 +274,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(context.child("delayed"), "start_sync_overlap", &pending);
+            let open = open_delayed_db(
+                context.child("delayed"),
+                "start_sync_overlap",
+                &pending,
+                NZU64!(1000),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -333,9 +323,14 @@ pub(crate) mod test {
             let size = db.bounds().end;
             drop(db);
 
-            let db = open_delayed_db(context.child("reopen"), "start_sync_overlap", &pending)
-                .await
-                .unwrap();
+            let db = open_delayed_db(
+                context.child("reopen"),
+                "start_sync_overlap",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             assert_eq!(db.root(), root);
             assert_eq!(db.bounds().end, size);
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
@@ -352,9 +347,14 @@ pub(crate) mod test {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(context.child("delayed"), "start_sync_fail", &pending)
-                .await
-                .unwrap();
+            let mut db = open_delayed_db(
+                context.child("delayed"),
+                "start_sync_fail",
+                &pending,
+                NZU64!(1000),
+            )
+            .await
+            .unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
             db = apply_write(db, key0, value0).await;
@@ -393,11 +393,21 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(context.child("delayed"), "start_sync_prune", &pending);
+            let open = open_delayed_db(
+                context.child("delayed"),
+                "start_sync_prune",
+                &pending,
+                NZU64!(7),
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
-            let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
-            db = apply_write(db, key0, value0).await;
+
+            // Overwriting one key moves the floor up with each commit, so the prune below crosses
+            // a blob.
+            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+            for i in 0..10u64 {
+                let value = Sha256::hash(&[&i.to_be_bytes()]);
+                db = drive_pending_syncs(&pending, apply_write(db, key, value)).await;
+            }
 
             let starts_before = pending.starts();
             let handle;
@@ -408,39 +418,17 @@ pub(crate) mod test {
             let floor = db.inactivity_floor();
             assert!(*floor > 0);
             let db = {
+                pending.arm();
                 let mut prune = std::pin::pin!(db.prune(floor));
                 assert!(
                     prune.as_mut().now_or_never().is_none(),
                     "prune proceeded while the commit sync was pending"
                 );
                 assert_eq!(
-                    pending.starts(),
-                    starts_before + 2,
-                    "prune started the merkle journal sync before blocking"
+                    pending.calls(),
+                    0,
+                    "prune synced while the started sync was pending"
                 );
-
-                // Release only the merkle sync (parked last): prune must still wait on the
-                // in-flight commit's sync before mutating the log.
-                {
-                    let mut parked = pending.lock();
-                    assert_eq!(
-                        parked.len(),
-                        2,
-                        "expected the commit and merkle syncs parked"
-                    );
-                    let merkle_sync = parked.pop().unwrap();
-                    merkle_sync.release.send(Ok(())).unwrap();
-                }
-                assert!(
-                    prune.as_mut().now_or_never().is_none(),
-                    "prune proceeded while the commit sync was pending"
-                );
-                assert_eq!(
-                    pending.lock().len(),
-                    1,
-                    "prune is blocked on the commit sync, not a new sync of its own"
-                );
-
                 pending.unblock();
                 prune.await.unwrap()
             };
@@ -498,7 +486,7 @@ pub(crate) mod test {
     /// A merkleize future dropped mid-flight leaves the database fully usable.
     ///
     /// With a parallel strategy, merkleize's hashing job may keep running detached against its
-    /// snapshot of committed Merkle state after the future is dropped. Later mutations must not
+    /// view of committed Merkle state after the future is dropped. Later mutations must not
     /// observe it (they copy-on-write instead), and its discarded result must not corrupt
     /// anything.
     ///
@@ -522,7 +510,7 @@ pub(crate) mod test {
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", strategy);
             let db = ParTest::init(context.child("db"), cfg, None).await.unwrap();
 
-            // Populate and commit so later snapshots carry committed nodes.
+            // Populate and commit so later views carry committed nodes.
             let mut rng = TestRng::new(11);
             let mut keys = Vec::with_capacity(1024);
             let mut batch = db.new_batch();
@@ -688,7 +676,7 @@ pub(crate) mod test {
 
             // Track the expected key-value state alongside the applied ops. The `any` root is a
             // pure function of the immutable log, so only a state check can catch an index
-            // rebuilt into the wrong shape.
+            // rebuilt into the wrong index.
             let ops = create_test_ops(10_000);
             let mut expected = HashMap::new();
             for op in &ops {
@@ -978,9 +966,8 @@ pub(crate) mod test {
         });
     }
 
-    /// A replay failure during a parallel build must join every worker before surfacing the
-    /// error: no worker may outlive the failed build, retaining a clone of the log and its
-    /// partition-range allocation (the [crate::qmdb::IndexBuild] cleanup invariant).
+    /// On replay failure, a parallel build must join its workers and release their partition
+    /// ranges. Every log clone must be dropped before returning, as required by [`Rebuild`].
     #[test_traced("WARN")]
     fn test_unordered_partitioned_parallel_init_replay_failure_drains_workers() {
         deterministic::Runner::default().start(|context| async move {
@@ -1816,132 +1803,64 @@ pub(crate) mod test {
         });
     }
 
-    /// A snapshot stays byte-stable and verifiable against its captured root while the live
-    /// database rewrites its keys, commits, and prunes past it, evidence that it carries
-    /// neither the keyed index nor the activity bitmap.
+    /// After syncing again, pruning to a previous sync target and restarting, a database still
+    /// serves a peer syncing to that target. It returns the pins at the target's start and a proof
+    /// of its operations against the target's root.
     #[test]
-    fn test_any_fixed_db_snapshot() {
+    fn test_any_fixed_db_serves_previous_sync_target() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let db = create_test_db(context.child("storage")).await;
-            let ops = create_test_ops(20);
-            let mut db = apply_ops(db, ops.clone()).await;
-            let root = db.root();
-            let op_count = db.bounds().end;
+            let cfg = fixed_db_config::<TwoCap>("previous_target");
+            let db = AnyTest::init(context.child("first"), cfg.clone(), None)
+                .await
+                .unwrap();
 
-            let snapshot;
-            (db, snapshot) = db.snapshot().await.unwrap();
-            assert_eq!(snapshot.size(), op_count);
-
-            let (proof, proof_ops) =
-                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
-                    .await
-                    .unwrap();
-            assert!(proof.verify::<Sha256, _>(Location::new(0), &proof_ops, &root));
-
-            // Update every captured key (rewriting index entries and retroactively flipping
-            // activity bits), commit, and prune the live database past the snapshot.
+            // Rewrite the same keys so the inactivity floor passes whole operation blobs, which a
+            // prune can remove.
             let mut rng = TestRng::new(7);
-            let updates: Vec<_> = ops
-                .iter()
-                .filter_map(|op| match op {
-                    Operation::Update(Update(key, _)) => {
-                        Some(Operation::Update(Update(*key, Digest::random(&mut rng))))
+            let keys: Vec<Digest> = (0..24).map(|_| Digest::random(&mut rng)).collect();
+            let rewrite = async |mut db: AnyTest, rng: &mut TestRng| {
+                for _ in 0..4 {
+                    let mut batch = db.new_batch();
+                    for key in &keys {
+                        batch = batch.write(*key, Some(Digest::random(&mut *rng)));
                     }
-                    _ => None,
-                })
-                .collect();
-            assert!(!updates.is_empty());
-            db = apply_ops(db, updates).await;
-            let boundary = db.sync_boundary();
-            db = db.prune(boundary).await.unwrap();
-            assert_ne!(db.root(), root);
-            assert!(db.bounds().start > Location::new(0));
+                    let merkleized = batch.merkleize(&db).await.unwrap();
+                    db = db.apply_batch(merkleized).await.unwrap();
+                }
+                db.sync().await.unwrap()
+            };
+            let db = rewrite(db, &mut rng).await;
+            let (start, size, root) = (db.sync_boundary(), db.bounds().end, db.root());
+            let db = rewrite(db, &mut rng).await;
+            let per_blob = cfg.log.items_per_blob.get();
+            assert!(
+                *db.sync_boundary() / per_blob > *start / per_blob,
+                "the floor did not pass the target's blob"
+            );
 
-            // The snapshot still serves the identical proof, verifiable against the captured
-            // root, including for operations the live database has since pruned.
-            let (proof2, proof_ops2) =
-                crate::qmdb::historical_proof(&snapshot, op_count, Location::new(0), NZU64!(100))
+            // Prune to the previous target, as a node does to the oldest target it serves.
+            let db = db.prune(start).await.unwrap();
+            assert!(db.bounds().start > Location::new(0), "nothing was pruned");
+            let serves = async |db: &AnyTest| {
+                let pins = db.pinned_nodes_at(start).await;
+                assert!(
+                    pins.is_ok(),
+                    "pins at the previous target's start: {pins:?}"
+                );
+                let (proof, ops) = db
+                    .historical_proof(size, start, NZU64!(10))
                     .await
-                    .unwrap();
-            assert_eq!(proof.encode(), proof2.encode());
-            assert!(proof2.verify::<Sha256, _>(Location::new(0), &proof_ops2, &root));
-
-            // Anything at or above the frozen size is rejected.
-            assert!(matches!(
-                crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
-                    .await,
-                Err(crate::qmdb::Error::Merkle(
-                    crate::merkle::Error::RangeOutOfBounds(_)
-                ))
-            ));
-            assert!(matches!(
-                crate::qmdb::historical_proof(&snapshot, op_count, op_count, NZU64!(1)).await,
-                Err(crate::qmdb::Error::Merkle(
-                    crate::merkle::Error::RangeOutOfBounds(_)
-                ))
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Snapshot serving is byte-identical to live serving at the captured generation, for both
-    /// request arms, and stays identical after the live database advances and prunes past it.
-    #[test]
-    fn test_any_fixed_snapshot_serves_like_live_db() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = create_test_db(context.child("storage")).await;
-            let mut db = apply_ops(db, create_test_ops(20)).await;
-            let op_count = db.bounds().end;
-
-            let ops_request = Request::Operations {
-                size: op_count,
-                start: Location::new(3),
-                max_ops: NZU64!(5),
+                    .expect("proof of the previous target's operations");
+                assert!(proof.verify::<Sha256, _>(start, &ops, &root));
             };
-            let boundary_request = Request::Boundary {
-                size: op_count,
-                start: Location::new(3),
-            };
+            serves(&db).await;
+            drop(db);
 
-            let (live_ops, _) = db.serve(ops_request).await.unwrap();
-            let (live_boundary, _) = db.serve(boundary_request).await.unwrap();
-
-            let snapshot;
-            (db, snapshot) = db.snapshot().await.unwrap();
-
-            let (snap_ops, _) = snapshot.serve(ops_request).await.unwrap();
-            let (snap_boundary, _) = snapshot.serve(boundary_request).await.unwrap();
-            assert_eq!(snap_ops.encode(), live_ops.encode());
-            assert_eq!(snap_boundary.encode(), live_boundary.encode());
-
-            // Advance and prune the live database past the snapshot, then confirm the
-            // snapshot's output is byte-identical to its pre-mutation output.
-            db = apply_ops(db, create_test_ops(30)).await;
-            let boundary = db.sync_boundary();
-            db = db.prune(boundary).await.unwrap();
-            assert!(db.bounds().start > Location::new(3));
-
-            let (snap_ops2, _) = snapshot.serve(ops_request).await.unwrap();
-            let (snap_boundary2, _) = snapshot.serve(boundary_request).await.unwrap();
-            assert_eq!(snap_ops2.encode(), snap_ops.encode());
-            assert_eq!(snap_boundary2.encode(), snap_boundary.encode());
-
-            // Requests above the frozen size are rejected.
-            let above = Request::Operations {
-                size: op_count + 1,
-                start: Location::new(0),
-                max_ops: NZU64!(1),
-            };
-            assert!(matches!(
-                snapshot.serve(above).await,
-                Err(crate::qmdb::Error::Merkle(
-                    crate::merkle::Error::RangeOutOfBounds(_)
-                ))
-            ));
-
+            let db = AnyTest::init(context.child("second"), cfg, None)
+                .await
+                .unwrap();
+            serves(&db).await;
             db.destroy().await.unwrap();
         });
     }
@@ -1966,11 +1885,7 @@ pub(crate) mod test {
             // Verify a single-op proof at the full commit size.
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
-            assert!(proof.verify::<Sha256, _>(
-                Location::new(1),
-                &proof_ops,
-                &root
-            ));
+            assert!(proof.verify::<Sha256, _>(Location::new(1), &proof_ops, &root));
 
             // historical_proof at full size should match proof.
             let (hp, hp_ops) = db
@@ -1997,14 +1912,16 @@ pub(crate) mod test {
             assert_eq!(min_proof.leaves, Location::new(1));
             assert_eq!(min_ops.len(), 1);
 
-            // Non-commit-boundary historical sizes are rejected.
-            let result = db
-                .historical_proof(Location::new(5), Location::new(1), NZU64!(3))
-                .await;
-            assert!(
-                matches!(result, Err(crate::qmdb::Error::HistoricalFloorPruned(loc)) if loc == Location::new(5)),
-                "expected HistoricalFloorPruned(5), got {result:?}"
-            );
+            for size in [Location::new(0), Location::new(5)] {
+                let result = db.historical_proof(size, Location::new(0), NZU64!(1)).await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::qmdb::Error::NotCommitBoundary(actual)) if actual == size
+                    ),
+                    "expected NotCommitBoundary({size}), got {result:?}"
+                );
+            }
 
             db.destroy().await.unwrap();
         });
@@ -2086,26 +2003,22 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::{Family, Location, full::Merkle},
+            merkle::{Family, Location},
             qmdb::any::sync::tests::FromSyncTestable,
         };
-        use futures::future::join_all;
 
         impl<F: Family> FromSyncTestable
             for Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>
         {
-            type Merkle = Merkle<F, deterministic::Context, Digest, Sequential>;
+            type Frontier =
+                crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
-            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+            fn into_log_components(self) -> (Self::Frontier, Self::Journal) {
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
-                join_all(F::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }

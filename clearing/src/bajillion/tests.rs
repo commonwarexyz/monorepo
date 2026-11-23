@@ -17,8 +17,8 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     index::{Unordered, unordered::Index},
-    journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig},
+    merkle::{Location, mmb, mmr},
     qmdb::{current::unordered::fixed, keyless},
     translator::{EightCap, Translator},
 };
@@ -211,13 +211,10 @@ pub(crate) fn queue(epoch: Epoch, deposits: &[(u64, u64)], forced: &[(u64, u64)]
 fn journals(name: &str) -> (MerkleConfig<Sequential>, JournalConfig) {
     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let merkle = MerkleConfig {
-        journal_partition: format!("{name}-merkle-journal"),
-        metadata_partition: format!("{name}-merkle-metadata"),
-        items_per_blob: NZU64!(7),
-        write_buffer: NZUsize!(1024),
+        partition: format!("{name}-merkle-metadata"),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: page_cache.clone(),
+        resident_height: Default::default(),
     };
     let log = JournalConfig {
         partition: format!("{name}-log"),
@@ -239,14 +236,18 @@ pub(crate) fn config<T: Translator>(name: &str, translator: T) -> fixed::Config<
         translator,
         init_cache: None,
         init_buffer: NZUsize!(1024),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
 /// Returns the configuration of a payout log in partitions named after `name`.
 fn log_config(name: &str) -> keyless::fixed::Config<Sequential> {
     let (merkle, log) = journals(&format!("{name}-payouts"));
-    keyless::fixed::Config { merkle, log }
+    keyless::fixed::Config {
+        merkle,
+        log,
+        init_concurrency: NZUsize!(2),
+    }
 }
 
 /// Opens the payout log in partitions named after `name`, at its latest commit with at most
@@ -341,7 +342,7 @@ fn test_ledger_vector() {
         let genesis = Summary::<Sha256>::genesis::<PublicKey, u64>(store.balances.root());
         assert_eq!(
             hex(store.balances.root().as_ref()),
-            "4e051a8ba89ab421a291d4b906848b2e0f80402175824a056cc3cc00efc4cc65"
+            "f1e9c318380f461bd04baeaec21206e3a51666d47a423e302ef9e8d6bcf3b699"
         );
         assert_eq!(genesis.payouts.root, store.log.root());
         assert_eq!(store.log.bounds().end, genesis.payouts.size);
@@ -351,7 +352,7 @@ fn test_ledger_vector() {
         );
         assert_eq!(
             hex(genesis.digest().as_ref()),
-            "dc78896a8eab075c7672d704b58798ff2687447dc6132852a86f007847bf5af0"
+            "bca2adf2d2f2da18fbc30bebdc4bd6ca110eb3606ec46bde9faf3ebb30b03f1e"
         );
 
         // The deposit queue's running hash after bob's deposit, chained from genesis. The queues
@@ -457,18 +458,18 @@ fn test_ledger_vector() {
         assert_eq!(
             hex(first.summary.encode().as_ref()),
             concat!(
-                "0000000000000001dc78896a8eab075c7672d704b58798ff2687447dc6132852",
-                "a86f007847bf5af0bb7e4f8026a16dea4b1b699ee9a17fa361272f269a044f05",
-                "32c3fae7729b059ccbeaa33ee0fadca40a7a84e3ef4538a6d5a9225c44b2e85f",
-                "c27c58fc0dde40f50451b5519948527b730a86197f813f51283fa3545ca2b6c7",
-                "4ca20596b4f4461fec02f90c99746c6dc051366862ffe2d129f1729cb9134387",
+                "0000000000000001bca2adf2d2f2da18fbc30bebdc4bd6ca110eb3606ec46bde",
+                "9faf3ebb30b03f1ebb7e4f8026a16dea4b1b699ee9a17fa361272f269a044f05",
+                "32c3fae7729b059c60299dc2396510e310a5c06b01a4e3e7e6014cc94ad56870",
+                "20691a5566690b2f04ce5acf079e17d1d15a28b9a42a4908f692b1cfb3e19f31",
+                "6ac130d0dd626c550402f90c99746c6dc051366862ffe2d129f1729cb9134387",
                 "158fe590c943d69f55e902e9e2c7b054fce05131d767f27fe4b9b130cf6fd441",
                 "14d394fbf97853f27ef05d",
             )
         );
         assert_eq!(
             hex(first.summary.digest().as_ref()),
-            "4ea46f121bbf323e7dd93e6c34665a9cc8f3b0cd117b950586426d44729165ae"
+            "ccb6e9a75d0fd05ce5307dbf32e67c6ef2d9db20611b5f442d8b3938bff7fee8"
         );
 
         // Bob's balance under the balances root of that summary, as a claim after a halt proves it.
@@ -480,11 +481,11 @@ fn test_ledger_vector() {
             hex(proof.encode().as_ref()),
             concat!(
                 "0000000000000007043c00000000000000000000000000000000000000000000",
-                "000000000000000000060002e8deb066466eaf1b04f892d6986303eb407d463a",
-                "51b4739a8c2513ac826becca71e1ff83de02f877f9e2c800a2502f61e761b10a",
-                "0432c6703d620d79f7a9318c00011aee11ebaa71f4483e3129068f72caf28d4c",
-                "1b4faa01f6b925e7fe97c2493636199f565a0c239b645ac33ac70a041ffda7cf",
-                "66adc2e76d88454be81900cd252a",
+                "000000000000000000060002cd18d0f8070b23a202f67aaf8d1c3135a1bc8362",
+                "41569548b82971ac76039f2114918dbca46ba089a4224b438db93329797e30eb",
+                "7eb1cfe1fdbaa7f48b8795cb00011aee11ebaa71f4483e3129068f72caf28d4c",
+                "1b4faa01f6b925e7fe97c24936362ecebd67707d4f3c51398d06f3217ab24529",
+                "24cc733192f7173a42b8a1062ab7",
             )
         );
 
@@ -503,15 +504,15 @@ fn test_ledger_vector() {
         assert_eq!(payouts.size, 4);
         assert_eq!(
             hex(payouts.root.as_ref()),
-            "51b5519948527b730a86197f813f51283fa3545ca2b6c74ca20596b4f4461fec"
+            "ce5acf079e17d1d15a28b9a42a4908f692b1cfb3e19f316ac130d0dd626c5504"
         );
         assert_eq!(
             hex(early.encode().as_ref()),
             concat!(
                 "01478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b44052",
                 "66000000000000000304000266b4a8b2a17f0463f7427c0239106eaf710ea712",
-                "9f42d184a58c50cdff614ba4c9b32f58d153a4f26cb6078783a7d3a6cfab16d8",
-                "f6fcedaa19ed63c338e2a9ce",
+                "9f42d184a58c50cdff614ba422f18941eaddc443f89b982cfc48f48a4f2af312",
+                "96564dedbdf0d721c193e2e1",
             )
         );
 
@@ -531,16 +532,16 @@ fn test_ledger_vector() {
         assert_eq!(payouts.size, 7);
         assert_eq!(
             hex(payouts.root.as_ref()),
-            "540a194296da3b72974ec85cba28b56ce0cae59481844b2480db323061d7554d"
+            "47c3d72b316a6c4149eb38b4a2f37e146e9ae0585aff0101199ff6e2eb251de4"
         );
         assert_eq!(
             hex(late.encode().as_ref()),
             concat!(
                 "01478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b44052",
-                "6600000000000000030700038a4c9a9db0462d62f8c5467b7d7ae30b90514a34",
-                "7f1abb4265e7184ec9052e4266b4a8b2a17f0463f7427c0239106eaf710ea712",
-                "9f42d184a58c50cdff614ba4c9b32f58d153a4f26cb6078783a7d3a6cfab16d8",
-                "f6fcedaa19ed63c338e2a9ce",
+                "660000000000000003070003ce005e6008436eba508102f19d0736c11ff2fde8",
+                "ea90a6e23a3da2886fcf9b7c66b4a8b2a17f0463f7427c0239106eaf710ea712",
+                "9f42d184a58c50cdff614ba422f18941eaddc443f89b982cfc48f48a4f2af312",
+                "96564dedbdf0d721c193e2e1",
             )
         );
     });

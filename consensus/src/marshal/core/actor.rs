@@ -85,14 +85,13 @@ enum PooledSync {
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
 /// of blocks.
 ///
-/// The actor is designed to be used in a view-based model. Each view corresponds to a
-/// potential block in the chain. The actor will only finalize a block if it has a
+/// The actor is designed to be used in a view-based model. Each view corresponds to a potential
+/// block in the chain. The actor will only finalize a block (and its ancestors) if it has a
 /// corresponding finalization.
 ///
 /// The actor also provides a backfill mechanism for missing blocks. If the actor receives a
 /// finalization for a block that is ahead of its current view, it will request the missing blocks
-/// from its peers. This ensures that the actor can catch up to the rest of the network if it falls
-/// behind.
+/// from its peers. This lets the actor catch up to the rest of the network if it falls behind.
 pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
     E: CryptoRng + Spawner + Metrics + Clock + Storage,
@@ -132,7 +131,7 @@ where
     stream: Stream<E>,
     // Pending application acknowledgements
     pending_acks: PendingAcks<A>,
-    // Highest known finalized height
+    // Height of the highest stored finalization, or zero if none
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
@@ -152,7 +151,7 @@ where
     // Finalized blocks stored by height
     finalized_blocks: FB,
 
-    // Latest height metric
+    // Height of the highest stored finalization
     finalized_height: Gauge,
     // Latest processed height
     processed_height: Gauge,
@@ -227,10 +226,10 @@ where
 
         // The metadata's round floor can be lower than what the archives and the epocher justify.
         // An earlier marshal may have written no round floor, or one that never records a closed
-        // epoch. Marshal also archives each block and its finalization before the application
-        // acknowledges it, and records the new processed height only after the acknowledgement. The
-        // round floor covers only processed blocks and installed floor anchors, so a restart in
-        // between can find the next block archived with its finalization.
+        // epoch. The application also acknowledges a block only after marshal archives it, and
+        // marshal records the block as processed only after that acknowledgement. The round floor
+        // covers only processed blocks and installed floor anchors, so a restart in between can
+        // find the next block archived with its finalization.
         //
         // That archived block raises the floor to its finalization round and covers the epochs
         // ending at or below it. Init syncs a higher floor to the metadata, so a later start reads
@@ -251,7 +250,10 @@ where
             last_processed_height.map(|height| Self::processed(&finalized_blocks, height));
 
         // Create metrics
-        let finalized_height = context.gauge("finalized_height", "Finalized height of application");
+        let finalized_height = context.gauge(
+            "finalized_height",
+            "Height of the highest stored finalization",
+        );
         let processed_height = context.gauge("processed_height", "Processed height of application");
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
@@ -892,7 +894,7 @@ where
             Message::GetFinalization {
                 height, response, ..
             } => {
-                let finalization = self.get_finalization_by_height(height).await;
+                let finalization = self.find_finalization(height).await;
                 response.send_lossy(finalization);
             }
             Message::GetProcessed { response, .. } => {
@@ -1180,8 +1182,10 @@ where
         // registered for later local availability.
         //
         // Round-based fetching is for notarized proposal lookups whose height is
-        // not known before the request. Height-based fetching is only for callers
-        // that have a validated block height for resolver retention.
+        // not known before the request. Commitment-based fetching is for callers
+        // that read the block's height from the block above it. That height bounds
+        // the request only once the block above has been checked against its own
+        // parent. A round the caller supplies bounds it regardless.
         match fallback {
             CommitmentFallback::FetchByRound { round } => {
                 // Fetch the notarized proposal for this round. The response
@@ -1194,7 +1198,7 @@ where
                     .ignore();
                 debug!(?round, ?digest, "notarized block unavailable");
             }
-            CommitmentFallback::FetchByCommitment { height } => {
+            CommitmentFallback::FetchByCommitment { height, round } => {
                 let commitment = match key {
                     SubscriptionKey::Commitment(commitment) => commitment,
                     SubscriptionKey::Digest(_) => {
@@ -1203,14 +1207,21 @@ where
                 };
 
                 // Ancestry may be only notarized, so skipping commitment recomputation
-                // requires certification evidence
+                // requires certification evidence. That evidence also fixes the block's
+                // height, so only a request without it needs the round as a bound.
                 let request = if self.certified.contains(height, &commitment) {
                     Request::certified(commitment, height)
                 } else {
-                    Request::untrusted(commitment, height)
+                    Request::untrusted(commitment, height, round)
                 };
                 self.floor.fetch_if_permitted(resolver, request).ignore();
-                debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
+                debug!(
+                    %height,
+                    ?round,
+                    ?commitment,
+                    ?digest,
+                    "certified ancestry block unavailable"
+                );
             }
             CommitmentFallback::Wait => {}
         }
@@ -1336,10 +1347,11 @@ where
     /// observable while running because mailbox requests are only served
     /// after the current `select_loop!` arm completes. After an unclean
     /// shutdown, however, a subscriber may hold a block that marshal never
-    /// durably stored. Subscriptions make no durability promise. Durable
-    /// height-ordered delivery is provided by application dispatch, which
-    /// only sends blocks once the finalized archives are durable (see
-    /// [`Self::try_dispatch_blocks`]).
+    /// durably stored.
+    ///
+    /// Subscriptions make no durability promise. [`Self::try_dispatch_blocks`]
+    /// provides durable height-ordered delivery and only sends a block once
+    /// that block's finalized-archive writes are durable.
     ///
     /// Returns true if the block was consumed as the floor anchor.
     async fn ingest<Buf: Buffer<V>>(
@@ -1562,7 +1574,7 @@ where
                     matches!(
                         annotation,
                         Annotation::Certified { height: bound }
-                        | Annotation::Untrusted { height: bound } if height <= *bound
+                        | Annotation::Untrusted { height: bound, .. } if height <= *bound
                     )
                 }) && height > self.floor.processed_height()
                     && let Some(bounds) = self.epocher.containing(height)
@@ -1896,8 +1908,9 @@ where
     ///
     /// # Crash safety
     ///
-    /// Because `select_loop!` arms run to completion, archive data is always
-    /// durable before the ack handler advances the processed floor height:
+    /// A block is dispatched only after every finalized-archive write already
+    /// made for it is durable, and the ack handler advances the processed floor
+    /// height only after dispatch. With a blocking sync:
     ///
     /// ```text
     /// Iteration N (caller):
@@ -1909,6 +1922,10 @@ where
     ///   ack handler       ->  update_processed         ->  metadata buffered
     ///   stream.sync       ->  metadata durable
     /// ```
+    ///
+    /// If marshal writes a finalization after dispatching its block, that write
+    /// may still be in flight when the ack handler advances the processed floor
+    /// height.
     async fn try_dispatch_blocks(
         mut self: Box<Self>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -2078,6 +2095,24 @@ where
         }
     }
 
+    /// Finds the finalization for `height` in the height archive or the digest cache.
+    async fn find_finalization(
+        &self,
+        height: Height,
+    ) -> Option<Finalization<P::Scheme, V::Commitment>> {
+        if let Some(proof) = self.get_finalization_by_height(height).await {
+            return Some(proof);
+        }
+
+        // A crash can leave the block archived by height and its proof only in the digest cache.
+        let stored = self.get_finalized_block(height).await?;
+        let block = V::restore_across(stored, &self.strategy).await;
+        self.cache
+            .get_finalization_for(block.digest())
+            .await
+            .filter(|proof| proof.proposal.payload == V::commitment(&block))
+    }
+
     /// Get finalized block information from either the finalization archive or
     /// the finalized-block archive.
     async fn get_info_by_height(
@@ -2106,13 +2141,14 @@ where
     /// Writes for a block above the processed height are buffered and not synced. The caller must
     /// call [sync_finalized](Self::sync_finalized) (blocking) or
     /// [start_finalized_sync](Self::start_finalized_sync) (pooled) before yielding to the
-    /// `select_loop!` so that archive data is durable before the ack handler advances the
-    /// processed floor height. See [`Self::try_dispatch_blocks`] for the crash safety invariant.
+    /// `select_loop!`, so that a sync covers the writes and releases the dispatch gate once they
+    /// are durable. See [`Self::try_dispatch_blocks`] for the crash safety invariant.
     ///
-    /// A block at or below the processed height is not stored or dispatched. When the archive
-    /// holds that block without its finalization, the finalization is stored and synced. A
-    /// finalization for a block the archive lacks is dropped, because that block was pruned or
-    /// sits below a state-sync floor.
+    /// A block at or below the processed height is not stored or dispatched. When a finalization
+    /// is supplied and the block archive holds that block without one, the finalization is stored
+    /// and synced if the certificate archive still accepts writes at that height. A finalization
+    /// for a block the block archive lacks is dropped, because that block was pruned or sits
+    /// below a state-sync floor.
     ///
     /// Walkback repair stores a block without its finalization when the cache lacks one, and an
     /// unclean shutdown during the concurrent sync of both archives can leave a block durable
@@ -2224,18 +2260,12 @@ where
         let _ = self.finalized_height.try_set(height.get());
     }
 
-    /// Get the latest finalized block information (height and digest tuple).
+    /// Returns the height, digest, and round of the highest finalization in
+    /// `finalizations_by_height`.
     ///
-    /// Blocks are only finalized directly with a finalization or indirectly via a descendant
-    /// block's finalization. Thus, the highest known finalized block must itself have a direct
-    /// finalization.
-    ///
-    /// We return the height and digest using the highest known finalization that we know the
-    /// block height for. While it's possible that we have a later finalization, if we do not have
-    /// the full block for that finalization, we do not know its height and therefore it would not
-    /// yet be found in the `finalizations_by_height` archive. While not checked explicitly, we
-    /// should have the associated block (in the `finalized_blocks` archive) for the information
-    /// returned.
+    /// The `finalized_blocks` archive may lack the block this finalization names and may hold
+    /// blocks above its height. The Durability section of the [module docs](crate::marshal)
+    /// describes both states.
     async fn get_latest(&self) -> Option<(Height, <V::Block as Digestible>::Digest, Round)> {
         let height = self.finalizations_by_height.last_index()?;
         let finalization = self

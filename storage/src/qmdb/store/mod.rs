@@ -11,6 +11,7 @@
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
+//! use commonware_parallel::Sequential;
 //! use commonware_runtime::{
 //!     buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _, Supervisor as _,
 //! };
@@ -34,9 +35,10 @@
 //!         translator: TwoCap,
 //!         init_cache: Some(NZUsize!(1 << 16)),
 //!         init_buffer: NZUsize!(1 << 21),
+//!         strategy: Sequential,
 //!     };
 //!     let db =
-//!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config, None)
+//!         Db::<_, Digest, Digest, TwoCap, _>::init(ctx.child("store"), config, None)
 //!             .await
 //!             .unwrap();
 //!

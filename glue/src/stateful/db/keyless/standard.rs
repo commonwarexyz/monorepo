@@ -1,44 +1,33 @@
-//! Journaled [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
-//! [`keyless`](commonware_storage::qmdb::keyless) databases.
+//! [`Qmdb`] implementation for QMDB [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Keyless databases are append-only. Operations are addressed by [`Location`] rather than by
 //! key. Batch reads consult the database at the time of the read for locations their batch chain
 //! does not hold, and return a `StaleRead` error once the database is at no state of that chain.
 
-use crate::stateful::db::{
-    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
-};
-use commonware_codec::{EncodeShared, Read as CodecRead};
+use crate::stateful::db::qmdb::{Merkleized, Qmdb, Unmerkleized};
+use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use commonware_storage::{
     Context,
-    journal::contiguous::{
-        Mutable, fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
-    },
+    journal::contiguous::Mutable,
     merkle::{Family, Location},
     qmdb::{
         Error,
         keyless::{
             Db, Operation,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
-            fixed, initial_root, variable,
         },
-        sync::{self, Target as AnySyncTarget},
-        value::{FixedEncoding, FixedValue, ValueEncoding, VariableEncoding, VariableValue},
+        sync,
+        value::ValueEncoding,
     },
 };
-use commonware_utils::{
-    channel::{mpsc, ring},
-    non_empty_range,
-};
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 
-/// A speculative batch of appended values over a shared keyless database.
-pub struct KeylessUnmerkleized<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> Unmerkleized<Db<F, E, V, C, H, S>>
 where
+    Db<F, E, V, C, H, S>: Qmdb<Batch = UnmerkleizedBatch<F, H, V, S>>,
     F: Family,
     E: Context,
     V: ValueEncoding,
@@ -47,46 +36,16 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    batch: UnmerkleizedBatch<F, H, V, S>,
-    db: Shared<Db<F, E, V, C, H, S>>,
-}
-
-impl<F, E, V, C, H, S> Deref for KeylessUnmerkleized<F, E, V, C, H, S>
-where
-    F: Family,
-    E: Context,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-{
-    type Target = UnmerkleizedBatch<F, H, V, S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.batch
-    }
-}
-
-impl<F, E, V, C, H, S> KeylessUnmerkleized<F, E, V, C, H, S>
-where
-    F: Family,
-    E: Context,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-{
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
-    /// it.
+    /// Sets the metadata committed by [`merkleize`](crate::stateful::db::Unmerkleized::merkleize).
+    /// `None` clears it.
     pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
         self.batch = self.batch.with_metadata(metadata);
         self
     }
 
-    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (inherited from the database or parent batch when unset).
+    /// Sets the inactivity floor committed by
+    /// [`merkleize`](crate::stateful::db::Unmerkleized::merkleize) (inherited from the database or
+    /// parent batch when unset).
     pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.batch = self.batch.with_inactivity_floor(floor);
         self
@@ -132,58 +91,9 @@ where
     }
 }
 
-/// A sealed keyless batch with a computed root.
-pub struct KeylessMerkleized<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> Merkleized<Db<F, E, V, C, H, S>>
 where
-    F: Family,
-    E: Context,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-{
-    inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    db: Shared<Db<F, E, V, C, H, S>>,
-}
-
-impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
-where
-    F: Family,
-    E: Context,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            db: self.db.clone(),
-        }
-    }
-}
-
-impl<F, E, V, C, H, S> Deref for KeylessMerkleized<F, E, V, C, H, S>
-where
-    F: Family,
-    E: Context,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-{
-    type Target = MerkleizedBatch<F, H::Digest, V, S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<F, E, V, C, H, S> KeylessMerkleized<F, E, V, C, H, S>
-where
+    Db<F, E, V, C, H, S>: Qmdb<MerkleizedBatch = MerkleizedBatch<F, H::Digest, V, S>>,
     F: Family,
     E: Context,
     V: ValueEncoding,
@@ -226,8 +136,9 @@ where
     }
 }
 
-impl<F, E, V, C, H, S> UnmerkleizedTrait for KeylessUnmerkleized<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> Qmdb for Db<F, E, V, C, H, S>
 where
+    Self: sync::Database<Family = F, Context = E, Digest = H::Digest, Hasher = H, Config: Send>,
     F: Family,
     E: Context,
     V: ValueEncoding,
@@ -236,283 +147,48 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    type Merkleized = KeylessMerkleized<F, E, V, C, H, S>;
-    type Error = Error<F>;
+    type Batch = UnmerkleizedBatch<F, H, V, S>;
+    type MerkleizedBatch = MerkleizedBatch<F, H::Digest, V, S>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(&db).await?;
-        Ok(KeylessMerkleized {
-            inner: merkleized,
-            db: self.db.clone(),
-        })
-    }
-}
-
-impl<F, E, V, C, H, S> MerkleizedTrait for KeylessMerkleized<F, E, V, C, H, S>
-where
-    F: Family,
-    E: Context,
-    V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, V>: EncodeShared,
-{
-    type Digest = H::Digest;
-    type Unmerkleized = KeylessUnmerkleized<F, E, V, C, H, S>;
-
-    fn root(&self) -> H::Digest {
-        self.inner.root()
+    fn new_batch(&self) -> Self::Batch {
+        self.new_batch()
     }
 
-    fn new_batch(&self) -> Self::Unmerkleized {
-        KeylessUnmerkleized {
-            batch: self.inner.new_batch::<H>(),
-            db: self.db.clone(),
-        }
-    }
-}
-
-impl<F, E, V, H, S> ManagedDb<E> for fixed::Db<F, E, V, H, S>
-where
-    F: Family,
-    E: Context,
-    V: FixedValue,
-    H: Hasher,
-    S: Strategy,
-{
-    type Unmerkleized =
-        KeylessUnmerkleized<F, E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<F, V>>, H, S>;
-    type Merkleized =
-        KeylessMerkleized<F, E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<F, V>>, H, S>;
-    type Error = Error<F>;
-    type Config = fixed::Config<S>;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
-
-    async fn init(
-        context: E,
-        config: Self::Config,
-        expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
-        let db = <Self>::init(
-            context,
-            config,
-            expected.as_ref().map(|target| target.range.end()),
-        )
-        .await
-        .map_err(InitError::Database)?;
-        validate_initialization(db, expected)
+    fn new_child(parent: &Arc<Self::MerkleizedBatch>) -> Self::Batch {
+        parent.new_batch::<H>()
     }
 
-    fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget {
-            root: initial_root::<F, FixedEncoding<V>, H>(),
-            range: non_empty_range!(Location::new(0), Location::new(1)),
-        }
+    async fn merkleize(&self, batch: Self::Batch) -> Result<Arc<Self::MerkleizedBatch>, Error<F>> {
+        batch.merkleize(self).await
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
-        KeylessUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
-        }
+    async fn apply_batch(self, batch: Arc<Self::MerkleizedBatch>) -> Result<Self, Error<F>> {
+        self.apply_batch(batch).await
     }
 
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
-            && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip.size
-    }
-
-    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        self.apply_batch(batch.inner).await
-    }
-
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
         self.start_sync().await
-    }
-
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        self.prune((*target.range.start()).into()).await
-    }
-
-    fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds();
-        AnySyncTarget {
-            root: self.root(),
-            range: non_empty_range!(self.sync_boundary(), bounds.end),
-        }
-    }
-}
-
-impl<F, E, V, H, S> ManagedDb<E> for variable::Db<F, E, V, H, S>
-where
-    F: Family,
-    E: Context,
-    V: VariableValue,
-    H: Hasher,
-    S: Strategy,
-{
-    type Unmerkleized = KeylessUnmerkleized<
-        F,
-        E,
-        VariableEncoding<V>,
-        VariableJournal<E, variable::Operation<F, V>>,
-        H,
-        S,
-    >;
-    type Merkleized = KeylessMerkleized<
-        F,
-        E,
-        VariableEncoding<V>,
-        VariableJournal<E, variable::Operation<F, V>>,
-        H,
-        S,
-    >;
-    type Error = Error<F>;
-    type Config = variable::Config<<variable::Operation<F, V> as CodecRead>::Cfg, S>;
-    type SyncTarget = AnySyncTarget<F, H::Digest>;
-
-    async fn init(
-        context: E,
-        config: Self::Config,
-        expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
-        let db = <Self>::init(
-            context,
-            config,
-            expected.as_ref().map(|target| target.range.end()),
-        )
-        .await
-        .map_err(InitError::Database)?;
-        validate_initialization(db, expected)
-    }
-
-    fn initial_sync_target() -> Self::SyncTarget {
-        AnySyncTarget {
-            root: initial_root::<F, VariableEncoding<V>, H>(),
-            range: non_empty_range!(Location::new(0), Location::new(1)),
-        }
-    }
-
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
-        KeylessUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
-        }
-    }
-
-    fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
-        batch.root() == target.root
-            && *target.range.start() == batch.bounds().inactivity_floor
-            && *target.range.end() == batch.bounds().tip.size
-    }
-
-    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        self.apply_batch(batch.inner).await
-    }
-
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
-    }
-
-    async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
-        self.prune((*target.range.start()).into()).await
-    }
-
-    fn sync_target(&self) -> Self::SyncTarget {
-        let bounds = self.bounds();
-        AnySyncTarget {
-            root: self.root(),
-            range: non_empty_range!(self.sync_boundary(), bounds.end),
-        }
-    }
-}
-
-impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::Db<F, E, V, H, S>
-where
-    F: Family,
-    E: Context,
-    V: FixedValue,
-    H: Hasher,
-    S: Strategy,
-    R: sync::SourceFor<Self>,
-{
-    type SyncError = sync::Error<F, R::Error, H::Digest>;
-
-    async fn sync_db(
-        context: E,
-        config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: ring::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<ring::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
-    ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
-    }
-}
-
-impl<F, E, V, H, S, R> StateSyncDb<E, R> for variable::Db<F, E, V, H, S>
-where
-    F: Family,
-    E: Context,
-    V: VariableValue,
-    H: Hasher,
-    S: Strategy,
-    R: sync::SourceFor<Self>,
-{
-    type SyncError = sync::Error<F, R::Error, H::Digest>;
-
-    async fn sync_db(
-        context: E,
-        config: Self::Config,
-        source: R,
-        target: Self::SyncTarget,
-        tip_updates: ring::Receiver<Self::SyncTarget>,
-        finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<ring::Sender<Self::SyncTarget>>,
-        sync_config: SyncEngineConfig,
-    ) -> Result<Self, Self::SyncError> {
-        sync_standard_db(
-            context,
-            config,
-            source,
-            target,
-            tip_updates,
-            finish,
-            reached_target,
-            sync_config,
-        )
-        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedJournalConfig,
+        },
+        mmr,
+        qmdb::{
+            keyless::{self as storage_keyless, fixed, variable},
+            sync::Target as AnySyncTarget,
+        },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -528,13 +204,10 @@ mod tests {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         storage_keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("log-{suffix}"),
@@ -543,6 +216,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
+            init_concurrency: NZUsize!(2),
         }
     }
 

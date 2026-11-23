@@ -102,7 +102,7 @@ use thiserror::Error;
 mod test_util;
 
 #[cfg(any(test, feature = "fuzz"))]
-pub mod fuzz;
+commonware_macros::stability_mod!(ALPHA, pub mod fuzz);
 
 mod decoder_result;
 mod encoder_result;

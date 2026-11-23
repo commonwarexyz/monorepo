@@ -179,6 +179,7 @@ where
             artifact: None,
             subscribers: Vec::new(),
             pending: None,
+            fallback: None,
         }
         .run(boundary_sender, boundary_receiver)
         .await;
