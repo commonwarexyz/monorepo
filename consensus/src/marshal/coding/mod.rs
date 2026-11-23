@@ -1401,10 +1401,9 @@ mod tests {
     /// the finalization for the block's full coding commitment before delivering the block.
     #[test_traced("WARN")]
     fn test_coding_restart_restores_reported_finalization_after_interrupted_sync() {
-        const PREFIX: &str = "coding-interrupted-sync";
-
         // Run marshal on a certificate archive whose syncs never complete, report the finalization
         // of a coded block and crash. Then restart on the stores the crash left.
+        const PREFIX: &str = "coding-interrupted-sync";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         let ((provider, block, finalization), checkpoint) =
             runner.start_and_recover(|mut context| async move {
@@ -1436,9 +1435,9 @@ mod tests {
                     Some(Processed::Block(Height::zero()))
                 );
 
-                // Verify a coded block and report its finalization. The payload of the finalization
-                // is the coding commitment of the block. Marshal caches the finalization and stores
-                // the block.
+                // Hand marshal a verified coded block and report its finalization. The payload of
+                // the finalization is the coding commitment of the block. Marshal caches the
+                // finalization and stores the block.
                 let genesis = genesis_block();
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let ctx = CodingCtx {
@@ -1481,7 +1480,8 @@ mod tests {
             );
             assert_eq!(certificates.last_index(), None);
 
-            // Restart on those stores.
+            // Restart on the ordinary certificate archive, so the restored finalization can become
+            // durable.
             let (actor, mailbox, _) = core::Actor::<_, TestCodingVariant, _, _, _, _, _>::init(
                 context.child("actor"),
                 certificates,

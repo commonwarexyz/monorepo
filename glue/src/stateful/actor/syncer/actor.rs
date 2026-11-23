@@ -397,8 +397,8 @@ mod tests {
     #[test]
     fn resolve_covers_durable_marshal_progress() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-            // Marshal stores block one without a finalization of its own. The finalization of its
-            // successor is stored by height, so marshal delivers block one under it.
+            // Seed block one without a finalization of its own and the finalization of its
+            // successor, so marshal delivers block one under the higher finalization.
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor", 1);
             let selected = fixtures::finalization(&fixture, 0, Sha256::fill(0));
             let processed_block = TestBlock::new(1, 1);
