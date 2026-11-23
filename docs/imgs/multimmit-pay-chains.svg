@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="640" height="384" viewBox="0 36 640 384" role="img" aria-labelledby="title">
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="288" viewBox="0 36 640 384" role="img" aria-labelledby="title">
   <title id="title">A leader proposal references one tip per producer chain</title>
   <rect y="36" width="640" height="384" fill="#fff"/>
   <style>
-    text { font-family: monospace; font-size: 15px; }
-    .chain { font-size: 16px; font-weight: 600; text-anchor: end; }
+    text { font-family: monospace; font-size: 16px; }
+    .chain { font-size: 17px; font-weight: 600; text-anchor: end; }
     .note { fill: #666666; }
     .block { fill: #e9f5ec; stroke: #0e8f3e; stroke-width: 1.4; }
     .link { stroke: #cfcfcf; stroke-width: 1.4; }

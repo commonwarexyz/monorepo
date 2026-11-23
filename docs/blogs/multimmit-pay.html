@@ -9,10 +9,12 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > The Payment Heard Round the World</title>
-    <meta name="description" content="A payee can verify that a
-Multimmit payment is final before its place in the log is known. Across
-thirteen regions, producers had that proof in a median of 241ms at
-100,000 transactions per second.">
+    <meta name="description" content="A Multimmit receipt proves a
+payment is irreversible, even before its block enters the shared log. At
+one million transactions per second, the median time from submission to
+a receipt at the producer was 41ms across three North American regions
+and 245ms across 13 regions worldwide. At 100,000 per second, those
+medians were 37ms and 241ms.">
     <meta name="author" content="Andrew Lewis-Pye">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -22,10 +24,12 @@ thirteen regions, producers had that proof in a median of 241ms at
     <meta property="og:image" content="https://commonware.xyz/imgs/multimmit-pay.png" />
     <meta property="og:title" content="The Payment Heard Round the
 World" />
-    <meta property="og:description" content="A payee can verify that a
-Multimmit payment is final before its place in the log is known. Across
-thirteen regions, producers had that proof in a median of 241ms at
-100,000 transactions per second." />
+    <meta property="og:description" content="A Multimmit receipt proves
+a payment is irreversible, even before its block enters the shared log.
+At one million transactions per second, the median time from submission
+to a receipt at the producer was 41ms across three North American
+regions and 245ms across 13 regions worldwide. At 100,000 per second,
+those medians were 37ms and 241ms." />
     <meta property="article:author" content="Andrew Lewis-Pye" />
     <meta property="article:published_time" content="2026-11-23T00:00:00Z" />
     <meta property="article:modified_time" content="2026-11-23T00:00:00Z" />
@@ -37,10 +41,12 @@ thirteen regions, producers had that proof in a median of 241ms at
     <meta property="twitter:url" content="https://commonware.xyz/blogs/multimmit-pay" />
     <meta property="twitter:title" content="The Payment Heard Round the
 World" />
-    <meta property="twitter:description" content="A payee can verify
-that a Multimmit payment is final before its place in the log is known.
-Across thirteen regions, producers had that proof in a median of 241ms
-at 100,000 transactions per second." />
+    <meta property="twitter:description" content="A Multimmit receipt
+proves a payment is irreversible, even before its block enters the
+shared log. At one million transactions per second, the median time from
+submission to a receipt at the producer was 41ms across three North
+American regions and 245ms across 13 regions worldwide. At 100,000 per
+second, those medians were 37ms and 241ms." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/multimmit-pay.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
         <meta property="twitter:creator" content="https://x.com/AndrewLewisPye" />
@@ -312,6 +318,13 @@ Lewis-Pye</a></div>
         the sense that the protocol already runs this round trip for
         every block. Payment chains just ask more of the
         acknowledgments.</p>
+        <img id="receipt-proof" src="/imgs/multimmit-pay-receipt.svg" style="display: block; margin: 20px auto;" alt="Alice signs a transfer of 10 to Bob. A Merkle path links it to the root in the producer's signed block header. A bitmap marks the 41 of 50 validators whose aggregate signature covers that header.">
+        <div class="image-caption">
+        <p>Figure 4: Bob uses Alice’s signed payment and the sibling
+        hashes (gray) to reconstruct the Merkle root in the producer’s
+        header. The bitmap (blue) tells him which validators’ keys to
+        use to check the aggregate signature on that same header.</p>
+        </div>
         <p>Why do these acknowledgments make the payment irreversible?
         There are two possible issues. The first is a conflicting
         payment gathering a quorum of its own. This cannot happen: on
@@ -411,7 +424,7 @@ Lewis-Pye</a></div>
               </tbody>
             </table>
           </details>
-          <figcaption id="multimmit-pay-latency-caption">Figure 4: Payment receipt and placement latency, in milliseconds, with all fifty chains configured as payment chains. Medians from scheduled submission at the producer; a receipt requires 41 of 50 acknowledgments. Each panel has its own scale. Offered rates are in transactions per second. Expand the table for the 99th percentiles. The <a href="https://arxiv.org/html/2607.21021v6#S8.SS1">experiment</a> used synthetic 512-byte transactions with storage sync disabled; these times exclude execution, committee changes and delivery to the payee.</figcaption>
+          <figcaption id="multimmit-pay-latency-caption">Figure 5: Payment receipt and placement latency, in milliseconds, with all fifty chains configured as payment chains. Medians from scheduled submission at the producer; a receipt requires 41 of 50 acknowledgments. Each panel has its own scale. Offered rates are in transactions per second. Expand the table for the 99th percentiles. The <a href="https://arxiv.org/html/2607.21021v6#S8.SS1">experiment</a> used synthetic 512-byte transactions with storage sync disabled; these times exclude execution, committee changes and delivery to the payee.</figcaption>
         </figure>
 
         <script type="module" src="multimmit-pay.chart.js"></script>

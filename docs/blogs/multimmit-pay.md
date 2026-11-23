@@ -1,6 +1,6 @@
 ---
 title: "The Payment Heard Round the World"
-description: "A payee can verify that a Multimmit payment is final before its place in the log is known. Across thirteen regions, producers had that proof in a median of 241ms at 100,000 transactions per second."
+description: "A Multimmit receipt proves a payment is irreversible, even before its block enters the shared log. At one million transactions per second, the median time from submission to a receipt at the producer was 41ms across three North American regions and 245ms across 13 regions worldwide. At 100,000 per second, those medians were 37ms and 241ms."
 date: "November 23rd, 2026"
 published-time: "2026-11-23T00:00:00Z"
 modified-time: "2026-11-23T00:00:00Z"
@@ -82,6 +82,14 @@ Acknowledgments on a payment chain attest more than availability. Before acknowl
 
 A **receipt** is then: the signed payment, the signed header of its block, a Merkle proof of inclusion, and acknowledgments from $n-f$ validators (41 of 50 in our experiments; $n-2f=32$ suffice for availability), aggregated into one signature with a bitmap of signers. During an epoch handoff, early acknowledgments count only with proof that the new committee adopted the log they depend on. Anyone can verify the receipt with the epoch's committee keys and quorum size (no account state and no chain download required). In the good case, the producer holds it roughly $2\delta$ after disseminating the block (the ordinary dissemination round trip). Receipts are free in the sense that the protocol already runs this round trip for every block. Payment chains just ask more of the acknowledgments.
 
+```{=html}
+<img id="receipt-proof" src="/imgs/multimmit-pay-receipt.svg" style="display: block; margin: 20px auto;" alt="Alice signs a transfer of 10 to Bob. A Merkle path links it to the root in the producer's signed block header. A bitmap marks the 41 of 50 validators whose aggregate signature covers that header.">
+```
+
+::: {.image-caption}
+Figure 4: Bob uses Alice's signed payment and the sibling hashes (gray) to reconstruct the Merkle root in the producer's header. The bitmap (blue) tells him which validators' keys to use to check the aggregate signature on that same header.
+:::
+
 Why do these acknowledgments make the payment irreversible? There are two possible issues. The first is a conflicting payment gathering a quorum of its own. This cannot happen: on the adopted history, each correct validator acknowledges at most one transaction block per chain per height. To acknowledge a later block it must follow a certified base and have acknowledged the intervening ancestors. Together with quorum overlap, these rules keep all certifiable blocks on one branch, so two incompatible blocks can never both be receipted. With the validity checks above, it follows that a receipted block's payments can never be contradicted by payments anywhere else, because all of an account's debits sit on its home chain. The second is the ordering routing around the receipt, placing some competing branch of the chain. This cannot happen either: with $d=e=0$, ordinary views place only certified tips and their ancestors on a payment chain, all of them on the receipted block's own branch. When an epoch ends, validators stop acknowledging and *report* what they acknowledged. Any closing quorum's reports provably cover every receipted block, which is how a receipted block enters the log even if its certificate was never shown to a single other party.
 
 ## What a receipt guarantees
@@ -141,7 +149,7 @@ We list three caveats. A receipt guarantees execution; actual execution, and the
       </tbody>
     </table>
   </details>
-  <figcaption id="multimmit-pay-latency-caption">Figure 4: Payment receipt and placement latency, in milliseconds, with all fifty chains configured as payment chains. Medians from scheduled submission at the producer; a receipt requires 41 of 50 acknowledgments. Each panel has its own scale. Offered rates are in transactions per second. Expand the table for the 99th percentiles. The <a href="https://arxiv.org/html/2607.21021v6#S8.SS1">experiment</a> used synthetic 512-byte transactions with storage sync disabled; these times exclude execution, committee changes and delivery to the payee.</figcaption>
+  <figcaption id="multimmit-pay-latency-caption">Figure 5: Payment receipt and placement latency, in milliseconds, with all fifty chains configured as payment chains. Medians from scheduled submission at the producer; a receipt requires 41 of 50 acknowledgments. Each panel has its own scale. Offered rates are in transactions per second. Expand the table for the 99th percentiles. The <a href="https://arxiv.org/html/2607.21021v6#S8.SS1">experiment</a> used synthetic 512-byte transactions with storage sync disabled; these times exclude execution, committee changes and delivery to the payee.</figcaption>
 </figure>
 
 <script type="module" src="multimmit-pay.chart.js"></script>
