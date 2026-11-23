@@ -218,7 +218,7 @@ impl Request {
         matches!(self, Self::WriteAt(_) | Self::Sync(_) | Self::Resize(_))
     }
 
-    /// Return whether this request reads, writes, syncs, or resizes a file.
+    /// Return whether this request reads, writes, syncs or resizes a file.
     pub const fn is_storage(&self) -> bool {
         match self {
             Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) | Self::Resize(_) => true,
