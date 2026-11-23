@@ -1,0 +1,340 @@
+use super::*;
+use crate::simplex::Viewport;
+use commonware_utils::futures::Pool;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// One pass starts a job for each ready kind of each dirty view. Each finished job
+/// forwards its certificate and marks its view dirty. It does not start a new job.
+#[test]
+fn dispatch_starts_every_ready_view_and_completions_revisit_rounds() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let Fixture {
+            schemes,
+            participants,
+            ..
+        } = ed25519::fixture(&mut context, b"dispatch_ready", 5);
+        let epoch = Epoch::new(1);
+        let (mut actor, _mailbox) = Actor::new(
+            context.child("batcher"),
+            test_config(
+                schemes[0].clone(),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            ),
+        );
+        let (sender, mut receiver) = mailbox::new(context.child("voter"), NZUsize!(16));
+        let mut voter = voter::Mailbox::new(sender);
+        let mut work = BTreeMap::new();
+        for view in [1, 2, 3].map(View::new) {
+            let id = Round::new(epoch, view);
+            let mut round = super::super::Round::new(
+                id,
+                Arc::new(schemes[0].clone()),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                false,
+            );
+            for (index, scheme) in schemes.iter().take(quorum(5) as usize).enumerate() {
+                assert!(round.add_network(
+                    participants[index].clone(),
+                    Vote::<_, Sha256Digest>::Nullify(
+                        Nullify::sign::<Sha256Digest>(scheme, id).unwrap()
+                    )
+                ));
+            }
+            work.insert(view, round);
+        }
+        // View 2 also has a notarize quorum, so it has two ready kinds. We lead view 2, so
+        // dispatch forwards no proposal.
+        let current = work.get_mut(&View::new(2)).unwrap();
+        current.set_leader(Participant::new(0));
+        let proposal = Proposal::new(
+            Round::new(epoch, View::new(2)),
+            View::new(1),
+            Sha256::hash(&[b"dispatch_ready"]),
+        );
+        for (index, scheme) in schemes.iter().take(quorum(5) as usize).enumerate() {
+            assert!(current.add_network(
+                participants[index].clone(),
+                Vote::Notarize(Notarize::sign(scheme, proposal.clone()).unwrap())
+            ));
+        }
+        let viewport = Viewport {
+            finalized: View::zero(),
+            current: View::new(2),
+            view_retention: ViewDelta::new(10),
+            lookahead: BatcherOptions::default().lookahead,
+        };
+        let mut pool = Pool::default();
+        let mut dirty = BTreeSet::from([1, 2, 3].map(View::new));
+        actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
+        assert_eq!(pool.len(), 4);
+        assert!(dirty.is_empty());
+
+        // A dirty view with running jobs starts no new job.
+        dirty.insert(View::new(2));
+        actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
+        assert_eq!(pool.len(), 4);
+        assert!(dirty.is_empty());
+
+        let mut completed = Vec::new();
+        while !pool.is_empty() {
+            let done = pool.next_completed().await;
+            let view = done.view;
+            assert_eq!(actor.handle_done(&mut voter, &mut work, done), Some(view));
+            dirty.insert(view);
+            let Some(voter::Message::Verified { certificate, .. }) = receiver.recv().await else {
+                panic!("completion must forward a certificate");
+            };
+            assert_eq!(certificate.view(), view);
+            assert!(certificate.verify(&mut context, &schemes[0], &Sequential));
+            completed.push(view);
+        }
+        completed.sort();
+        assert_eq!(completed, [1, 2, 2, 3].map(View::new));
+
+        // Each certified kind has no job to start.
+        actor.dispatch_ready(&mut pool, &mut work, &mut dirty, &mut voter, viewport);
+        assert!(pool.is_empty());
+        assert!(dirty.is_empty());
+    });
+}
+
+/// A job for a pruned round still forwards its certificate, blocks invalid signers, and
+/// updates metrics.
+#[test]
+fn pruned_completion_forwards_certificate_and_records_fallback() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let Fixture {
+            schemes,
+            participants,
+            ..
+        } = ed25519::fixture(&mut context, b"dispatch_pruned", 7);
+        let blocked = Arc::new(Mutex::new(Vec::new()));
+        let epoch = Epoch::new(1);
+        let view = View::new(1);
+        let id = Round::new(epoch, view);
+        let (mut actor, _mailbox) = Actor::new(
+            context.child("batcher"),
+            test_config(
+                schemes[0].clone(),
+                RecordingBlocker(blocked.clone()),
+                NoopReporter(PhantomData),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            ),
+        );
+        let mut round = super::super::Round::new(
+            id,
+            Arc::new(schemes[0].clone()),
+            RecordingBlocker(blocked.clone()),
+            NoopReporter(PhantomData),
+            false,
+        );
+        let mut votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, id).unwrap())
+            .collect();
+        votes[1].attestation.signature = votes.last().unwrap().attestation.signature.clone();
+        let count = quorum(7) as usize + 1;
+        for (index, vote) in votes.into_iter().take(count).enumerate() {
+            assert!(round.add_network(
+                participants[index].clone(),
+                Vote::<_, Sha256Digest>::Nullify(vote)
+            ));
+        }
+        let mut work = BTreeMap::from([(view, round)]);
+        let mut dirty = BTreeSet::from([view]);
+        let mut pool = Pool::default();
+        let (sender, mut receiver) = mailbox::new(context.child("voter"), NZUsize!(16));
+        let mut voter = voter::Mailbox::new(sender);
+        actor.dispatch_ready(
+            &mut pool,
+            &mut work,
+            &mut dirty,
+            &mut voter,
+            Viewport {
+                finalized: View::zero(),
+                current: view,
+                view_retention: ViewDelta::new(10),
+                lookahead: BatcherOptions::default().lookahead,
+            },
+        );
+        work.remove(&view).unwrap();
+        let delay = Duration::from_millis(50);
+        context.sleep(delay).await;
+        let done = pool.next_completed().await;
+        assert!(done.constructed.batch.fallback);
+        assert_eq!(done.constructed.batch.processed, count);
+        assert_eq!(actor.handle_done(&mut voter, &mut work, done), None);
+        assert!(work.is_empty());
+        let Some(voter::Message::Verified { certificate, .. }) = receiver.recv().await else {
+            panic!("pruned completion must forward a certificate");
+        };
+        assert_eq!(certificate.view(), view);
+        assert!(certificate.verify(&mut context, &schemes[0], &Sequential));
+        assert_eq!(*blocked.lock(), vec![participants[1].clone()]);
+        let metrics = context.encode();
+        assert!(
+            metrics.contains(&format!("batcher_processed_total {count}")),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains("batcher_construct_fallback_total 1"),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains("batcher_construct_latency_count 1"),
+            "{metrics}"
+        );
+        assert!(metrics.contains("batcher_batch_size_count 1"), "{metrics}");
+        let observed: f64 = metrics
+            .lines()
+            .find_map(|line| line.strip_prefix("batcher_construct_latency_sum "))
+            .expect("construction histogram missing")
+            .parse()
+            .unwrap();
+        assert_eq!(observed, delay.as_secs_f64());
+    });
+}
+
+/// Replaces the strategy of a test [Config].
+fn with_strategy<
+    S: Scheme<Sha256Digest>,
+    B: Blocker,
+    Re: crate::Reporter,
+    Rl: Relay,
+    T: Strategy,
+>(
+    cfg: Config<S, B, Re, Rl, Sequential>,
+    strategy: T,
+) -> Config<S, B, Re, Rl, T> {
+    Config {
+        scheme: cfg.scheme,
+        blocker: cfg.blocker,
+        reporter: cfg.reporter,
+        track_historical_votes: cfg.track_historical_votes,
+        relay: cfg.relay,
+        strategy,
+        view_retention: cfg.view_retention,
+        skip: cfg.skip,
+        epoch: cfg.epoch,
+        mailbox_size: cfg.mailbox_size,
+        lookahead: cfg.lookahead,
+        forward: cfg.forward,
+        floor: cfg.floor,
+    }
+}
+
+/// Crypto that never completes must not block an update or the leader nullify that follows it.
+#[test]
+fn pending_crypto_keeps_mailbox_and_network_responsive() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let Fixture {
+            schemes,
+            participants,
+            ..
+        } = ed25519::fixture(&mut context, b"dispatch_pending", 5);
+        let epoch = Epoch::new(1);
+        let me = participants[0].clone();
+        let oracle =
+            start_test_network_with_peers(context.child("network"), participants.clone()).await;
+        let cfg = with_strategy(
+            test_config(
+                schemes[0].clone(),
+                NoopBlocker,
+                NoopReporter(PhantomData),
+                MockRelay::new(),
+                epoch,
+                BatcherOptions::default(),
+            ),
+            commonware_parallel::mocks::pending(NZUsize!(2)),
+        );
+        let (actor, mut batcher) = Actor::new(context.child("batcher"), cfg);
+        let (sender, mut receiver) = mailbox::new(context.child("voter"), NZUsize!(16));
+        let (_vote_sender, vote_receiver) = oracle
+            .control(me.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (_cert_sender, cert_receiver) = oracle
+            .control(me.clone())
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+        let mut senders = Vec::new();
+        for peer in participants.iter().skip(1) {
+            senders.push(
+                register_and_link_peer(
+                    &oracle,
+                    peer.clone(),
+                    me.clone(),
+                    0,
+                    Duration::from_millis(1),
+                )
+                .await,
+            );
+        }
+        track_test_peers(&mut context, &oracle, 1, &participants, &[]).await;
+        actor.start(voter::Mailbox::new(sender), vote_receiver, cert_receiver);
+        let first = Round::new(epoch, View::new(1));
+        batcher.update(
+            Span::none(),
+            first.view(),
+            Participant::from_usize(4),
+            View::zero(),
+            None,
+        );
+        batcher.constructed(Vote::<_, Sha256Digest>::Nullify(
+            Nullify::sign::<Sha256Digest>(&schemes[0], first).unwrap(),
+        ));
+        for (index, sender) in senders.iter_mut().take(3).enumerate() {
+            sender.send(
+                Recipients::One(me.clone()),
+                Vote::<_, Sha256Digest>::Nullify(
+                    Nullify::sign::<Sha256Digest>(&schemes[index + 1], first).unwrap(),
+                )
+                .encode(),
+                true,
+            );
+        }
+        // Wait until the batcher adds all four votes.
+        while !context.encode().contains("batcher_added_total 4") {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        let next = Round::new(epoch, View::new(2));
+        batcher.update(
+            Span::none(),
+            next.view(),
+            Participant::from_usize(1),
+            View::zero(),
+            None,
+        );
+        senders[0].send(
+            Recipients::One(me),
+            Vote::<_, Sha256Digest>::Nullify(
+                Nullify::sign::<Sha256Digest>(&schemes[1], next).unwrap(),
+            )
+            .encode(),
+            true,
+        );
+        expect_timeout(
+            &mut context,
+            &mut receiver,
+            next.view(),
+            TimeoutReason::LeaderNullify,
+        )
+        .await;
+        let metrics = context.encode();
+        assert!(metrics.contains("batcher_added_total 5"), "{metrics}");
+        assert!(metrics.contains("batcher_processed_total 0"), "{metrics}");
+        assert!(
+            metrics.contains("batcher_construct_latency_count 0"),
+            "{metrics}"
+        );
+    });
+}
