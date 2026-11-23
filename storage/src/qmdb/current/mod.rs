@@ -1048,7 +1048,9 @@ pub mod tests {
         context.auditor().state()
     }
 
-    /// Compare runtime audit hashes from two runs of the same random history over `num_keys` keys.
+    /// Build the same random history over `num_keys` keys twice, checking each time that the root
+    /// survives a reopen, and require both runs to leave the same runtime audit hash. The second
+    /// run uses a fresh default runner, so `context` must come from one too.
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
