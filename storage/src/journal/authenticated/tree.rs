@@ -95,7 +95,8 @@ impl<D: Copy> Level<D> {
     fn push(&mut self, digest: D) {
         self.tail.push(digest);
         if self.tail.len() == LEVEL_CHUNK {
-            self.chunks.push_back(core::mem::take(&mut self.tail).into());
+            self.chunks
+                .push_back(core::mem::take(&mut self.tail).into());
         }
     }
 

@@ -108,10 +108,11 @@ pub struct Config<J, S: Strategy> {
 pub(crate) mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::Mutable,
+        journal::contiguous::{Mutable, Snapshottable},
         merkle::Location,
         qmdb::{Error, ProofExt as _},
     };
+    use commonware_codec::Encode as _;
     use commonware_cryptography::Sha256;
     use commonware_macros::boxed;
     use commonware_parallel::Strategy;
@@ -578,6 +579,121 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// A proof snapshot stays byte-stable and verifiable against its captured root while the
+    /// live database applies batches, commits, and prunes past it.
+    #[boxed]
+    pub(crate) async fn run_snapshot<F: Family, V, C, S: Strategy>(
+        mut db: TestDb<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>> + Snapshottable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared + std::fmt::Debug,
+    {
+        const ELEMENTS: u64 = 50;
+
+        {
+            let mut batch = db.new_batch();
+            for i in 0..ELEMENTS {
+                batch = batch.append(V::Value::make(i));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let root = db.root();
+        let op_count = db.bounds().end;
+
+        let snapshot;
+        (db, snapshot) = db.snapshot().await.unwrap();
+        assert_eq!(snapshot.size(), op_count);
+
+        // A boundary request, which serves the frozen Merkle's pinned nodes, answers like the
+        // live database at capture.
+        let boundary_request = crate::qmdb::sync::Request::Boundary {
+            size: op_count,
+            start: Location::new(3),
+        };
+        let (live_boundary, _) = crate::qmdb::sync::Source::serve(&db, boundary_request)
+            .await
+            .unwrap();
+        let (snap_boundary, _) = crate::qmdb::sync::Source::serve(&snapshot, boundary_request)
+            .await
+            .unwrap();
+        assert_eq!(snap_boundary.encode(), live_boundary.encode());
+
+        let (proof, ops) = snapshot
+            .historical_proof(
+                op_count,
+                Location::new(0),
+                NZU64!(100),
+                crate::qmdb::inactive_peaks_at(&snapshot, op_count)
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &ops, &root));
+
+        // Advance the live database past the snapshot by applying another batch with a raised
+        // inactivity floor, commit, and prune.
+        {
+            let mut batch = db.new_batch();
+            for i in 0..ELEMENTS {
+                batch = batch.append(V::Value::make(i + ELEMENTS));
+            }
+            let merkleized = batch
+                .with_inactivity_floor(Location::new(40))
+                .merkleize(&db)
+                .await
+                .unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
+        }
+        db = db.commit().await.unwrap();
+        let boundary = db.sync_boundary();
+        db = db.prune(boundary).await.unwrap();
+        assert_ne!(db.root(), root);
+        assert!(db.bounds().start > Location::new(0));
+
+        // The snapshot still serves the identical proof, verifiable against the captured
+        // root, including for operations the live database has since pruned.
+        let (proof2, ops2) = snapshot
+            .historical_proof(
+                op_count,
+                Location::new(0),
+                NZU64!(100),
+                crate::qmdb::inactive_peaks_at(&snapshot, op_count)
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(proof.encode(), proof2.encode());
+        assert!(proof2.verify::<Sha256, _>(Location::new(0), &ops2, &root));
+        let (snap_boundary2, _) = crate::qmdb::sync::Source::serve(&snapshot, boundary_request)
+            .await
+            .unwrap();
+        assert_eq!(snap_boundary2.encode(), snap_boundary.encode());
+
+        // Anything at or above the frozen size is rejected.
+        assert!(matches!(
+            snapshot
+                .historical_proof(op_count + 1, Location::new(0), NZU64!(1), 0)
+                .await,
+            Err(crate::journal::authenticated::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(_)
+            ))
+        ));
+        assert!(matches!(
+            snapshot
+                .historical_proof(op_count, op_count, NZU64!(1), 0)
+                .await,
+            Err(crate::journal::authenticated::Error::Merkle(
+                crate::merkle::Error::RangeOutOfBounds(_)
+            ))
+        ));
+
+        db.destroy().await.unwrap();
+    }
     /// Applying a batch's child moves the database to a state outside the parent's chain, so
     /// reads through the parent return `StaleRead` while the child keeps reading.
     #[boxed]
