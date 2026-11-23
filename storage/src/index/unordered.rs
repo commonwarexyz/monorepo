@@ -91,9 +91,8 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Move `other`'s contents into self, which must be empty. Moving the maps wholesale lets
-    /// an index made by [`Self::empty`] install without re-inserting each entry. Metrics need no
-    /// adjustment because `other` updated self's metrics directly.
+    /// Move `other`'s contents into self, which must be empty. `other` must have been made by
+    /// [`Self::empty`] on self, so that self's metrics already count its contents.
     ///
     /// # Panics
     ///
@@ -103,6 +102,8 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             self.map.is_empty() && self.overflow.is_empty(),
             "absorb target must be empty"
         );
+
+        // `other` updated self's metrics as it was filled, so only its maps move.
         self.map = other.map;
         self.overflow = other.overflow;
     }

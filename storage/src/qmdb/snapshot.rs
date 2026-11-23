@@ -1,6 +1,6 @@
 //! Rebuild snapshot indexes and activity bitmaps from the operations log.
 //!
-//! A build has two phases. It first replays the log once, writing a small record for every keyed
+//! A build has two phases. It first replays the log, writing a small record for every keyed
 //! operation into the bucket that owns the key's partition. It then sorts each bucket by key and
 //! location, which puts the operations of one key side by side with the newest last, and loads
 //! the keys whose newest operation is not a delete. Buckets of a build too large to hold in
@@ -82,9 +82,11 @@ const MEMORY_BYTES: u64 = 64 << 20;
 const MEMORY_BYTES: u64 = 1024;
 
 /// Bytes of records a bucket collects before it writes them to the scratch blob, once the build
-/// holds more than [MEMORY_BYTES]. Small in tests so ordinary logs write several times.
+/// holds more than [MEMORY_BYTES]. A bucket with fewer keeps them in memory, so a build with many
+/// buckets holds up to this much for each. Small writes are costly: in benchmarks, a build that
+/// wrote 256 KiB at a time took 19% longer. Small in tests so ordinary logs write several times.
 #[cfg(not(test))]
-const SPILL_BYTES: usize = 1 << 20;
+const SPILL_BYTES: usize = 4 << 20;
 #[cfg(test)]
 const SPILL_BYTES: usize = 256;
 
@@ -142,13 +144,35 @@ const LOAD_BYTES: usize = 4 << 20;
 #[cfg(test)]
 const LOAD_BYTES: usize = 512;
 
+/// Where an operation sits in the replayed log and whether it deletes its key: the operation's
+/// offset from the floor shifted left by one, with the low bit set for a delete. The tagged
+/// locations of one key order as its operations do, oldest first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Tagged(u64);
+
+impl Tagged {
+    /// The tagged location of an operation `offset` locations above the floor.
+    const fn new(offset: u64, is_delete: bool) -> Self {
+        Self((offset << 1) | is_delete as u64)
+    }
+
+    /// The operation's offset from the floor.
+    const fn offset(self) -> u64 {
+        self.0 >> 1
+    }
+
+    /// Whether the operation deletes its key.
+    const fn is_delete(self) -> bool {
+        self.0 & 1 != 0
+    }
+}
+
 /// How a build assigns operations to buckets and encodes their records.
 ///
-/// A record is the key's length, the operation's tagged location, then the key's bytes, which
-/// identify it (see [Key](crate::qmdb::operation::Key)). A length below 255 takes one byte, and
-/// a longer key writes 255 followed by its length in four little-endian bytes. The tagged
-/// location is the operation's offset from `floor` shifted left by one, with the low bit set
-/// for a delete, in `loc_bytes` little-endian bytes.
+/// A record is the key's length, the operation's [Tagged] location in `loc_bytes` little-endian
+/// bytes, then the key's bytes, which identify it (see [Key](crate::qmdb::operation::Key)). A
+/// length below 255 takes one byte, and a longer key writes 255 followed by its length in four
+/// little-endian bytes.
 #[derive(Clone, Copy)]
 struct Layout {
     /// Maps a key to its index partition.
@@ -165,12 +189,12 @@ struct Layout {
 
 impl Layout {
     /// The tagged location of the operation at `loc`.
-    const fn tag(&self, loc: u64, is_delete: bool) -> u64 {
-        ((loc - self.floor) << 1) | is_delete as u64
+    const fn tag(&self, loc: u64, is_delete: bool) -> Tagged {
+        Tagged::new(loc - self.floor, is_delete)
     }
 
     /// Append the record of an operation on `key` to `buf`.
-    fn encode(&self, buf: &mut Vec<u8>, key: &[u8], tagged: u64) {
+    fn encode(&self, buf: &mut Vec<u8>, key: &[u8], tagged: Tagged) {
         match u8::try_from(key.len()) {
             Ok(len) if len < u8::MAX => buf.push(len),
             _ => {
@@ -179,13 +203,13 @@ impl Layout {
                 buf.extend_from_slice(&len.to_le_bytes());
             }
         }
-        buf.extend_from_slice(&tagged.to_le_bytes()[..self.loc_bytes]);
+        buf.extend_from_slice(&tagged.0.to_le_bytes()[..self.loc_bytes]);
         buf.extend_from_slice(key);
     }
 
     /// Read the record at `at` in `data`. Returns its tagged location, where its key starts and
     /// the key's length. The next record follows the key.
-    fn decode(&self, data: &[u8], mut at: usize) -> (u64, usize, usize) {
+    fn decode(&self, data: &[u8], mut at: usize) -> (Tagged, usize, usize) {
         let mut len = data[at] as usize;
         at += 1;
         if len == u8::MAX as usize {
@@ -194,7 +218,7 @@ impl Layout {
         }
         let mut tagged = [0u8; 8];
         tagged[..self.loc_bytes].copy_from_slice(&data[at..at + self.loc_bytes]);
-        (u64::from_le_bytes(tagged), at + self.loc_bytes, len)
+        (Tagged(u64::from_le_bytes(tagged)), at + self.loc_bytes, len)
     }
 
     /// The smallest and largest key prefix (see [key_prefix]) among the records in `data`, or
@@ -226,8 +250,8 @@ fn key_prefix(key: &[u8]) -> u64 {
 struct Record {
     /// The key's first eight bytes, which decide most comparisons.
     prefix: u64,
-    /// The tagged location, which orders a key's operations oldest first.
-    tagged: u64,
+    /// The operation's tagged location, which orders a key's operations oldest first.
+    tagged: Tagged,
     /// Where the key starts in the bucket's records.
     key_at: u32,
     key_len: u32,
@@ -484,10 +508,10 @@ where
     for group in 0..sorter.groups() {
         let (records, data) = sorter.sort(group, layout);
         for record in records {
-            if record.tagged & 1 != 0 {
+            if record.tagged.is_delete() {
                 continue;
             }
-            let offset = record.tagged >> 1;
+            let offset = record.tagged.offset();
             activate(offset);
             loader.push(index, layout, record.key(data), offset);
             survivors += 1;
@@ -508,7 +532,7 @@ struct Run {
     /// The current record: its key's first eight bytes, its tagged location, and where its key
     /// sits in `block`.
     prefix: u64,
-    tagged: u64,
+    tagged: Tagged,
     key_at: usize,
     key_len: usize,
 }
@@ -520,7 +544,7 @@ impl Run {
             blocks: blocks.into_iter(),
             block: IoBufMut::default(),
             prefix: 0,
-            tagged: 0,
+            tagged: Tagged::new(0, false),
             key_at: 0,
             key_len: 0,
         }
@@ -617,7 +641,7 @@ impl Merge {
         &mut self,
         blob: &impl Blob,
         layout: Layout,
-    ) -> Result<Option<u64>, RuntimeError> {
+    ) -> Result<Option<Tagged>, RuntimeError> {
         let Some(&top) = self.heap.first() else {
             return Ok(None);
         };
@@ -835,7 +859,7 @@ impl<B: Blob, R> Buckets<B, R> {
         context: &impl Storage<Blob = B>,
         run: &mut RunWriter,
         key: &[u8],
-        tagged: u64,
+        tagged: Tagged,
     ) -> Result<(), RuntimeError> {
         self.layout.encode(&mut run.block, key, tagged);
         if run.block.len() >= SPILL_BYTES {
@@ -934,10 +958,10 @@ impl<B: Blob, R> Buckets<B, R> {
         let mut merge = Merge::new(blob, layout, sorted.into()).await?;
         let mut survivors = 0;
         while let Some(tagged) = merge.next(blob, layout).await? {
-            if tagged & 1 != 0 {
+            if tagged.is_delete() {
                 continue;
             }
-            let offset = tagged >> 1;
+            let offset = tagged.offset();
             activate(offset);
             loader.push(index, layout, &merge.key, offset);
             survivors += 1;
@@ -2357,7 +2381,7 @@ mod tests {
         for chunk in ops.chunks(piece.max(1)) {
             let mut data = Vec::new();
             for (key, tagged) in chunk {
-                layout.encode(&mut data, key, *tagged);
+                layout.encode(&mut data, key, Tagged(*tagged));
             }
             bytes += data.len();
             pieces.push(data);
@@ -2373,7 +2397,7 @@ mod tests {
             let mut sorted = Vec::new();
             for group in 0..sorter.groups() {
                 let (records, data) = sorter.sort(group, layout);
-                sorted.extend(records.iter().map(|r| (r.key(data).to_vec(), r.tagged)));
+                sorted.extend(records.iter().map(|r| (r.key(data).to_vec(), r.tagged.0)));
             }
             let mut newest = BTreeMap::new();
             for (key, tagged) in ops {
