@@ -161,66 +161,16 @@ const WAKE_COUNT: u32 = 2;
 /// futex2 flags of the ring and thread waits: a private 32-bit word.
 #[cfg(not(feature = "loom"))]
 const FUTEX2_PRIVATE_U32: u32 = 0x02 | libc::FUTEX_PRIVATE_FLAG as u32;
-/// futex2 `futex_wait`, which `libc` does not name. Linux numbers each system
-/// call added since 5.1 alike on every architecture, relative to its base, so
-/// it is `io_uring_setup` plus 30.
+/// futex2 `futex_wait`, which `libc` does not name. System calls added since
+/// Linux 5.1 have the same number on every architecture that uses the kernel's
+/// generic numbering, which the assertion checks through `io_uring_setup`.
 #[cfg(not(feature = "loom"))]
-const SYS_FUTEX_WAIT: libc::c_long = libc::SYS_io_uring_setup + 30;
-
-/// Block on `word` while it equals `snapshot`, for at most `timeout`,
-/// returning the system call's result.
-///
-/// The timeout is an absolute `CLOCK_MONOTONIC` time, the clock of [`Instant`],
-/// read here, so time spent since the caller's reading extends it.
+const SYS_FUTEX_WAIT: libc::c_long = 455;
 #[cfg(not(feature = "loom"))]
-fn idle_wait(word: &AtomicU32, snapshot: u32, timeout: Option<Duration>) -> libc::c_long {
-    const NANOS_PER_SEC: libc::c_long = 1_000_000_000;
-    let timeout = timeout.map(|timeout| {
-        let mut now = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY: `now` is writable storage that outlives the call.
-        let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
-        // CLOCK_MONOTONIC exists on every supported kernel and the pointer is
-        // valid, so the call cannot fail.
-        assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
-
-        // Both nanosecond fields are below one second, so their sum carries at
-        // most one second.
-        let nanos = now.tv_nsec + libc::c_long::from(timeout.subsec_nanos());
-        let secs = libc::time_t::try_from(timeout.as_secs()).unwrap_or(libc::time_t::MAX);
-        libc::timespec {
-            tv_sec: now
-                .tv_sec
-                .saturating_add(secs)
-                .saturating_add(nanos / NANOS_PER_SEC),
-            tv_nsec: nanos % NANOS_PER_SEC,
-        }
-    });
-    let timeout_ptr = timeout
-        .as_ref()
-        .map_or(std::ptr::null(), std::ptr::from_ref);
-
-    // SAFETY: `word` is an aligned atomic futex word that outlives the call.
-    // `timeout_ptr` is null or references the initialized local timespec,
-    // which remains alive and unchanged until return. On the 64-bit targets
-    // the runtime supports, `libc::timespec` has the layout of the kernel's
-    // `__kernel_timespec`. The value and mask are passed as `unsigned long`,
-    // as the kernel reads them, without bits above the word size, which it
-    // rejects.
-    unsafe {
-        libc::syscall(
-            SYS_FUTEX_WAIT,
-            word.as_ptr(),
-            libc::c_ulong::from(snapshot),
-            libc::c_ulong::from(u32::MAX),
-            FUTEX2_PRIVATE_U32,
-            timeout_ptr,
-            libc::CLOCK_MONOTONIC,
-        )
-    }
-}
+const _: () = assert!(
+    libc::SYS_io_uring_setup == 425,
+    "target must use the kernel's generic system call numbers"
+);
 
 /// RAII guard returned by [`Parker::arm`], which disarms the word on drop.
 pub struct ArmGuard<'a> {
@@ -519,18 +469,63 @@ impl Parker {
             return false;
         }
 
+        // futex2 takes an absolute `CLOCK_MONOTONIC` timeout. That is the clock
+        // of [`Instant`], which does not expose its value, so the clock is read
+        // again here and the time remaining since `now` added to it.
         let timeout = match deadline {
             Some(deadline) => {
                 let remaining = deadline.saturating_duration_since(now);
                 if remaining.is_zero() {
                     return false;
                 }
-                Some(remaining)
+
+                let mut clock = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                // SAFETY: `clock` is writable storage that outlives the call.
+                let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut clock) };
+                // CLOCK_MONOTONIC exists on every supported kernel and the
+                // pointer is valid, so the call cannot fail.
+                assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
+
+                // Both nanosecond fields are below one second, so their sum
+                // carries at most one second.
+                const NANOS_PER_SEC: libc::c_long = 1_000_000_000;
+                let nanos = clock.tv_nsec + libc::c_long::from(remaining.subsec_nanos());
+                let secs = libc::time_t::try_from(remaining.as_secs()).unwrap_or(libc::time_t::MAX);
+                Some(libc::timespec {
+                    tv_sec: clock
+                        .tv_sec
+                        .saturating_add(secs)
+                        .saturating_add(nanos / NANOS_PER_SEC),
+                    tv_nsec: nanos % NANOS_PER_SEC,
+                })
             }
             None => None,
         };
+        let timeout_ptr = timeout
+            .as_ref()
+            .map_or(std::ptr::null(), std::ptr::from_ref);
 
-        let ret = idle_wait(&self.word, snapshot, timeout);
+        // SAFETY: `word` is an aligned atomic futex word that outlives the
+        // call. `timeout_ptr` is null or references the initialized local
+        // timespec, which remains alive and unchanged until return. On the
+        // 64-bit targets the runtime supports, `libc::timespec` has the layout
+        // of the kernel's `__kernel_timespec`. The value and mask are passed as
+        // `unsigned long`, as the kernel reads them, without bits above the
+        // word size, which it rejects.
+        let ret = unsafe {
+            libc::syscall(
+                SYS_FUTEX_WAIT,
+                self.word.as_ptr(),
+                libc::c_ulong::from(snapshot),
+                libc::c_ulong::from(u32::MAX),
+                FUTEX2_PRIVATE_U32,
+                timeout_ptr,
+                libc::CLOCK_MONOTONIC,
+            )
+        };
         if ret == 0 {
             return true;
         }
