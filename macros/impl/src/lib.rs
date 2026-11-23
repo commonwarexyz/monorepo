@@ -785,3 +785,94 @@ pub fn select_loop(input: TokenStream) -> TokenStream {
     }
     .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::{Meta, punctuated::Punctuated};
+
+    const LEVELS: [&str; 6] = ["WIP", "ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON"];
+
+    /// Evaluates a cfg predicate against the set of stability cfgs that are enabled.
+    fn eval(meta: &Meta, enabled: &[&str]) -> bool {
+        match meta {
+            Meta::Path(path) => {
+                let ident = path.get_ident().expect("cfg name").to_string();
+                enabled
+                    .iter()
+                    .any(|level| ident == format!("commonware_stability_{level}"))
+            }
+            Meta::List(list) => {
+                let args = list
+                    .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                    .expect("cfg arguments");
+                match list
+                    .path
+                    .get_ident()
+                    .expect("cfg operator")
+                    .to_string()
+                    .as_str()
+                {
+                    "all" => args.iter().all(|arg| eval(arg, enabled)),
+                    "any" => args.iter().any(|arg| eval(arg, enabled)),
+                    "not" => {
+                        assert_eq!(args.len(), 1);
+                        !eval(&args[0], enabled)
+                    }
+                    other => panic!("unexpected cfg operator: {other}"),
+                }
+            }
+            Meta::NameValue(_) => panic!("unexpected name-value cfg"),
+        }
+    }
+
+    /// Returns whether an item marked `level` compiles with the `enabled` stability cfgs.
+    fn compiled(level: &str, enabled: &[&str]) -> bool {
+        let level: StabilityLevel = syn::parse_str(level).expect("valid level");
+        let cfg: Meta = syn::parse2(inclusion_cfg(level.value)).expect("valid cfg");
+        eval(&cfg, enabled)
+    }
+
+    #[test]
+    fn test_inclusion_cfg() {
+        for (rank, level) in LEVELS.iter().enumerate() {
+            // Consumers set no stability cfg: every level but WIP compiles.
+            assert_eq!(compiled(level, &[]), rank > 0, "{level} with no cfg");
+
+            // The monorepo sets only WIP: every level compiles.
+            assert!(compiled(level, &["WIP"]), "{level} with WIP");
+
+            // An explicit level excludes lower levels, with or without WIP.
+            for (selected_rank, selected) in LEVELS.iter().enumerate().skip(1) {
+                let expected = rank >= selected_rank;
+                assert_eq!(
+                    compiled(level, &[selected]),
+                    expected,
+                    "{level} with {selected}"
+                );
+                assert_eq!(
+                    compiled(level, &["WIP", selected]),
+                    expected,
+                    "{level} with WIP and {selected}"
+                );
+            }
+
+            // RESERVED excludes every marked item.
+            assert!(!compiled(level, &["RESERVED"]), "{level} with RESERVED");
+            assert!(
+                !compiled(level, &["WIP", "RESERVED"]),
+                "{level} with WIP and RESERVED"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rejects_unnamed_levels() {
+        for input in ["0", "1", "5", "alpha", "RESERVED", "UNKNOWN", ""] {
+            assert!(
+                syn::parse_str::<StabilityLevel>(input).is_err(),
+                "accepted {input:?}"
+            );
+        }
+    }
+}
