@@ -492,19 +492,16 @@ impl Parker {
                 // pointer is valid, so the call cannot fail.
                 assert_eq!(ret, 0, "CLOCK_MONOTONIC must be readable");
 
-                // Each nanosecond field is below one second, so their sum is
-                // below two seconds, and at most one whole second moves from
-                // it into the seconds field.
-                const NANOS_PER_SEC: libc::c_long = 1_000_000_000;
-                let nanos = clock.tv_nsec + libc::c_long::from(remaining.subsec_nanos());
-                let secs = libc::time_t::try_from(remaining.as_secs()).unwrap_or(libc::time_t::MAX);
+                // The kernel rejects a timeout whose nanoseconds reach one
+                // second, so the sum carries whole seconds, as `Duration`
+                // addition does. The monotonic clock is never negative and its
+                // nanoseconds stay below one second, so the casts are exact.
+                let timeout = Duration::new(clock.tv_sec as u64, clock.tv_nsec as u32)
+                    .saturating_add(remaining);
 
                 Some(libc::timespec {
-                    tv_sec: clock
-                        .tv_sec
-                        .saturating_add(secs)
-                        .saturating_add(nanos / NANOS_PER_SEC),
-                    tv_nsec: nanos % NANOS_PER_SEC,
+                    tv_sec: timeout.as_secs().try_into().unwrap_or(libc::time_t::MAX),
+                    tv_nsec: timeout.subsec_nanos().into(),
                 })
             }
             None => None,
