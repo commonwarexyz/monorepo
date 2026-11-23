@@ -24,7 +24,7 @@
 //!   durability, so one database barrier can cover several finalizations.
 
 use crate::stateful::{
-    Application, Finality, Input, Proposed, PruneConfig,
+    Application, ExecutionError, Finality, Input, Proposed, PruneConfig,
     actor::{BlockDigest, SyncTargets, core::Proposal, metrics::Metrics as StatefulMetrics},
     db::{Anchor, Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
@@ -568,6 +568,17 @@ where
                     return;
                 };
                 let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(ExecutionError::Invalid(reason)) => {
+                        debug!(
+                            ?parent_digest,
+                            reason, "prepare declined: invalid execution"
+                        );
+                        Handoff::Wait
+                    }
+                    Err(err) => panic!("prepare failed: {err}"),
+                };
+                let prepared = match prepared {
                     Handoff::Vote(proposed) => {
                         Handoff::Vote(self.cache_proposed(round, parent_digest, proposed).await)
                     }
@@ -593,10 +604,18 @@ where
                     return;
                 };
                 let block = match proposed {
-                    Some(proposed) => {
+                    Ok(Some(proposed)) => {
                         Some(self.cache_proposed(round, parent_digest, proposed).await)
                     }
-                    None => None,
+                    Ok(None) => None,
+                    Err(ExecutionError::Invalid(reason)) => {
+                        debug!(
+                            ?parent_digest,
+                            reason, "propose declined: invalid execution"
+                        );
+                        None
+                    }
+                    Err(err) => panic!("propose failed: {err}"),
                 };
                 if block.is_some() {
                     timer.observe(context);
@@ -750,6 +769,7 @@ where
                     Finality::Finalized,
                 )
                 .await
+                .unwrap_or_else(|err| panic!("finalize reconstruction failed: {err}"))
                 .expect("finalize reconstruction must process the block");
             assert!(
                 A::Databases::matches_sync_targets(&batch, &sync_targets),
@@ -1009,7 +1029,7 @@ where
         let sync_targets = A::sync_targets(block.inner());
 
         let batches = self.fork_batches(&parent_digest).await?;
-        let Some(merkleized) = app
+        let merkleized = match app
             .process(
                 (context, consensus_context),
                 ancestry,
@@ -1017,9 +1037,17 @@ where
                 Finality::Candidate,
             )
             .await
-        else {
-            warn!(block = ?digest, "application rejected block");
-            return Err(PrepareBatchesError::Invalid);
+        {
+            Ok(Some(merkleized)) => merkleized,
+            Ok(None) => {
+                warn!(block = ?digest, "application rejected block");
+                return Err(PrepareBatchesError::Invalid);
+            }
+            Err(ExecutionError::Invalid(reason)) => {
+                warn!(block = ?digest, reason, "block execution is invalid");
+                return Err(PrepareBatchesError::Invalid);
+            }
+            Err(err) => panic!("process failed: {err}"),
         };
 
         if !A::Databases::matches_sync_targets(&merkleized, &sync_targets) {
@@ -1196,7 +1224,7 @@ mod tests {
         PendingEntry, PrepareBatchesError, Processor, Prune, Pruning,
     };
     use crate::stateful::{
-        Application, Finality, Input, Proposed, PruneConfig,
+        Application, ExecutionError, Finality, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
         tests::mocks::digested,
@@ -1581,9 +1609,11 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             let mut ancestry = Box::pin(ancestry);
-            let parent = ancestry.next().await?;
+            let Some(parent) = ancestry.next().await else {
+                return Ok(None);
+            };
             let context = context.1.clone();
             let view = context.round.view();
             let height = parent.height().next();
@@ -1595,7 +1625,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: merkleized.target().range,
             };
-            Some(Proposed { block, merkleized })
+            Ok(Some(Proposed { block, merkleized }))
         }
 
         async fn process(
@@ -1604,8 +1634,13 @@ mod tests {
             mut ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             finality: Finality,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            let block = ancestry.next().await?;
+        ) -> Result<
+            Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized>,
+            ExecutionError,
+        > {
+            let Some(block) = ancestry.next().await else {
+                return Ok(None);
+            };
             if let Some(observations) = &self.process_ancestry {
                 let parent = ancestry
                     .next()
@@ -1623,7 +1658,9 @@ mod tests {
             if let Some(probe) = &self.process_probe {
                 probe.call(block.digest()).await;
             }
-            Some(Self::execute(block.height(), block.inner().context.round.view(), batches).await)
+            Ok(Some(
+                Self::execute(block.height(), block.inner().context.round.view(), batches).await,
+            ))
         }
 
         async fn capture(

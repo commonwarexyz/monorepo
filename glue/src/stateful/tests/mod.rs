@@ -20,8 +20,8 @@ use crate::{
         property::Property,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
-        Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
+        PruneConfig, Stateful as StatefulActor, SyncPlan,
         db::{DatabaseSet, Merkleized as _, Publisher, SyncEngineConfig},
     },
 };
@@ -1093,7 +1093,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, deterministic::Context>> {
+    ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
         let gate = self.propose_gate.lock().take();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
@@ -1107,10 +1107,10 @@ impl Application<deterministic::Context> for GatedMultiApp {
             input,
         )
         .await?;
-        Some(Proposed {
+        Ok(proposed.map(|proposed| Proposed {
             block: proposed.block,
             merkleized: proposed.merkleized,
-        })
+        }))
     }
 
     async fn process(
@@ -1119,7 +1119,10 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+    ) -> Result<
+        Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized>,
+        ExecutionError,
+    > {
         let gate = self.process_gates.lock().pop_front();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
@@ -1224,7 +1227,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let merkleized = App::execute(height, batches).await;
+        let merkleized = App::execute(height, batches).await.unwrap();
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::zero(), View::new(height.get())),
@@ -1276,7 +1279,7 @@ async fn build_multi_chain(
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await;
+        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await.unwrap();
         let bounds_b = merkleized_b.bounds();
         let block = MultiBlock {
             context: Context {

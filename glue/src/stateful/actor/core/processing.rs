@@ -515,7 +515,7 @@ where
 mod tests {
     use super::{Message, Processing};
     use crate::stateful::{
-        Application, Finality, Input, Proposed, PruneConfig,
+        Application, ExecutionError, Finality, Input, Proposed, PruneConfig,
         actor::{
             core::{
                 mailbox::Mailbox,
@@ -632,9 +632,9 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Handoff<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Handoff<Proposed<Self, deterministic::Context>>, ExecutionError> {
             self.hold_proposal().await;
-            Handoff::Wait
+            Ok(Handoff::Wait)
         }
 
         async fn propose(
@@ -643,9 +643,9 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             self.hold_proposal().await;
-            None
+            Ok(None)
         }
 
         async fn process(
@@ -654,10 +654,12 @@ mod tests {
             mut ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             finality: Finality,
-        ) -> Option<TestMerkleized> {
-            ancestry.next().await?;
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
+            if ancestry.next().await.is_none() {
+                return Ok(None);
+            }
             if finality == Finality::Finalized {
-                return Some(TestMerkleized);
+                return Ok(Some(TestMerkleized));
             }
             self.observed_contexts.lock().push(context.0.name());
             let mut gate = self
@@ -667,7 +669,7 @@ mod tests {
                 .expect("every process call must have a gate");
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
-            self.process_valid.then_some(TestMerkleized)
+            Ok(self.process_valid.then_some(TestMerkleized))
         }
 
         async fn capture(
@@ -719,7 +721,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             panic!("read-gated application proposal is not used")
         }
 
@@ -729,10 +731,12 @@ mod tests {
             mut ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _finality: Finality,
-        ) -> Option<TestMerkleized> {
-            let block = ancestry.next().await?;
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
+            let Some(block) = ancestry.next().await else {
+                return Ok(None);
+            };
             if block.height() != self.gate_height {
-                return Some(TestMerkleized);
+                return Ok(Some(TestMerkleized));
             }
             let database = self.database.read().await;
             let Some(mut gate) = self.gate.lock().take() else {
@@ -741,7 +745,7 @@ mod tests {
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
             drop(database);
-            Some(TestMerkleized)
+            Ok(Some(TestMerkleized))
         }
 
         async fn capture(
@@ -829,10 +833,11 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             batches: TestUnmerkleized,
             input: Input<Self::Input, Self::Provider>,
-        ) -> Handoff<Proposed<Self, deterministic::Context>> {
-            self.propose(context, ancestry, batches, input)
-                .await
-                .map_or(Handoff::Wait, Handoff::Vote)
+        ) -> Result<Handoff<Proposed<Self, deterministic::Context>>, ExecutionError> {
+            Ok(self
+                .propose(context, ancestry, batches, input)
+                .await?
+                .map_or(Handoff::Wait, Handoff::Vote))
         }
 
         async fn propose(
@@ -841,18 +846,20 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             let gate = self.proposal_gate.lock().take();
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
             let mut ancestry = Box::pin(ancestry);
-            let parent = ancestry.next().await?;
-            Some(Proposed {
+            let Some(parent) = ancestry.next().await else {
+                return Ok(None);
+            };
+            Ok(Some(Proposed {
                 block: TestBlock::child(parent.inner(), 9),
                 merkleized: TestMerkleized,
-            })
+            }))
         }
 
         async fn process(
@@ -861,8 +868,10 @@ mod tests {
             mut ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             finality: Finality,
-        ) -> Option<TestMerkleized> {
-            let block = ancestry.next().await?;
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
+            let Some(block) = ancestry.next().await else {
+                return Ok(None);
+            };
             self.process_calls.record(block.height());
             if finality == Finality::Finalized {
                 self.finalized_calls.record(block.height());
@@ -876,7 +885,7 @@ mod tests {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
-            (self.unexecutable != Some(block.height())).then_some(TestMerkleized)
+            Ok((self.unexecutable != Some(block.height())).then_some(TestMerkleized))
         }
 
         async fn capture(

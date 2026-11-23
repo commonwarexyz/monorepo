@@ -1,5 +1,5 @@
 use crate::stateful::{
-    Application, Finality, Input, Proposed,
+    Application, ExecutionError, Finality, Input, Proposed,
     db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -435,14 +435,15 @@ impl<E: Send + Sync> Application<E> for TestApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Handoff<Proposed<Self, E>> {
+    ) -> Result<Handoff<Proposed<Self, E>>, ExecutionError> {
         let decision = self.handoff;
         if decision.is_wait() {
-            return Handoff::Wait;
+            return Ok(Handoff::Wait);
         }
-        self.propose(context, ancestry, batches, input)
-            .await
-            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
+        Ok(self
+            .propose(context, ancestry, batches, input)
+            .await?
+            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed)))
     }
 
     async fn propose(
@@ -451,11 +452,11 @@ impl<E: Send + Sync> Application<E> for TestApp {
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        self.proposal.clone().map(|block| Proposed {
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        Ok(self.proposal.clone().map(|block| Proposed {
             block,
             merkleized: TestMerkleized,
-        })
+        }))
     }
 
     /// Rejects every candidate and produces state for every finalized block.
@@ -465,11 +466,11 @@ impl<E: Send + Sync> Application<E> for TestApp {
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        match finality {
+    ) -> Result<Option<<Self::Databases as DatabaseSet<E>>::Merkleized>, ExecutionError> {
+        Ok(match finality {
             Finality::Candidate => None,
             Finality::Finalized => Some(TestMerkleized),
-        }
+        })
     }
 
     async fn capture(
