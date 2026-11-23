@@ -8,6 +8,16 @@
 //!
 //! The tasks that replay the log can also hash its operations for the journal's Merkle structure,
 //! so that initialization reads the log once.
+//!
+//! # Scratch blob
+//!
+//! The scratch blob is a sequence of runs with no header and no index. A run is whole records
+//! (see [Layout]) of one bucket, and the runs of different buckets are interleaved in the order
+//! tasks claimed their space, which a task does by advancing the blob's end. Each bucket keeps
+//! the offset and length of its runs in memory. A bucket that is sorted in pieces writes its
+//! sorted pieces and merged runs to the same blob, and nothing is reclaimed until the build
+//! removes the blob. Only the build that wrote a blob knows where its runs are, so the blob is
+//! never synced, and one left by an interrupted build is removed without being read.
 
 use super::Error;
 use crate::{
