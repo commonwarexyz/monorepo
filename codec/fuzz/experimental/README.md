@@ -11,7 +11,7 @@ libFuzzer targets. They are run by hand or by a scheduled job, not by CI.
 | Package | Crate | Contents |
 | ------- | ----- | -------- |
 | [`ephyra/`](./ephyra) | `commonware-codec-fuzz-ephyra` | Five property tests of documented contracts, written with the [ephyra](https://github.com/datadog-labs/ephyra) library. Tests only: no library and no fuzz targets. |
-| [`kani/`](./kani) | `commonware-codec-fuzz-kani` | 24 proof harnesses of documented contracts, checked with the [Kani](https://github.com/model-checking/kani) model checker. Harnesses only: nothing is compiled outside `cargo kani`, and there are no fuzz targets. See [its README](./kani/README.md). |
+| [`kani/`](./kani) | `commonware-codec-fuzz-kani` | 89 proof harnesses of codec contracts, checked with the [Kani](https://github.com/model-checking/kani) model checker. The contracts are taken from the codec documentation and, where it is silent, from tests and comments of `commonware-codec`. Harnesses only: nothing is compiled outside `cargo kani`, and there are no fuzz targets. See [its README](./kani/README.md). |
 
 `ephyra` is its own workspace with its own `Cargo.lock`. It is not a member of
 the repository workspace, so `cargo` commands run for the repository workspace

@@ -24,8 +24,14 @@
 //! 4. on `InvalidLength(v)`: `v` is outside the range. codec/src/error.rs:47-54: the "value
 //!    fell outside the permitted range"; "The contained `usize` is the invalid length that
 //!    was decoded."
-//! 5. any other failure is `EndOfBuffer`, `InvalidVarint` or `InvalidUsize`
-//!    (codec/src/error.rs:10-14, :25-36).
+//! 5. a malformed varint is refused: it gives no value and no `InvalidLength`.
+//!    codec/src/types/primitives.rs:8-17: `usize` "uses variable-length (varint) encoding";
+//!    codec/src/varint.rs:479-481, on the varint read: "Returns an error if:" "The varint is
+//!    invalid (too long or malformed)". Which bytes are malformed: those that `UInt<u32>`
+//!    refuses with `InvalidVarint` (codec/src/varint.rs:117: "`Err(InvalidVarint)` if the
+//!    varint is malformed (overflow or invalid encoding)"). The documentation does not say
+//!    with which error `usize` itself refuses them, so the gate does not fix the kind of
+//!    that failure: no assertion and no cover check of the default build looks at it.
 //!
 //! # Implementation consistency (asserted only with `--features consistency`; not a gate)
 //!
@@ -33,7 +39,10 @@
 //!   `UInt::<u32>::read` on the same input. The docs say a `usize` is a varint that fits a
 //!   `u32`; they do not name `UInt<u32>`. This is also a shared-code check, not an independent
 //!   oracle: `usize::read_cfg` calls `UInt::read` (codec/src/types/primitives.rs:181).
-//! - `InvalidUsize` never happens (on a 64-bit target every `u32` fits a `usize`).
+//! - `InvalidUsize` never happens (on a 64-bit target every `u32` fits a `usize`), and no
+//!   failure has a kind other than `InvalidLength`, `EndOfBuffer` or `InvalidVarint`.
+//! - the cover check that expects a malformed varint under `InvalidVarint` is compiled only
+//!   with the feature.
 //!
 //! # Bounds
 //!
@@ -123,11 +132,27 @@ fn kani_p4_usize_read() {
     let result = usize::read_cfg(&mut buf, &range);
     let left = buf.remaining();
 
+    // Contract 5: the bytes are a malformed 32-bit varint when `UInt<u32>` refuses them with
+    // `InvalidVarint`.
+    let mut reference_buf = Copying(input);
+    let reference = UInt::<u32>::read(&mut reference_buf);
+    let malformed = matches!(reference, Err(Error::InvalidVarint(_)));
+
+    // This check asks for a failure and does not look at its kind, so it holds for whatever
+    // error `usize` gives.
+    kani::cover!(
+        malformed && result.is_err(),
+        "a malformed varint is refused"
+    );
+
     match &result {
         Ok(v) => {
             // Contract 2 and 3.
             assert!(in_interval(start, end, *v));
             assert!(*v <= u32::MAX as usize);
+
+            // Contract 5: a malformed varint gives no value.
+            assert!(!malformed);
 
             kani::cover!(*v == 0, "accepts length zero");
             kani::cover!(*v == u32::MAX as usize, "accepts the largest length");
@@ -139,6 +164,9 @@ fn kani_p4_usize_read() {
         Err(Error::InvalidLength(v)) => {
             // Contract 4.
             assert!(!in_interval(start, end, *v));
+
+            // Contract 5: a malformed varint gives no length to report.
+            assert!(!malformed);
 
             kani::cover!(*v == 0, "rejects length zero");
             kani::cover!(
@@ -153,20 +181,23 @@ fn kani_p4_usize_read() {
         Err(Error::EndOfBuffer) => {
             kani::cover!(len == 4, "a four-byte prefix ends the buffer");
         }
+        // Contract 5: any other failure refuses the bytes. Its kind is a consistency check,
+        // so no cover check of the default build is in the three arms below: an error of
+        // another kind may never come to one of them.
         Err(Error::InvalidVarint(_)) => {
-            kani::cover!(true, "an invalid varint is reported");
+            #[cfg(feature = "consistency")]
+            kani::cover!(malformed, "an invalid varint is reported");
         }
         Err(Error::InvalidUsize) => {
             consistency!(false, "InvalidUsize cannot happen on a 64-bit target");
         }
-        // Contract 5: no other failure.
-        Err(_) => panic!("unexpected error kind"),
+        Err(_) => {
+            consistency!(false, "a failure of another kind");
+        }
     }
 
     // Consistency: agrees with the u32 varint reader on the same input.
     if cfg!(feature = "consistency") {
-        let mut reference_buf = Copying(input);
-        let reference = UInt::<u32>::read(&mut reference_buf);
         match (&result, &reference) {
             (Ok(v), Ok(UInt(r))) | (Err(Error::InvalidLength(v)), Ok(UInt(r))) => {
                 assert!(*r as usize == *v);

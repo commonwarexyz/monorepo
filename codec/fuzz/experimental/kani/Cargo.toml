@@ -13,15 +13,15 @@ license = "MIT OR Apache-2.0"
 # here.
 [package.metadata.kani]
 version = "0.68.0"
-harnesses = 24
+harnesses = 89
 
 # This package is its own workspace, with its own Cargo.lock. It is not a member of the
 # repository workspace, so workspace-wide commands do not build or run it.
 [workspace]
 
 [features]
-# Adds the implementation-consistency assertions, which are stronger than the documented
-# contract. The default build asserts the documented contract only.
+# Adds the implementation-consistency assertions, which are stronger than the quoted
+# contracts. The default build asserts the quoted contracts only.
 consistency = []
 
 # `cargo kani` sets `cfg(kani)`. Every module and every dependency is behind it, so a plain

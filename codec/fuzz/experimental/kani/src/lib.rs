@@ -7,7 +7,9 @@
 //!
 //! - "Documented contract": what the documentation of `commonware-codec` promises, each item
 //!   with its quote and source (file and lines of `codec/src` as of `main` at commit
-//!   c2627b4132). These assertions are in every build. The default build is the gate.
+//!   c2627b4132). Where the documentation is silent, for example on the byte layout of an
+//!   address, an item quotes a test of `commonware-codec` instead and says so. These
+//!   assertions are in every build. The default build is the gate.
 //! - "Implementation consistency": checks that are stronger than the documentation. They are
 //!   asserted only with `--features consistency` (the `consistency!` macro) and are not a gate:
 //!   a valid change of the implementation may fail them.
@@ -21,6 +23,10 @@
 #[cfg(kani)]
 mod common;
 #[cfg(kani)]
+mod p10_tags;
+#[cfg(kani)]
+mod p11_modes;
+#[cfg(kani)]
 mod p1_varint_decode;
 #[cfg(kani)]
 mod p2_varint_roundtrip;
@@ -32,3 +38,9 @@ mod p4_range;
 mod p5_length_math;
 #[cfg(kani)]
 mod p6_varint_uint14;
+#[cfg(kani)]
+mod p7_net;
+#[cfg(kani)]
+mod p8_exact_decode;
+#[cfg(kani)]
+mod p9_fixed_width;
