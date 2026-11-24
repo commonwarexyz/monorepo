@@ -138,6 +138,17 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         self.capacity
     }
 
+    /// Returns how many newly inserted entries a full cache retains before evicting the oldest
+    /// of them, absent intervening hits.
+    #[inline]
+    pub const fn admission_capacity(&self) -> usize {
+        if self.small.capacity == 0 {
+            self.capacity
+        } else {
+            self.small.capacity
+        }
+    }
+
     /// Returns the number of entries currently in the cache.
     #[inline]
     pub fn len(&self) -> usize {
