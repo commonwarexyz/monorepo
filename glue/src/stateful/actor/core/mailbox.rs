@@ -8,7 +8,7 @@ use commonware_actor::{
 use commonware_consensus::{
     Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
     Viewable,
-    marshal::{
+    simplex::marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
@@ -389,7 +389,7 @@ mod tests {
     use super::Mailbox;
     use crate::stateful::tests::mocks::{TestApp, TestBlock, digested};
     use commonware_actor::{Feedback, mailbox};
-    use commonware_consensus::{Reporter as _, marshal::Update};
+    use commonware_consensus::{Reporter as _, simplex::marshal::Update};
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         NZUsize,

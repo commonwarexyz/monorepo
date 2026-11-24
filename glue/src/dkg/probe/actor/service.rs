@@ -9,8 +9,11 @@ use crate::{
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::Encode as _;
 use commonware_consensus::{
-    marshal::core::{Mailbox as MarshalMailbox, Variant},
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{
+        marshal::core::{Mailbox as MarshalMailbox, Variant},
+        scheme::Scheme,
+        types::Finalization,
+    },
     types::Epoch,
 };
 use commonware_macros::select_loop;
