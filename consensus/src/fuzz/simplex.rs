@@ -18,9 +18,10 @@ use crate::{
     Handoff, IndexSubscription, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
-        mocks::{application, relay, reporter, twins},
+        mocks::{application, relay, reporter},
         types::{Certificate, Vote},
     },
+    twins,
     types::{Delta, Epoch, TermLength, View, ViewDelta},
 };
 use arbitrary::Arbitrary;
