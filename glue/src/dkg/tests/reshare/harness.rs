@@ -1293,20 +1293,24 @@ impl EngineDefinition for ReshareEngine {
             init_concurrency: NZUsize!(2),
         };
 
+        let publication_context = context.child("publication");
+        let (snapshot_publisher, snapshot_subscriber) =
+            crate::stateful::db::Publisher::new(&publication_context);
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
             context.child("qmdb_resolver"),
             qmdb_resolver::Config {
                 peer_provider: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
-                database: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
                 fetch_timeout: NZDuration!(Duration::from_secs(2)),
                 fetch_retry_delay: Duration::from_millis(100),
                 max_serve_ops: SYNC_BATCH_SIZE,
+                serve_timeout: Duration::from_secs(2),
                 priority_requests: false,
                 priority_responses: false,
             },
+            snapshot_subscriber,
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
@@ -1395,6 +1399,7 @@ impl EngineDefinition for ReshareEngine {
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: qmdb_sync_resolver,
+                snapshot_publisher,
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: SYNC_BATCH_SIZE,
                     apply_batch_size: NZU64!(64),

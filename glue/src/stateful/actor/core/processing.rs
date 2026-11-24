@@ -7,7 +7,7 @@ use crate::stateful::{
         },
         processor::{Applied, Processor},
     },
-    db::{Barrier, DatabaseSet},
+    db::Barrier,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -165,18 +165,19 @@ impl Durability {
 ///
 /// Speculative work keeps running while the barrier waits for database access. Returns `false` if
 /// the actor stops before the barrier starts. Panics unless [`Durability::needs_barrier`] holds.
-async fn start_barrier<E, A, V>(
+async fn start_barrier<E, A, V, T>(
     context: &E,
     durability: &mut Durability,
     verifications: &mut Verifications<E, A, V>,
     actions: &mut VecDeque<Action<E, A>>,
-    databases: &A::Databases,
+    processor: &mut Processor<E, A, T>,
 ) -> bool
 where
     E: Spawner + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    T: Strategy,
 {
     assert!(
         durability.needs_barrier(),
@@ -186,7 +187,7 @@ where
     let height = durability.applied();
     let barrier = select! {
         _ = context.stopped() => return false,
-        barrier = verifications.drive(databases.finalize(), actions) => barrier,
+        barrier = verifications.drive(processor.start_sync(), actions) => barrier,
     };
     durability.set_barrier(height, barrier);
     true
@@ -257,7 +258,7 @@ where
                         &mut durability,
                         &mut verifications,
                         &mut actions,
-                        self.processor.databases(),
+                        &mut self.processor,
                     ).await
                 {
                     return;
@@ -467,7 +468,7 @@ where
                             &mut durability,
                             &mut verifications,
                             &mut actions,
-                            self.processor.databases(),
+                            &mut self.processor,
                         ).await {
                             return;
                         }
@@ -480,6 +481,24 @@ where
                     verifications
                         .drive(prune.run(self.processor.databases(), &self.marshal), &mut actions)
                         .await;
+                    // The published snapshots predate this prune and pin the pruned storage, so
+                    // capture and publish afresh right away. Starting the successor barrier now
+                    // does both.
+                    if durability.needs_barrier() {
+                        if !start_barrier(
+                            self.context.as_present(),
+                            &mut durability,
+                            &mut verifications,
+                            &mut actions,
+                            &mut self.processor,
+                        ).await {
+                            return;
+                        }
+                    } else {
+                        verifications
+                            .drive(self.processor.publish_snapshot(), &mut actions)
+                            .await;
+                    }
                     verifications.resume(&mut actions);
                 }
                 Step::Barrier(completion) => {
@@ -505,7 +524,7 @@ mod tests {
             metrics::Metrics as StatefulMetrics,
             processor::{Processor, Pruning},
         },
-        db::{DatabaseSet, Shared},
+        db::{DatabaseSet, Publisher, Shared, Subscriber},
         tests::{
             fixtures,
             mocks::{
@@ -531,8 +550,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _, Spawner as _,
-        Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
+        Clock as _, ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _,
+        Spawner as _, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
         NZU64, NZUsize,
@@ -929,6 +948,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            crate::stateful::db::Publisher::new(context).0,
             Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -954,6 +974,7 @@ mod tests {
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
+        Subscriber<u64>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -968,6 +989,7 @@ mod tests {
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
+        Subscriber<u64>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -993,15 +1015,18 @@ mod tests {
             process_valid: true,
             observed_contexts: Arc::default(),
         };
-        let processor = Processor::new(
+        let (publisher, subscriber) = Publisher::new(context);
+        let mut processor = Processor::new(
             app,
             databases,
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            publisher,
             Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+        processor.publish_snapshot().await;
         let processing = Processing {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
@@ -1011,7 +1036,24 @@ mod tests {
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), control, marshal.guards, actor)
+        (
+            Mailbox::new(sender),
+            control,
+            subscriber,
+            marshal.guards,
+            actor,
+        )
+    }
+
+    /// The value of the `publications` counter.
+    fn publications(context: &deterministic::Context) -> u64 {
+        context
+            .encode()
+            .lines()
+            .find_map(|line| line.strip_prefix("publications_total "))
+            .expect("counter must be registered")
+            .parse()
+            .expect("counter must be an integer")
     }
 
     async fn spawn_read_gated_processing(
@@ -1052,6 +1094,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             pruning,
+            crate::stateful::db::Publisher::new(context).0,
             Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -1394,6 +1437,7 @@ mod tests {
             anchor(0, 0),
             StatefulMetrics::new(context),
             None,
+            crate::stateful::db::Publisher::new(context).0,
             Sequential,
         );
         let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -2083,6 +2127,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
@@ -2477,7 +2522,7 @@ mod tests {
     #[test]
     fn conflicting_processed_block_is_rejected() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (mut mailbox, control, _marshal, actor) =
+            let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "conflicting-processed", None).await;
             let genesis = TestBlock::new(0, 0);
             let canonical = TestBlock::child(&genesis, 1);
@@ -2792,6 +2837,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -2880,6 +2926,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -2958,6 +3005,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -3080,6 +3128,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
@@ -3213,6 +3262,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -3651,6 +3701,7 @@ mod tests {
                 anchor(1, 1),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -3729,6 +3780,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
@@ -3783,6 +3835,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
 
@@ -3954,6 +4007,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -4102,6 +4156,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -4227,6 +4282,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 Some(pruning),
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
@@ -4329,17 +4385,18 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Marshal only receives prune requests here. Its actor never runs.
             let (verify_gate, verify_started, verify_release) = application_gate();
-            let (mut mailbox, control, _marshal, _actor) = spawn_processing_with_gates(
-                &context,
-                "gated-prune",
-                Some(PruneConfig {
-                    maintenance_interval: NZUsize!(1),
-                    retained_marshal_blocks: 0,
-                    retained_qmdb_blocks: 0,
-                }),
-                VecDeque::from([verify_gate]),
-            )
-            .await;
+            let (mut mailbox, control, _subscriber, _marshal, _actor) =
+                spawn_processing_with_gates(
+                    &context,
+                    "gated-prune",
+                    Some(PruneConfig {
+                        maintenance_interval: NZUsize!(1),
+                        retained_marshal_blocks: 0,
+                        retained_qmdb_blocks: 0,
+                    }),
+                    VecDeque::from([verify_gate]),
+                )
+                .await;
 
             let genesis = TestBlock::new(0, 0);
             let block1 = TestBlock::child(&genesis, 1);
@@ -4436,6 +4493,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(2));
@@ -4504,7 +4562,7 @@ mod tests {
     #[case::failure(false)]
     fn duplicate_reports_wait_for_durability(#[case] succeeds: bool) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal, actor) =
+            let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "duplicate-durability", None).await;
 
             // Apply block 1 with its flush held, then report it again.
@@ -4605,6 +4663,7 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    crate::stateful::db::Publisher::new(&context).0,
                     Sequential,
                 ),
                 deferred_verifications: Vec::new(),
@@ -4789,6 +4848,7 @@ mod tests {
                     anchor(0, 0),
                     StatefulMetrics::new(&context),
                     None,
+                    crate::stateful::db::Publisher::new(&context).0,
                     Sequential,
                 ),
                 deferred_verifications: Vec::new(),
@@ -4822,7 +4882,7 @@ mod tests {
     #[test]
     fn stable_leader_finalizations_coalesce_while_barrier_pending() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal, _actor) =
+            let (mut mailbox, control, _subscriber, _marshal, _actor) =
                 spawn_processing(&context, "gated-coalesced-barrier", None).await;
 
             const BLOCKS: u64 = 3;
@@ -4942,7 +5002,7 @@ mod tests {
     fn prune_join_preserves_execution_until_shutdown(#[case] shutdown: bool) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (gate, started, release) = application_gate();
-            let (mut mailbox, control, _marshal, actor) = spawn_processing_with_gates(
+            let (mut mailbox, control, _subscriber, _marshal, actor) = spawn_processing_with_gates(
                 &context,
                 "prune-join-shutdown",
                 Some(PruneConfig {
@@ -5061,6 +5121,7 @@ mod tests {
                 anchor(0, 0),
                 StatefulMetrics::new(&context),
                 None,
+                crate::stateful::db::Publisher::new(&context).0,
                 Sequential,
             );
             let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
@@ -5238,7 +5299,7 @@ mod tests {
     #[test]
     fn aborted_target_flush_prevents_prune() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal, actor) = spawn_processing(
+            let (mut mailbox, control, _subscriber, _marshal, actor) = spawn_processing(
                 &context,
                 "gated-aborted-prune",
                 Some(PruneConfig {
@@ -5279,13 +5340,163 @@ mod tests {
         });
     }
 
+    /// A prune publishes fresh snapshots, so serving stops pinning the pruned
+    /// state.
+    #[test]
+    fn prune_publishes_fresh_snapshots() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, subscriber, _marshal, _actor) = spawn_processing(
+                &context,
+                "gated-prune-snapshots",
+                Some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
+            )
+            .await;
+
+            // Blocks 1 and 2 fill the retention window, scheduling a prune at block 1.
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                digested(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
+                acknowledgement,
+            ));
+            control.applied_at_least(2).await;
+            let release = control.next_flush().await;
+            let _ = release.send(Ok(()));
+            waiter1.await.expect("block 1 acknowledgement");
+            control.pruned_at_least(1).await;
+            assert_eq!(control.pruned.lock().clone(), vec![1]);
+
+            // The prune publishes fresh snapshots right away. Block 2 is not yet durable, so
+            // the successor sync starts at once and its capture is that publication: startup,
+            // block 1's sync, then block 2's successor sync, with no separate capture.
+            while publications(&context) < 3 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                subscriber.latest(),
+                Some(2),
+                "the fresh snapshots must serve block 2's state"
+            );
+
+            // The successor sync covers block 2's dirty suffix.
+            let release = control.next_flush().await;
+            let _ = release.send(Ok(()));
+            waiter2.await.expect("block 2 acknowledgement");
+            assert_eq!(publications(&context), 3);
+        });
+    }
+
+    /// A prune whose applied state is already durable publishes fresh snapshots itself.
+    #[test]
+    fn durable_prune_publishes_fresh_snapshots() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, subscriber, _marshal, _actor) = spawn_processing(
+                &context,
+                "gated-durable-prune",
+                Some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
+            )
+            .await;
+
+            // Block 1 applies and becomes durable.
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                digested(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            let release = control.next_flush().await;
+            let _ = release.send(Ok(()));
+            waiter1.await.expect("block 1 acknowledgement");
+
+            // Block 2 fills the retention window, scheduling a prune at block 1, and starts its
+            // own flush. Startup, block 1's sync, and block 2's sync have published.
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
+                acknowledgement,
+            ));
+            let release = control.next_flush().await;
+            assert_eq!(publications(&context), 3);
+            assert!(
+                control.pruned.lock().is_empty(),
+                "the prune waits for the active flush"
+            );
+
+            // Once block 2 is durable, the prune runs and publishes on its own.
+            let _ = release.send(Ok(()));
+            waiter2.await.expect("block 2 acknowledgement");
+            control.pruned_at_least(1).await;
+            assert_eq!(control.pruned.lock().clone(), vec![1]);
+            while publications(&context) < 4 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(subscriber.latest(), Some(2));
+        });
+    }
+
+    /// Snapshots serve at apply, ahead of their flushes. Acknowledgements still
+    /// release only as flushes complete.
+    #[test]
+    fn snapshots_serve_before_their_flushes_complete() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, subscriber, _marshal, _actor) =
+                spawn_processing(&context, "gated-out-of-order", None).await;
+
+            let (acknowledgement, mut waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                digested(TestBlock::new(1, 1)),
+                acknowledgement,
+            ));
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(
+                digested(TestBlock::child(&TestBlock::new(1, 1), 2)),
+                acknowledgement,
+            ));
+            control.applied_at_least(2).await;
+
+            // Block 1's snapshots already published while its flush is parked.
+            assert_eq!(
+                subscriber.latest(),
+                Some(1),
+                "snapshots must serve before their flush completes",
+            );
+            assert!(poll!(&mut waiter1).is_pending());
+
+            // Completing the first sync acknowledges block 1. The successor sync
+            // publishes block 2's snapshots when it starts, ahead of its own flush.
+            let release = control.next_flush().await;
+            let _ = release.send(Ok(()));
+            waiter1.await.expect("block 1 acknowledgement");
+
+            let release = control.next_flush().await;
+            assert_eq!(
+                subscriber.latest(),
+                Some(2),
+                "the successor sync must publish block 2's snapshots at start",
+            );
+            let _ = release.send(Ok(()));
+            waiter2.await.expect("block 2 acknowledgement");
+        });
+    }
+
     /// While the loop is idle, a completed flush must release its acknowledgement without
     /// displacing a simultaneously reported block, while an incomplete flush must cancel its
     /// acknowledgement when processing stops.
     #[test]
     fn idle_acks_follow_flush_outcome() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal, actor) =
+            let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "gated-idle", None).await;
 
             // Park the loop idle with block 1's flush pending. The flush starting means the loop
@@ -5325,7 +5536,7 @@ mod tests {
     #[test]
     fn ready_aborted_flush_stops_processing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal, actor) =
+            let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "gated-ready-abort", None).await;
 
             let (acknowledgement, waiter1) = Exact::handle();
@@ -5365,7 +5576,7 @@ mod tests {
     #[test]
     fn mailbox_eof_finishes_scheduled_prune() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, marshal, actor) = spawn_processing(
+            let (mut mailbox, control, _subscriber, marshal, actor) = spawn_processing(
                 &context,
                 "eof-pending-prune",
                 Some(PruneConfig {
@@ -5448,7 +5659,7 @@ mod tests {
     #[test]
     fn shutdown_cancels_pending_flush_ack() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal, actor) =
+            let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "gated-shutdown", None).await;
 
             let (acknowledgement, waiter) = Exact::handle();
@@ -5474,7 +5685,7 @@ mod tests {
     #[should_panic(expected = "database sync failed (type")]
     fn flush_failure_panics_processing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, control, _marshal, actor) =
+            let (mut mailbox, control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "gated-failure", None).await;
 
             let (acknowledgement, _waiter) = Exact::handle();
@@ -5525,7 +5736,7 @@ mod tests {
     #[case::parent(true)]
     fn unavailable_ancestry_does_not_block_finalization(#[case] block_available: bool) {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (mut mailbox, control, marshal, actor) =
+            let (mut mailbox, control, _subscriber, marshal, actor) =
                 spawn_processing(&context, "unavailable-ancestry", None).await;
             let parent = TestBlock::child(&TestBlock::new(0, 0), 1);
             let child = TestBlock::child(&parent, 2);
@@ -5569,7 +5780,7 @@ mod tests {
     #[test]
     fn tip_redelivery_keeps_acquiring_verification() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, _control, _marshal, actor) =
+            let (mut mailbox, _control, _subscriber, _marshal, actor) =
                 spawn_processing(&context, "tip-redelivery-acquiring", None).await;
 
             // Start a verification whose ancestry never yields its block.

@@ -19,13 +19,14 @@
 //!   its block's commitments. Concurrent requests that need the same block's state, including a
 //!   verification of that block, share one processing call.
 //! - Finalization: processing of the finalized block and of competing branches finishes before
-//!   the block's state is applied, while processing of its descendants may continue. The caller
-//!   coordinates durability, so one database barrier can cover several finalizations.
+//!   the block's state is applied, while processing of its descendants may continue. The
+//!   processor publishes snapshots after the finalization hook completes. The caller coordinates
+//!   durability, so one database barrier can cover several finalizations.
 
 use crate::stateful::{
     Application, Finality, Input, Proposed, PruneConfig,
     actor::{BlockDigest, SyncTargets, core::Proposal, metrics::Metrics as StatefulMetrics},
-    db::{Anchor, Barrier, DatabaseSet},
+    db::{Anchor, Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Handoff, Heightable, Roundable,
@@ -382,6 +383,7 @@ where
     app: A,
     execution: Execution<E, A>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
+    publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     strategy: T,
 }
 
@@ -398,8 +400,15 @@ where
         anchor: Anchor<BlockDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<SyncTargets<A, E>>>,
+        publisher: Publisher<SnapshotsOf<A::Databases, E>>,
         strategy: T,
     ) -> Self {
+        const {
+            assert!(
+                !A::Databases::CHEAP_SNAPSHOT || A::Databases::ANY_CHEAP_SNAPSHOT,
+                "CHEAP_SNAPSHOT requires ANY_CHEAP_SNAPSHOT"
+            );
+        }
         Self {
             app,
             execution: Execution {
@@ -412,6 +421,7 @@ where
                 metrics,
             },
             pruning,
+            publisher: publisher.with_merge(A::Databases::merge_snapshots),
             strategy,
         }
     }
@@ -452,6 +462,36 @@ where
     /// Returns the current branch anchor.
     pub(super) fn branch_anchor(&self) -> Anchor<BlockDigest<A, E>> {
         self.execution.branch_anchor()
+    }
+
+    /// Capture a snapshot of the database set's applied state and publish it at the branch
+    /// anchor's height.
+    pub(super) async fn publish_snapshot(&mut self) {
+        let snapshots = self.execution.databases.snapshot().await;
+        self.publisher
+            .publish(self.execution.branch_anchor().height, snapshots);
+    }
+
+    /// Capture and publish applied state, and start the barrier that makes it durable.
+    ///
+    /// The caller must await the previous barrier before starting another.
+    pub(super) async fn start_sync(&mut self) -> Barrier {
+        let (snapshots, barrier) = self.execution.databases.finalize().await;
+        self.publisher
+            .publish(self.execution.branch_anchor().height, snapshots);
+        barrier
+    }
+
+    /// Refresh a mixed set's cheap members at `height`, retaining its other served snapshots.
+    /// Does nothing before the first publish.
+    async fn refresh_snapshot(&mut self, height: Height) {
+        let Some(served) = self.publisher.served() else {
+            return;
+        };
+        let snapshots = self.execution.databases.refresh_cheap(&served).await;
+        // Drop our reference before replacement releases the old served set.
+        drop(served);
+        self.publisher.refresh(height, snapshots);
     }
 
     #[cfg(test)]
@@ -640,8 +680,8 @@ where
     /// before entering, and must admit no new requests until this call returns. Retained
     /// descendants may continue.
     ///
-    /// Returns the prune that became due, if any. If `start_barrier` is set, it also returns a
-    /// barrier covering `block` and every earlier applied block. The branch anchor advances once
+    /// Publishes snapshots and returns the prune that became due, if any. If `start_barrier` is
+    /// set, it also returns a barrier covering `block` and every earlier applied block. The branch anchor advances once
     /// `block`'s merkleized state is ready, and that state remains cached through the
     /// application's `finalized` hook.
     ///
@@ -730,10 +770,13 @@ where
             )
             .await;
         self.execution.databases.apply(batch).await;
-        let barrier = if start_barrier {
-            Some(self.execution.databases.finalize().await)
+        let (snapshots, barrier) = if start_barrier {
+            let (snapshots, barrier) = self.execution.databases.finalize().await;
+            (Some(snapshots), Some(barrier))
+        } else if A::Databases::CHEAP_SNAPSHOT {
+            (Some(self.execution.databases.snapshot().await), None)
         } else {
-            None
+            (None, None)
         };
         self.app
             .finalized(
@@ -743,6 +786,15 @@ where
                 self.execution.databases.readers(),
             )
             .await;
+
+        // Publish only after the hook completes. Compact members must serve every applied block,
+        // including blocks applied while a barrier is pending.
+        if let Some(snapshots) = snapshots {
+            self.publisher.publish(height, snapshots);
+        } else if A::Databases::ANY_CHEAP_SNAPSHOT {
+            self.refresh_snapshot(height).await;
+        }
+
         let prune = self
             .pruning
             .as_mut()
@@ -1776,6 +1828,7 @@ mod tests {
             >>::init(context.child("databases"), config.clone(), None)
             .await;
             let metrics = StatefulMetrics::new(&context);
+            let (publisher, _) = crate::stateful::db::Publisher::new(&context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
@@ -1788,6 +1841,7 @@ mod tests {
                     },
                     metrics,
                     None,
+                    publisher,
                     Sequential,
                 ),
                 provider,
@@ -2086,6 +2140,7 @@ mod tests {
                     1,
                     0,
                 )),
+                crate::stateful::db::Publisher::new(harness.context_cell.as_present()).0,
                 Sequential,
             );
 

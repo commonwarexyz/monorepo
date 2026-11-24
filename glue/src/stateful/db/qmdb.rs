@@ -39,6 +39,12 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
         + Send
         + Sync;
 
+    /// Owned immutable snapshot of applied state, served to peers (see [`ManagedDb::Snapshot`]).
+    type Snapshot: Clone + Send + Sync + 'static;
+
+    /// See [`ManagedDb::CHEAP_SNAPSHOT`].
+    const CHEAP_SNAPSHOT: bool = false;
+
     /// Batch rooted at the applied state.
     fn new_batch(&self) -> Self::Batch;
 
@@ -61,6 +67,16 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     fn start_sync(
         self,
     ) -> impl Future<Output = Result<(Self, Handle<()>), Error<Self::Family>>> + Send;
+
+    /// Capture a snapshot of the applied state (see [`ManagedDb::snapshot`]).
+    fn snapshot(
+        self,
+    ) -> impl Future<Output = Result<(Self, Self::Snapshot), Error<Self::Family>>> + Send;
+
+    /// See [`ManagedDb::merge_snapshot`].
+    fn merge_snapshot(_served: &Self::Snapshot, fresh: Self::Snapshot) -> Self::Snapshot {
+        fresh
+    }
 }
 
 /// A [`Qmdb`] batch before merkleization, reading through to its database's applied state.
@@ -143,6 +159,9 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     type Error = Error<D::Family>;
     type Config = D::Config;
     type SyncTarget = sync::Target<D::Family, D::Digest>;
+    type Snapshot = D::Snapshot;
+
+    const CHEAP_SNAPSHOT: bool = D::CHEAP_SNAPSHOT;
 
     async fn init(
         context: D::Context,
@@ -179,8 +198,21 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
         Qmdb::apply_batch(self, batch.inner).await
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<D::Family>> {
-        Qmdb::start_sync(self).await
+    async fn finalize(self) -> Result<(Self, D::Snapshot, Handle<()>), Error<D::Family>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability boundary,
+        // so the capture's flush does not wait, and the snapshot still includes every applied
+        // batch.
+        let (db, snapshot) = Qmdb::snapshot(self).await?;
+        let (db, handle) = Qmdb::start_sync(db).await?;
+        Ok((db, snapshot, handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, D::Snapshot), Error<D::Family>> {
+        Qmdb::snapshot(self).await
+    }
+
+    fn merge_snapshot(served: &D::Snapshot, fresh: D::Snapshot) -> D::Snapshot {
+        D::merge_snapshot(served, fresh)
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<D::Family>> {
