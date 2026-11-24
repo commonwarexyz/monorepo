@@ -113,17 +113,17 @@ impl<P: PublicKey, E: Clock> State<P, E> {
     fn reserve(&mut self, recipients: Recipients<P>, reserved: &mut Vec<P>) -> bool {
         // A peer that is already reserved, including an earlier duplicate in the same list, is
         // skipped, so the reservation set also removes duplicates
-        let requested = match recipients {
+        let empty_request = match recipients {
             Recipients::One(peer) => {
                 if reservable(&mut self.rate_limit, &self.in_flight, &peer) {
                     reserved.reserve_exact(1);
                     self.in_flight.insert(peer.clone());
                     reserved.push(peer);
                 }
-                true
+                false
             }
             Recipients::Some(peers) => {
-                let requested = !peers.is_empty();
+                let empty = peers.is_empty();
                 reserved.reserve_exact(peers.len());
                 for peer in peers {
                     if reservable(&mut self.rate_limit, &self.in_flight, &peer) {
@@ -131,7 +131,7 @@ impl<P: PublicKey, E: Clock> State<P, E> {
                         reserved.push(peer);
                     }
                 }
-                requested
+                empty
             }
             Recipients::All => {
                 self.refresh_known_peers();
@@ -143,10 +143,10 @@ impl<P: PublicKey, E: Clock> State<P, E> {
                         reserved.push(owned);
                     }
                 }
-                !self.known_peers.is_empty()
+                self.known_peers.is_empty()
             }
         };
-        !requested || !reserved.is_empty()
+        empty_request || !reserved.is_empty()
     }
 
     /// Releases the reservations of `peers`.
@@ -160,7 +160,8 @@ impl<P: PublicKey, E: Clock> State<P, E> {
     fn charge(&mut self, peers: &[P]) {
         for peer in peers {
             // The reservation kept every other send from spending this quota since it was checked
-            let _ = self.rate_limit.check_key(peer);
+            let charged = self.rate_limit.check_key(peer);
+            debug_assert!(charged.is_ok(), "reserved recipient must have quota");
         }
     }
 
