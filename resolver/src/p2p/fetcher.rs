@@ -29,6 +29,18 @@ use tracing::debug;
 /// rejecting or closing would be polled continuously, because rejected submissions spend no quota.
 const ZERO_DELAY_FALLBACK: Duration = Duration::from_millis(1);
 
+/// When a fetcher with pending keys may next scan for peers.
+#[derive(Clone, Copy)]
+enum Waiter {
+    /// Scan whenever a pending key is due.
+    Ready,
+    /// Scan no earlier than the deadline.
+    Until(SystemTime),
+    /// The last scan failed at the clock ceiling with nothing later to wait for. Stay idle until
+    /// an external change makes the fetcher [Waiter::Ready].
+    Parked,
+}
+
 /// Per-peer label.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
 struct Peer<P: PublicKey> {
@@ -234,11 +246,7 @@ where
 
     /// If no peers are ready to handle a request (all filtered out or send failed), the waiter is set
     /// to the next time to try the request.
-    waiter: Option<SystemTime>,
-
-    /// Whether the last unsuccessful scan ran at the clock ceiling with nothing later to wait for.
-    /// Only meaningful while the waiter is set to the ceiling, and cleared by the next scan.
-    parked: bool,
+    waiter: Waiter,
 
     /// Delay before retrying an unresolved fetch or a failed send.
     retry_delay: Duration,
@@ -306,8 +314,7 @@ where
             fetch_timeout: config.fetch_timeout,
             pending: PrioritySet::new(),
             pending_sequence: 0,
-            waiter: None,
-            parked: false,
+            waiter: Waiter::Ready,
             retry_delay: config.retry_delay,
             priority_requests: config.priority_requests,
             targets: AHashMap::new(),
@@ -392,8 +399,7 @@ where
         &mut self,
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
     ) {
-        self.waiter = None;
-        self.parked = false;
+        self.waiter = Waiter::Ready;
 
         // Track when an unsuccessful scan can try again. Without a future deadline or
         // eligible peer, the queue waits for an external change.
@@ -492,8 +498,11 @@ where
         }
         // Time cannot advance past the ceiling, so a scan that fails there would be retried
         // at once forever. Park until an external change clears the waiter.
-        self.parked = next_deadline == SystemTime::limit() && now >= SystemTime::limit();
-        self.waiter = Some(next_deadline);
+        self.waiter = if next_deadline == SystemTime::limit() && now >= SystemTime::limit() {
+            Waiter::Parked
+        } else {
+            Waiter::Until(next_deadline)
+        };
     }
 
     /// Retains only the fetches whose keys satisfy the predicate.
@@ -506,7 +515,7 @@ where
         self.retries.retain(|k, _| predicate(k));
 
         // Clear waiter since the key that caused it may have been removed
-        self.waiter = None;
+        self.waiter = Waiter::Ready;
     }
 
     /// Enqueues `key` as a fresh request or a retry due at `deadline`.
@@ -523,7 +532,7 @@ where
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. A newly queued key can still
         // be fetchable, so wake pending processing immediately.
-        self.waiter = None;
+        self.waiter = Waiter::Ready;
         self.pending.put(
             key,
             Order {
@@ -564,13 +573,13 @@ where
             return None;
         }
 
-        if self.parked && self.waiter == Some(SystemTime::limit()) {
-            return None;
-        }
-
         // Return the greater of the waiter and the next pending deadline
         let pending_deadline = self.pending.peek().map(|(_, order)| order.deadline);
-        pending_deadline.max(self.waiter)
+        match self.waiter {
+            Waiter::Ready => pending_deadline,
+            Waiter::Until(deadline) => pending_deadline.max(Some(deadline)),
+            Waiter::Parked => None,
+        }
     }
 
     /// Returns the deadline for the next active request timeout.
@@ -681,7 +690,7 @@ where
         self.participants = Participants { peers, weights };
 
         // Clear waiter (may no longer apply)
-        self.waiter = None;
+        self.waiter = Waiter::Ready;
     }
 
     /// Replaces the set of peers the network currently blocks.
@@ -705,7 +714,7 @@ where
             }
         }
         self.blocked = blocked;
-        self.waiter = None;
+        self.waiter = Waiter::Ready;
     }
 
     /// Add target peers for fetching a key.
@@ -717,7 +726,7 @@ where
         self.targets.entry(key).or_default().extend(peers);
 
         // Clear waiter to allow retry with new targets
-        self.waiter = None;
+        self.waiter = Waiter::Ready;
     }
 
     /// Clear targeting for a key.
@@ -730,7 +739,7 @@ where
         self.targets.remove(key);
 
         // Clear waiter to allow retry without targets
-        self.waiter = None;
+        self.waiter = Waiter::Ready;
     }
 
     /// Drops the targets and peer-selection history of a key whose fetch has ended.
@@ -1876,13 +1885,14 @@ mod tests {
             fetcher.fetch(&mut sender);
 
             // Waiter should be set to far future (no eligible peers at all)
-            assert!(fetcher.waiter.is_some());
-            let waiter_time = fetcher.waiter.unwrap();
+            let Waiter::Until(waiter_time) = fetcher.waiter else {
+                panic!("expected a deadline");
+            };
             assert!(waiter_time > context.current() + Duration::from_secs(1000));
 
             // Add targets should clear the waiter
             fetcher.add_targets(MockKey(1), [peer1]);
-            assert!(fetcher.waiter.is_none());
+            assert!(matches!(fetcher.waiter, Waiter::Ready));
 
             // Pending deadline should now be reasonable
             let deadline = fetcher.get_pending_deadline().unwrap();
@@ -1892,11 +1902,11 @@ mod tests {
             fetcher.clear_targets(&MockKey(1));
             fetcher.add_targets(MockKey(1), [blocked_peer]);
             fetcher.fetch(&mut sender);
-            assert!(fetcher.waiter.is_some());
+            assert!(!matches!(fetcher.waiter, Waiter::Ready));
 
             // clear_targets should clear the waiter
             fetcher.clear_targets(&MockKey(1));
-            assert!(fetcher.waiter.is_none());
+            assert!(matches!(fetcher.waiter, Waiter::Ready));
         });
     }
 
@@ -1922,7 +1932,7 @@ mod tests {
             fetcher.add_targets(MockKey(1), [missing_peer]);
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
-            assert!(fetcher.waiter.is_some());
+            assert!(!matches!(fetcher.waiter, Waiter::Ready));
 
             // Fresh demand must wake the fetcher and progress while key 1 remains pending.
             fetcher.add_ready(MockKey(2));
@@ -1951,7 +1961,7 @@ mod tests {
 
             // With only key 1 pending, the queue parks until new demand arrives.
             fetcher.fetch(&mut sender);
-            assert!(fetcher.waiter.is_some());
+            assert!(!matches!(fetcher.waiter, Waiter::Ready));
 
             // A missing response wakes the queue for key 1, but key 2 must still wait
             // for its own retry deadline.
@@ -1986,7 +1996,7 @@ mod tests {
                 if fetch_first {
                     let mut sender = WrappedSender::new(SuccessMockSender::default());
                     fetcher.fetch(&mut sender);
-                    assert!(fetcher.waiter.is_some());
+                    assert!(!matches!(fetcher.waiter, Waiter::Ready));
                 }
 
                 // Expiry requeues key 2 and clears any waiter left by key 1.
@@ -2079,7 +2089,7 @@ mod tests {
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             fetcher.fetch(&mut sender);
-            assert!(fetcher.waiter.is_some());
+            assert!(!matches!(fetcher.waiter, Waiter::Ready));
 
             fetcher.add_targets(MockKey(1), [peer]);
             assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
@@ -2098,7 +2108,7 @@ mod tests {
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             fetcher.fetch(&mut sender);
-            assert!(fetcher.waiter.is_some());
+            assert!(!matches!(fetcher.waiter, Waiter::Ready));
 
             fetcher.clear_targets(&MockKey(1));
             assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
@@ -2134,7 +2144,7 @@ mod tests {
                 // Only a scan that fails at the ceiling parks the queue. A retry scheduled for the
                 // ceiling from an earlier time stays an ordinary due deadline, and an external
                 // change wakes a parked queue.
-                assert_eq!(fetcher.parked, expected.is_none());
+                assert_eq!(matches!(fetcher.waiter, Waiter::Parked), expected.is_none());
                 if expected.is_none() {
                     fetcher.add_ready(MockKey(2));
                     assert!(fetcher.get_pending_deadline().is_some());
@@ -2417,9 +2427,9 @@ mod tests {
             assert_eq!(fetcher.get_eligible_peers(&MockKey(2)), vec![peer2]);
 
             // Lifting the block makes the peer eligible again and wakes the fetcher.
-            fetcher.waiter = Some(context.current());
+            fetcher.waiter = Waiter::Until(context.current());
             fetcher.set_blocked([]);
-            assert!(fetcher.waiter.is_none());
+            assert!(matches!(fetcher.waiter, Waiter::Ready));
             assert_eq!(fetcher.get_eligible_peers(&MockKey(1)), vec![peer1]);
         });
     }
@@ -2521,8 +2531,9 @@ mod tests {
             assert_eq!(fetcher.len_active(), 0);
 
             // Waiter should be set to far future (no eligible peers at all)
-            assert!(fetcher.waiter.is_some());
-            let waiter_time = fetcher.waiter.unwrap();
+            let Waiter::Until(waiter_time) = fetcher.waiter else {
+                panic!("expected a deadline");
+            };
             assert!(waiter_time > context.current() + Duration::from_secs(1000));
         });
     }
