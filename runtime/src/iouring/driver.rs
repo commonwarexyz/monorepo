@@ -391,10 +391,10 @@ impl Driver {
         }
 
         // A ring wait that an earlier ring park left queued serves this park,
-        // even across thread parks since, whose wakes pass over it. Its
-        // compare belonged to that park, so this arm alone guards the sequence
-        // since `seen`, and a later notification finds the ring bit and wakes
-        // that wait.
+        // even when thread parks came in between, since their wakes pass over
+        // it. Its compare belonged to the ring park that installed it, so this
+        // arm alone guards the sequence since `seen`, and a later notification
+        // finds the ring bit and wakes that wait.
         //
         // A transient enter can leave a new wait's SQE unsubmitted. Its
         // snapshot carries the ring bit, so a later enter queues it only
@@ -517,8 +517,10 @@ impl Drop for Driver {
         // a live wait synchronously, and keep the word allocated if that fails.
         //
         // SINGLE_ISSUER rejects the cancel from any thread but the owner with
-        // EEXIST, which would leak the word, so the driver must drop on its
-        // owner thread, as worker cleanup does.
+        // EEXIST. That would leak the word, and until the ring's teardown
+        // cancels the wait, it could take a ring wake meant for a later driver
+        // on the same parker. So the driver must drop on its owner thread, as
+        // worker cleanup does.
         //
         // No wait is live once its completion was reaped.
         if self.state.ring_wait_needed {
