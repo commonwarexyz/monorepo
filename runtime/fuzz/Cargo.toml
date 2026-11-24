@@ -29,7 +29,12 @@ storage-differential = []
 storage-faults = []
 shared-reads = []
 iobuf = []
-runtime-all = [ "iobuf", "shared-reads", "storage-differential", "storage-faults" ]
+runtime-all = [
+	"iobuf",
+	"shared-reads",
+	"storage-differential",
+	"storage-faults",
+]
 
 [lib]
 bench = false
