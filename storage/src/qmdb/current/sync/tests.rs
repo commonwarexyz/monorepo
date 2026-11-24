@@ -15,7 +15,9 @@ use crate::qmdb::{
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
-use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Context};
+use commonware_runtime::{
+    Metrics as _, Runner as _, Supervisor as _, deterministic, deterministic::Context,
+};
 use commonware_utils::{NZU64, NZUsize, non_empty_range, probability};
 use rand::Rng as _;
 use std::collections::BTreeMap;
@@ -543,6 +545,12 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 
         assert_eq!(SyncDatabase::target(&synced_db).root, sync_root);
         assert_eq!(synced_db.root(), verification_root);
+        assert!(
+            context
+                .encode()
+                .lines()
+                .any(|line| line == "client_any_index_items 1")
+        );
         assert_eq!(synced_db.sync_boundary(), lower_bound);
         assert_eq!(synced_db.get(&key).await.unwrap(), expected);
 
@@ -553,6 +561,12 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             .unwrap();
         assert_eq!(SyncDatabase::target(&reopened).root, sync_root);
         assert_eq!(reopened.root(), verification_root);
+        assert!(
+            context
+                .encode()
+                .lines()
+                .any(|line| line == "reopened_any_index_items 1")
+        );
         assert_eq!(reopened.sync_boundary(), lower_bound);
         assert_eq!(reopened.get(&key).await.unwrap(), expected);
 

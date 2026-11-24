@@ -59,8 +59,8 @@ pub struct Config<T: Translator, C, S: Strategy> {
     /// The strategy used to parallelize batched reads.
     pub strategy: S,
 
-    /// The number of tasks a partitioned index may build its index on during init. Any other
-    /// index builds on the calling task.
+    /// Maximum number of tasks used to build a partitioned index during initialization.
+    /// Other indexes build on the calling task.
     pub init_concurrency: NonZeroUsize,
 }
 

@@ -1,4 +1,4 @@
-//! Rebuild index indexes and activity bitmaps from the operations log.
+//! Rebuild key indexes and activity bitmaps from the operations log.
 
 use super::{Error, cache::Cache};
 use crate::{
@@ -177,7 +177,7 @@ where
 /// the replay from running arbitrarily far ahead of a slow worker.
 const INDEX_CHANNEL_DEPTH: usize = 4;
 
-/// A batch of keyed operations routed to a index-build worker: each entry is the op's key, its
+/// A batch of keyed operations routed to an index-build worker: each entry is the op's key, its
 /// location, and whether it is a delete.
 type RoutedBatch<K> = Vec<(K, u64, bool)>;
 
@@ -204,7 +204,7 @@ const INDEX_ROUTE_BATCH: usize = 3;
 
 /// Operations ahead of its insert at which a parallel-build worker hints an operation's partition
 /// entries. The partition's header is hinted twice as far ahead. One in tests, so the hints reach
-/// their steady state within a [INDEX_ROUTE_BATCH].
+/// their steady state within one batch of [INDEX_ROUTE_BATCH] operations.
 #[cfg(not(test))]
 const PREFETCH_DISTANCE: usize = 16;
 #[cfg(test)]

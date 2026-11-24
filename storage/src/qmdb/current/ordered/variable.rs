@@ -31,8 +31,8 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 pub type Config<T, C, S> = current::Config<T, JournalConfig<C>, S>;
 
 pub mod partitioned {
-    //! A variant of [super] that uses a partitioned index for the index, dividing the key space
-    //! into `2^(P*8)` partitions. See [Any's counterpart] for when to use one.
+    //! A variant of [super] whose key index divides the key space into `2^(P*8)` partitions.
+    //! See [Any's counterpart] for when to use one.
     //!
     //! See [Db] for the generic type, or use the convenience aliases:
     //! - [p256::Db] for 256 partitions (P=1)
