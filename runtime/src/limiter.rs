@@ -174,22 +174,19 @@ impl<C: Clock> RateLimiter<C> {
 
     /// Waits until one cell can be admitted and charges it.
     ///
+    /// A backward clock step between checking admission and registering the sleep can delay
+    /// the wake. Admission is checked again after waking.
+    ///
     /// If the clock reaches its maximum representable time before a cell is ready, this
     /// future stays pending. Cancel it and retry to observe any subsequent clock correction.
     pub async fn until_ready(&mut self) {
         while let Err(wait) = self.admit() {
             let now = self.gcra.last;
-            let clock = &self.gcra.clock;
-            if now.checked_add(wait).is_some() {
-                clock.sleep(wait).await;
-            } else {
-                let limit = SystemTime::limit();
-                if now >= limit {
-                    return pending().await;
-                }
-                // Pass the limit directly so a fresh clock read cannot overflow a relative sleep.
-                clock.sleep_until(limit).await;
+            let deadline = self.gcra.not_until(wait);
+            if deadline == now {
+                return pending().await;
             }
+            self.gcra.clock.sleep_until(deadline).await;
         }
     }
 }
@@ -272,33 +269,39 @@ mod tests {
         task::{Context, Waker},
     };
 
-    /// A clock that only moves when set.
+    /// A clock with a configurable delay between reading the time and registering a sleep.
     #[derive(Clone)]
-    struct ManualClock(Arc<Mutex<SystemTime>>);
+    struct ManualClock {
+        time: Arc<Mutex<SystemTime>>,
+        registration_delay: Duration,
+    }
 
     impl ManualClock {
         fn new(time: SystemTime) -> Self {
-            Self(Arc::new(Mutex::new(time)))
+            Self {
+                time: Arc::new(Mutex::new(time)),
+                registration_delay: Duration::ZERO,
+            }
         }
 
         fn set(&self, time: SystemTime) {
-            *self.0.lock() = time;
+            *self.time.lock() = time;
         }
 
         fn advance(&self, step: Duration) {
-            let mut time = self.0.lock();
+            let mut time = self.time.lock();
             *time += step;
         }
 
         fn rewind(&self, step: Duration) {
-            let mut time = self.0.lock();
+            let mut time = self.time.lock();
             *time -= step;
         }
     }
 
     impl Clock for ManualClock {
         fn current(&self) -> SystemTime {
-            *self.0.lock()
+            *self.time.lock()
         }
 
         fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
@@ -306,6 +309,7 @@ mod tests {
                 !duration.is_zero(),
                 "a rejected admission must not request a zero sleep"
             );
+            self.advance(self.registration_delay);
             self.advance(duration);
             ready(())
         }
@@ -314,6 +318,7 @@ mod tests {
             &self,
             deadline: SystemTime,
         ) -> impl Future<Output = ()> + Send + 'static + use<> {
+            self.advance(self.registration_delay);
             assert!(
                 deadline > self.current(),
                 "a rejected admission must sleep until a future deadline"
@@ -586,6 +591,26 @@ mod tests {
                     .is_pending()
             );
         });
+    }
+
+    #[test]
+    fn test_until_ready_registers_at_sampled_deadline() {
+        let ceiling = SystemTime::limit();
+        let period = Duration::from_nanos(5);
+        let clock = ManualClock {
+            registration_delay: Duration::from_nanos(1),
+            ..ManualClock::new(ceiling - period)
+        };
+        let mut limiter = RateLimiter::new(Quota::with_period(period).unwrap(), clock.clone());
+        limiter.check().unwrap();
+
+        let mut wait = pin!(limiter.until_ready());
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+        assert_eq!(clock.current(), ceiling);
     }
 
     #[test]
