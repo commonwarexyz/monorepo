@@ -25,6 +25,8 @@
 //! [ZIP215]: https://zips.z.cash/zip-0215
 
 mod core;
+#[cfg(any(test, feature = "arbitrary"))]
+mod zip215;
 
 use self::core::Scalar;
 use crate::curve::{G, GAffine};
@@ -41,8 +43,6 @@ use commonware_codec::{Buf, FixedSize, Read, Write, util::at_least_items};
 use commonware_codec::{Copying, DecodeExt as _};
 use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier};
 use commonware_formatting::Hex;
-#[cfg(any(test, feature = "arbitrary"))]
-use commonware_formatting::hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, union_unique};
@@ -52,6 +52,8 @@ use sha2::{
     digest::{FixedOutput, Update},
 };
 use zeroize::{ZeroizeOnDrop, Zeroizing};
+#[cfg(any(test, feature = "arbitrary"))]
+pub(crate) use zip215::ZIP215_POINTS;
 
 /// An Ed25519 signing key.
 ///
@@ -350,26 +352,6 @@ impl arbitrary::Arbitrary<'_> for VerifyingKey {
             .unwrap_or_else(|_| SigningKey::from_seed(&bytes).verifying_key()))
     }
 }
-
-/// Every small-order point, in its canonical encoding and every non-canonical one that ZIP215
-/// accepts.
-#[cfg(any(test, feature = "arbitrary"))]
-pub(crate) const ZIP215_POINTS: [[u8; 32]; 14] = [
-    hex!("0x0100000000000000000000000000000000000000000000000000000000000000"),
-    hex!("0xc7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
-    hex!("0x0000000000000000000000000000000000000000000000000000000000000080"),
-    hex!("0x26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
-    hex!("0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
-    hex!("0x26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"),
-    hex!("0x0000000000000000000000000000000000000000000000000000000000000000"),
-    hex!("0xc7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa"),
-    hex!("0x0100000000000000000000000000000000000000000000000000000000000080"),
-    hex!("0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-    hex!("0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
-    hex!("0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-    hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
-    hex!("0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-];
 
 impl VerifyingKey {
     /// The decoding error for an encoding that is not a curve point.

@@ -3,8 +3,6 @@
 //
 // RFC 8032: https://www.rfc-editor.org/rfc/rfc8032.txt
 // RFC 7748: https://www.rfc-editor.org/rfc/rfc7748.txt
-// ZIP 215 specification: https://zips.z.cash/zip-0215
-// ZIP 215 test vectors: https://gist.githubusercontent.com/hdevalence/93ed42d17ecab8e42138b213812c8cc7/raw/83851a92916d3289b73aaa9ec64b988aae678eb2/gistfile1.txt
 // Project Wycheproof Ed25519 test vectors: https://raw.githubusercontent.com/C2SP/wycheproof/5722833ca004983abd1a91bcb6c24596d50ac0f9/testvectors_v1/ed25519_test.json
 // Project Wycheproof X25519 test vectors: https://raw.githubusercontent.com/C2SP/wycheproof/5722833ca004983abd1a91bcb6c24596d50ac0f9/testvectors_v1/x25519_test.json
 
