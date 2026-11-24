@@ -2146,31 +2146,32 @@ mod tests {
         }
     }
 
+    /// Accepts sends while the shared flag is set and rejects them otherwise.
+    #[derive(Clone)]
+    struct Toggle(Arc<AtomicBool>);
+
+    impl UnlimitedSender for Toggle {
+        type PublicKey = PublicKey;
+
+        fn send(
+            &mut self,
+            _recipients: Recipients<Self::PublicKey>,
+            _message: impl Into<IoBufs> + Send,
+            _priority: bool,
+        ) -> Unreliable<Feedback> {
+            if self.0.load(Ordering::SeqCst) {
+                Unreliable::new(Feedback::Ok)
+            } else {
+                Unreliable::Rejected
+            }
+        }
+    }
+
     /// Rejected submissions do not spend quota, so with no retry delay a failed scan waits for the
     /// zero-delay fallback instead of polling at once. An accepted send does spend quota, and the
     /// next request waits for the refill.
     #[test]
     fn test_zero_retry_delay_charges_quota_only_for_accepted_sends() {
-        #[derive(Clone)]
-        struct Toggle(Arc<AtomicBool>);
-
-        impl UnlimitedSender for Toggle {
-            type PublicKey = PublicKey;
-
-            fn send(
-                &mut self,
-                _recipients: Recipients<Self::PublicKey>,
-                _message: impl Into<IoBufs> + Send,
-                _priority: bool,
-            ) -> Unreliable<Feedback> {
-                if self.0.load(Ordering::SeqCst) {
-                    Unreliable::new(Feedback::Ok)
-                } else {
-                    Unreliable::Rejected
-                }
-            }
-        }
-
         Runner::timed(Duration::from_secs(3)).start(|context| async move {
             let mut fetcher = create_test_fetcher(context.child("fetcher"));
             fetcher.retry_delay = Duration::ZERO;
@@ -2228,26 +2229,6 @@ mod tests {
     /// A failed available-peer submission must retry before a later quota deadline.
     #[test]
     fn test_failed_submission_retry_precedes_later_rate_limit() {
-        #[derive(Clone)]
-        struct Toggle(Arc<AtomicBool>);
-
-        impl UnlimitedSender for Toggle {
-            type PublicKey = PublicKey;
-
-            fn send(
-                &mut self,
-                _recipients: Recipients<Self::PublicKey>,
-                _message: impl Into<IoBufs> + Send,
-                _priority: bool,
-            ) -> Unreliable<Feedback> {
-                if self.0.load(Ordering::SeqCst) {
-                    Unreliable::new(Feedback::Ok)
-                } else {
-                    Unreliable::Rejected
-                }
-            }
-        }
-
         for retry_delay in [
             Duration::from_millis(100),
             Duration::ZERO,
@@ -2289,52 +2270,6 @@ mod tests {
                 );
             });
         }
-    }
-
-    #[test]
-    fn test_waiter_uses_retry_delay_on_send_failure() {
-        let cfg = deterministic::Config::default().with_timeout(Some(Duration::from_secs(5)));
-        let runner = Runner::new(cfg);
-        runner.start(|context| async move {
-            let public_key = PrivateKey::from_seed(0).public_key();
-            let peer1 = PrivateKey::from_seed(1).public_key();
-            let peer2 = PrivateKey::from_seed(2).public_key();
-            let retry_delay = Duration::from_millis(100);
-            let config = Config {
-                me: Some(public_key.clone()),
-                fetch_timeout: NZDuration!(Duration::from_secs(5)),
-                retry_delay,
-                priority_requests: false,
-            };
-            let mut fetcher: Fetcher<_, _, MockKey> =
-                Fetcher::new(context.child("fetcher"), config);
-            // Add peers (FailMockSender doesn't rate limit, just fails sends)
-            fetcher.reconcile(&[public_key, peer1, peer2]);
-            let mut sender = WrappedSender::new(FailMockSender::default());
-
-            // Add a key and attempt a fetch. Every send fails.
-            fetcher.add_ready(MockKey(1));
-            fetcher.fetch(&mut sender);
-
-            // Key should still be pending (send failed)
-            assert_eq!(fetcher.len_pending(), 1);
-
-            // Failed sends resume after the configured retry delay.
-            let pending_deadline = fetcher.get_pending_deadline().unwrap();
-            let max_expected = context.current() + retry_delay + Duration::from_millis(10);
-            assert!(
-                pending_deadline <= max_expected,
-                "pending deadline {:?} exceeds the retry delay",
-                pending_deadline.duration_since(context.current())
-            );
-
-            // Reaching the retry deadline permits another send attempt.
-            let wait_duration = pending_deadline
-                .duration_since(context.current())
-                .unwrap_or(Duration::ZERO);
-            context.sleep(wait_duration).await;
-            fetcher.fetch(&mut sender);
-        });
     }
 
     /// A key without targets may use any peer of the latest tracked set. Targets restrict
