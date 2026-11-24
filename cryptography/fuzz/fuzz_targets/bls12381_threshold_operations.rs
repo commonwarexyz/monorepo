@@ -8,10 +8,13 @@ use commonware_cryptography::bls12381::primitives::{
     sharing::{ModeVersion, Sharing},
     variant::{MinPk, MinSig, PartialSignature, Variant},
 };
-use commonware_parallel::{Rayon, Sequential, ThreadPool, rayon::ThreadPoolBuilder};
+use commonware_parallel::{
+    Rayon, Sequential, ThreadPool, mocks::Explorer, rayon::ThreadPoolBuilder,
+};
 use commonware_utils::{NZUsize, Participant, non_empty, test_rng};
 use libfuzzer_sys::fuzz_target;
 use std::{
+    hash::{DefaultHasher, Hash, Hasher},
     num::NonZeroU32,
     sync::{Arc, OnceLock},
 };
@@ -28,13 +31,13 @@ use common::{
 const MAX_CONCURRENCY: usize = 4;
 
 /// One pool per concurrency value, built on first use and shared by all invocations: building
-/// a pool per operation grows memory under ASan. Each operation gets a new strategy with a
-/// fresh adaptive policy: a shared policy would learn from earlier inputs to run small inputs
-/// serially.
+/// a pool per operation grows memory under ASan. Each operation runs on an explorer over its
+/// pool, which takes the serial or a parallel shape of each call as its seed picks, not by
+/// wall-clock measurements, so a crash input replays the same shapes.
 static POOLS: [OnceLock<ThreadPool>; MAX_CONCURRENCY + 1] =
     [const { OnceLock::new() }; MAX_CONCURRENCY + 1];
 
-fn parallel_strategy(concurrency: usize) -> Rayon {
+fn parallel_strategy(concurrency: usize, seed: u64) -> Explorer {
     let pool = POOLS[concurrency].get_or_init(|| {
         Arc::new(
             ThreadPoolBuilder::new(NZUsize!(concurrency))
@@ -42,7 +45,15 @@ fn parallel_strategy(concurrency: usize) -> Rayon {
                 .unwrap(),
         )
     });
-    Rayon::with_pool(Arc::clone(pool))
+    Explorer::seeded(&Rayon::with_pool(Arc::clone(pool)), seed)
+}
+
+/// A seed for the explorer, hashed from the operation's own content with a hasher that has no
+/// per-process key, so a crash input replays the same shapes.
+fn shape_seed(content: &impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 enum FuzzOperation {
@@ -452,7 +463,8 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let strategy = parallel_strategy(concurrency);
+                let seed = shape_seed(&(&signature_groups, concurrency));
+                let strategy = parallel_strategy(concurrency, seed);
                 let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }
@@ -463,7 +475,8 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let strategy = parallel_strategy(concurrency);
+                let seed = shape_seed(&(&signature_groups, concurrency));
+                let strategy = parallel_strategy(concurrency, seed);
                 let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }

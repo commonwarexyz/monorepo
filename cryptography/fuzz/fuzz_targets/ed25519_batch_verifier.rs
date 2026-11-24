@@ -3,11 +3,15 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{
     BatchEntry, BatchVerifier, Signer, Verifier,
-    ed25519::{PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey, Signature},
 };
-use commonware_parallel::Sequential;
-use commonware_utils::TestRng;
+use commonware_parallel::{
+    Rayon, Sequential, Strategy,
+    mocks::{self, Explorer},
+};
+use commonware_utils::{NZUsize, TestRng};
 use libfuzzer_sys::fuzz_target;
+use std::sync::LazyLock;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum BatchOperation {
@@ -26,6 +30,45 @@ enum BatchOperation {
 }
 
 const MAX_OPERATIONS: usize = 32;
+const PLANNED_TASKS: usize = 4;
+
+/// A one-worker pool that plans for several tasks, built once. The explorer on it cuts a batch
+/// into shards as a multi-core verifier does, and runs them one after another.
+static POOL: LazyLock<Rayon> = LazyLock::new(|| mocks::inline(NZUsize!(PLANNED_TASKS)));
+
+type Entry = (Vec<u8>, Vec<u8>, PublicKey, Signature);
+
+fn verify_with(rng: &mut TestRng, batch: &[Entry], strategy: &impl Strategy) -> bool {
+    PublicKey::verify_batch(
+        rng,
+        batch,
+        |_, (namespace, message, public_key, signature)| BatchEntry {
+            namespace,
+            message,
+            public_key,
+            signature,
+        },
+        strategy,
+    )
+}
+
+/// Verifies the batch serially and in the shape the seed picks for each call, which may shard
+/// it, and checks that both shapes give the same verdict. The shaped call draws from its own
+/// rng, a copy of the serial one, so the serial calls see the same stream as without it.
+fn verify_batch(
+    rng: &mut TestRng,
+    shape_rng: &mut TestRng,
+    batch: &[Entry],
+    shape_seed: u64,
+) -> bool {
+    let serial = verify_with(rng, batch, &Sequential);
+    let shaped = verify_with(shape_rng, batch, &Explorer::seeded(&POOL, shape_seed));
+    assert_eq!(
+        serial, shaped,
+        "Ed25519 batch verdict depends on the execution shape"
+    );
+    serial
+}
 
 #[derive(Debug)]
 struct FuzzInput {
@@ -49,6 +92,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 fn fuzz(input: FuzzInput) {
     let mut rng = TestRng::new(input.rng_seed);
+    let mut shape_rng = TestRng::new(input.rng_seed);
+    let shape_seed = input.rng_seed;
 
     let mut ed25519_batch = Vec::new();
     let mut expected_ed25519_result = None;
@@ -94,17 +139,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             BatchOperation::VerifyEd25519 => {
-                let result = PublicKey::verify_batch(
-                    &mut rng,
-                    &ed25519_batch,
-                    |_, (namespace, message, public_key, signature)| BatchEntry {
-                        namespace,
-                        message,
-                        public_key,
-                        signature,
-                    },
-                    &Sequential,
-                );
+                let result = verify_batch(&mut rng, &mut shape_rng, &ed25519_batch, shape_seed);
                 assert_eq!(
                     result,
                     expected_ed25519_result.unwrap_or(false),
@@ -119,17 +154,7 @@ fn fuzz(input: FuzzInput) {
     }
 
     // Final verification of any remaining items
-    let ed25519_result = PublicKey::verify_batch(
-        &mut rng,
-        &ed25519_batch,
-        |_, (namespace, message, public_key, signature)| BatchEntry {
-            namespace,
-            message,
-            public_key,
-            signature,
-        },
-        &Sequential,
-    );
+    let ed25519_result = verify_batch(&mut rng, &mut shape_rng, &ed25519_batch, shape_seed);
     assert_eq!(
         ed25519_result,
         expected_ed25519_result.unwrap_or(false),

@@ -8,16 +8,20 @@ use commonware_cryptography_curve25519::{
     signing::{Signature, SigningKey, VerifyingKey},
 };
 use commonware_math::algebra::Random as _;
-use commonware_parallel::Sequential;
+use commonware_parallel::{
+    Rayon, Sequential, Strategy,
+    mocks::{self, Explorer},
+};
 use commonware_runtime::{Runner, deterministic};
-use commonware_utils::{Entropy, FuzzRng};
+use commonware_utils::{Entropy, FuzzRng, NZUsize};
 use libfuzzer_sys::fuzz_target;
-use rand_core::Rng as _;
+use rand_core::{CryptoRng, Rng as _};
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashSet},
     fmt::{self, Debug},
     hash::{DefaultHasher, Hash, Hasher},
+    sync::LazyLock,
 };
 
 const MIN_SIGNERS: usize = 2;
@@ -27,6 +31,12 @@ const MAX_PAYLOAD: usize = 64;
 const STREAM_BYTES: usize = 1 << 10;
 const SEED_BYTES: usize = 8;
 const ENTROPY_BYTES: usize = 32;
+const PLANNED_TASKS: usize = 4;
+
+/// A one-worker pool that plans for several tasks, built once. The explorer on it takes the
+/// parallel shape of batch verification as a multi-core verifier does, and runs its tasks one
+/// after another.
+static POOL: LazyLock<Rayon> = LazyLock::new(|| mocks::inline(NZUsize!(PLANNED_TASKS)));
 
 /// How a run obtains a signing key.
 enum Source {
@@ -203,7 +213,7 @@ fn check_identity(keys: &[VerifyingKey]) {
     );
 }
 
-fn check_signing(context: &mut deterministic::Context, signing: &Signing) {
+fn check_signing(context: &mut deterministic::Context, signing: &Signing, shape_rng: &mut FuzzRng) {
     let Signing {
         sources,
         namespace,
@@ -286,18 +296,17 @@ fn check_signing(context: &mut deterministic::Context, signing: &Signing) {
         .iter()
         .map(|key| (key.verifying_key(), key.sign(namespace, message)))
         .collect();
+    // Each batch is verified serially and in the shape the seed picks for each call, and both
+    // shapes must give the same verdict.
+    let shapes = Explorer::seeded(&POOL, shape_rng.next_u64());
     let mut verify_batch = |batch: &[(VerifyingKey, Signature)]| {
-        VerifyingKey::verify_batch(
-            &mut *context,
-            batch,
-            |_, (public_key, signature)| BatchEntry {
-                namespace,
-                message,
-                public_key,
-                signature,
-            },
-            &Sequential,
-        )
+        let serial = verify_with(context, batch, namespace, message, &Sequential);
+        let shaped = verify_with(shape_rng, batch, namespace, message, &shapes);
+        assert_eq!(
+            serial, shaped,
+            "batch verdict depends on the execution shape"
+        );
+        serial
     };
     assert!(verify_batch(&batch));
     assert!(!verify_batch(&[]));
@@ -309,6 +318,26 @@ fn check_signing(context: &mut deterministic::Context, signing: &Signing) {
     assert_eq!(encoded.as_ref(), stray.as_ref());
     verifying_keys.push(VerifyingKey::decode(encoded).expect("32 bytes decode"));
     check_identity(&verifying_keys);
+}
+
+fn verify_with(
+    rng: &mut impl CryptoRng,
+    batch: &[(VerifyingKey, Signature)],
+    namespace: &[u8],
+    message: &[u8],
+    strategy: &impl Strategy,
+) -> bool {
+    VerifyingKey::verify_batch(
+        rng,
+        batch,
+        |_, (public_key, signature)| BatchEntry {
+            namespace,
+            message,
+            public_key,
+            signature,
+        },
+        strategy,
+    )
 }
 
 fn check_exchange(context: &mut deterministic::Context, kind: &Other) {
@@ -366,10 +395,13 @@ fn fuzz(input: FuzzInput) {
         other,
         entropy,
     } = input;
+    // The shaped calls draw from an rng of their own, so the runtime's stream is the same as
+    // without them.
+    let mut shape_rng = FuzzRng::from(entropy.clone());
     let cfg = deterministic::Config::new().with_rng(FuzzRng::from(entropy));
     let runner = deterministic::Runner::new(cfg);
     runner.start(|mut context| async move {
-        check_signing(&mut context, &signing);
+        check_signing(&mut context, &signing, &mut shape_rng);
         check_exchange(&mut context, &other);
     });
 }

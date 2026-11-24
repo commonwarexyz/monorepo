@@ -6,10 +6,15 @@ use commonware_cryptography::bls12381::primitives::{
     ops::aggregate,
     variant::{MinPk, MinSig},
 };
-use commonware_parallel::{Rayon, Sequential, ThreadPool, rayon::ThreadPoolBuilder};
+use commonware_parallel::{
+    Rayon, Sequential, ThreadPool, mocks::Explorer, rayon::ThreadPoolBuilder,
+};
 use commonware_utils::{NZUsize, iter::NonEmpty, non_empty};
 use libfuzzer_sys::fuzz_target;
-use std::sync::{Arc, OnceLock};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::{Arc, OnceLock},
+};
 
 mod common;
 use common::{
@@ -20,13 +25,13 @@ use common::{
 const MAX_CONCURRENCY: usize = 8;
 
 /// One pool per concurrency value, built on first use and shared by all invocations: building
-/// a pool per operation grows memory under ASan. Each operation gets a new strategy with a
-/// fresh adaptive policy: a shared policy would learn from earlier inputs to run these small
-/// folds serially.
+/// a pool per operation grows memory under ASan. Each operation runs on an explorer over its
+/// pool, which takes the serial or a parallel shape of each call as its seed picks, not by
+/// wall-clock measurements, so a crash input replays the same shapes.
 static POOLS: [OnceLock<ThreadPool>; MAX_CONCURRENCY + 1] =
     [const { OnceLock::new() }; MAX_CONCURRENCY + 1];
 
-fn parallel_strategy(concurrency: usize) -> Rayon {
+fn parallel_strategy(concurrency: usize, seed: u64) -> Explorer {
     let pool = POOLS[concurrency].get_or_init(|| {
         Arc::new(
             ThreadPoolBuilder::new(NZUsize!(concurrency))
@@ -34,7 +39,15 @@ fn parallel_strategy(concurrency: usize) -> Rayon {
                 .unwrap(),
         )
     });
-    Rayon::with_pool(Arc::clone(pool))
+    Explorer::seeded(&Rayon::with_pool(Arc::clone(pool)), seed)
+}
+
+/// A seed for the explorer, hashed from the operation's own content with a hasher that has no
+/// per-process key, so a crash input replays the same shapes.
+fn shape_seed(content: &impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug)]
@@ -195,7 +208,7 @@ fn fuzz(op: FuzzOperation) {
             let combined_msg = if concurrency > 1 {
                 aggregate::combine_messages::<MinPk, _>(
                     non_empty![@messages_refs.iter()],
-                    &parallel_strategy(concurrency),
+                    &parallel_strategy(concurrency, shape_seed(&(&messages, concurrency))),
                 )
             } else {
                 aggregate::combine_messages::<MinPk, _>(
@@ -221,7 +234,7 @@ fn fuzz(op: FuzzOperation) {
             let combined_msg = if concurrency > 1 {
                 aggregate::combine_messages::<MinSig, _>(
                     non_empty![@messages_refs.iter()],
-                    &parallel_strategy(concurrency),
+                    &parallel_strategy(concurrency, shape_seed(&(&messages, concurrency))),
                 )
             } else {
                 aggregate::combine_messages::<MinSig, _>(

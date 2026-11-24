@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
-use commonware_parallel::{Rayon, Sequential, Strategy};
+use commonware_parallel::{Sequential, Strategy, mocks::Explorer};
 use commonware_runtime::{
     Runner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
@@ -20,6 +20,8 @@ use std::num::NonZeroU16;
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PROOF_OPS: u64 = 100;
+/// The input's leading bytes that seed the runtime and the explorer.
+const SEED_BYTES: usize = size_of::<u64>();
 type CodecConfig = (commonware_codec::RangeCfg<usize>, ());
 
 /// Which error variant a bad-floor commit should produce.
@@ -214,7 +216,7 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let raw_len = u.len().min(8);
+        let raw_len = u.len().min(SEED_BYTES);
         let raw_bytes = u.bytes(raw_len)?.to_vec();
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let ops = (0..num_ops)
@@ -872,13 +874,23 @@ fn fuzz_family<F: Family, S: Strategy>(
     });
 }
 
+/// The explorer's seed: the input's leading bytes, which also seed the runtime. The explorer
+/// takes the serial or a parallel shape of each call as the seed picks, not by wall-clock
+/// measurements, so a crash input replays the same shapes.
+fn shape_seed(raw_bytes: &[u8]) -> u64 {
+    let mut seed = [0u8; SEED_BYTES];
+    seed[..raw_bytes.len()].copy_from_slice(raw_bytes);
+    u64::from_le_bytes(seed)
+}
+
 fuzz_target!(|input: FuzzInput| {
+    let seed = shape_seed(&input.raw_bytes);
     fuzz_family::<mmr::Family, Sequential>(&input, "fuzz-mmr-sequential", |_| Sequential);
     fuzz_family::<mmb::Family, Sequential>(&input, "fuzz-mmb-sequential", |_| Sequential);
-    fuzz_family::<mmr::Family, Rayon>(&input, "fuzz-mmr-rayon", |context| {
-        context.strategy(NZUsize!(2))
+    fuzz_family::<mmr::Family, Explorer>(&input, "fuzz-mmr-rayon", |context| {
+        Explorer::seeded(&context.strategy(NZUsize!(2)), seed)
     });
-    fuzz_family::<mmb::Family, Rayon>(&input, "fuzz-mmb-rayon", |context| {
-        context.strategy(NZUsize!(2))
+    fuzz_family::<mmb::Family, Explorer>(&input, "fuzz-mmb-rayon", |context| {
+        Explorer::seeded(&context.strategy(NZUsize!(2)), seed)
     });
 });
