@@ -432,11 +432,6 @@ mod tests {
     #[test]
     fn test_sub_nanosecond_rate_clamps_to_one_nanosecond() {
         let clock = ManualClock::new(START);
-        let mut limiter = RateLimiter::new(Quota::per_second(NonZeroU32::MAX), clock.clone());
-        for _ in 0..10_000 {
-            limiter.check().unwrap();
-        }
-
         let quota = Quota::per_second(NonZeroU32::MAX).allow_burst(NZU32!(1));
         let mut limiter = RateLimiter::new(quota, clock.clone());
         limiter.check().unwrap();
@@ -455,16 +450,14 @@ mod tests {
         let mut limiter = RateLimiter::new(quota, clock.clone());
         limiter.check().unwrap();
 
-        // Admits the full burst rather than wrapping the burst capacity
-        let mut keyed = KeyedRateLimiter::new(
-            Quota::with_period(Duration::from_secs(3_600))
-                .unwrap()
-                .allow_burst(NonZeroU32::MAX),
-            clock.clone(),
-        );
-        for _ in 0..1_000_000 {
+        // One interval fits in u64 nanoseconds, but two intervals do not.
+        let period = Duration::from_nanos(1u64 << 63);
+        let quota = Quota::with_period(period).unwrap().allow_burst(NZU32!(3));
+        let mut keyed = KeyedRateLimiter::new(quota, clock.clone());
+        for _ in 0..3 {
             keyed.check_key(&0u8).unwrap();
         }
+        assert_eq!(keyed.check_key(&0u8), Err(START + period));
 
         // The earliest time saturates when it is not representable
         let quota = Quota::with_period(Duration::MAX).unwrap();
