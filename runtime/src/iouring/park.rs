@@ -75,15 +75,15 @@
 //! completion ended that park. A wake that releases it only queues deferred
 //! task work, which posts the completion when the worker next runs the ring's
 //! task work, as an enter that waits for completions does, so it cannot end a
-//! thread wait. Each wait therefore carries a futex bitset:
-//! the waiter bit of its kind. A notification clears only the bit its
-//! increment found and, if its clear took the bit, wakes one waiter with that
-//! bit as the bitset, so a wake releases only a wait of the kind that bit
-//! armed. A thread wake passes over a ring wait queued ahead of the thread
-//! wait, and that ring wait stays queued for the next ring park to reuse. A
-//! ring wake whose syscall was delayed past the ring park that armed its bit
-//! passes over a thread wait that followed. The word has at most one ring wait
-//! and one thread wait queued, so one waiter per wake suffices.
+//! thread wait. Each wait therefore carries a futex bitset: the waiter bit of
+//! its kind. A notification clears only the bit its increment found and, if
+//! its clear took the bit, wakes one waiter with that bit as the bitset, so a
+//! wake releases only a wait of the kind that bit armed. A thread wake passes
+//! over a ring wait queued ahead of the thread wait, and that ring wait stays
+//! queued for the next ring park to reuse. A ring wake whose syscall was
+//! delayed past the ring park that armed its bit passes over a thread wait
+//! that followed. The word has at most one ring wait and one thread wait
+//! queued, so one waiter per wake suffices.
 //!
 //! A notification leaves alone an arm of the other kind that the worker made
 //! after its increment. That arm's snapshot already includes the increment,
