@@ -1121,6 +1121,81 @@ pub mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// Run `test_init_cache_equivalence` against a database factory.
+    ///
+    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the
+    /// snapshot with the cache disabled, with a tiny cache that evicts throughout replay, or
+    /// with a large cache must produce the identical root (which grafts the activity bitmap)
+    /// and key-value state. Every variant routes its rebuild through the shared cache path but
+    /// resolves collisions with its own index and cursor, so each is checked against the state
+    /// recorded before the drop.
+    pub async fn test_init_cache_equivalence<M, C, F, Fut>(context: Context, mut open_db: F)
+    where
+        M: merkle::Graftable + 'static,
+        C: DbAny<Family = M, Key = Digest> + 'static,
+        C::Value: TestValue,
+        F: FnMut(Context, String, Option<NonZeroUsize>) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        const ELEMENTS: u64 = 2000;
+
+        let partition = "init-cache-equivalence".to_string();
+        let mut db: C = Box::pin(open_db(context.child("populate"), partition.clone(), None)).await;
+
+        // Churn overlapping keys across several commits so replay supersedes and deletes cached
+        // locations. Keys share their leading bytes so every variant, including the partitioned
+        // ones, resolves collisions on every lookup.
+        let mut expected = std::collections::HashMap::new();
+        for round in 0u64..4 {
+            let mut writes = Vec::new();
+            for i in 0u64..ELEMENTS {
+                let k = colliding_digest((i % 16) as u8, i);
+                let v = match (round, i % 4) {
+                    (0, _) => Some(C::Value::from_seed(i)),
+                    (_, 0) => Some(C::Value::from_seed(i + round * ELEMENTS)),
+                    (_, 1) => None,
+                    (_, 2) if round % 2 == 0 => Some(C::Value::from_seed(i + round)),
+                    (_, 2) => None,
+                    _ => continue,
+                };
+                expected.insert(k, v.clone());
+                writes.push((k, v));
+            }
+            db = commit_writes::<M, C>(db, writes).await.unwrap();
+        }
+        let db = db.sync().await.unwrap();
+        let root = db.root();
+        let op_count = db.bounds().end;
+        drop(db);
+
+        // All three cache sizes rebuild the snapshot from the same immutable log, so every root
+        // and key-value result must match the pre-drop state.
+        for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
+            let ctx = context
+                .child("reopen")
+                .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
+            let db: C = Box::pin(open_db(ctx, partition.clone(), cache_size)).await;
+            assert_eq!(
+                db.bounds().end,
+                op_count,
+                "size mismatch at cache_size={cache_size:?}"
+            );
+            assert_eq!(
+                db.root(),
+                root,
+                "root mismatch at cache_size={cache_size:?}"
+            );
+            for (key, value) in &expected {
+                assert_eq!(
+                    db.get(key).await.unwrap(),
+                    *value,
+                    "state mismatch at cache_size={cache_size:?}"
+                );
+            }
+            drop(db);
+        }
+    }
+
     /// Reopen a pruned database after applying a batch without committing it, then after committing
     /// a batch without syncing Current's bitmap metadata.
     pub async fn test_simulate_write_failures<M, C, F, Fut>(
@@ -2118,6 +2193,17 @@ pub mod tests {
         };
     }
 
+    // Like `open_db_fn!`, but the factory also takes the init cache size to reopen with.
+    macro_rules! open_db_cache_fn {
+        ($db:ty, $cfg:ident) => {
+            |ctx: Context, partition: String, cache_size: Option<NonZeroUsize>| async move {
+                let mut cfg = $cfg::<OneCap>(&partition);
+                cfg.init_cache = cache_size;
+                <$db>::init(ctx.child("storage"), cfg, None).await.unwrap()
+            }
+        };
+    }
+
     // Ordered variants. The last field is the recovery workload in keys.
     // The four long histories across both lists cover every
     // ordered/unordered and fixed/variable combination, both Merkle families, and all index layouts.
@@ -2183,6 +2269,24 @@ pub mod tests {
         };
     }
 
+    // Like `test_for_variant!`, but hands the test a factory that also takes the init cache size.
+    macro_rules! test_for_variant_cache {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_recovery_keys:literal) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$f _ $label>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        // Box the future to prevent stack overflow when
+                        // monomorphized across DB variants.
+                        Box::pin($f(context, open_db_cache_fn!($db, $cfg))).await
+                    });
+                }
+            }
+        };
+    }
+
     // Other tests choose their own workload.
     macro_rules! test_for_variant {
         ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident, $_recovery_keys:literal) => {
@@ -2194,6 +2298,9 @@ pub mod tests {
     macro_rules! test_for_all_variants {
         ($f:ident, $traced:literal) => {
             with_all_variants!(test_for_variant!($f, $traced));
+        };
+        (with_cache: $f:ident, $traced:literal) => {
+            with_all_variants!(test_for_variant_cache!($f, $traced));
         };
     }
 
@@ -2240,6 +2347,7 @@ pub mod tests {
     with_all_variants!(run_variant!(test_simulate_write_failures, "WARN"));
     test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
     test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
+    test_for_all_variants!(with_cache: test_init_cache_equivalence, "WARN");
     test_for_all_variants!(test_stale_batch_side_effect_free, "WARN");
     test_for_all_variants!(test_chained_schedules_match_sequential, "WARN");
 
