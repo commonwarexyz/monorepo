@@ -18,8 +18,9 @@ use std::num::NonZeroU64;
 /// [`Config::operation_codec_config`](super::Config::operation_codec_config) and the widest
 /// encoding of each scalar and length prefix.
 ///
-/// `max_operation_size` must bound every operation the local database can serve. The network
-/// sender panics on a response above its message size limit.
+/// Derive `max_operation_size` from the same limits as the database's codec configuration. The
+/// database only serves operations within those limits, so a smaller value lets an honest
+/// response exceed the network's message size limit, and the sender panics.
 ///
 /// # Panics
 ///
