@@ -60,7 +60,12 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     }
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[key:{} value:{}]", hex(&self.0), hex(&self.1.encode()))
+        write!(
+            f,
+            "[key:{} value:{}]",
+            hex(self.0.as_ref()),
+            hex(&self.1.encode())
+        )
     }
 }
 

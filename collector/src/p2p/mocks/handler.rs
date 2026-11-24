@@ -14,6 +14,7 @@ pub struct Processed {
 /// A mock [crate::Handler].
 #[derive(Clone)]
 pub struct Handler {
+    /// Reports each request the handler processes
     sender: mpsc::UnboundedSender<Processed>,
 
     /// Configured responses for specific request IDs
@@ -37,7 +38,7 @@ impl Handler {
         )
     }
 
-    /// Create a dummy [Handler] that doesn't track events.
+    /// Create a [Handler] that responds to every request and reports no events.
     pub fn dummy() -> Self {
         let (sender, _) = mpsc::unbounded_channel();
         Self {
@@ -62,8 +63,7 @@ impl crate::Handler for Handler {
         &mut self,
         origin: Self::PublicKey,
         request: Self::Request,
-        responder: oneshot::Sender<Self::Response>,
-    ) {
+    ) -> oneshot::Receiver<Self::Response> {
         let request_id = request.id;
 
         // Determine if we should respond
@@ -77,13 +77,49 @@ impl crate::Handler for Handler {
         });
 
         // Send response if configured
+        let (responder, receiver) = oneshot::channel();
         if let Some(response) = self.responses.get(&request_id) {
             responder.send_lossy(response.clone());
         } else if self.respond_by_default {
             responder.send_lossy(Response {
                 id: request_id,
-                result: request.data.wrapping_mul(2) as u64,
+                result: u64::from(request.data.wrapping_mul(2)),
             });
         }
+        receiver
+    }
+}
+
+/// A mock [crate::Handler] that hands each request and its responder to the test.
+#[derive(Clone)]
+pub struct Deferring {
+    sender: mpsc::UnboundedSender<(Request, oneshot::Sender<Response>)>,
+}
+
+impl Deferring {
+    /// Create a new [Deferring] handler and the receiver of each request with its responder.
+    #[allow(clippy::type_complexity)]
+    pub fn new() -> (
+        Self,
+        mpsc::UnboundedReceiver<(Request, oneshot::Sender<Response>)>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Self { sender }, receiver)
+    }
+}
+
+impl crate::Handler for Deferring {
+    type PublicKey = PublicKey;
+    type Request = Request;
+    type Response = Response;
+
+    fn process(
+        &mut self,
+        _origin: Self::PublicKey,
+        request: Self::Request,
+    ) -> oneshot::Receiver<Self::Response> {
+        let (responder, receiver) = oneshot::channel();
+        let _ = self.sender.send((request, responder));
+        receiver
     }
 }

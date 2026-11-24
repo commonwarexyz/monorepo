@@ -15,7 +15,6 @@ use std::ops::Range;
 
 /// The most cache lines [`Partition::prefetch_arrays`] requests per array. Partitions hold a few
 /// dozen entries at large key counts, so this covers a typical partition whole.
-#[commonware_macros::stability(ALPHA)]
 const PREFETCH_LINES: usize = 8;
 
 /// A single partition's values as sorted parallel arrays keyed by translated key.
@@ -49,7 +48,6 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// Prefetch up to [PREFETCH_LINES] cache lines of each of the keys and values arrays ahead of a
     /// search and update of this partition. This reads the partition's header, so it should follow
     /// an earlier hint for that header.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch_arrays(&self) {
         prefetch::prefetch_lines(self.keys.as_ptr(), self.keys.len(), PREFETCH_LINES);
         prefetch::prefetch_lines(self.vals.as_ptr(), self.vals.len(), PREFETCH_LINES);
@@ -139,7 +137,6 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// Iterate every value held by the partition (in array order, all runs).
-    #[commonware_macros::stability(ALPHA)]
     pub(super) fn values_iter(&self) -> std::slice::Iter<'_, V> {
         self.vals.iter()
     }

@@ -1,5 +1,1035 @@
 # Release Notes
 
+## v2026.11.0
+
+### Stability
+
+The following crates and APIs are now BETA ([#5810]):
+
+- `commonware_storage::qmdb`
+- `commonware_storage::merkle`
+- `commonware_storage::merkle::mmr`
+- `commonware_storage::merkle::mmb`
+- `commonware_storage::bmt`
+- `commonware_storage::journal::authenticated`
+- `commonware_storage::AuthenticatedBitMap`
+- `commonware_storage::MerkleizedBitMap`
+- `commonware_storage::UnmerkleizedBitMap`
+- `commonware_storage::index::immutable`
+- `commonware_storage::journal::contiguous::fixed::Journal::init_at_size`
+- `commonware_storage::journal::contiguous::variable::Journal::init_at_size`
+- `commonware_coding`
+- `commonware_cryptography::reed_solomon`
+- `commonware_collector`
+- `commonware_consensus::Application`
+- `commonware_consensus::marshal::standard::Inline`
+- `commonware_consensus::marshal::standard::Deferred`
+- `commonware_consensus::marshal::coding`
+- `commonware_consensus::types::coding`
+- `commonware_utils::range::contains_cyclic`
+
+### QMDB Formats
+
+QMDB operations now share one tag table: commit is 0, update is 1, delete is 2,
+set is 3, and append is 4. `qmdb::operation` now exports the tags as
+`COMMIT_CONTEXT`, `UPDATE_CONTEXT`, `DELETE_CONTEXT`, `SET_CONTEXT`, and
+`APPEND_CONTEXT`. The new tags change how Any, Current, Immutable, and Store
+encode operations and how Keyless encodes appends. Every root and proof that
+commits to a retagged operation also changes, including the genesis roots of
+Any, Current, and Immutable. Rebuild Store in fresh partitions. Rebuild or
+resync each of the other databases into fresh partitions. Then recompute every
+pinned root of those databases ([#5787]).
+
+`LibQMDBCurrent` now expects the new update and commit tags when it parses the
+operation in an exclusion proof. Redeploy any contract that embeds
+`LibQMDBCurrent.verifyExclusion` or the `verifyExclusion` wrapper of
+`LibQMDBCurrentMMR` or `LibQMDBCurrentMMB`. The other Solidity QMDB verifiers
+hash the operation bytes they receive, so they need only the new roots and
+proofs. The `commonware-dkg` example's genesis block commits to a QMDB root, so
+start a fresh example network instead of reusing the example's existing storage
+([#5787]).
+
+Any, Current, and the full (non-compact) Immutable and Keyless databases no
+longer persist Merkle nodes. The authenticated journal that these databases
+build on no longer persists Merkle nodes either. The databases and the journal
+now store an operation log and a frontier, which records the pruning boundary
+and the digests pinned there. At startup, the databases and the journal now
+replay the retained operations to rebuild the tree in memory. Startup time
+therefore grows with the number of retained operations, so keep databases well
+pruned to keep it short. On a large database, set `init_concurrency` above 1 so
+that several tasks share the replay ([#5158]).
+
+A standalone authenticated journal with a pruned log cannot reopen under a fresh
+frontier. Rebuild it, or seed it with its pruning boundary and pinned digests
+through `Journal::from_components` and `persist_boundary`. Nothing in this
+release reads or removes the old node journal partitions that
+`journal_partition` named. Delete those partitions, and the rest of each
+replaced database, once nothing needs them. Compact databases keep their witness
+journal, and the standalone `merkle::full::Merkle` keeps its node journal
+([#5158]).
+
+`sync::CompactTarget` is removed, so describe a compact database's state with a
+`sync::Target` whose range is `[size - 1, size)`. `CompactDb::target` now
+returns that `Target`. The encoded target now carries both ends of the range, so
+re-encode any payload that carries a compact target ([#4590]).
+
+### QMDB Configuration
+
+In Any and Current, `Config::merkle_config` is renamed to `merkle` and
+`Config::journal_config` is renamed to `log`. In Immutable,
+`Config::merkle_config` is renamed to `merkle`, the name Keyless already uses
+([#5574]). In Any, Current, Immutable, and Keyless, `merkle` is now a
+`journal::authenticated::Config` instead of a `merkle::full::Config`. Replace
+`metadata_partition` with `partition`, which names the frontier's partition, and
+give that partition a fresh name. Add `resident_height`, and keep
+`replay_buffer` and `strategy`. Remove `journal_partition`, `items_per_blob`,
+`write_buffer`, and `page_cache`, which described the node journal. Current
+keeps `grafted_metadata_partition` ([#5158]).
+
+`resident_height` takes a `ResidentHeight`, the lowest tree height a database
+keeps in memory. When a proof, prune, or sync request needs a node below that
+height, the database rebuilds the node from the operations beneath it. A lower
+`ResidentHeight` therefore uses more memory and fewer reads.
+`ResidentHeight::new` accepts 0 through 8, and the default is 5. A height of 0
+keeps every node in memory ([#5158]).
+
+Any and Current `Config` drop their fourth type parameter, which was the type of
+`init_concurrency`. `init_concurrency` is now a `NonZeroUsize` for every index
+type. Immutable and Keyless `Config` gain `init_concurrency`, and their
+`Db::init` now requires a context that implements `Spawner`. Set
+`init_concurrency` to 1 to replay on the calling task ([#5158]).
+
+`FixedConfig` and `VariableConfig` are removed from `qmdb::any` and
+`qmdb::current`. Use the `Config` that each fixed and variable module, including
+each partitioned module, now exports beside its `Db` ([#5575]). Current's
+ordered, unordered, fixed, variable, and partitioned modules now re-export
+`Operation` and `Update`. Current's partitioned modules gain `p256` and `p64k`,
+which Any's partitioned modules already have. Both `p256` and `p64k` provide a
+`Db` and a `Config` ([#5610]). The free function `any::init` is removed, so call
+`Db::init` on the database type ([#5495]). `SnapshotBuild::build_snapshot` and
+`SnapshotBuild::Concurrency` are removed, so rebuild a snapshot by opening the
+database ([#5158], [#5783]).
+
+Any, Current, and the full Immutable and Keyless databases no longer report the
+`merkle_journal` and `merkle_metadata` metric families. The frontier's metadata
+now reports under `frontier`. The in-memory tree now reports
+`resident_hits_total`, `region_fills_total`, `filled_leaves_total`,
+`replayed_leaves_total`, and `resident_bytes` under `merkle` ([#5158]).
+
+### QMDB Types and Batches
+
+`immutable::Immutable` is renamed to `immutable::Db`, and `keyless::Keyless` is
+renamed to `keyless::Db` ([#5577]). `qmdb::any`, `qmdb::current`, and
+`qmdb::store` now export `Db` directly instead of through their `db` modules.
+`qmdb::store` now exports `Batch`, `Changeset`, and `Config` the same way
+([#5608]). The ordered and unordered Current `db` modules are no longer public,
+so name `current::Db` or a fixed or variable alias ([#5633]). `any::Db` now
+takes the bitmap chunk size as a const parameter after the strategy and defaults
+it to 64 bytes. Omit the chunk size when naming the type, because an Any
+database opens and syncs only at the default size ([#5792]).
+
+`FixedEncoding`, `VariableEncoding`, `ValueEncoding`, `FixedValue`, and
+`VariableValue` move from `qmdb::any::value` to `qmdb::value` ([#5606]).
+`ValueEncoding` is now sealed, so choose `FixedEncoding` or `VariableEncoding`
+([#5644]). `operation::Key` no longer requires `Deref<Target = [u8]>`. QMDB now
+indexes a key by its `AsRef<[u8]>` bytes. A key's ordering must match the
+ordering of those bytes ([#5780]). `chain::Commitment` now implements the codec
+traits ([#5591]).
+
+In Any and Current, `Operation::CommitFloor` is renamed to `Operation::Commit`.
+Any and Current commits now display their floor as `floor:<location>` ([#5612]).
+Any and Current operations now implement `Eq`. `qmdb::any` and `qmdb::immutable`
+now re-export the operation tags they use ([#5613]). `inactivity_floor_loc` is
+renamed to `inactivity_floor` on every database. Any and Current now expose
+`inactivity_floor` without the `commonware-storage/test-traits` feature.
+`has_floor` is renamed to `inactivity_floor` on Immutable and Keyless operations
+([#5580]).
+
+`operation::Floored` is removed, so call `Committable::inactivity_floor` in
+place of `Floored::has_floor` ([#4590], [#5580]). `operation::Committable` now
+takes the Merkle family as a type parameter and gives `is_commit` a default
+implementation. `Committable` now requires `inactivity_floor` and
+`initial_commit` ([#4590]). Immutable operations now implement `Committable`
+([#5611]). Immutable operations no longer implement `operation::Operation`. Use
+`key` to borrow a key. Match `immutable::Operation::Set` in place of `into_key`
+([#5644]).
+
+In Any and Current, unmerkleized batches and the `Staged` batches that `stage`
+returns now take commit metadata through `with_metadata` instead of an argument
+to `merkleize`. `merkleize` now advances the floor with `floor::Proportional`
+and no longer takes a policy. To use another policy, call `merkleize_with(&db,
+&mut policy)` on an unmerkleized batch or `merkleize_with(slots, unstaged, &db,
+&mut policy)` on a staged batch. Immutable and Keyless batches, including
+compact batches, now take metadata through `with_metadata` and the floor through
+`with_inactivity_floor`, both before `merkleize(&db)`. An Immutable or Keyless
+batch that sets no floor inherits the floor of its database or parent batch. In
+Any, Current, Immutable, and Keyless, a batch that sets no metadata commits
+without metadata ([#5316]).
+
+In Any and Current, `stage` now returns `(staged, values)` and `expand` now
+returns `(staged, range, values)`. Update every use that reads these tuples by
+position, because some code written for the previous order still compiles with
+the values swapped ([#5601]). Ordered Any's `get_all` is renamed to
+`get_with_next_key` ([#5603]). Ordered Current gains `get_with_next_key`
+([#5577], [#5603]). `get_many` now takes a slice of owned or borrowed keys on
+Any, Current, and full Immutable databases and batches. `stage` and `expand` on
+Any and Current now take the same kind of slice. An empty slice literal now
+needs an element type, as in `&[] as &[K]` ([#4886]).
+
+`size` is removed from Store and full Immutable databases, so read
+`bounds().end` ([#5577]). `size` is also removed from full Keyless merkleized
+batches, so read `bounds().tip.size` ([#5605]). `get` and `get_many` on full
+Keyless merkleized batches now order their type parameters `E, C, H` ([#5577]).
+
+Immutable `get` and `get_many` now return `None` for a key whose set operation
+lies below the inactivity floor, as batch reads already do. Do not treat `None`
+as proof that the key was never set ([#5770]). Keyless `get` and `get_many` now
+return `BelowInactivityFloor` for a location below the floor, whether or not the
+log still holds the operation at that location ([#5784]).
+
+Store batches now use `write(key, Some(value))` and `write(key, None)` instead
+of `update` and `delete`. `store::Db` and `store::Batch` gain `get_many`, which
+returns results in input order. On a batch, `get_many` also reflects the batch's
+own writes and deletes ([#5600]). Store batches now take metadata through
+`with_metadata`, and `finalize` now takes no argument.
+`store::Db::apply_batch(batch)` now applies `floor::Proportional`, so call
+`apply_batch_with(batch, &mut policy)` to use another policy ([#5577]).
+
+`store::Config`, `Db`, and `Batch` gain a strategy type parameter, and `Config`
+gains `strategy`. Pass `Sequential` to keep reads on the calling thread
+([#5649]). Store now reports the operation log metrics that the full databases
+share. Store now also emits INFO spans under `qmdb.store.db` for `apply_batch`,
+`commit`, `sync`, `start_sync`, and `prune` ([#5647]).
+
+`Error::FloorBeyondSize` is renamed to `FloorBeyondCommit` ([#5313]). When a
+database's `init` is given `Some(max_size)`, it now returns
+`Error::NoRetainedCommit` if pruning prevents it from selecting a commit within
+that bound. For that failure, the new error replaces `HistoricalFloorPruned` on
+compact databases and `Journal(ItemPruned)` on the others ([#5158], [#5791]).
+The `codec_config` docs now state that the setting limits what a database can
+decode and does not limit what the database writes. Check keys, values, and
+commit metadata against that configuration before writing them. A write outside
+those limits can succeed and leave data that the database cannot decode. For a
+compact database, check commit metadata against `witness.codec_config`
+([#5786]).
+
+An Immutable read now panics instead of returning `UnexpectedData` when the
+database's index points at an operation that is not a set. Full Keyless
+`get_metadata` now panics instead of returning `None` when the last operation is
+not a commit. Both checks guard invariants that a valid database upholds
+([#5642]).
+
+### QMDB Proofs
+
+`qmdb::ProofExt` replaces the free functions of `qmdb::verify`. Only the Merkle
+`Proof` implements `ProofExt`. On a proof, call `verify` in place of
+`verify_proof`, `verify_with_pinned_nodes` in place of
+`verify_proof_and_pinned_nodes`, and `verify_and_extract_digests` in place of
+`verify_proof_and_extract_digests`. Call `to_proof_store` in place of
+`create_proof_store` and `verify_multi` in place of `verify_multi_proof`. Call
+`ProofStore::multi_proof` in place of `create_multi_proof` ([#5543], [#5793]).
+Every `ProofExt` method except `verify_multi` takes an exact-size iterator of
+operation references instead of a slice ([#5615]). `verify_multi` takes an
+iterator of location and operation pairs instead of a slice ([#5633]).
+
+Current proofs can now be verified only by calling a method on the proof's own
+type. `RangeProof::verify` replaces `Db::verify_range_proof`, and
+`RangeProof::verify_and_extract_digests` replaces the free
+`verify_proof_and_extract_digests`. Unordered Current's `KeyValueProof` is now a
+struct that wraps an `OperationProof` in its `proof` field.
+`KeyValueProof::verify` replaces `Db::verify_key_value_proof` ([#5530]).
+`RangeProof::verify` and `verify_with_chunk_size` now take an exact-size
+iterator of operation references ([#5615]). `RangeProof` gains
+`verify_and_extract_digests_with_chunk_size` for a chunk size chosen at runtime
+([#5543]).
+
+Current `key_value_proof` now borrows its key and returns `(proof, value)`
+([#5529]). Current `Db::pinned_nodes_at` is renamed to `ops_pinned_nodes_at`.
+The other databases keep `pinned_nodes_at` ([#5607]). `KEY_VALUE_CONTEXT` and
+`COMMIT_CONTEXT` move from `current::ordered` to `current::ordered::proof`
+([#5613]). Current `Db::ops_root_witness` is no longer async and now returns a
+reference. Current `MerkleizedBatch` gains `chunks`, `pruned_chunks`,
+`grafted_nodes`, `ops_pinned_nodes`, and `ops_root_witness`. These methods
+expose what the batch publishes when it is applied ([#5562]).
+
+A historical proof or sync request on a non-compact database now returns
+`Error::NotCommitBoundary` for a size of zero. The request now also returns that
+error when the last operation within the requested size is retained and is not a
+commit ([#5785]).
+
+### QMDB Sync and Compact Databases
+
+`sync::engine::Config` moves to `sync::Config`, and `qmdb::immutable::sync` is
+no longer public ([#5313]). `Target::new` is removed, so build `Target { root,
+range }` ([#5613]). `sync::Database` gains `init`, `initial_target`, `target`,
+and `prune_to_target`. Read `target().root` in place of `sync::Database::root`.
+On Current, both give the ops root, and `Db::root` still returns the canonical
+root. The new `sync::MerkleizedBatch` trait reports the `root` and `target` that
+a database reaches when it applies the batch. Compact sync now returns
+`EngineError::InvalidTarget` for a target that covers more than the last commit.
+`InvalidTarget` now carries `bounds` instead of `lower_bound_pos` and
+`upper_bound_pos` ([#4590]).
+
+`sync::Database` is now sealed, so only the databases that `commonware-storage`
+provides can implement it. The trait no longer exposes `from_sync_result`,
+`persist_sync_result`, or `local_pinned_nodes`, so run a sync through
+`sync::sync` ([#5795]). A sync now persists its frontier and prunes older
+operations only after it verifies the target root. After an interrupted sync,
+call `sync::sync` again with a trusted target ([#5158]). When the destination
+database holds none of the target's operations, a sync now discards that
+database's leftover Merkle state before it appends fetched operations ([#5665]).
+
+`qmdb::compact` is now public and exports `Db`, `Config`, `Operation`,
+`UnmerkleizedBatch`, `MerkleizedBatch`, and `initial_root`. The Immutable and
+Keyless `CompactDb` and `CompactConfig` aliases keep their names.
+`Config::commit_codec_config` is removed, so set the codec configuration in
+`witness.codec_config`. Compact sync now checks a fetched commit against the
+destination's codec configuration before it replaces the witness journal.
+Opening a compact database now returns `Error::Journal` instead of
+`DataCorrupted` when the selected witness holds a commit that does not decode.
+The `qmdb.keyless.compact.*` and `qmdb.immutable.compact.*` spans are renamed to
+`qmdb.compact.*` and gain a `kind` field ([#4605]). Keyless
+`CompactUnmerkleizedBatch` gains `size`, the location of the next append
+([#5605]).
+
+### Journals and Recovery
+
+`Recovery` replaces the `Replay` types of the segmented fixed, variable, and
+`Oversized` journals, and `replay` is removed from all three. Read an open
+segmented or `Oversized` journal with `get` at known positions ([#5663],
+[#5664], [#5671]). Dropping a pending `Recovery::next` on any of the three
+journals now ends that recovery. The next call to `next` returns
+`Error::ReplayInterrupted` and `finish` returns `Error::ReplayFailed`, so open
+the journal again ([#5535]).
+
+Segmented variable `Journal::init` now takes the `ReadOptions` that `replay`
+took and returns a `Recovery`. Drain `Recovery::next` until it returns `None`,
+then call `finish` to get the journal. `Config` gains `replay_buffer`, which
+sets the size of the replay buffer for recovery and `init_at_most`. Recovery now
+reads every section from its first item ([#5664]).
+
+Segmented fixed `Journal::init` is removed. Open the journal by calling
+`Journal::preflight_floors` with an empty map and the `ReadOptions` that
+`replay` took. Then drain `Recovery::next` and await `finish`. To restore an
+exact durable checkpoint, call `preflight_restore` with the section and byte
+size that the checkpoint records, then await `finish` without draining. `Config`
+gains `replay_buffer`, and `init_at_most` keeps its signature ([#5663],
+[#5671]).
+
+`Oversized::init`, `init_at_most`, and `init_with_metadata_at_most` are removed.
+`init_with_metadata` is renamed to `init_with_markers` and now returns a
+`Recovery`. Pass the same marker partition for a journal that already used
+markers, or a new, empty partition for a journal that relied on
+`Oversized::init`. With a new, empty partition, recovery now checks each section
+from its first entry and truncates the section at the first missing, incomplete,
+or checksum-invalid value. In both cases, drain `next` and await `finish` to get
+the journal. For a journal that already used markers, `finish` replaces
+`finish_tracked` ([#5663]).
+
+Open a new journal with `init_with_checkpoint` and `(0, 0)`. Use `(0, 0)` only
+for empty storage or an intentional reset, because `init_with_checkpoint`
+restores exactly the checkpoint it is given. Restore an existing journal only to
+a checkpoint that the journal's owner published after syncing the data it
+covers. `init_with_metadata_at_most` has no replacement. `Glob::init` is
+removed, so call `glob::Recovery::init` and then `finish` ([#5663]).
+
+After an interrupted `destroy`, a contiguous variable journal now reopens
+through ordinary crash recovery or as an empty journal at position zero, as the
+contiguous fixed journal already does. `Queue` now reopens the same way. After
+an interrupted `destroy`, an unbounded `init` of Store now reopens the database
+at the last retained commit or as a new database ([#5665]).
+
+If an index already holds a record, `Ordinal::put` now leaves that record
+unchanged and still returns `Ok`. Write a replacement at a new index. A
+segmented fixed journal whose item type encodes to zero bytes no longer
+compiles. The `Freezer::destroy` docs now state that a checkpoint returned
+earlier stops describing the stored data once `destroy` is called. Retire the
+checkpoint before calling `destroy`, and reopen with `None` after an interrupted
+`destroy` ([#5687]).
+
+`contiguous::Mutable` gains `prune_target`, which reports where pruning to a
+given position stops. The default clamps the position to the journal's bounds,
+so override `prune_target` in a custom journal that prunes in larger units
+([#5158]). Segmented variable `Journal::get_many` now takes an `IntoIterator` of
+owned offsets, so pass `offsets.iter().copied()` for a slice ([#4886]). A
+contiguous variable journal now declines a cached batch read when it finds
+overlapping frame ranges, including ranges it computes from a frame's length
+prefix ([#5766]).
+
+`Metadata::init` now returns `Error::Corruption` instead of panicking when a
+blob passes its checksum but does not decode ([#5158]). `RMap::missing_items`
+now returns an empty vector for a limit of zero instead of panicking ([#5772]).
+A synchronous cached read of a single fixed journal item now uses a stack buffer
+if the item encodes to at most 128 bytes ([#5261]). The `Queue` docs now state
+that reopening can deliver appends that were never committed, including part of
+an interrupted `enqueue_bulk`. Handle duplicate deliveries ([#5773]).
+
+### Merkle Trees and Authenticated Journals
+
+Merkle `Proof` methods and `ProofStore::new` now take the location before the
+elements, and `verify_multi_inclusion` now takes `(location, element)` pairs.
+BMT `Proof::verify_element_inclusion` now takes the position before the leaf,
+and BMT `verify_multi_inclusion` now takes `(position, digest)` pairs.
+`AuthenticatedBitMap::verify_bit_inclusion` now takes the bit before the chunk.
+`Proof::verify_proof_and_pinned_nodes` is renamed to
+`verify_range_inclusion_with_pinned_nodes`. Calls in the previous order no
+longer compile ([#5545]).
+
+The Merkle range methods, `reconstruct_root`, and `ProofStore::new` now take
+their elements as an exact-size iterator instead of a slice. BMT
+`verify_multi_inclusion` now takes an iterator of pairs ([#4886]). BMT
+`verify_range_inclusion` now takes an exact-size iterator of digests ([#5615]).
+
+With the `commonware-storage/std` feature, `merkle::batch::UnmerkleizedBatch`
+gains `add_many`, which appends a slice of items and uses the batch's strategy
+to hash whole subtrees. Pass the same hasher to `add_many` and `merkleize`
+([#4942]).
+
+A custom Merkle family must now implement `Family::birth_offset` ([#4942]).
+`subtree_root_position` and `leftmost_leaf` move from `Graftable` to `Family`. A
+custom family's `peaks` and `nodes_to_pin` must now return at most
+`MAX_PINNED_NODES` entries. A merkleized batch now keeps the ancestor digests
+its proofs need, so those proofs no longer depend on the parent batches staying
+alive ([#5158]).
+
+`authenticated::Journal::new` and `init_at_most` now take
+`authenticated::Config` instead of `merkle::full::Config`.
+`Journal::from_components` now takes the context, the config, the operation
+journal, the hasher, the start location, the digests pinned at that location,
+and the apply batch size. `from_components` builds the tree without persisting a
+frontier, so call the new `persist_boundary` after verifying the root. Until
+`persist_boundary` records the boundary, `prune` does nothing on that journal.
+`Journal` gains `pinned_nodes_at` and now implements `merkle::storage::Storage`
+and `merkle::Readable`. The journal's `bounds` now start at the frontier. A read
+before the frontier now returns `ItemPruned` even when a blob still holds the
+operation ([#5158]).
+
+The authenticated journal no longer implements `contiguous::Mutable`, and
+`journal::Error::Merkle` is removed. Call the authenticated journal's own
+methods, apply a journal batch in place of `append_many`, and match
+`authenticated::Error::Merkle` in place of `journal::Error::Merkle` ([#5794]).
+`Journal::destroy` now removes the operation log first and the frontier second,
+and Current removes its grafted metadata last. After an interrupted destroy, a
+database now reopens as the previous database or as an empty one. Reopening also
+discards any frontier or grafted metadata left beside an empty log ([#5158],
+[#5665]).
+
+### Broadcast and Networking
+
+Buffered broadcast `Config` and `Engine` gain a blocker type parameter ahead of
+the strategy. `Config` gains `blocker`, so pass a `Blocker` for the network's
+peers. The engine now decodes inbound messages on its strategy in the
+background. The engine now handles decoded messages as they become available, in
+an order that can differ from arrival order. The engine now calls its blocker on
+the sender of a message that fails to decode. Decoded messages now wait in an
+inbox as large as the network receiver's `capacity`. The engine now drops a
+decoded message that arrives while that inbox is full. When several broadcasts
+of one digest wait behind a full `Mailbox`, they now merge into a single send to
+the union of their recipients. The message encoding is unchanged ([#5519]).
+
+The engine now counts decode results by status in `ingress_decode_total`, and
+`receive_total` no longer reports `Invalid`. The coding marshal's shard engine
+now reports `shard_ingress_decode_total` ([#5519]).
+
+`Recipients` gains `union_with` ([#5519]). `p2p::max_message_size` now takes an
+`IntoIterator` of sizes instead of a slice ([#5615]). `Resolver::fetch_all` and
+`TargetedResolver::fetch_all_targeted` now take an `IntoIterator` instead of a
+`Vec` ([#4886]).
+
+### Parallelism and SIMD
+
+`Rayon::new` now takes a `commonware_parallel::rayon::ThreadPoolBuilder`, and
+`ThreadPoolBuilder::new` now takes the worker count as a `NonZeroUsize`, so
+write `Rayon::new(ThreadPoolBuilder::new(n))`. `ThreadPoolBuilder` no longer
+implements `Default`, and `num_threads` is removed. The builder no longer reads
+`RAYON_NUM_THREADS` or `RAYON_RS_NUM_CPUS`, so set the worker count explicitly.
+The `thread_name` and `start_handler` callbacks now receive a `WorkerPosition`
+instead of an index. Read `index` for the index the callbacks received before,
+or `group` and `offset` for the worker's group and its position in that group
+([#5508]).
+
+On Linux, `Rayon::new` can now group its workers by last-level cache. For each
+group assigned a cache, `Rayon` asks the kernel to keep the threads it started
+on the CPUs that share that cache. The tokio and io_uring runtimes now build
+their strategies with `Rayon::new`, so those strategies can group workers the
+same way. When a thread outside any pool calls `Rayon`, the call can now run
+with that thread limited to one group's CPUs. When `Rayon` limits a caller to
+one group's CPUs, it asks the kernel to restore the caller's previous CPU
+affinity when the call ends. A thread that the caller starts while limited
+inherits the limit. A pool passed to `Rayon::with_pool` stays a single group and
+keeps its threads' affinity. Every pool on macOS also stays a single group and
+keeps its threads' affinity. `Rayon::new` now names the threads it starts
+`group<g>-<w>` unless the builder sets `thread_name` ([#5508]).
+
+`Strategy::join` on `Rayon` can now run both closures in sequence on the caller
+when the caller is outside its pool. Neither closure may rely on the other
+running on a worker. When `join` runs the closures in sequence on a caller
+outside the pool, the second closure does not run if the first panics ([#5508]).
+
+To decide whether to try running work serially on the caller, `Rayon` now
+measures the time threads spend on the work instead of the elapsed time. Time
+that work spends queued behind other jobs therefore no longer prevents a serial
+run. `Strategy` gains `block_on`, which waits synchronously for a future. The
+default implementation polls the future in a loop. On `Rayon`, a pool worker
+runs queued jobs while it waits, and any other caller parks between polls.
+Inside work that runs on the strategy, use `block_on` to wait on the future that
+`Strategy::spawn` returns, so that `Rayon` counts the spawned work and not the
+wait ([#5551]).
+
+`Simd` tokens must now be `Send`, `Sync`, and `'static`. The vector and table
+types of `Simd` and `Neon` must now be `Send` and `Sync` ([#5724]). On an x86-64
+target built without SSE2, `commonware_simd::dispatch` now uses the scalar
+backend, and `NativeX86V3` and `NativeX86V4C` are unavailable ([#5691]).
+
+### Collector
+
+The collector's p2p engine now carries requests and responses on one channel
+instead of two. `Engine::start` now takes a single sender and receiver pair.
+Each message is now a one-byte tag followed by the unchanged request or response
+encoding. Upgrade every collector peer together. Size the channel with the new
+`collector::p2p::max_message_size`, and set the channel's quota for request and
+response traffic combined ([#5761]).
+
+`Handler::process` now returns the `oneshot::Receiver` of a response channel
+that the handler supplies, instead of taking a sender. Drop that channel's
+sender to decline a request. The `Handler::process` and `Monitor::collected`
+docs now state that each method must return promptly, because both run on the
+engine's loop. In `p2p::Config`, `priority_request` is renamed to
+`priority_requests` and `priority_response` is renamed to `priority_responses`.
+`request_codec` is renamed to `request_codec_config` and `response_codec` is
+renamed to `response_codec_config`. `p2p::Message` is removed. `Mailbox::new` is
+no longer public, so take the mailbox from `Engine::new`. Requests and responses
+no longer need `Digestible`. The `Engine` type now requires its context to
+implement `Metrics` ([#5761]).
+
+The engine no longer reports `requests_total` and `responses_total`. It now
+reports `send_total`, `collect_total`, and `serve_total` by status,
+`invalid_total` for messages that fail to decode, and a `serve_processing` gauge
+of requests the engine is still serving ([#5761]).
+
+### DKG and Stateful Applications
+
+With an enabled `state_sync::Plan`, the DKG orchestrator now writes each epoch's
+boundary block to a checkpoint before it acknowledges the block. A validator
+with no applicable state-sync record can now restart from that checkpoint after
+marshal has pruned the block. The probe now serves boundary certificates and
+blocks from checkpoints that hold a finalization. During discovery, the probe
+now samples again when its boundary fetch runs out of responders without finding
+the block. Probe messages are unchanged ([#5555]).
+
+`dkg::state_sync::Plan` now takes the signing scheme and the marshal variant as
+`Plan<S, MV>`. `state_sync::Config` gains a type parameter and
+`block_codec_config`, which must match marshal's block codec configuration.
+Initialize one plan, and give a clone to the orchestrator and to the reshare
+actor. Pass another clone as the new second argument of
+`probe::Mailbox::attach`, which panics on `Plan::disabled()`.
+`orchestrator::Config` and `orchestrator::Actor` drop their DKG variant
+parameter ([#5555]).
+
+The plan's state-sync record now also stores the height of its floor. Neither
+this release nor v2026.10.1 reads the other's record. Start with an empty
+state-sync partition or a new `partition_prefix`. A validator that starts with
+neither a checkpoint nor a state-sync record still needs marshal to hold the
+current epoch's boundary block ([#5555]).
+
+Marshal's `Mailbox::get_finalization` now also checks marshal's cache when the
+archive holds the block at the requested height without that block's
+finalization ([#5555]). The `SecretStore` docs now state that reads after a
+restart must reflect the state that earlier runs left. The `SecretStore` docs
+also state that no operation from an earlier run may change the store once those
+reads begin ([#5753]). The `DatabaseSet` docs now state that a caller must
+discard the whole set and every handle to its databases when a pending `apply`,
+`finalize`, or `prune` is cancelled ([#5540]).
+
+`stateful::db::qmdb` adds `Unmerkleized<D>` and `Merkleized<D>`, where `D` is
+the database type. These types wrap the batches of Any, Current, Immutable,
+Keyless, and compact databases. They replace `AnyUnmerkleized`, `AnyMerkleized`,
+`CurrentUnmerkleized`, `CurrentMerkleized`, and the Immutable and Keyless
+wrappers. The modules of the Immutable and Keyless wrappers are no longer
+public. `Merkleized<D>` provides `target` ([#4590]). `D` must implement the new
+sealed `stateful::db::qmdb::Qmdb` trait ([#4590], [#5795]). Ordered Any
+databases and partitioned Any and Current databases now implement `ManagedDb`
+and `StateSyncDb`. Compact databases now use `sync::Target` as their
+`ManagedDb::SyncTarget` ([#4590]).
+
+`glue::transfers` now settles balances in the account's own amount type.
+`Account` gains an associated `Amount` type, so add `type Amount = u64` to keep
+an existing account's `u64` balances. `Change` now takes the account type
+instead of the effect type and no longer implements `Hash`. `Transfer::changes`
+now yields `(&Self::Key, Change<Self::Account>)` ([#5695]).
+
+### Runtime
+
+`buffer::Read::read` now restores the reader's position when a read fails or is
+cancelled ([#5539]). The runtime now records the `write_at`, `resize`, `sync`,
+and `start_sync` spans of `runtime.storage.blob` at DEBUG instead of INFO.
+OpenTelemetry now exports the `write_at` span's `bytes` field and the `resize`
+span's `len` field as numbers ([#5677]). The io_uring runner now propagates a
+waker panic raised while the runner drops queued messages at shutdown, even when
+the root task finished without error ([#5597]). `Spawner::spawn` no longer makes
+the compiler prove `Send` a second time for a spawned future. That second proof
+could exceed the recursion limit for deeply nested futures ([#5804]). The
+runtime now does less work when it spawns under a parent with many children,
+polls a task that stays pending, or reads from the page cache in batches
+([#5526], [#5527], [#5622]).
+
+### Encoding and Utilities
+
+`commonware-codec` adds `Uint<BITS, LIMBS>` and its `U256` alias. A `Uint` is an
+unsigned integer of a fixed width that encodes as big-endian bytes. `Uint`
+provides `ZERO`, `ONE`, `MAX`, `BYTES`, `from_limbs`, `as_limbs`,
+`leading_zeros`, `overflowing_add`, and `overflowing_sub`. `varint::UInt` now
+encodes a `Uint`, and `varint::Decoder` now reads a `Uint`. The varint of a
+`Uint` has the same bytes as the varint of an unsigned primitive that holds the
+same value. `commonware-utils` adds the `Amount` trait, which provides `ZERO`
+and checked and overflowing addition and subtraction. `u8`, `u16`, `u32`, `u64`,
+`u128`, and `Uint` implement `Amount` ([#5657]).
+
+`Viewing::new` is no longer `const`. `Viewing` gains `split_to`, which returns a
+cursor over the next `len` bytes and advances the original cursor past them
+([#5627]). `Lazy<T>` now treats two values with identical retained bytes as
+equal without decoding them. Compare only values read under the same
+`Read::Cfg`, and do not mutate a decoded value in a way that changes its
+equality, ordering, or hash. `Lazy<T>` now requires `T: Eq` for its `PartialEq`
+and `PartialOrd` ([#5447]). `PrioritySet::reconcile` now takes an `IntoIterator`
+of references instead of a slice ([#4886]).
+
+### Cryptography
+
+`threshold::recover_multiple` now takes an `IntoIterator` instead of a `Vec`
+([#4886]). The `Output::revealed` docs now state that the set lists the players
+whose shares the selected dealers may have exposed in the round. The set can
+omit a player whose share leaked outside the protocol. The set can also omit a
+player when an adversary can rebuild that player's new share from an earlier
+share and this round's reveals ([#5706], [#5708]).
+
+On x86-64 CPUs with SHA-NI, AVX2, SSSE3, and SSE4.1, `Sha256::hash` gains a fast
+path for single messages shaped like Merkle leaves and nodes ([#5719]). The
+paired SHA-NI path now clears the upper vector registers first, which avoids a
+slowdown on affected CPUs ([#5713]). Both changes leave digests unchanged
+([#5713], [#5719]).
+
+### Toolchain and Dependencies
+
+Every Commonware package now declares Rust 1.95.0 as its minimum supported
+version, which the workspace already required. `commonware_utils::sync` now
+re-exports its locks and guards from `parking_lot` 0.13. Update a direct
+`parking_lot` dependency to 0.13 wherever its types are used with Commonware's
+types ([#5691]). The workspace lockfile now selects `crypto-bigint` 0.7.11
+instead of the yanked 0.7.5 ([#5763]).
+
+### Clearing
+
+The new `commonware-clearing` crate adds Bajillion, a protocol that preconfirms
+payments and settles them in epochs. Validators certify each epoch's summary. An
+operator countersigns the payment state a sender submits in a
+`bajillion::Request`. The sender then issues each receiver a `Receipt`. `Close`,
+`Checked`, and `Proposal` settle an epoch against the QMDB `Balances` and
+`Payouts` stores. `Summary`, `Challenge`, `BalanceProof`, and `PayoutProof` let
+a deployment's ledger verify posts, shortfalls, and claims. Each deployment
+chooses its `Amount` type and a `Namespace` for its signatures ([#5591]).
+
+### Deployer
+
+Deployer YAML now accepts `bandwidth_weighting` under `monitoring` and under
+each instance. On instance types that support the setting, `vpc-1` favors
+networking and `ebs-1` favors EBS. The deployer applies the setting when it
+creates an instance. `InstanceConfig` and `MonitoringConfig` gain a
+`bandwidth_weighting` field. The new `BandwidthWeighting` enum has `Default`,
+`Vpc1`, and `Ebs1`. With the `commonware-deployer/aws` feature,
+`ec2::launch_instances` now takes `bandwidth_weighting` after
+`storage_throughput`, so pass `BandwidthWeighting::Default` to keep the standard
+split ([#5619]). With the same feature, `aws::s3::hash_files` now takes an
+`IntoIterator<Item = String>` instead of a `Vec<String>` ([#4886]).
+
+### Testing
+
+The certificate macros for Ed25519, Secp256r1, and BLS12-381 now generate
+`fixture` whenever `commonware-cryptography/mocks` is enabled, instead of when
+the calling crate has a `mocks` feature. `impl_certificate_mock!` now generates
+`fixture` and `fixture_with` on the same condition. Enable `mocks` on the
+`commonware-cryptography` dependency of any test that calls a generated fixture.
+The Ed25519, Secp256r1, and BLS12-381 macros no longer add `#[allow(dead_code)]`
+to `fixture` ([#5654]).
+
+With the `commonware-storage/test-traits` feature, `DbAny` and `Provable` now
+take the family as `Family = F` instead of a type parameter. On `BatchableDb`
+and `UnmerkleizedBatch`, `K` is renamed to `Key` and `V` is renamed to `Value`.
+`DbAny` now inherits `Key` and `Value` from `BatchableDb` ([#5614]). A custom
+`UnmerkleizedBatch` must now implement `with_metadata` and `merkleize_with`
+([#5316]). `DbAny::size` is removed, so read `bounds().end` ([#5605]).
+`BitmapPrunedBits::oldest_retained` is removed, so read `*db.bounds().start`
+([#5496]). `DbAny::get_many` now takes a slice of owned or borrowed keys
+([#4886]).
+
+The simulated network now sends a message only when the sender tracks the
+recipient and the recipient tracks the sender. `Control` gains `manager` and
+`socket_manager`, which return managers for one peer's sets. `Control` also
+gains `reset_peer_sets`, which queues a reset that clears those sets and ends
+subscriptions to them. When an oracle manager accepts a set, the manager now
+copies that set to each peer whose retained sets all have lower indices.
+`tracked_peer_sets` now bounds each peer's history. A peer that tracks a set
+through its own manager now counts toward `max_peers_per_set` even when the set
+omits that peer ([#5572]).
+
+With the `commonware-runtime/test-utils` feature, `commonware_runtime::mocks`
+adds `ReadGate`, `ReadGateContext`, and `ReadGateBlob`, which park reads from
+one storage partition. `ReadGateContext::new` wraps a context and returns the
+wrapper with a disarmed gate. `ReadGate::arm` parks every later read of the
+partition, and `disarm` lets new reads through without releasing the parked
+ones. `blocked` counts the reads parked since the last `arm` ([#5535]).
+`ReadGate::parked` returns a receiver that gets a signal when a later read is
+parked. `ReadGateContext` implements `Spawner` when the wrapped context does
+([#5158]).
+
+With the `fuzz` feature, `commonware-codec`, `commonware-parallel`, and
+`commonware-utils` each add a `fuzz::Plan`, whose `run` executes one generated
+test case. With the same feature on targets other than `wasm32`,
+`commonware-consensus` adds its own `fuzz::Plan` and `fuzz::simplex::{FuzzInput,
+Mode, Scheme}`. `Scheme::run` drives a Simplex simulation. Simplex's
+`mocks::twins` and `mocks::wrapped` are no longer compiled when
+`commonware_stability_BETA` is set ([#5774]).
+
+`commonware-collector` gains an `arbitrary` feature ([#5761]). The new
+`commonware-clearing` crate has an `arbitrary` feature as well ([#5591]). With
+the `commonware-codec/arbitrary` feature, `Uint` implements `Arbitrary`
+([#5657]). With the `commonware-storage/arbitrary` feature,
+`qmdb::chain::Commitment` now implements `Arbitrary` ([#5591]).
+
+`conformance_tests!` now finds `conformance.toml` through `CARGO_MANIFEST_DIR`
+when a test runs, so set that variable to run a generated test binary directly.
+`test_group` now looks for the nextest config from the calling crate unless
+`COMMONWARE_NEXTEST_CONFIG` is set ([#5524]). `commonware-bench` adds `Inputs`.
+`Inputs::current` picks `Smoke`, `Standard`, or `Full` inputs when a benchmark
+runs. Set `COMMONWARE_BENCH_FULL=1` for `Full` instead of rebuilding with a cfg
+flag ([#5588]).
+
+[#4590]: https://github.com/commonwarexyz/monorepo/pull/4590
+[#4605]: https://github.com/commonwarexyz/monorepo/pull/4605
+[#4886]: https://github.com/commonwarexyz/monorepo/pull/4886
+[#4942]: https://github.com/commonwarexyz/monorepo/pull/4942
+[#5158]: https://github.com/commonwarexyz/monorepo/pull/5158
+[#5261]: https://github.com/commonwarexyz/monorepo/pull/5261
+[#5313]: https://github.com/commonwarexyz/monorepo/pull/5313
+[#5316]: https://github.com/commonwarexyz/monorepo/pull/5316
+[#5447]: https://github.com/commonwarexyz/monorepo/pull/5447
+[#5495]: https://github.com/commonwarexyz/monorepo/pull/5495
+[#5496]: https://github.com/commonwarexyz/monorepo/pull/5496
+[#5508]: https://github.com/commonwarexyz/monorepo/pull/5508
+[#5519]: https://github.com/commonwarexyz/monorepo/pull/5519
+[#5524]: https://github.com/commonwarexyz/monorepo/pull/5524
+[#5526]: https://github.com/commonwarexyz/monorepo/pull/5526
+[#5527]: https://github.com/commonwarexyz/monorepo/pull/5527
+[#5529]: https://github.com/commonwarexyz/monorepo/pull/5529
+[#5530]: https://github.com/commonwarexyz/monorepo/pull/5530
+[#5535]: https://github.com/commonwarexyz/monorepo/pull/5535
+[#5539]: https://github.com/commonwarexyz/monorepo/pull/5539
+[#5540]: https://github.com/commonwarexyz/monorepo/pull/5540
+[#5543]: https://github.com/commonwarexyz/monorepo/pull/5543
+[#5545]: https://github.com/commonwarexyz/monorepo/pull/5545
+[#5551]: https://github.com/commonwarexyz/monorepo/pull/5551
+[#5555]: https://github.com/commonwarexyz/monorepo/pull/5555
+[#5562]: https://github.com/commonwarexyz/monorepo/pull/5562
+[#5572]: https://github.com/commonwarexyz/monorepo/pull/5572
+[#5574]: https://github.com/commonwarexyz/monorepo/pull/5574
+[#5575]: https://github.com/commonwarexyz/monorepo/pull/5575
+[#5577]: https://github.com/commonwarexyz/monorepo/pull/5577
+[#5580]: https://github.com/commonwarexyz/monorepo/pull/5580
+[#5588]: https://github.com/commonwarexyz/monorepo/pull/5588
+[#5591]: https://github.com/commonwarexyz/monorepo/pull/5591
+[#5597]: https://github.com/commonwarexyz/monorepo/pull/5597
+[#5600]: https://github.com/commonwarexyz/monorepo/pull/5600
+[#5601]: https://github.com/commonwarexyz/monorepo/pull/5601
+[#5603]: https://github.com/commonwarexyz/monorepo/pull/5603
+[#5605]: https://github.com/commonwarexyz/monorepo/pull/5605
+[#5606]: https://github.com/commonwarexyz/monorepo/pull/5606
+[#5607]: https://github.com/commonwarexyz/monorepo/pull/5607
+[#5608]: https://github.com/commonwarexyz/monorepo/pull/5608
+[#5610]: https://github.com/commonwarexyz/monorepo/pull/5610
+[#5611]: https://github.com/commonwarexyz/monorepo/pull/5611
+[#5612]: https://github.com/commonwarexyz/monorepo/pull/5612
+[#5613]: https://github.com/commonwarexyz/monorepo/pull/5613
+[#5614]: https://github.com/commonwarexyz/monorepo/pull/5614
+[#5615]: https://github.com/commonwarexyz/monorepo/pull/5615
+[#5619]: https://github.com/commonwarexyz/monorepo/pull/5619
+[#5622]: https://github.com/commonwarexyz/monorepo/pull/5622
+[#5627]: https://github.com/commonwarexyz/monorepo/pull/5627
+[#5633]: https://github.com/commonwarexyz/monorepo/pull/5633
+[#5642]: https://github.com/commonwarexyz/monorepo/pull/5642
+[#5644]: https://github.com/commonwarexyz/monorepo/pull/5644
+[#5647]: https://github.com/commonwarexyz/monorepo/pull/5647
+[#5649]: https://github.com/commonwarexyz/monorepo/pull/5649
+[#5654]: https://github.com/commonwarexyz/monorepo/pull/5654
+[#5657]: https://github.com/commonwarexyz/monorepo/pull/5657
+[#5663]: https://github.com/commonwarexyz/monorepo/pull/5663
+[#5664]: https://github.com/commonwarexyz/monorepo/pull/5664
+[#5665]: https://github.com/commonwarexyz/monorepo/pull/5665
+[#5671]: https://github.com/commonwarexyz/monorepo/pull/5671
+[#5677]: https://github.com/commonwarexyz/monorepo/pull/5677
+[#5687]: https://github.com/commonwarexyz/monorepo/pull/5687
+[#5691]: https://github.com/commonwarexyz/monorepo/pull/5691
+[#5695]: https://github.com/commonwarexyz/monorepo/pull/5695
+[#5706]: https://github.com/commonwarexyz/monorepo/pull/5706
+[#5708]: https://github.com/commonwarexyz/monorepo/pull/5708
+[#5713]: https://github.com/commonwarexyz/monorepo/pull/5713
+[#5719]: https://github.com/commonwarexyz/monorepo/pull/5719
+[#5724]: https://github.com/commonwarexyz/monorepo/pull/5724
+[#5753]: https://github.com/commonwarexyz/monorepo/pull/5753
+[#5761]: https://github.com/commonwarexyz/monorepo/pull/5761
+[#5763]: https://github.com/commonwarexyz/monorepo/pull/5763
+[#5766]: https://github.com/commonwarexyz/monorepo/pull/5766
+[#5770]: https://github.com/commonwarexyz/monorepo/pull/5770
+[#5772]: https://github.com/commonwarexyz/monorepo/pull/5772
+[#5773]: https://github.com/commonwarexyz/monorepo/pull/5773
+[#5774]: https://github.com/commonwarexyz/monorepo/pull/5774
+[#5780]: https://github.com/commonwarexyz/monorepo/pull/5780
+[#5783]: https://github.com/commonwarexyz/monorepo/pull/5783
+[#5784]: https://github.com/commonwarexyz/monorepo/pull/5784
+[#5785]: https://github.com/commonwarexyz/monorepo/pull/5785
+[#5786]: https://github.com/commonwarexyz/monorepo/pull/5786
+[#5787]: https://github.com/commonwarexyz/monorepo/pull/5787
+[#5791]: https://github.com/commonwarexyz/monorepo/pull/5791
+[#5792]: https://github.com/commonwarexyz/monorepo/pull/5792
+[#5793]: https://github.com/commonwarexyz/monorepo/pull/5793
+[#5794]: https://github.com/commonwarexyz/monorepo/pull/5794
+[#5795]: https://github.com/commonwarexyz/monorepo/pull/5795
+[#5804]: https://github.com/commonwarexyz/monorepo/pull/5804
+[#5810]: https://github.com/commonwarexyz/monorepo/pull/5810
+
+## v2026.10.1
+
+### Marshal
+
+The coding marshal's `shards::Mailbox` drops its public-key type parameter, so
+name it `Mailbox<B, C, H>`, including in `MarshaledConfig::shards`.
+`Mailbox::gather(commitment, round)` replaces `discovered` and `notarized`, and
+`proposed` is renamed to `disperse`. When certification is the first call to
+report a commitment to the shard engine, the engine can now check the shard the
+leader sent this validator, count it toward rebuilding the block, and relay it
+without learning the leader. The engine also no longer needs to know the leader
+to block the sender of a shard whose index is neither the sender's nor the
+engine's own. A node outside the participant set no longer receives a successful
+`subscribe_assigned_shard_verified` notification, so do not wait for one on such
+a node. Vote, certificate, and shard encodings are unchanged ([#5681]).
+
+`BlockProvider::subscribe_parent` now takes `bound: Option<Round>` after the
+block, and `AncestorStream::new` takes it before `fetch_duration`. Once a block
+finalized in that round or a later one is processed, a provider may stop
+fetching the parent. The subscription then completes only if the parent becomes
+available locally. Pass either of two rounds. The first is the round consensus
+assigned to the block the ancestry walk starts from. The second is the round of
+the consensus request the walk serves, such as the proposal being verified or
+built. Pass `None` only when every block the walk reaches has been checked
+against its own parent, as in certified or finalized ancestry.
+`CommitmentFallback::FetchByCommitment` and `Annotation::Untrusted` gain a
+`round: Option<Round>` field, and `Request::untrusted` takes the round as its
+third argument. A `round` of `None` leaves the request to be retired by height
+alone ([#5717]).
+
+Marshal now retires an ancestry walk's request for an uncertified block once
+marshal has processed a block finalized in the round the request carries or a
+later round. Marshal still retires the request once the processed height reaches
+the height the block's child claims for it. With stable leaders and optimistic
+validation, a leader could pick that height. A validator could then keep
+retrying a fetch that no peer can answer, until the chain reached that height.
+`Inline`, `Deferred`, and `glue::stateful` pass the round of the proposal or
+block they act on. `Mailbox::ancestry` passes the round of
+`DigestFallback::FetchByRound` and no round with `DigestFallback::Wait`, so
+start a `Wait` walk only from a block whose ancestry has been checked, such as a
+certified or finalized block. The coding marshal ignores `bound` and reads the
+parent's round from each child's consensus context ([#5717]).
+
+`Deferred` now checks that a newly proposed block names its consensus context's
+parent before the vote to notarize the block, instead of after the vote.
+`verify` answers `false` for a newly proposed block that names another parent.
+`certify` then answers `false` for that block without waiting for the parent.
+Certification requires the same parent, so no block that can be certified loses
+a vote. With stable leaders and optimistic validation, a validator that voted
+for a newly proposed block that names another parent could verify the block's
+child and then fetch and cache ancestors that no round of consensus named
+([#5715]).
+
+A vote journaled before the upgrade replays without `Deferred`'s parent check,
+and a validator on an earlier release still votes for a block that names another
+parent. A validator can therefore still fetch ancestors that no round of
+consensus named until every validator has upgraded and a view at or after the
+last view any of them voted on before upgrading has finalized. `Deferred` now
+relies on the vote-time check and no longer checks the parent link of the block
+it builds on. Until every validator has upgraded and such a view has finalized,
+an upgraded leader whose application returns a block from `Application::prepare`
+can build on a block that names another parent. That block never certifies, so
+the build is wasted. A leader that voted for the build under `Handoff::Vote`
+cannot propose again in that view ([#5715]).
+
+`Deferred` and coding `Marshaled` now stop verifying a block once certification
+is requested for a different block of its round. That request cancels a
+verification that is running or still waiting for its block or parent. The
+`Application::verify` docs now state that several calls can be outstanding for
+one round when its leader equivocates, and that an implementation must give each
+its own verdict without cancelling or replacing an earlier one ([#5682]).
+
+When the `view_retention` window reaches back past the start of the epoch of the
+previously witnessed finalization round, marshal now counts each view the window
+lacks in that epoch as one block height below the epoch instead of as one whole
+earlier epoch, and keeps the whole epoch containing the lowest such height.
+Where the `epocher` cannot place those heights, each earlier epoch still counts
+for one view. The first prune after upgrading destroys the caches of earlier
+epochs that the window no longer covers ([#5646]).
+
+Marshal no longer caches a block fetched by commitment when the block's height
+maps to an epoch later than the latest epoch its cache has recorded. Marshal
+still delivers the block. With stable leaders and optimistic validation, an
+ancestry walk that `Mailbox::ancestry` starts from a notarized coded block could
+fetch a parent that claims a height in a far later epoch. Caching that parent
+raised the latest recorded epoch. Neither pruning nor upgrading lowers that
+epoch, and startup probes every epoch from the oldest unpruned one up to it
+([#5717]).
+
+### DKG
+
+`SecretStore::put_dealing` and `get_dealing` each gain a `V: Variant` type
+parameter and take the dealing's public message as `public: &DealerPubMsg<V>`
+after the dealer. Add the type parameter and the argument to these two methods
+in every implementation, and include the public message in each private
+dealing's key. A validator loses the private dealings of the epoch in progress
+at the upgrade unless its store also reads the previous key when the new key
+finds nothing. The store needs that fallback until it prunes that epoch. The
+reshare store now asks the secret store for the private half of a journaled
+dealing, using the dealing's public message. It restores the dealing only when
+the secret store returns a private half. With the new key, a player no longer
+panics on every resume after interruptions leave only the public half of one
+dealing and only the private half of a different dealing from the same dealer. A
+dealer that follows the protocol does not send one player two different dealings
+in an epoch ([#5728]).
+
+A store that switches to the new key without reading its previous key as a
+fallback no longer finds the private dealings it wrote before the upgrade. After
+a rollback, the earlier release does not find the private dealings written
+since. With the fallback, a store returns for the earlier dealings what the
+earlier release returned. The `commonware-dkg` example's `Secrets` store now
+keys a dealing by a digest of its dealer and public message and has no fallback
+([#5728]).
+
+A validator that restarts without dealings it acknowledged in the current epoch
+finishes that epoch with no share for the next epoch once a log from the dealer
+of one of those dealings is included. Without that share, the validator cannot
+vote or deal in the next epoch. It gets a share again only from a later reshare
+that succeeds with it as a player. Until the dealing window closes, the
+validator also accepts a different dealing from a dealer it already
+acknowledged. That can let a faulty dealer make the validator panic each time it
+verifies the epoch's last block and so keep it from finishing the epoch. Dealers
+start sending dealings at an epoch's first block, so count as faulty each
+validator rolled back and each validator upgraded to a store that does not read
+its previous key as a fallback. Each counts as faulty from the end of the epoch
+it restarted in until it holds a share again ([#5728]).
+
+### Simplex
+
+Once Simplex has requested `certify` for a view, it no longer requests `verify`
+for that view before a restart. Under marshal's `Deferred`, that later `verify`
+could run the application's verification a second time. A validator whose
+`certify` request comes first therefore no longer casts a late notarize vote for
+that view or nullifies it early on a `false` verification verdict. That
+validator can still vote to finalize if certification succeeds before the view
+is nullified. The voter now also drops the receiver of a pending `verify` when a
+certificate for a conflicting proposal of the same view arrives ([#5681]).
+
+The `Automaton::verify` docs now state that consensus may drop the receiver
+before a verdict arrives. The `CertifiableAutomaton::certify` docs clarify that
+a round can carry conflicting payloads, so state must be keyed by `(round,
+payload)` and not by either alone, and that certification can be requested for a
+payload this participant was never asked to verify ([#5681]).
+
+### Crash Recovery
+
+Opening a paged blob for writing, as journals and the stores built on them do at
+startup, now clears a checksum slot that a torn write left on its partial last
+page. A torn shrink or append could leave part of a checksum in that slot, and a
+second torn write to the page after a restart could complete it, revalidating
+bytes that the shrink or the earlier recovery had discarded.
+`paged::Recovery::open` durably zeroes such a slot before opening completes,
+including on pages written by earlier releases. The page format is unchanged
+([#5660]).
+
+### Memory and Metrics
+
+Commonware's `futures` and `futures-util` dependencies now require at least
+0.3.34, including in downstream builds. Version 0.3.32 has a
+`FuturesUnordered::into_iter` leak that can retain task allocations when
+`glue::stateful` verification resumes after a finalization or prune ([#5583]).
+
+The resolver's `peer_performance` gauge drops a peer's series when the peer
+leaves the tracked set. When the DKG reshare actor prepares an epoch, it drops
+the `latest_share` series of peers outside that epoch's dealers and the
+`latest_ack` series of peers outside its players. A peer that keeps its role
+keeps its value ([#5528]).
+
+### Resolver
+
+The p2p resolver now tries pending requests in queue order when their deadlines
+match, with fresh requests still ahead of retries. Marshal's fresh requests for
+blocks by commitment that queue at the same instant behind a rate-limited peer
+are therefore tried in that order instead of digest order ([#5698]).
+
+The resolver's p2p and opaque engines now apply a verdict that a consumer has
+already sent, or the drop of the verdict's sender, before they add a fetch for
+the same key. A repeat fetch that the consumer issues afterwards for a
+subscriber retired by that verdict or drop could be lost, leaving its caller
+waiting, when the engine handled the repeat first. The deterministic runtime
+does not produce that order. The repeat now starts a new fetch, or receives that
+delivery's response while a later subscriber keeps the key in flight. The
+`Consumer::deliver` docs now state that a verdict does not retire a fetch issued
+after it. They also state that a fetch issued before the verdict for a delivered
+subscriber may be retired with that subscriber. `delivery::Tracker` gains
+`try_completion`. It takes the completion of a key's delivery if the consumer
+has already sent its verdict or dropped the verdict's sender, and returns `None`
+otherwise. `next_completion` reports the wait of a delivery taken this way as
+`Aborted` ([#5722]).
+
+### Cryptography
+
+The `lthash` docs no longer estimate at least 200 bits of security and instead
+describe a published collision attack on its 1024-element, 16-bit state, which
+puts collision resistance far below 128 bits. The attack needs colliding sets of
+at least 2^72 elements combined, so it does not apply while an adversary cannot
+get that many elements of its choosing into the sets being compared. The hash
+function is unchanged ([#5590]).
+
+### Testing
+
+With the `commonware-glue/test-utils` feature,
+`simulate::action::Crash::ProcessedHeight` now takes `participants:
+NonEmptyVec<P>` instead of `participant: P`, so wrap a single participant in a
+`NonEmptyVec`. `ProcessedHeight` crashes the listed validators together once all
+of them are running and report a processed height inside `heights`. The run
+fails if any listed validator reports a height past `heights` before the crash.
+`simulate::plan::Plan` now applies scheduled crashes, scheduled restarts, and
+`Crash::Random` ticks before it handles finalization updates, so a steady stream
+of updates no longer starves them. A run that configures scheduled or random
+crashes can therefore take longer ([#5726]).
+
+`commonware_runtime::mocks` adds `MutationFaults`, `MutationFaultContext`, and
+`MutationFaultBlob` for recovery tests. `MutationFaults::allow` lets a set
+number of mutating storage operations succeed and then fails every later one
+([#5673]). `MutationFaults::park_after` also lets a set number succeed, but then
+leaves every later one pending so that it never completes ([#5692]).
+
+[#5528]: https://github.com/commonwarexyz/monorepo/pull/5528
+[#5583]: https://github.com/commonwarexyz/monorepo/pull/5583
+[#5590]: https://github.com/commonwarexyz/monorepo/pull/5590
+[#5646]: https://github.com/commonwarexyz/monorepo/pull/5646
+[#5660]: https://github.com/commonwarexyz/monorepo/pull/5660
+[#5673]: https://github.com/commonwarexyz/monorepo/pull/5673
+[#5681]: https://github.com/commonwarexyz/monorepo/pull/5681
+[#5682]: https://github.com/commonwarexyz/monorepo/pull/5682
+[#5692]: https://github.com/commonwarexyz/monorepo/pull/5692
+[#5698]: https://github.com/commonwarexyz/monorepo/pull/5698
+[#5715]: https://github.com/commonwarexyz/monorepo/pull/5715
+[#5717]: https://github.com/commonwarexyz/monorepo/pull/5717
+[#5722]: https://github.com/commonwarexyz/monorepo/pull/5722
+[#5726]: https://github.com/commonwarexyz/monorepo/pull/5726
+[#5728]: https://github.com/commonwarexyz/monorepo/pull/5728
+
 ## v2026.10.0
 
 <details>

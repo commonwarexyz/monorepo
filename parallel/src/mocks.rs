@@ -180,7 +180,7 @@ impl Explorer {
 
 impl Strategy for Explorer {
     #[track_caller]
-    fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
+    fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static + use<F, T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
@@ -253,7 +253,7 @@ impl Strategy for Explorer {
         let most = self
             .strategy
             .parallelism
-            .min(len / minimum_batch_len.get())
+            .min(len / minimum_batch_len)
             .max(1);
         match self.pick(Location::caller(), len, most) + 1 {
             1 => run(Batches::whole(self, len)),

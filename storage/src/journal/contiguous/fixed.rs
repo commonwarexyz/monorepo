@@ -138,12 +138,10 @@ use super::{
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
     checkpoint::Checkpoint,
 };
-#[commonware_macros::stability(ALPHA)]
-use crate::journal::authenticated;
 use crate::{
     Context, SyncCompletion,
     journal::{
-        Error,
+        Error, authenticated,
         contiguous::{Many, Mutable, metrics::Metrics},
         decode_sync,
         durability::Barrier,
@@ -638,7 +636,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
     /// Stage a reset to `size` in `checkpoint`, await `clear_dependents`, then complete the reset
     /// without opening any stored blob. A crash after staging leaves an intent that the next open
     /// completes.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn open_cleared<F, Fut>(
         context: E,
         cfg: Config,
@@ -681,7 +678,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
     /// Positions the stored blobs may hold, from blob names and the checkpoint without opening
     /// their contents. The end is an upper bound based on the newest blob's capacity. A staged
     /// clear has not yet been applied.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn span(
         context: &E,
         cfg: &Config,
@@ -1202,7 +1198,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::init_at_size].
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Fail before writing intent if existing blob partitions are already inconsistent.
         Partition::select(&context, &cfg.partition).await?;
@@ -1468,15 +1463,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         min_item_pos: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
-        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
-        let min_blob = std::cmp::min(target_blob, tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        let Some((min_blob, new_boundary)) = self
+            .blobs
+            .prune_target(min_item_pos, self.items_per_blob.get())
+        else {
             return Ok((self, false));
-        }
+        };
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -1490,7 +1482,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         sync.await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs = self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
@@ -1547,7 +1538,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ///
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(
         mut self: Box<Self>,
         new_size: u64,
@@ -1593,7 +1583,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
-    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
         new_size: u64,
@@ -1669,7 +1658,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// # Crash Safety
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `size..size`.
-    #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         Ok(Self(Box::new(
             Inner::init_at_size(context, cfg, size).await?,
@@ -1677,14 +1665,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Discard all items and reposition the journal at or beyond its current end.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
         Ok(self)
     }
 
     /// Wait for every started sync to complete, surfacing a failure without changing storage.
-    #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn wait_for_sync(self) -> Result<Self, Error> {
         Ok(Self(Box::new(self.0.wait_for_sync().await?)))
     }
@@ -2119,6 +2105,13 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::prune(self, min_position).await
     }
 
+    fn prune_target(&self, min_position: u64) -> u64 {
+        self.0
+            .blobs
+            .prune_target(min_position, self.0.items_per_blob.get())
+            .map_or(self.0.bounds.start, |(_, start)| start)
+    }
+
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Self::start_sync(self).await
     }
@@ -2136,7 +2129,6 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recovery<E, A> {
     type Journal = Journal<E, A>;
 
@@ -2159,7 +2151,6 @@ impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recover
     }
 }
 
-#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A> {
     type Recovery = Recovery<E, A>;
 
@@ -2316,7 +2307,7 @@ mod tests {
             SYNC_READ_STACK_SIZE, authenticated,
             contiguous::{
                 Contiguous as _,
-                tests::{replay_items, tear_page_rewrite},
+                tests::{assert_prune_target, replay_items, tear_page_rewrite},
             },
         },
         utils::codec::View,
@@ -4399,6 +4390,37 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, Error::ItemOutOfRange(10)));
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `prune_target` predicts where each prune leaves the start, across blob boundaries.
+    #[test_traced]
+    fn test_fixed_journal_prune_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(7));
+            // A no-op prune preserves the mid-blob start.
+            let mut journal = Journal::init_at_size(context.child("storage"), cfg, 5)
+                .await
+                .unwrap();
+            for i in 5..45 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = assert_prune_target(
+                journal,
+                &[
+                    (0, 5),
+                    (5, 5),
+                    (7, 7),
+                    (13, 7),
+                    (14, 14),
+                    (30, 28),
+                    (u64::MAX, 42),
+                    (45, 42),
+                ],
+            )
+            .await;
             journal.destroy().await.unwrap();
         });
     }

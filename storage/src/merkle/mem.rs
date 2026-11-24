@@ -5,7 +5,8 @@
 //! `mmr::mem::Mmr` and `mmb::mem::Mmb` via type aliases.
 
 use crate::merkle::{
-    Error, Family, Location, Position, Proof, RangePlan, Readable, batch, hasher::Hasher,
+    Error, Family, Location, MAX_PINNED_NODES, Position, Proof, RangePlan, Readable, batch,
+    hasher::Hasher,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -152,8 +153,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ) -> Result<D, Error<F>> {
         let size = self.size();
         let leaves = Location::try_from(size).expect("invalid merkle size");
-        // A u64 leaf count has at most 64 peaks, so a fixed buffer avoids a heap allocation.
-        let mut peaks = [Position::<F>::default(); 64];
+        let mut peaks = [Position::<F>::default(); MAX_PINNED_NODES];
         let mut count = 0;
         for (pos, _) in F::peaks(size) {
             peaks[count] = pos;
@@ -354,6 +354,39 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .collect()
     }
 
+    /// Move the pruning boundary of a structure that retains no nodes forward to `leaves`, pinning
+    /// `peaks`. Together with the nodes already pinned, which stay pinned, they must include every
+    /// node [`Family::nodes_to_pin`] returns for `leaves`.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn skip_to(
+        &mut self,
+        leaves: Location<F>,
+        peaks: impl IntoIterator<Item = (Position<F>, D)>,
+    ) -> Result<(), Error<F>> {
+        let pos = Position::try_from(leaves)?;
+        if !self.nodes.is_empty() || pos < self.pruning_boundary {
+            return Err(Error::DataCorrupted("skip requires a pruned structure"));
+        }
+        self.pruning_boundary = pos;
+        self.pinned_nodes.extend(peaks);
+        debug_assert!(
+            F::nodes_to_pin(leaves).all(|pos| self.pinned_nodes.contains_key(&pos)),
+            "skip must pin every peak"
+        );
+        Ok(())
+    }
+
+    /// Drop every retained node and pinned node except the peaks at the current size and `keep`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a peak at the current size is neither retained nor pinned.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn compact(&mut self, keep: &BTreeMap<Position<F>, D>) {
+        self.prune_to_loc(self.leaves());
+        self.pinned_nodes.extend(keep);
+    }
+
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
     #[cfg(feature = "std")]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
@@ -486,7 +519,7 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner as _, Strategizer, deterministic};
+    use commonware_runtime::{Runner as _, Strategizer};
     use commonware_utils::NZUsize;
 
     type D = sha256::Digest;
@@ -531,158 +564,165 @@ mod tests {
     }
 
     fn validity<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut mem = Mem::<F, D>::new();
-            for i in 0u64..256 {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = Mem::<F, D>::new();
+        for i in 0u64..256 {
+            assert!(
+                mem.size().is_valid_size(),
+                "size should be valid at step {i}"
+            );
+            let old_size = mem.size();
+            let batch = mem
+                .new_batch()
+                .add(&hasher, &i.to_be_bytes())
+                .merkleize(&mem, &hasher);
+            mem.apply_batch(&batch).unwrap();
+            for size in *old_size + 1..*mem.size() {
                 assert!(
-                    mem.size().is_valid_size(),
-                    "size should be valid at step {i}"
+                    !Position::<F>::new(size).is_valid_size(),
+                    "size {size} should not be valid"
                 );
-                let old_size = mem.size();
-                let batch = mem
-                    .new_batch()
-                    .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&mem, &hasher);
-                mem.apply_batch(&batch).unwrap();
-                for size in *old_size + 1..*mem.size() {
-                    assert!(
-                        !Position::<F>::new(size).is_valid_size(),
-                        "size {size} should not be valid"
-                    );
-                }
             }
-        });
+        }
+    }
+
+    /// Skipping a pruned structure ahead, pinning a reference's new peaks, reproduces the
+    /// reference's root, and compacting keeps only its peaks.
+    fn skip_to_then_compact<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let reference = build_raw::<F>(&hasher, 20);
+        let mut mem = build_raw::<F>(&hasher, 7);
+        mem.prune_all();
+        let start = mem.size();
+        let leaves = Location::new(20);
+        let peaks: Vec<_> = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= start)
+            .map(|pos| (pos, reference.get_node(pos).unwrap()))
+            .collect();
+        mem.skip_to(leaves, peaks).unwrap();
+        assert_eq!(mem.size(), reference.size());
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+        mem.compact(&BTreeMap::new());
+        assert_eq!(mem.pinned_nodes, reference.nodes_to_pin(leaves));
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+
+        // A structure with retained nodes, or a move backward, is rejected.
+        assert!(build_raw::<F>(&hasher, 7).skip_to(leaves, []).is_err());
+        assert!(mem.skip_to(Location::new(7), []).is_err());
     }
 
     fn prune_all_then_append<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut mem = Mem::<F, D>::new();
-            for i in 0u64..256 {
-                mem.prune_all();
-                let batch = mem
-                    .new_batch()
-                    .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&mem, &hasher);
-                mem.apply_batch(&batch).unwrap();
-                assert_eq!(*mem.leaves(), i + 1);
-            }
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = Mem::<F, D>::new();
+        for i in 0u64..256 {
+            mem.prune_all();
+            let batch = mem
+                .new_batch()
+                .add(&hasher, &i.to_be_bytes())
+                .merkleize(&mem, &hasher);
+            mem.apply_batch(&batch).unwrap();
+            assert_eq!(*mem.leaves(), i + 1);
+        }
     }
 
     fn range_proof_out_of_bounds<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mem = Mem::<F, D>::new();
-            assert!(matches!(
-                mem.range_proof(&hasher, Location::new(0)..Location::new(1), 0),
-                Err(Error::RangeOutOfBounds(_))
-            ));
-            let mem = build::<F>(&hasher, 10);
-            assert!(matches!(
-                mem.range_proof(&hasher, Location::new(5)..Location::new(11), 0),
-                Err(Error::RangeOutOfBounds(_))
-            ));
-            assert!(
-                mem.range_proof(&hasher, Location::new(5)..Location::new(10), 0)
-                    .is_ok()
-            );
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mem = Mem::<F, D>::new();
+        assert!(matches!(
+            mem.range_proof(&hasher, Location::new(0)..Location::new(1), 0),
+            Err(Error::RangeOutOfBounds(_))
+        ));
+        let mem = build::<F>(&hasher, 10);
+        assert!(matches!(
+            mem.range_proof(&hasher, Location::new(5)..Location::new(11), 0),
+            Err(Error::RangeOutOfBounds(_))
+        ));
+        assert!(
+            mem.range_proof(&hasher, Location::new(5)..Location::new(10), 0)
+                .is_ok()
+        );
     }
 
     fn proof_out_of_bounds<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mem = Mem::<F, D>::new();
-            assert!(matches!(
-                mem.proof(&hasher, Location::new(0), 0),
-                Err(Error::LeafOutOfBounds(_))
-            ));
-            let mem = build::<F>(&hasher, 10);
-            assert!(matches!(
-                mem.proof(&hasher, Location::new(10), 0),
-                Err(Error::LeafOutOfBounds(_))
-            ));
-            assert!(mem.proof(&hasher, Location::new(9), 0).is_ok());
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mem = Mem::<F, D>::new();
+        assert!(matches!(
+            mem.proof(&hasher, Location::new(0), 0),
+            Err(Error::LeafOutOfBounds(_))
+        ));
+        let mem = build::<F>(&hasher, 10);
+        assert!(matches!(
+            mem.proof(&hasher, Location::new(10), 0),
+            Err(Error::LeafOutOfBounds(_))
+        ));
+        assert!(mem.proof(&hasher, Location::new(9), 0).is_ok());
     }
 
     fn init_pinned_nodes_validation<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
+        let hasher: H = Standard::new(ForwardFold);
 
-            assert!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![],
-                })
-                .is_ok()
-            );
+        assert!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![],
+            })
+            .is_ok()
+        );
 
-            assert!(matches!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(8),
-                    pinned_nodes: vec![],
-                }),
-                Err(Error::InvalidPinnedNodes)
-            ));
+        assert!(matches!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(8),
+                pinned_nodes: vec![],
+            }),
+            Err(Error::InvalidPinnedNodes)
+        ));
 
-            assert!(matches!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: Location::new(0),
-                    pinned_nodes: vec![hasher.digest(b"dummy")],
-                }),
-                Err(Error::InvalidPinnedNodes)
-            ));
+        assert!(matches!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: Location::new(0),
+                pinned_nodes: vec![hasher.digest(b"dummy")],
+            }),
+            Err(Error::InvalidPinnedNodes)
+        ));
 
-            let mem = build::<F>(&hasher, 50);
-            let prune_loc = Location::<F>::new(25);
-            let pinned_nodes = mem.node_digests_to_pin(prune_loc);
-            assert!(
-                Mem::<F, D>::init(Config {
-                    nodes: vec![],
-                    pruning_boundary: prune_loc,
-                    pinned_nodes,
-                })
-                .is_ok()
-            );
-        });
+        let mem = build::<F>(&hasher, 50);
+        let prune_loc = Location::<F>::new(25);
+        let pinned_nodes = mem.node_digests_to_pin(prune_loc);
+        assert!(
+            Mem::<F, D>::init(Config {
+                nodes: vec![],
+                pruning_boundary: prune_loc,
+                pinned_nodes,
+            })
+            .is_ok()
+        );
     }
 
     fn root_stable_under_pruning<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mut reference = Mem::<F, D>::new();
-            let mut pruned = Mem::<F, D>::new();
-            for i in 0u64..200 {
-                let element = hasher.digest(&i.to_be_bytes());
-                let cs = reference
-                    .new_batch()
-                    .add(&hasher, &element)
-                    .merkleize(&reference, &hasher);
-                reference.apply_batch(&cs).unwrap();
-                let cs = pruned
-                    .new_batch()
-                    .add(&hasher, &element)
-                    .merkleize(&pruned, &hasher);
-                pruned.apply_batch(&cs).unwrap();
-                pruned.prune_all();
-                assert_eq!(
-                    plain_root(&pruned, &hasher),
-                    plain_root(&reference, &hasher)
-                );
-            }
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mut reference = Mem::<F, D>::new();
+        let mut pruned = Mem::<F, D>::new();
+        for i in 0u64..200 {
+            let element = hasher.digest(&i.to_be_bytes());
+            let cs = reference
+                .new_batch()
+                .add(&hasher, &element)
+                .merkleize(&reference, &hasher);
+            reference.apply_batch(&cs).unwrap();
+            let cs = pruned
+                .new_batch()
+                .add(&hasher, &element)
+                .merkleize(&pruned, &hasher);
+            pruned.apply_batch(&cs).unwrap();
+            pruned.prune_all();
+            assert_eq!(
+                plain_root(&pruned, &hasher),
+                plain_root(&reference, &hasher)
+            );
+        }
     }
 
     fn do_batch_update<F: Family, S: Strategy>(hasher: &H, mut mem: Mem<F, D>, strategy: S) {
@@ -716,12 +756,9 @@ mod tests {
     }
 
     fn batch_update_leaf<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let mem = build::<F>(&hasher, 200);
-            do_batch_update(&hasher, mem, Sequential);
-        });
+        let hasher: H = Standard::new(ForwardFold);
+        let mem = build::<F>(&hasher, 200);
+        do_batch_update(&hasher, mem, Sequential);
     }
 
     fn batch_parallel_update_leaf<F: Family>() {
@@ -1620,6 +1657,10 @@ mod tests {
         validity::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_prune_all_then_append() {
         prune_all_then_append::<crate::mmr::Family>();
     }
@@ -1743,6 +1784,10 @@ mod tests {
     #[test]
     fn mmb_validity() {
         validity::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_prune_all_then_append() {

@@ -17,7 +17,7 @@
 //! from the operations. The canonical root is then computed from the ops root, the reconstructed
 //! grafted root, and any pending or partial chunk digests.
 //!
-//! [`Database::ops_root`] returns the ops root used by the sync engine.
+//! The root of [`Database::target`] is the ops root used by the sync engine.
 //!
 //! For pruned databases (`range.start > 0`), grafted pinned nodes for the pruned region are read
 //! directly from the ops tree after it is built. This works because of the zero-chunk identity: for
@@ -29,10 +29,7 @@ use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Graftable, Location,
-        full::{self, Merkle},
-    },
+    merkle::{Graftable, Location, storage::Storage as _},
     qmdb::{
         self,
         any::{
@@ -42,7 +39,7 @@ use crate::{
         bitmap::Shared,
         current::{db, grafting},
         metrics::Metrics as AnyMetrics,
-        sync::{Database, DatabaseConfig as Config, Request, source},
+        sync::{Database, DatabaseConfig as Config, Hooks, Request, source},
     },
     translator::Translator,
 };
@@ -57,7 +54,7 @@ use std::{num::NonZeroU64, sync::Arc};
 #[cfg(test)]
 pub(crate) mod tests;
 
-impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, B> {
+impl<T: Translator, J: Clone, S: Strategy> Config for super::Config<T, J, S> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -75,13 +72,13 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, 
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     context: E,
-    merkle_config: full::Config<S>,
+    merkle_config: authenticated::Config<S>,
     log: J,
     translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+    init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
     metadata_partition: String,
@@ -98,20 +95,14 @@ where
     Operation<F, U>: Codec,
 {
     // Build authenticated log.
-    let merkle = Merkle::<F, _, _, S>::init_sync(
-        context.child("merkle"),
-        full::SyncConfig {
-            config: merkle_config,
-            range: range.clone(),
-            pinned_nodes,
-        },
-    )
-    .await?;
     let index = I::new(context.child("index"), translator);
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
-        merkle,
+        context.child("merkle"),
+        &merkle_config,
         log,
         qmdb::hasher::<H>(),
+        range.start(),
+        pinned_nodes.unwrap_or_default(),
         apply_batch_size,
     )
     .await?;
@@ -131,7 +122,7 @@ where
     // during replay.
     let snapshot_context = context.child("any_snapshot");
     let any_metrics = AnyMetrics::new(context.child("any"));
-    let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
+    let any: AnyDb<F, E, J, I, H, U, S, N> = AnyDb::init_from_log(
         snapshot_context,
         index,
         log,
@@ -158,7 +149,6 @@ where
             let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
             let digest = any
                 .log
-                .merkle
                 .get_node(ops_pos)
                 .await?
                 .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
@@ -173,7 +163,7 @@ where
     let (grafted_tree, graft_roots, ops_root_witness) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
-        &any.log.merkle,
+        &any.log,
         any.inactivity_floor_loc,
         &strategy,
     )
@@ -200,9 +190,6 @@ where
     };
     current_db.update_metrics();
 
-    // Persist metadata so the db can be reopened with init_fixed/init_variable.
-    let current_db = current_db.sync_metadata().await?;
-
     Ok(current_db)
 }
 
@@ -210,8 +197,11 @@ impl<F, E, C, I, H, U, const N: usize, S> Database for db::Db<F, E, C, I, H, U, 
 where
     F: Graftable,
     E: Context + Spawner,
-    C: Mutable<Item = Operation<F, U>>
-        + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as crate::qmdb::sync::Journal<F>>::Config,
+        > + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
     H: Hasher,
@@ -224,19 +214,55 @@ where
     type Op = Operation<F, U>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<
-        I::Translator,
-        <C as crate::qmdb::sync::Journal<F>>::Config,
-        S,
-        <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
-    >;
+    type Config = super::Config<I::Translator, <C as crate::qmdb::sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
 
-    async fn from_sync_result(
-        context: Self::Context,
+    async fn init(
+        context: E,
         config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        crate::qmdb::current::init_db(context, config, max_size).await
+    }
+
+    /// The root is the ops root (not the canonical root), since the sync engine verifies
+    /// batches against the ops tree.
+    fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
+        qmdb::sync::Target {
+            root: Self::ops_root(self),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
+    }
+
+    async fn prune_to_target(
+        self,
+        target: &qmdb::sync::Target<F, H::Digest>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        self.prune(target.range.start()).await
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Hooks<Self> for db::Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context + Spawner,
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as crate::qmdb::sync::Journal<F>>::Config,
+        > + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
+        + 'static,
+    I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    async fn from_sync_result(
+        context: E,
+        config: <Self as Database>::Config,
+        log: C,
+        pinned_nodes: Option<Vec<H::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
@@ -258,22 +284,30 @@ where
         .await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        // The grafted metadata must never leave a chunk unpruned when the frontier cannot serve its
+        // graft root. A boundary that moves forward writes the metadata first, as Db::prune does.
+        // One that moves back writes the frontier first, which restores access to the earlier roots
+        // before the metadata needs them.
+        if self.any.log.merkle.bounds().start < self.any.log.frontier.boundary().0 {
+            self.any.log = self.any.log.persist_boundary().await?;
+            self = self.sync_metadata().await?;
+        } else {
+            self = self.sync_metadata().await?;
+            self.any.log = self.any.log.persist_boundary().await?;
+        }
         Ok(self)
     }
 
     async fn discard_local_state(
-        context: Self::Context,
-        config: &Self::Config,
+        context: E,
+        config: &<Self as Database>::Config,
     ) -> Result<(), qmdb::Error<F>> {
-        qmdb::sync::discard_local_state::<F, _, H, S>(
-            context.child("merkle"),
-            config.merkle.clone(),
-        )
-        .await?;
+        authenticated::discard_frontier::<F, _, H, S>(context.child("merkle"), &config.merkle)
+            .await?;
 
         // Grafted metadata records chunks pruned from operations the log held, so it is
-        // discarded with the Merkle structure of those operations.
+        // discarded with the frontier of those operations.
         let (mut metadata, pruned_chunks, _) = db::init_metadata::<F, E, DigestOf<H>>(
             context.child("metadata"),
             &config.grafted_metadata_partition,
@@ -287,35 +321,12 @@ where
     }
 
     async fn local_pinned_nodes(
-        context: Self::Context,
-        config: &Self::Config,
-        target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-        journal: &Self::Journal,
-    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
-        {
-            return Ok(None);
-        }
-
-        // The inactivity floor is carried by the last commit operation rather than
-        // being the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
-        qmdb::sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle.clone(),
-            target,
-            inactivity_floor,
-        )
-        .await
-    }
-
-    /// Returns the ops root (not the canonical root), since the sync engine verifies
-    /// batches against the ops tree.
-    fn ops_root(&self) -> Self::Digest {
-        Self::ops_root(self)
+        context: E,
+        config: &<Self as Database>::Config,
+        target: &qmdb::sync::Target<F, H::Digest>,
+        journal: &C,
+    ) -> Result<Option<Vec<H::Digest>>, qmdb::Error<F>> {
+        qmdb::sync::local_pinned_nodes::<F, _, H, S>(context, &config.merkle, target, journal).await
     }
 }
 

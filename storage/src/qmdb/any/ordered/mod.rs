@@ -1,3 +1,8 @@
+//! Ordered variants of the [Any database](crate::qmdb::any).
+//!
+//! Span lookups use the lexicographic byte order defined by [`Key`], including when the
+//! queried key is absent.
+
 use crate::{
     Context,
     index::Ordered as Index,
@@ -59,7 +64,7 @@ impl<
     H: Hasher,
     const N: usize,
     S: Strategy,
-> Db<F, E, C, I, H, Update<K, V>, N, S>
+> Db<F, E, C, I, H, Update<K, V>, S, N>
 where
     Operation<F, K, V>: Codec,
 {
@@ -94,13 +99,16 @@ where
             }
 
             // If the translated key is in the snapshot, search its conflicts for the span.
-            if let Some(span) = self.find_span(self.snapshot.get(key).copied(), key).await? {
+            if let Some(span) = self
+                .find_span(self.snapshot.get(key.as_ref()).copied(), key)
+                .await?
+            {
                 return Ok(Some(span));
             }
 
             // The remaining span owner is in the previous translated key. Allow wrapping because
             // spans connect the last active key back to the first.
-            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = self.snapshot.prev_translated_key(key.as_ref()) else {
                 // DB is empty.
                 return Ok(None);
             };
@@ -135,7 +143,7 @@ where
         async move {
             // The strict predecessor can share the query's translated key.
             if let Some(prev) = self
-                .find_strict_prev_key(self.snapshot.get(key).copied(), key)
+                .find_strict_prev_key(self.snapshot.get(key.as_ref()).copied(), key)
                 .await?
             {
                 return Ok(Some(prev));
@@ -143,7 +151,7 @@ where
 
             // The previous translated key is the only remaining candidate. Reject wrapping so
             // queries at or below the first active key have no predecessor.
-            let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
+            let Some((iter, false)) = self.snapshot.prev_translated_key(key.as_ref()) else {
                 return Ok(None);
             };
 
@@ -248,7 +256,7 @@ where
         let updates = match cursor {
             Cursor::Done => return Ok(None),
             Cursor::Next(key) => {
-                self.fetch_all_updates(self.snapshot.get(key).copied())
+                self.fetch_all_updates(self.snapshot.get(key.as_ref()).copied())
                     .await?
             }
             Cursor::Start => match start {
@@ -261,11 +269,12 @@ where
                 Included(start) | Excluded(start) => {
                     // The bound's own bucket may hold keys below it. When no active key shares
                     // its translated key, the following bucket starts.
-                    let mut locs = self.snapshot.get(start).copied().peekable();
+                    let mut locs = self.snapshot.get(start.as_ref()).copied().peekable();
                     if locs.peek().is_some() {
                         self.fetch_all_updates(locs).await?
                     } else {
-                        let Some((iter, false)) = self.snapshot.next_translated_key(start) else {
+                        let Some((iter, false)) = self.snapshot.next_translated_key(start.as_ref())
+                        else {
                             return Ok(None);
                         };
                         self.fetch_all_updates(iter.copied()).await?
@@ -426,7 +435,7 @@ fn find_prev_key_mut<'a, K: Ord, V>(
 mod test {
     use super::*;
     use crate::{
-        index::ordered::Index as OrderedIndex,
+        index::{ordered::Index as OrderedIndex, partitioned::ordered::SPILL_THRESHOLD},
         journal::{
             Error as JournalError, authenticated,
             contiguous::{self, fixed::Journal},
@@ -435,7 +444,7 @@ mod test {
         mmb, mmr,
         qmdb::{
             any::{
-                self, BITMAP_CHUNK_BYTES,
+                self,
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current,
@@ -454,7 +463,7 @@ mod test {
     };
     use core::{future::Future, pin::Pin};
     use futures::{StreamExt as _, future::pending, pin_mut};
-    use rand::{RngExt as _, seq::SliceRandom as _};
+    use rand::RngExt as _;
     use std::{
         collections::{BTreeMap, BTreeSet},
         num::NonZeroUsize,
@@ -843,12 +852,21 @@ mod test {
         };
     }
 
+    /// Keys that share one translated key in every neighbor test, enough to give lookups a run of
+    /// conflicts to read through.
+    const CROWD: u16 = 16;
+
+    /// Run the neighbor scenario against `$db`. `$spill` is the number of extra keys that share a
+    /// partition, and `$spilled` reports how many partitions the index has spilled. An index
+    /// without partitions passes zero for both.
     macro_rules! test_neighbors {
-        ($name:ident, $db:ty, $config:path) => {
+        ($name:ident, $db:ty, $config:path, $spill:expr, $spilled:expr) => {
             #[test]
             fn $name() {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
+                    let spill: usize = $spill;
+                    let spilled: fn(&TestDb) -> usize = $spilled;
 
                     let config = $config("neighbors");
                     let mut db = TestDb::init(context.child("db"), config.clone(), None)
@@ -882,10 +900,8 @@ mod test {
                         }
                     }
 
-                    // Flood one translated key and force partitioned indices past their spill
-                    // threshold. Leave gaps between keys and scramble the conflict iteration order.
-                    let mut rng = test_rng();
-                    let mut crowded: Vec<Digest> = (0u16..520)
+                    // Crowd one translated key, leaving gaps between its keys.
+                    let crowded: Vec<Digest> = (0..CROWD)
                         .map(|i| {
                             let mut bytes = [0x20; 32];
                             bytes[30..].copy_from_slice(&(i * 2).to_be_bytes());
@@ -895,30 +911,41 @@ mod test {
                     let survivor = *crowded.last().unwrap();
                     let probes: Vec<_> = crowded
                         .iter()
-                        .step_by(31)
+                        .step_by(4)
                         .chain(crowded.last())
                         .copied()
                         .collect();
-                    for key in &probes {
+
+                    // Fill the crowded keys' partition past the point where it spills, with keys
+                    // spread over many translated keys so that a lookup among them stays short.
+                    let filler: Vec<Digest> = (0..spill)
+                        .map(|i| {
+                            let mut bytes = [0x20; 32];
+                            bytes[1] = 0x80 | (i % 128) as u8;
+                            bytes[30..].copy_from_slice(&u16::try_from(i).unwrap().to_be_bytes());
+                            bytes.into()
+                        })
+                        .collect();
+                    for key in probes.iter().chain(filler.iter().step_by(61)) {
                         queries.push(*key);
                         let mut gap: [u8; 32] = (*key).into();
-                        gap[31] += 1;
+                        gap[31] = gap[31].wrapping_add(1);
                         queries.push(gap.into());
                     }
-                    crowded.shuffle(&mut rng);
-                    phases.push(crowded.iter().map(|&key| (key, Some(value))).collect());
+                    let flood: Vec<Digest> = crowded.iter().chain(&filler).copied().collect();
+                    let flooded = phases.len();
+                    phases.push(flood.iter().map(|&key| (key, Some(value))).collect());
                     phases.push(probes.iter().map(|&key| (key, None)).collect());
                     phases.push(
                         probes
                             .iter()
-                            .rev()
                             .map(|&key| (key, Some(Sha256::fill(2))))
                             .collect(),
                     );
 
                     // Leave one active collision behind the tombstones before emptying the view.
                     phases.push(
-                        crowded
+                        flood
                             .iter()
                             .filter(|&&key| key != survivor)
                             .map(|&key| (key, None))
@@ -975,6 +1002,11 @@ mod test {
                         );
                         db = db.apply_batch(batch).await.unwrap();
 
+                        // The filler must have spilled its partition, or the phases that follow
+                        // would not query a spilled one.
+                        if phase == flooded {
+                            assert_eq!(spilled(&db), usize::from(spill > 0), "applied");
+                        }
                         assert_neighbors!(
                             &db,
                             &active,
@@ -1000,6 +1032,9 @@ mod test {
                         db = TestDb::init(context.child("reopen"), config.clone(), None)
                             .await
                             .unwrap();
+                        if phase == flooded {
+                            assert_eq!(spilled(&db), usize::from(spill > 0), "reopened");
+                        }
                         assert_neighbors!(
                             &db,
                             &active,
@@ -1016,39 +1051,93 @@ mod test {
     test_neighbors!(
         test_neighbors_any_fixed,
         any::ordered::fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, Sequential>,
-        any::test::fixed_db_config::<OneCap>
+        any::test::fixed_db_config::<OneCap>,
+        0,
+        |_| 0
     );
     test_neighbors!(
         test_neighbors_any_variable,
         any::ordered::variable::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, Sequential>,
-        any::test::variable_db_config::<OneCap>
+        any::test::variable_db_config::<OneCap>,
+        0,
+        |_| 0
     );
     test_neighbors!(
         test_neighbors_any_fixed_partitioned,
         any::ordered::fixed::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
-        any::test::fixed_db_config_partitioned::<OneCap>
+        any::test::fixed_db_config_partitioned::<OneCap>,
+        SPILL_THRESHOLD + 8,
+        |db| db.snapshot.spilled_count()
     );
     test_neighbors!(
         test_neighbors_any_variable_partitioned,
         any::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
-        any::test::variable_db_config_partitioned::<OneCap>
+        any::test::variable_db_config_partitioned::<OneCap>,
+        SPILL_THRESHOLD + 8,
+        |db| db.snapshot.spilled_count()
     );
-    test_neighbors!(
+
+    // Current delegates neighbor lookups to Any. Check that each wrapper queries the right view.
+    macro_rules! test_current_neighbors {
+        ($name:ident, $db:ty, $config:path) => {
+            #[test]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    type TestDb = $db;
+                    let config = $config("neighbors");
+                    let db = TestDb::init(context.child("db"), config.clone(), None)
+                        .await
+                        .unwrap();
+                    let keys = [1, 2, 3].map(Sha256::fill);
+                    let [left, middle, right] = keys;
+                    let before = BTreeSet::from(keys);
+                    let after = BTreeSet::from([left, right]);
+
+                    let mut seed = db.new_batch();
+                    for key in keys {
+                        seed = seed.write(key, Some(Sha256::fill(1)));
+                    }
+                    let seed = seed.merkleize(&db).await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
+
+                    let batch = db
+                        .new_batch()
+                        .write(middle, None)
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
+                    assert_neighbors!(batch, &after, &keys, "merkleized", &db);
+                    assert_neighbors!(&db, &before, &keys, "before apply");
+                    let db = db.apply_batch(batch).await.unwrap();
+                    assert_neighbors!(&db, &after, &keys, "applied");
+
+                    drop(db.commit().await.unwrap());
+                    let db = TestDb::init(context.child("reopen"), config, None)
+                        .await
+                        .unwrap();
+                    assert_neighbors!(&db, &after, &keys, "reopened");
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    test_current_neighbors!(
         test_neighbors_current_fixed,
         current::ordered::fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>,
         current::tests::fixed_config::<OneCap>
     );
-    test_neighbors!(
+    test_current_neighbors!(
         test_neighbors_current_variable,
         current::ordered::variable::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>,
         current::tests::variable_config::<OneCap>
     );
-    test_neighbors!(
+    test_current_neighbors!(
         test_neighbors_current_fixed_partitioned,
         current::ordered::fixed::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
         current::tests::fixed_config_partitioned::<OneCap>
     );
-    test_neighbors!(
+    test_current_neighbors!(
         test_neighbors_current_variable_partitioned,
         current::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
         current::tests::variable_config_partitioned::<OneCap>
@@ -1918,7 +2007,6 @@ mod test {
         OrderedIndex<TwoCap, Location<mmr::Family>>,
         Sha256,
         fixed::Update<Digest, Digest>,
-        BITMAP_CHUNK_BYTES,
         Sequential,
     >;
 
@@ -1970,11 +2058,15 @@ mod test {
         } = db;
         let authenticated::Journal {
             merkle,
+            frontier,
+            boundary_recorded,
             journal,
             hasher,
         } = log;
         let log = authenticated::Journal {
             merkle,
+            frontier,
+            boundary_recorded,
             journal: Controlled {
                 inner: journal,
                 mode,

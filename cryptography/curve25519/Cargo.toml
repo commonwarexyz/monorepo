@@ -1,6 +1,7 @@
 [package]
 name = "commonware-cryptography-curve25519"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -48,6 +49,11 @@ bench = false
 name = "batch_verify"
 harness = false
 path = "benches/batch_verify.rs"
+
+[[bench]]
+name = "decode"
+harness = false
+path = "benches/decode.rs"
 
 [features]
 default = [ "std" ]

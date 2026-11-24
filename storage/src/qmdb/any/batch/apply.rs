@@ -43,7 +43,7 @@ fn probe_index<'a, F: Family, K: Key + 'a, I: UnorderedIndex<Value = Location<F>
     }
     let mut probed = 0u64;
     for key in keys {
-        probed ^= snapshot.get(key).next().map_or(0, |loc| **loc);
+        probed ^= snapshot.get(key.as_ref()).next().map_or(0, |loc| **loc);
     }
     std::hint::black_box(probed);
 }
@@ -53,7 +53,7 @@ fn probe_index<'a, F: Family, K: Key + 'a, I: UnorderedIndex<Value = Location<F>
 fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
     snapshot: &mut I,
     bitmap: &mut bitmap::Prunable<N>,
-    key: &impl Key,
+    key: &[u8],
     entry: &DiffEntry<F, V>,
     old_loc: Option<Location<F>>,
 ) {
@@ -97,7 +97,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
             for chunk in self.diff.chunks(PROBE_CHUNK) {
                 probe_index(snapshot, chunk.iter().map(|(key, _)| key));
                 for (key, entry) in chunk {
-                    apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+                    apply_diff(snapshot, bitmap, key.as_ref(), entry, entry.base_old_loc());
                 }
             }
         } else {
@@ -150,7 +150,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
                 }
                 probe_index(snapshot, chunk.iter().map(|(key, _, _)| *key));
                 for &(key, entry, old) in &chunk {
-                    apply_diff(snapshot, bitmap, key, entry, old);
+                    apply_diff(snapshot, bitmap, key.as_ref(), entry, old);
                 }
             }
         }
@@ -161,7 +161,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, S, N>
 where
     F: Family,
     E: Context,

@@ -1,0 +1,3 @@
+["commonware_collector::p2p::wire::tests::conformance::CodecConformance<Message<u8,u16>>"]
+n_cases = 65536
+hash = "2e92cb7c0dd5609e9c4f5161db5ffc3f2cbabe99407e1e1b746196eedb41e25d"

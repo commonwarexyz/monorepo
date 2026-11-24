@@ -5,6 +5,9 @@
 //! compared to [super::unordered] variants. Their translator must implement
 //! [OrderedTranslator](crate::translator::OrderedTranslator).
 //!
+//! Span lookups use the lexicographic byte order defined by [`Key`](crate::qmdb::operation::Key),
+//! including when the queried key is absent.
+//!
 //! Variants:
 //! - [fixed]: Variant optimized for values of fixed size.
 //! - [variable]: Variant for values of variable size.
@@ -340,7 +343,7 @@ pub mod tests {
                 &root,
             ));
 
-            let db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(200, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -388,7 +391,7 @@ pub mod tests {
         executor.start(|mut context| async move {
             let partition = "range-proofs".to_string();
             let db = open_db(context.child("db"), partition.clone()).await;
-            let db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
+            let db = apply_random_ops::<F, TestDb<F, C, V>>(500, context.next_u64(), db)
                 .await
                 .unwrap();
             let merkleized = db.new_batch().merkleize(&db).await.unwrap();
@@ -438,7 +441,7 @@ pub mod tests {
                 let wrong_root = Sha256::hash(&[&[0xDD]]);
                 assert!(!proof.verify::<Sha256, V>(key, value, &wrong_root));
                 // Proof should fail with the wrong next-key.
-                let mut bad_proof = proof.clone();
+                let mut bad_proof = proof;
                 bad_proof.next_key = wrong_key;
                 assert!(!bad_proof.verify::<Sha256, V>(key, value, &root));
             }

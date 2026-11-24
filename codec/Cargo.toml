@@ -1,6 +1,7 @@
 [package]
 name = "commonware-codec"
 edition.workspace = true
+rust-version.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
@@ -30,6 +31,7 @@ arbitrary = [
 	"ruint/arbitrary",
 	"std",
 ]
+fuzz = [ "arbitrary/derive", "dep:arbitrary" ]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }
@@ -45,9 +47,10 @@ ruint.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-allocator = { workspace = true, features = ["mimalloc"] }
+commonware-invariants.workspace = true
 criterion.workspace = true
-proptest.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }
 
 [lib]

@@ -231,7 +231,10 @@ pub trait Read: Sized {
     /// Reads `len` values from the buffer into a vector.
     ///
     /// Container implementations call this hook so element types can provide a more efficient
-    /// vector read path. The default preserves normal element-by-element decoding.
+    /// vector read path, such as validating every element in one batch. The default preserves
+    /// normal element-by-element decoding. An override must accept exactly the inputs, and
+    /// produce exactly the values, that calling [Read::read_cfg] `len` times would. Only the
+    /// returned [Error] variant may differ on a rejected input.
     ///
     /// This hook exists because stable Rust cannot express the overlapping specialized
     /// container impls that would otherwise provide this aggregate path directly.
@@ -252,7 +255,9 @@ pub trait Read: Sized {
     /// Reads exactly `N` values from the buffer into an array.
     ///
     /// This hidden hook is the array equivalent of [Read::read_vec]. The default preserves
-    /// normal element-by-element decoding.
+    /// normal element-by-element decoding through [Read::read_vec]. An override must accept
+    /// exactly the inputs, and produce exactly the values, that calling [Read::read_cfg] `N`
+    /// times would. Only the returned [Error] variant may differ on a rejected input.
     ///
     /// This hook exists because stable Rust cannot express the overlapping specialized array
     /// impls that would otherwise provide this aggregate path directly.

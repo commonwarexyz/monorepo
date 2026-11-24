@@ -41,9 +41,8 @@ pub mod partitioned {
     //! [Any's counterpart]: crate::qmdb::any::unordered::fixed::partitioned
 
     use super::*;
-    pub use super::{Operation, Update};
+    pub use super::{Config, Operation, Update};
     use crate::index::partitioned::unordered::Index;
-    use core::num::NonZeroUsize;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -64,9 +63,6 @@ pub mod partitioned {
             S,
         >;
 
-    /// Configuration for a [Db].
-    pub type Config<T, S> = current::Config<T, JournalConfig, S, NonZeroUsize>;
-
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Fixed-value DB with 256 partitions.
@@ -86,8 +82,9 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        journal::contiguous::fixed::Config as JournalConfig,
-        merkle::full::Config as MerkleConfig,
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig,
+        },
         mmr,
         qmdb::{
             any::batch::Slot,
@@ -110,7 +107,7 @@ pub mod test {
             self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
+    use commonware_utils::{NZU64, NZUsize, TestRng, probability};
     use rand::Rng as _;
     use std::collections::HashMap;
 
@@ -610,13 +607,10 @@ pub mod test {
             .unwrap();
             Config {
                 merkle: MerkleConfig {
-                    journal_partition: "rebranch-merkle-journal".into(),
-                    metadata_partition: "rebranch-merkle-metadata".into(),
-                    items_per_blob: NZU64!(100_000),
-                    write_buffer: NZUsize!(4096),
+                    partition: "rebranch-merkle-metadata".into(),
                     replay_buffer: NZUsize!(4096),
                     strategy: Sequential,
-                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(64)),
+                    resident_height: Default::default(),
                 },
                 log: JournalConfig {
                     partition: "rebranch-ops-journal".into(),
@@ -629,7 +623,7 @@ pub mod test {
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 16),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(2),
             }
         }
 

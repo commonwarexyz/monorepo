@@ -69,8 +69,6 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
-    pub mod reed_solomon;
-
     pub mod sha512;
     pub use crate::sha512::{CoreSha512, Sha512};
 
@@ -110,6 +108,8 @@ commonware_macros::stability_scope!(BETA {
 
     #[cfg(feature = "std")]
     pub mod handshake;
+
+    pub mod reed_solomon;
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
     pub trait Signer: Random + Send + Sync + Clone + 'static {

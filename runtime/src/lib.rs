@@ -410,6 +410,25 @@ stability_scope!(BETA {
         ///
         /// Child tasks should assume they start from a clean configuration without needing to inspect how their
         /// parent was configured.
+        ///
+        /// # Thread Safety
+        ///
+        /// The task's future must be [`Send`].
+        ///
+        /// ```compile_fail
+        /// use commonware_runtime::{deterministic, Runner, Spawner};
+        /// use std::rc::Rc;
+        ///
+        /// let executor = deterministic::Runner::default();
+        /// executor.start(|context| async move {
+        ///     // An `Rc` held across an await keeps the task's future from being `Send`.
+        ///     context.spawn(|_| async move {
+        ///         let shared = Rc::new(());
+        ///         std::future::ready(()).await;
+        ///         drop(shared);
+        ///     });
+        /// });
+        /// ```
         fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
         where
             Self: Sized,
@@ -919,6 +938,13 @@ stability_scope!(BETA {
     /// stages of that mutation. The ranges of one batched read are not a snapshot either.
     /// Callers that need a stable view must synchronize mutations with their reads or read
     /// only immutable ranges.
+    ///
+    /// Mutations that are pending at the same time may take effect in any order, regardless of
+    /// the order in which they were called. To order an operation after a mutation, await the
+    /// mutation first. A mutation whose future was dropped before it completed may still take
+    /// effect after later operations complete, including a later [`Blob::sync`]. Opening the
+    /// blob again after every handle to this open is dropped waits for such a mutation to finish
+    /// (see [`Storage`]).
     pub trait Blob: Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///

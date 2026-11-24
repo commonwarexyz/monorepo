@@ -9,8 +9,8 @@ use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{Graftable, PendingChunk as _, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig},
+    merkle::{Graftable, PendingChunk as _, mmb, mmr},
     qmdb::{
         self,
         any::ordered::fixed::Update,
@@ -66,13 +66,10 @@ fn config() -> Config<OneCap, Sequential> {
     let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
     Config {
         merkle: MerkleConfig {
-            journal_partition: "lifecycle-merkle-journal".into(),
-            metadata_partition: "lifecycle-merkle-metadata".into(),
-            items_per_blob: NZU64!(11),
-            write_buffer: NZUsize!(1024),
+            partition: "lifecycle-merkle-metadata".into(),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            resident_height: Default::default(),
         },
         log: JournalConfig {
             partition: "lifecycle-operations".into(),
@@ -85,7 +82,7 @@ fn config() -> Config<OneCap, Sequential> {
         translator: OneCap,
         init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(4096),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(2),
     }
 }
 
@@ -258,8 +255,8 @@ mod tests {
                 assert_eq!(fixture.after.root, fixture.excluded.root);
                 assert_ne!(fixture.after.root, fixture.empty.root);
                 assert!(fixture.retainedStart > Uint256::ZERO);
-                assert_eq!(fixture.before.operation[0], 0xd2);
-                assert_eq!(fixture.empty.operation[0], 0xd3);
+                assert_eq!(fixture.before.operation[0], 0x01);
+                assert_eq!(fixture.empty.operation[0], 0x00);
             }
         }
     }

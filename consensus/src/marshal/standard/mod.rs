@@ -50,21 +50,19 @@
 //! Without that context, a validator that missed the proposal or restarted cannot verify the
 //! block itself, so it relies on the honest validators in the notarizing quorum having verified it.
 //!
-//! [`Deferred`] checks that the block's embedded context matches the proposal before voting to
-//! notarize, without waiting for application verification. It certifies only after application
-//! verification succeeds, using the embedded context if the validator missed the proposal or
-//! restarted. Its notarizations therefore do not guarantee application validity and cannot
-//! safely be trusted by [`Inline`] validators.
+//! [`Deferred`] checks that the block's embedded context matches the proposal and that the block
+//! names the proposal's parent before voting to notarize, without waiting for application
+//! verification. It certifies only after application verification succeeds, using the embedded
+//! context if the validator missed the proposal or restarted. Its notarizations therefore do not
+//! guarantee application validity and cannot safely be trusted by [`Inline`] validators.
 
-commonware_macros::stability_scope!(ALPHA {
-    mod deferred;
-    pub use deferred::Deferred;
+mod deferred;
+pub use deferred::Deferred;
 
-    mod inline;
-    pub use inline::Inline;
+mod inline;
+pub use inline::Inline;
 
-    mod validation;
-});
+mod validation;
 
 mod variant;
 pub use variant::Standard;
@@ -95,12 +93,14 @@ mod tests {
                     self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
                     InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
                     QUORUM, S, StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V,
-                    ValidatorHandle, default_leader, make_raw_block, setup_network_links,
-                    setup_network_with_participants,
+                    ValidatorHandle, default_leader, make_raw_block, opened_cache_epochs,
+                    setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
                 strategy::{Gate, GatedStrategy},
-                verifying::MockVerifyingApp,
+                verifying::{
+                    MockVerifyingApp, RecordingVerifyingApp, Verification, WalkingVerifyingApp,
+                },
             },
             resolver::handler,
         },
@@ -114,7 +114,9 @@ mod tests {
                 Nullify, Proposal, Vote,
             },
         },
-        types::{Epoch, EpochInfo, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
+        types::{
+            Epoch, EpochInfo, Epocher, FixedEpocher, Height, Round, TermLength, View, ViewDelta,
+        },
     };
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
@@ -137,6 +139,10 @@ mod tests {
         buffer::paged::CacheRef,
         deterministic,
         mocks::{MutationFaultContext, MutationFaults},
+        telemetry::metrics::{
+            MetricsExt as _,
+            histogram::{Buckets, Timed},
+        },
         utils::reschedule,
     };
     use commonware_storage::{
@@ -145,7 +151,7 @@ mod tests {
         translator::EightCap,
     };
     use commonware_utils::{
-        Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize,
+        Acknowledgement as _, NZDuration, NZU16, NZU32, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         non_empty,
@@ -155,6 +161,7 @@ mod tests {
         sync::Mutex,
         vec::NonEmptyVec,
     };
+    use futures::StreamExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -275,7 +282,7 @@ mod tests {
 
                 let mut cursor = marshal.get_block(&parent).await.unwrap();
                 for expected in (0..3).rev() {
-                    cursor = marshal.subscribe_parent(&cursor).await.unwrap();
+                    cursor = marshal.subscribe_parent(&cursor, None).await.unwrap();
                     assert_eq!(cursor.height(), Height::new(expected));
                 }
                 assert_eq!(counter.count(), 3, "{kind:?} ancestry hashing");
@@ -381,7 +388,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let buffer = RecordingBuffer::default();
-            let (mailbox, buffer, _resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "standard-provider-parent-commitment",
                 ConstantProvider::new(schemes[0].clone()),
@@ -394,7 +401,7 @@ mod tests {
 
             let parent = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
             let child = make_raw_block(parent.digest(), Height::new(2), 200);
-            let subscription = mailbox.subscribe_parent(&ready(child.clone()));
+            let subscription = mailbox.subscribe_parent(&ready(child.clone()), None);
 
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
@@ -402,7 +409,50 @@ mod tests {
                 1,
                 "parent walkback should use the standard parent commitment"
             );
-            drop(subscription);
+
+            // A caller's bound travels with the request.
+            let round = Round::new(Epoch::zero(), View::new(7));
+            let bounded = mailbox.subscribe_parent(&ready(child.clone()), Some(round));
+
+            // A stream that starts from a block found by round requests under that round.
+            assert!(mailbox.verified(round, ready(child.clone())).await);
+            let mut ancestry = mailbox
+                .ancestry(
+                    Arc::new(context.child("ancestry")),
+                    (DigestFallback::FetchByRound { round }, child.digest()),
+                    Timed::new(context.histogram(
+                        "ancestor_fetch_duration",
+                        "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
+                        Buckets::LOCAL,
+                    )),
+                )
+                .await
+                .expect("the stored child must start the stream");
+            assert_eq!(
+                ancestry.next().await.map(|block| block.digest()),
+                Some(child.digest())
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+            let requested: Vec<_> = resolver
+                .fetches()
+                .into_iter()
+                .map(|fetch| (fetch.key, fetch.subscriber))
+                .collect();
+            let request = |round| {
+                (
+                    handler::Key::Block(parent.digest()),
+                    handler::Annotation::Untrusted {
+                        height: Height::new(1),
+                        round,
+                    },
+                )
+            };
+            assert_eq!(
+                requested,
+                [request(None), request(Some(round)), request(Some(round))]
+            );
+            drop((subscription, bounded, ancestry));
         });
     }
 
@@ -759,16 +809,11 @@ mod tests {
             .expect("failed to sync seeded application metadata");
     }
 
-    // Writes a block directly into the cache's per-epoch notarized storage,
-    // simulating a block that was notarized but never finalized before a crash.
-    async fn seed_cache_block(
+    async fn init_seed_cache(
         context: deterministic::Context,
         partition_prefix: &str,
-        epoch: Epoch,
-        view: View,
-        block: &B,
-    ) {
-        let cache = cache::Manager::<_, Standard<B>, S>::init(
+    ) -> cache::Manager<deterministic::Context, Standard<B>, S> {
+        cache::Manager::init(
             context.child("seed_cache"),
             cache::Config {
                 partition_prefix: format!("{partition_prefix}-cache"),
@@ -780,7 +825,19 @@ mod tests {
             },
             (),
         )
-        .await;
+        .await
+    }
+
+    // Writes a block directly into the cache's per-epoch notarized storage,
+    // simulating a block that was notarized but never finalized before a crash.
+    async fn seed_cache_block(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        epoch: Epoch,
+        view: View,
+        block: &B,
+    ) {
+        let cache = init_seed_cache(context, partition_prefix).await;
         let (_cache, synced) = cache
             .put_notarized(
                 Round::new(epoch, view),
@@ -1104,6 +1161,52 @@ mod tests {
                 let h = recovering.application.acknowledged().await;
                 assert_eq!(h, Height::new(expected_height));
             }
+        });
+    }
+
+    /// If a crash interrupts the sync of the height archives, the lookup recovers the finalization
+    /// from the digest cache when the block was stored by height without its certificate.
+    #[test_traced("WARN")]
+    fn test_standard_restart_reads_cached_finalization() {
+        const PARTITION_PREFIX: &str = "restart-reads-cached-finalization";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let height = Height::new(1);
+            let block = make_raw_block(genesis.digest(), height, 100);
+            let digest = block.digest();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), digest),
+                &schemes,
+                QUORUM,
+            );
+
+            // The digest cache sync and the block archive sync completed before the crash.
+            let storage = context.child("storage");
+            let cache = init_seed_cache(storage.child("cache"), PARTITION_PREFIX).await;
+            drop(cache.put_finalization(round, digest, &finalization).await);
+            seed_inconsistent_restart_state(
+                storage,
+                PARTITION_PREFIX,
+                &[genesis.inner().clone(), block],
+                &[],
+            )
+            .await;
+
+            let (mailbox, _, _, _handle) = start_standard_actor(
+                context.child("restart"),
+                PARTITION_PREFIX,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis),
+            )
+            .await;
+
+            assert_eq!(mailbox.get_finalization(height).await, Some(finalization));
         });
     }
 
@@ -2035,32 +2138,6 @@ mod tests {
         });
     }
 
-    /// Epochs whose cache archives are open under the metrics context `root`. Each open epoch's
-    /// finalizations archive registers an `items_tracked` gauge labeled with the epoch.
-    fn opened_cache_epochs(context: &deterministic::Context, root: &str) -> Vec<u64> {
-        let needle = format!("{root}_cache_finalizations_items_tracked{{");
-        let mut epochs: Vec<u64> = context
-            .encode()
-            .lines()
-            .filter(|line| line.starts_with(&needle))
-            .map(|line| {
-                let start = line
-                    .find("epoch=\"")
-                    .expect("gauge must have an epoch label")
-                    + "epoch=\"".len();
-                let end = start
-                    + line[start..]
-                        .find('"')
-                        .expect("epoch label must have a closing quote");
-                line[start..end]
-                    .parse()
-                    .expect("epoch label must be an integer")
-            })
-            .collect();
-        epochs.sort_unstable();
-        epochs
-    }
-
     // A floor finalization cached at epoch 64 before its anchor block arrives
     // is the cache's first write, so it records the epoch range (0, 64).
     // Reopening the cache must open only the epoch that holds data.
@@ -2925,10 +3002,11 @@ mod tests {
                 missing_digest,
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
+                    round: None,
                 },
             );
             let mut wait = mailbox.subscribe_by_digest(missing_digest, DigestFallback::Wait);
-            let mut parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone())));
+            let mut parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone()), None));
 
             // The anchor subscription resolves when the block arrives.
             let anchor_wait = mailbox.subscribe_by_digest(
@@ -2979,7 +3057,7 @@ mod tests {
                     round: Round::new(Epoch::zero(), View::new(3)),
                 },
             );
-            let mut late_parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone())));
+            let mut late_parent = Box::pin(mailbox.subscribe_parent(&ready(child.clone()), None));
             let _ = mailbox.get_processed().await;
             assert!(matches!(late_by_round.try_recv(), Err(TryRecvError::Empty)));
             select! {
@@ -3759,6 +3837,236 @@ mod tests {
     #[test_traced("WARN")]
     fn test_deferred_scripted_byzantine_parent_equivocation() {
         scripted_byzantine_parent_equivocation(WrapperKind::Deferred);
+    }
+
+    /// Runs a validator with stable leaders and a lookahead of one view against a scripted leader
+    /// that proposes a first block in view 1 and a child of that block in view 2. Returns the
+    /// views the validator voted to notarize and the views whose block its application was asked
+    /// to verify.
+    ///
+    /// The first block embeds the consensus context of its view and follows genesis in height.
+    /// With `linked` it also names genesis as its parent. Otherwise it names an arbitrary digest
+    /// that no block has. The child embeds its view's context, names the first block as its
+    /// parent, and is one block higher.
+    fn optimistic_child(linked: bool) -> (Vec<View>, Vec<View>) {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // With terms of two views, round-robin elects participant 1 for views 1 and 2, and
+            // a lookahead of one view lets a validator verify view 2 on its vote for view 1.
+            let terms = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(2)),
+                Duration::from_secs(60),
+                ViewDelta::new(1),
+            );
+            let leader = participants[1].clone();
+            let victim = participants[0].clone();
+            let observer = participants[2].clone();
+            let elector: RoundRobinElector<S> = terms.clone().build(schemes[0].participants());
+            for view in [1, 2] {
+                assert_eq!(
+                    schemes[0]
+                        .participants()
+                        .key(elector.elect(Round::new(Epoch::zero(), View::new(view)), ())),
+                    Some(&leader),
+                );
+            }
+
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+            let setup = StandardHarness::setup_validator(
+                context.child("marshal"),
+                &mut oracle,
+                victim.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let buffer = setup.extra;
+
+            // Build both blocks and cache them in the victim's buffer, as the leader's broadcast
+            // would.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let first_round = Round::new(Epoch::zero(), View::new(1));
+            let first_parent = if linked {
+                genesis.digest()
+            } else {
+                Sha256::hash(&[b"not the context parent"])
+            };
+            let first = B::new::<Sha256>(
+                Ctx {
+                    round: first_round,
+                    leader: leader.clone(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                first_parent,
+                Height::new(1),
+                100,
+            );
+            let child_round = Round::new(Epoch::zero(), View::new(2));
+            let child = B::new::<Sha256>(
+                Ctx {
+                    round: child_round,
+                    leader: leader.clone(),
+                    parent: (View::new(1), first.digest()),
+                },
+                first.digest(),
+                Height::new(2),
+                200,
+            );
+            for block in [&first, &child] {
+                assert!(
+                    buffer
+                        .broadcast(Recipients::Some(vec![]), ready(block.clone()))
+                        .accepted(),
+                    "candidate broadcast must be accepted"
+                );
+            }
+
+            // Channels 1 and 2 are owned by marshal. Register the victim's three Simplex
+            // channels, the leader as the scripted sender, and a tap on the votes the victim
+            // broadcasts.
+            let victim_control = oracle.control(victim.clone());
+            let vote_network = victim_control.register(3, TEST_QUOTA).await.unwrap();
+            let certificate_network = victim_control.register(4, TEST_QUOTA).await.unwrap();
+            let resolver_network = victim_control.register(5, TEST_QUOTA).await.unwrap();
+            let leader_control = oracle.control(leader);
+            let (mut leader_vote_sender, _leader_vote_receiver) =
+                leader_control.register(3, TEST_QUOTA).await.unwrap();
+            let _leader_certificates = leader_control.register(4, TEST_QUOTA).await.unwrap();
+            let _leader_resolver = leader_control.register(5, TEST_QUOTA).await.unwrap();
+            let (_observer_vote_sender, mut observer_vote_receiver) = oracle
+                .control(observer)
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            // Run the victim's engine from genesis with an application that records every
+            // verification it is asked for.
+            let application = RecordingVerifyingApp::<B, S>::new();
+            let wrapper = Deferred::new(
+                context.child("wrapper"),
+                application.clone(),
+                marshal,
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+            let engine = simplex::Engine::new(
+                context.child("simplex"),
+                simplex::config::Config {
+                    scheme: schemes[0].clone(),
+                    elector: terms,
+                    blocker: oracle.control(victim.clone()),
+                    automaton: wrapper.clone(),
+                    relay: wrapper.clone(),
+                    reporter: wrapper,
+                    strategy: Sequential,
+                    partition: "optimistic-child".to_string(),
+                    mailbox_size: NZUsize!(128),
+                    epoch: Epoch::zero(),
+                    floor: simplex::config::Floor::Genesis(genesis.digest()),
+                    replay_buffer: NZUsize!(1024),
+                    write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+                    leader_timeout: Duration::from_secs(2),
+                    certification_timeout: Duration::from_secs(4),
+                    timeout_retry: Duration::from_secs(3),
+                    view_retention: ViewDelta::new(10),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(6),
+                        budget: SkipBudget::Participants,
+                    },
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    forward: ForwardPolicy::Disabled,
+                    track_historical_votes: false,
+                },
+            );
+            let _engine = engine.start(vote_network, certificate_network, resolver_network);
+
+            // The leader's own notarize votes carry both proposals to the victim, and the child
+            // arrives while the victim is still in view 1.
+            for (round, parent, block) in [
+                (first_round, View::zero(), &first),
+                (child_round, View::new(1), &child),
+            ] {
+                let proposal = Proposal::new(round, parent, block.digest());
+                leader_vote_sender.send(
+                    Recipients::One(victim.clone()),
+                    Vote::<S, D>::Notarize(Notarize::sign(&schemes[1], proposal).unwrap()).encode(),
+                    true,
+                );
+                context.sleep(Duration::from_millis(250)).await;
+            }
+
+            // Collect the victim's notarize votes until view 1 has passed its certification
+            // timeout, by which time the victim has acted on both proposals.
+            let mut notarized = Vec::new();
+            let deadline = context.current() + Duration::from_secs(5);
+            loop {
+                select! {
+                    _ = context.sleep_until(deadline) => break,
+                    vote = next_vote(&mut observer_vote_receiver, &victim) => {
+                        if let Vote::Notarize(notarize) = vote {
+                            notarized.push(notarize.proposal.round.view());
+                        }
+                    },
+                }
+            }
+
+            // Map each verification the application started to the view of its block.
+            let verified = application
+                .observed()
+                .into_iter()
+                .filter_map(|event| match event {
+                    Verification::Started(digest) if digest == first.digest() => {
+                        Some(first_round.view())
+                    }
+                    Verification::Started(digest) if digest == child.digest() => {
+                        Some(child_round.view())
+                    }
+                    _ => None,
+                })
+                .collect();
+            (notarized, verified)
+        })
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5714.
+    ///
+    /// With optimistic validation, consensus verifies a child on this validator's vote for its
+    /// parent alone, and the child's ancestry is fetched by following parent digests. A newly
+    /// proposed block that names a parent other than its context's gets no vote, so its child never
+    /// reaches the application.
+    #[test_traced("WARN")]
+    fn issue_5714_regression() {
+        // A first block that names its context's parent gets the vote, and its child is
+        // verified on that vote alone.
+        let (notarized, verified) = optimistic_child(true);
+        assert_eq!(notarized, [View::new(1), View::new(2)]);
+        assert_eq!(verified, [View::new(1), View::new(2)]);
+
+        // A first block that names any other parent gets no vote, so consensus never verifies
+        // the child.
+        let (notarized, verified) = optimistic_child(false);
+        assert!(
+            notarized.is_empty(),
+            "an unlinked block and its child must get no vote: {notarized:?}"
+        );
+        assert!(
+            verified.is_empty(),
+            "an unlinked block and its child must not reach the application: {verified:?}"
+        );
     }
 
     /// Verifies a block below a round that consensus then finalizes, and returns a `kind`
@@ -4709,6 +5017,232 @@ mod tests {
         });
     }
 
+    /// A proposal is built for one consensus round, so each ancestor the build requests carries
+    /// that round.
+    #[test_traced("WARN")]
+    fn test_standard_propose_requests_ancestry_under_its_round() {
+        for kind in wrapper_kinds() {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let (marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("propose-ancestry-round-{kind:?}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    Application::<B>::default(),
+                    Some(RecordingBuffer::default()),
+                    Start::Genesis(genesis.clone()),
+                )
+                .await;
+
+                // The parent to build on is stored, and the block below it is missing.
+                let block = |view, parent: (u64, D), height| {
+                    let round = Round::new(Epoch::zero(), View::new(view));
+                    let block = B::new::<Sha256>(
+                        Ctx {
+                            round,
+                            leader: participants[1].clone(),
+                            parent: (View::new(parent.0), parent.1),
+                        },
+                        parent.1,
+                        Height::new(height),
+                        view * 100,
+                    );
+                    (round, block)
+                };
+                let (_, missing) = block(1, (0, genesis.digest()), 1);
+                let (parent_round, parent) = block(2, (1, missing.digest()), 2);
+                assert!(marshal.verified(parent_round, ready(parent.clone())).await);
+
+                // The application reads the parent's ancestry while it builds for view 3.
+                let round = Round::new(Epoch::zero(), View::new(3));
+                let consensus_context = Ctx {
+                    round,
+                    leader: participants[0].clone(),
+                    parent: (parent_round.view(), parent.digest()),
+                };
+                let application = WalkingVerifyingApp::<B, S>::default();
+                let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+                let _proposal = match kind {
+                    WrapperKind::Inline => {
+                        Inline::new(context.child("wrapper"), application, marshal, epocher)
+                            .propose(consensus_context)
+                            .await
+                    }
+                    WrapperKind::Deferred => {
+                        Deferred::new(context.child("wrapper"), application, marshal, epocher)
+                            .propose(consensus_context)
+                            .await
+                    }
+                };
+                while resolver.fetches().is_empty() {
+                    reschedule().await;
+                }
+                let requested: Vec<_> = resolver
+                    .fetches()
+                    .into_iter()
+                    .map(|fetch| (fetch.key, fetch.subscriber))
+                    .collect();
+                assert_eq!(
+                    requested,
+                    [(
+                        handler::Key::Block(missing.digest()),
+                        handler::Annotation::Untrusted {
+                            height: Height::new(1),
+                            round: Some(round),
+                        },
+                    )],
+                    "{kind:?}: the build must request ancestry under the proposal's round"
+                );
+            });
+        }
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/issues/5718.
+    ///
+    /// `Deferred` votes for a block before the block is stored, so a validator can restart with
+    /// its vote for a block and without the block, and then verify that block's descendants. The
+    /// walk below an unchecked descendant requests the missing block by digest, under a height
+    /// that only the descendant vouches for. The request ends once the processed round floor
+    /// covers the round of the verification the walk serves.
+    #[test_traced("WARN")]
+    fn issue_5718_regression() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mut marshal, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "issue-5718",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone()),
+            )
+            .await;
+
+            // Each block names its parent's view and digest in its context and its parent's
+            // digest in its parent field.
+            let block = |view, parent: (u64, D), height, timestamp| {
+                let round = Round::new(Epoch::zero(), View::new(view));
+                let block = B::new::<Sha256>(
+                    Ctx {
+                        round,
+                        leader: participants[1].clone(),
+                        parent: (View::new(parent.0), parent.1),
+                    },
+                    parent.1,
+                    Height::new(height),
+                    timestamp,
+                );
+                (round, block)
+            };
+
+            // The leader of views 1 to 3 sent its first block to this validator alone, and the
+            // validator lost it in a crash after voting for it. The second block follows the
+            // first and claims a height far above it, and the third block follows the second.
+            let (lost_round, lost) = block(1, (0, genesis.digest()), 1, 100);
+            let (parent_round, parent) = block(2, (1, lost.digest()), 15, 200);
+            let (round, candidate) = block(3, (2, parent.digest()), 16, 300);
+            assert!(marshal.verified(parent_round, ready(parent.clone())).await);
+            assert!(marshal.verified(round, ready(candidate.clone())).await);
+
+            // The validator votes for both blocks it holds, with an application that reads a
+            // block's ancestry down to genesis.
+            let application = WalkingVerifyingApp::<B, S>::default();
+            let mut deferred = Deferred::new(
+                context.child("deferred"),
+                application.clone(),
+                marshal.clone(),
+                FixedEpocher::new(BLOCKS_PER_EPOCH),
+            );
+            for block in [&parent, &candidate] {
+                let vote = deferred.verify(block.context.clone(), block.digest()).await;
+                assert!(
+                    vote.await.expect("verify must answer"),
+                    "a block that follows its context's parent must get the vote"
+                );
+            }
+
+            // Verification of the parent requests the lost block by round. The application
+            // reads the candidate and its parent, and the walk below the parent requests the
+            // lost block by digest, under the height the parent implies and the round of the
+            // candidate's verification.
+            let active = |resolver: &RecordingResolver| {
+                let mut active: Vec<_> = resolver
+                    .active_fetches()
+                    .into_iter()
+                    .map(|fetch| (fetch.key, fetch.subscriber))
+                    .collect();
+                active.sort();
+                active
+            };
+            while active(&resolver).len() < 2 {
+                reschedule().await;
+            }
+            assert_eq!(
+                active(&resolver),
+                [
+                    (
+                        handler::Key::Block(lost.digest()),
+                        handler::Annotation::Untrusted {
+                            height: Height::new(14),
+                            round: Some(round),
+                        },
+                    ),
+                    (
+                        handler::Key::Notarized { round: lost_round },
+                        handler::Annotation::Notarization { round: lost_round },
+                    ),
+                ]
+            );
+            assert_eq!(
+                *application.blocks.lock(),
+                [candidate.digest(), parent.digest()]
+            );
+
+            // A block built on genesis finalizes in view 4 at height 1. The candidate was
+            // proposed in view 3, so it can never be finalized, and the chain is far below the
+            // height the parent claimed.
+            let (finalized_round, finalized) = block(4, (0, genesis.digest()), 1, 400);
+            assert!(
+                marshal
+                    .verified(finalized_round, ready(finalized.clone()))
+                    .await
+            );
+            StandardHarness::report_finalization(
+                &mut marshal,
+                StandardHarness::make_finalization(
+                    Proposal::new(finalized_round, View::zero(), finalized.digest()),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            while marshal.get_processed().await != Some(Processed::Block(Height::new(1))) {
+                reschedule().await;
+            }
+            assert_eq!(
+                active(&resolver),
+                [],
+                "both requests must end once the round floor covers the candidate's round"
+            );
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_standard_verify_height_lie_parent_fetch_is_round_bound() {
         for kind in wrapper_kinds() {
@@ -4787,7 +5321,7 @@ mod tests {
                             && !matches!(
                                 fetch.subscriber,
                                 handler::Annotation::Certified { height }
-                                | handler::Annotation::Untrusted { height }
+                                | handler::Annotation::Untrusted { height, .. }
                                     if height == Height::new(2)
                             )
                     }),
@@ -5457,90 +5991,6 @@ mod tests {
         }
     }
 
-    /// Deferred votes on a block before checking its parent link, so a pipelined
-    /// handoff can request a build on a parent whose link was never validated. The
-    /// build may walk ancestry only through the parent that the tip's own consensus
-    /// context names, and an unlinked parent declines without asking the application.
-    #[test_traced("WARN")]
-    fn test_deferred_handoff_rejects_unvalidated_parent_link() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-                1024 * 1024,
-            )
-            .await;
-            let me = participants[0].clone();
-            let setup = StandardHarness::setup_validator(
-                context.child("validator").with_attribute("index", 0),
-                &mut oracle,
-                me.clone(),
-                ConstantProvider::new(schemes[0].clone()),
-            )
-            .await;
-            let marshal = setup.mailbox;
-            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
-
-            // Both outgoing tips carry an authentic consensus context naming genesis.
-            // Only the second also links to genesis.
-            let tip_round = Round::new(Epoch::zero(), View::new(1));
-            let tip_context = Ctx {
-                round: tip_round,
-                leader: default_leader(),
-                parent: (View::zero(), genesis.digest()),
-            };
-            let forged = B::new::<Sha256>(
-                tip_context.clone(),
-                Sha256::hash(&[b"forged parent link"]),
-                Height::new(1),
-                100,
-            );
-            let linked = B::new::<Sha256>(tip_context, genesis.digest(), Height::new(1), 101);
-            for (label, tip, built) in [("forged", &forged, false), ("linked", &linked, true)] {
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(tip_round, ready(tip.clone()))
-                        .await
-                );
-                let handoff_context = Ctx {
-                    round: Round::new(Epoch::zero(), View::new(2)),
-                    leader: me.clone(),
-                    parent: (View::new(1), tip.digest()),
-                };
-                let child =
-                    B::new::<Sha256>(handoff_context.clone(), tip.digest(), Height::new(2), 200);
-                let app = MockVerifyingApp::new()
-                    .with_handoff(Handoff::Stage(()))
-                    .with_propose_result(child.clone());
-                let mut deferred = Wrapper::new(
-                    WrapperKind::Deferred,
-                    context.child(label),
-                    app,
-                    marshal.clone(),
-                );
-                let response = deferred.prepare(handoff_context).await.await;
-                let expected = if built {
-                    Handoff::Stage(child.digest())
-                } else {
-                    Handoff::Wait
-                };
-                assert_eq!(
-                    response.expect("handoff decision missing"),
-                    expected,
-                    "{label}: a handoff build must require a parent linked to its context"
-                );
-            }
-        });
-    }
-
     #[test_traced("WARN")]
     fn test_verify_reproposal_validation() {
         for kind in wrapper_kinds() {
@@ -5788,7 +6238,7 @@ mod tests {
                 let mismatch_round = Round::new(Epoch::zero(), View::new(3));
                 let mismatched_context = Ctx {
                     round: mismatch_round,
-                    leader: me,
+                    leader: me.clone(),
                     parent: (View::new(1), parent_digest),
                 };
                 let mismatched_block = B::new::<Sha256>(
@@ -5813,23 +6263,70 @@ mod tests {
                     .await
                     .await
                     .expect("verify result missing");
-                if kind == WrapperKind::Inline {
-                    // Inline returns the full verification result directly.
-                    assert!(
-                        !mismatch_verify,
-                        "inline verify should reject mismatched parent digest"
-                    );
-                } else {
-                    // Deferred reports optimistic success and relies on `certify`.
-                    assert!(
-                        mismatch_verify,
-                        "deferred verify should optimistically pass pre-checks"
-                    );
+
+                // Both wrappers refuse to vote for a newly proposed block that names a parent other
+                // than its context's.
+                assert!(
+                    !mismatch_verify,
+                    "{kind:?}: verify must reject a mismatched parent digest"
+                );
+                if kind == WrapperKind::Deferred {
                     let certify = wrapper.certify(mismatch_round, mismatched_digest).await;
                     assert!(
                         !certify.await.expect("certify result missing"),
                         "deferred certify should reject mismatched parent digest"
                     );
+                }
+
+                // Test case 3: mismatched parent commitment whose context parent is not available.
+                // Deferred rejects the vote by comparing the block's parent digest with its
+                // context's, so neither the vote nor the certification waits for the parent.
+                if kind == WrapperKind::Deferred {
+                    let unavailable_round = Round::new(Epoch::zero(), View::new(5));
+                    let unavailable_context = Ctx {
+                        round: unavailable_round,
+                        leader: me,
+                        parent: (View::new(4), Sha256::hash(&[b"unavailable parent"])),
+                    };
+                    let unavailable_block = B::new::<Sha256>(
+                        unavailable_context.clone(),
+                        genesis.digest(),
+                        Height::new(2),
+                        500,
+                    );
+                    let unavailable_digest = unavailable_block.digest();
+                    assert!(
+                        marshal
+                            .verified(unavailable_round, ready(unavailable_block))
+                            .await
+                    );
+
+                    let verify = wrapper
+                        .verify(unavailable_context, unavailable_digest)
+                        .await;
+                    select! {
+                        result = verify => {
+                            assert!(
+                                !result.expect("verify must resolve"),
+                                "deferred verify must reject a mismatched parent digest"
+                            );
+                        },
+                        _ = context.sleep(Duration::from_secs(5)) => {
+                            panic!("deferred verify must not wait for the parent");
+                        },
+                    }
+                    let certify = wrapper.certify(unavailable_round, unavailable_digest).await;
+                    select! {
+                        result = certify => {
+                            assert!(
+                                !result.expect("certify must resolve"),
+                                "deferred certify must reject a mismatched parent digest"
+                            );
+                        },
+                        _ = context.sleep(Duration::from_secs(5)) => {
+                            panic!("deferred certify must not wait for the parent");
+                        },
+                    }
                 }
             });
         }
@@ -7280,16 +7777,22 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "floor-jump-ignores-stale-ack",
+            let prefix = "floor-jump-ignores-stale-ack";
+            let (certificates, blocks) = prunable_finalized_stores(&context, prefix).await;
+            let config = test_config(
+                prefix,
                 ConstantProvider::new(schemes[0].clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                NZUsize!(1),
+            );
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                blocks,
+                config,
             )
             .await;
-            let mut mailbox = mailbox;
+            let (rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let _actor_handle = actor.start_unbuffered(application.clone(), (rx, resolver.clone()));
             assert_eq!(application.acknowledged().await, Height::zero());
 
             let block1_round = Round::new(Epoch::zero(), View::new(1));
@@ -7300,7 +7803,7 @@ mod tests {
                 QUORUM,
             );
             assert!(mailbox.verified(block1_round, ready(block1.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
+            StandardHarness::report_finalization(&mut mailbox, block1_finalization.clone()).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -7309,10 +7812,16 @@ mod tests {
             )
             .await;
 
-            let floor_round = Round::new(Epoch::zero(), View::new(5));
-            let floor_block = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
+            assert_eq!(
+                mailbox.get_finalization(block1.height()).await,
+                Some(block1_finalization)
+            );
+
+            let floor_round = Round::new(Epoch::zero(), View::new(15));
+            let floor_block =
+                make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(15), 500);
             let floor_finalization = StandardHarness::make_finalization(
-                Proposal::new(floor_round, View::new(4), floor_block.digest()),
+                Proposal::new(floor_round, View::new(14), floor_block.digest()),
                 &schemes,
                 QUORUM,
             );
@@ -7343,15 +7852,19 @@ mod tests {
             );
             assert_eq!(
                 mailbox
-                    .get_block(Height::new(5))
+                    .get_block(floor_block.height())
                     .await
                     .expect("floor block missing")
                     .digest(),
                 floor_block.digest()
             );
 
+            // The old height has been pruned, even though its ack is still held.
+            assert!(mailbox.get_block(block1.height()).await.is_none());
+            assert!(mailbox.get_finalization(block1.height()).await.is_none());
+
             // Release the stale ack after the remote floor has been applied.
-            // It must not lower the processed floor back below height 5.
+            // It must not lower the processed floor back below the new floor.
             let fetches_after_floor = resolver.fetches().len();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
             context.sleep(Duration::from_millis(100)).await;
@@ -7360,9 +7873,10 @@ mod tests {
                 Sha256::hash(&[b"below-floor-after-stale-ack"]),
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
+                    round: None,
                 },
             );
-            let _ = mailbox.get_block(Height::new(5)).await;
+            let _ = mailbox.get_block(Height::new(15)).await;
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_after_floor,
@@ -7445,6 +7959,7 @@ mod tests {
                 Sha256::hash(&[b"below-local-floor-after-stale-ack"]),
                 CommitmentFallback::FetchByCommitment {
                     height: Height::new(2),
+                    round: None,
                 },
             );
             let _ = mailbox.get_block(Height::new(5)).await;
@@ -10302,7 +10817,7 @@ mod tests {
             .await;
 
             assert!(mailbox.verified(round, ready(block.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             select! {
                 height = started => {
@@ -10343,13 +10858,9 @@ mod tests {
                 "restart should recover the delivered finalized block by height"
             );
             assert_eq!(
-                mailbox
-                    .get_finalization(Height::new(1))
-                    .await
-                    .expect("finalization must be durable before delivery")
-                    .round(),
-                round,
-                "restart should recover the delivered finalization by height"
+                mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(1), block.digest())),
+                "the delivered finalization must survive restart in the height archive"
             );
         });
     }
