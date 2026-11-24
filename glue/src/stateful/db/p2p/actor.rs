@@ -1793,7 +1793,9 @@ mod tests {
         };
 
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let source = Db::init(context.child("source"), config("source"), None)
+            const PREFIX: &str = "variable_live";
+            let pair_context = context.child(PREFIX);
+            let source = Db::init(pair_context.child("source"), config("source"), None)
                 .await
                 .unwrap();
             let entries = [
@@ -1814,39 +1816,44 @@ mod tests {
                     .unwrap(),
             };
 
-            let client = Db::init(context.child("client"), config("client"), None)
+            let client = Db::init(pair_context.child("client"), config("client"), None)
                 .await
                 .unwrap();
             let max_value_size = max_items_size(MAX_VALUE_SIZE, u8::SIZE);
             let set_size = Key::SIZE + max_value_size;
             let commit_size = u8::SIZE + max_value_size + Location::MAX_ENCODE_SIZE;
             let pair = spawn_connected_pair(
-                &context,
+                &pair_context,
                 [Shared::new("client", client), Shared::new("source", source)],
                 codec_config,
                 u8::SIZE + set_size.max(commit_size),
             )
             .await;
 
-            let synced: Db = sync::sync(sync::Config {
-                context: context.child("destination"),
-                source: pair.mailboxes[0].clone(),
-                target: target.clone(),
-                max_outstanding_requests: NZUsize!(4),
-                fetch_batch_size: NZU64!(2),
-                apply_batch_size: NZU64!(1),
-                db_config: config("destination"),
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-            })
-            .await
-            .unwrap();
+            let synced: Db = select! {
+                result = sync::sync(sync::Config {
+                    context: pair_context.child("destination"),
+                    source: pair.mailboxes[0].clone(),
+                    target: target.clone(),
+                    max_outstanding_requests: NZUsize!(4),
+                    fetch_batch_size: NZU64!(2),
+                    apply_batch_size: NZU64!(1),
+                    db_config: config("destination"),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                }) => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("variable sync stopped making progress");
+                },
+            };
             assert_eq!(synced.root(), target.root);
             assert_eq!(synced.bounds(), target.range.start()..target.range.end());
             for (key, value) in entries {
                 assert_eq!(synced.get(&key).await.unwrap(), Some(value));
             }
+            wait_for_no_pending(&context, &pair.metrics[0]).await;
+            shutdown_actors(&context, PREFIX, pair.handles).await;
         });
     }
 
