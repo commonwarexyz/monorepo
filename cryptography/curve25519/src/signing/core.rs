@@ -665,8 +665,9 @@ pub(super) fn verify_batch_bytes(
 
 /// Reads `len` point encodings from `buf`, which must hold at least `len * 32` bytes, and
 /// decompresses them as [`GAffine::decompress`] does. Selects the backend once and decompresses
-/// [`LANES`] encodings per unit. Pads a final unit of more than [`SCALAR_TAIL`] encodings with
-/// the identity encoding, and decompresses a shorter one an encoding at a time.
+/// [`LANES`] encodings per unit. Pads a final unit of at least the backend's
+/// [`DECOMPRESS_BATCH_MIN`](crate::curve::FBackend::DECOMPRESS_BATCH_MIN) encodings with the
+/// identity encoding, and decompresses a shorter one an encoding at a time.
 ///
 /// Returns `map(encoding, point)` for every encoding in order, or `None` if any encoding is not
 /// a curve point.
@@ -677,10 +678,6 @@ pub(super) fn read_points<T>(
 ) -> Option<Vec<T>> {
     with_backend(ReadPoints { buf, len, map })
 }
-
-/// The longest final unit that [`read_points`] decompresses an encoding at a time. On NEON, one
-/// batched unit costs about as much as decompressing half its lanes one at a time.
-const SCALAR_TAIL: usize = LANES / 2;
 
 /// The inputs of [`read_points`].
 struct ReadPoints<'a, R, M> {
@@ -707,7 +704,7 @@ where
             for encoding in &mut encodings[..count] {
                 self.buf.copy_to_slice(encoding);
             }
-            if count <= SCALAR_TAIL {
+            if count < B::DECOMPRESS_BATCH_MIN {
                 for encoding in &encodings[..count] {
                     let point = GAffine::decompress(encoding)?;
                     values.push((self.map)(VerifyingKeyBytes::new(*encoding), point));

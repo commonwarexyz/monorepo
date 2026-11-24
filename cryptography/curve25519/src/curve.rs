@@ -407,6 +407,11 @@ impl FVec {
 
 /// Abstracts over base field operations.
 pub trait FBackend: Copy {
+    /// The fewest point encodings that [`GAffine::decompress_batch`] decompresses faster, padded
+    /// to [`LANES`], than [`GAffine::decompress`] does one at a time. A value above [`LANES`]
+    /// means a batch is never faster.
+    const DECOMPRESS_BATCH_MIN: usize;
+
     /// a + b.
     fn add(self, a: FVec, b: FVec) -> FVec;
 

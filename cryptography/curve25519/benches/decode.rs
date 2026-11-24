@@ -29,7 +29,7 @@ mod decode_verifying_keys_bench {
 
     pub fn bench(c: &mut Criterion) {
         let mut group = c.benchmark_group(module_path!());
-        for n in [1, 4, 100, 1_000] {
+        for n in [1, 4, 7, 13, 100, 1_000] {
             let encoded = encode_keys(n);
             group.throughput(Throughput::Elements(n as u64));
             group.bench_function(format!("keys={n} path=each"), |b| {
