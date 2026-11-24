@@ -332,6 +332,7 @@ where
                 tips.push((*round, *height, *digest));
             }
             Update::Block(block, _) => {
+                super::coding_disrupter::check_not_embedded(self.validator, block.inner().digest());
                 if let Some(max_pending_acks) = self.max_pending_acks {
                     super::invariants::check_pending_acks(
                         self.validator,

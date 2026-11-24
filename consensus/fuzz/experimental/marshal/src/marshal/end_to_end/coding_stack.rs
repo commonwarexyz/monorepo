@@ -13,6 +13,7 @@ use super::{
 };
 use arbitrary::Arbitrary;
 use bytes::BufMut;
+use commonware_actor::Feedback;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
@@ -61,7 +62,7 @@ use commonware_runtime::{
     Clock as _, Handle, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{FuzzRng, NZDuration, NZU64, NZUsize};
+use commonware_utils::{FuzzRng, NZDuration, NZU64, NZUsize, SystemTimeExt as _};
 use rand::RngExt as _;
 use std::{fmt, future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 
@@ -207,6 +208,51 @@ pub(crate) struct CodingValidator<P: Simplex> {
     pub(crate) shards: ShardsMailbox<P>,
 }
 
+/// Records every peer an honest resolver blocks into the extended poison
+/// records, as `(node, blocked participant, simulated time)`; without a record
+/// target it only forwards.
+pub(crate) struct ResolverBlockRecorder<K, B> {
+    inner: B,
+    record: Option<Arc<(usize, Vec<K>, deterministic::Context)>>,
+}
+
+impl<K, B: Clone> Clone for ResolverBlockRecorder<K, B> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            record: self.record.clone(),
+        }
+    }
+}
+
+impl<K, B> Blocker for ResolverBlockRecorder<K, B>
+where
+    K: commonware_cryptography::PublicKey,
+    B: Blocker<PublicKey = K>,
+{
+    type PublicKey = K;
+
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a recording blocker forwards the resolver's block, which logged it"
+    )]
+    fn block(&mut self, peer: Self::PublicKey) -> Feedback {
+        if let Some(record) = &self.record {
+            let (node, participants, clock) = &**record;
+            super::coding_disrupter::record_resolver_block(
+                *node,
+                participants.iter().position(|key| *key == peer),
+                clock.current().epoch(),
+            );
+        }
+        self.inner.block(peer)
+    }
+
+    fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
+        self.inner.blocked()
+    }
+}
+
 /// Builds one coding validator's marshal actor, resolver, and shard engine.
 ///
 /// Mirrors [`super::twins::stack::setup_validator`] except that the block
@@ -227,6 +273,43 @@ pub(crate) async fn setup_validator_coding<P: Simplex>(
     stack: Arc<str>,
     shards_mailbox_size: NonZeroUsize,
     tap: Option<&Arc<ReplicaTap<P>>>,
+) -> CodingValidator<P>
+where
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
+{
+    setup_validator_coding_recorded(
+        context,
+        oracle,
+        validator,
+        provider,
+        genesis,
+        max_pending_acks,
+        pending_ack_invariant_limit,
+        validator_idx,
+        stack,
+        shards_mailbox_size,
+        tap,
+        None,
+    )
+    .await
+}
+
+/// [`setup_validator_coding`], whose resolver blocks are also recorded into the
+/// extended poison records when `participants` is given.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn setup_validator_coding_recorded<P: Simplex>(
+    context: deterministic::Context,
+    oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
+    validator: PublicKeyOf<P>,
+    provider: ConstantProvider<SchemeOf<P>, Epoch>,
+    genesis: CodingCoded<P>,
+    max_pending_acks: NonZeroUsize,
+    pending_ack_invariant_limit: Option<NonZeroUsize>,
+    validator_idx: usize,
+    stack: Arc<str>,
+    shards_mailbox_size: NonZeroUsize,
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    participants: Option<Vec<PublicKeyOf<P>>>,
 ) -> CodingValidator<P>
 where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
@@ -273,7 +356,16 @@ where
         resolver::Config {
             public_key: validator.clone(),
             peer_provider: oracle.manager(),
-            blocker: tap_blocker(tap, oracle.control(validator.clone())),
+            blocker: ResolverBlockRecorder {
+                inner: tap_blocker(tap, oracle.control(validator.clone())),
+                record: participants.map(|participants| {
+                    Arc::new((
+                        validator_idx,
+                        participants,
+                        context.child("resolver_blocks"),
+                    ))
+                }),
+            },
             mailbox_size: config.mailbox_size,
             fetch_timeout: NZDuration!(Duration::from_secs(2)),
             fetch_retry_delay: Duration::from_millis(100),

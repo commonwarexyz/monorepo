@@ -713,6 +713,7 @@ pub(super) async fn release_coding<P>(
                     backfill,
                     rng,
                     Some(registry.marker(index, Role::Disrupter)),
+                    None,
                 );
                 registry.register(index, Role::Disrupter, handle);
             }

@@ -53,10 +53,11 @@ use super::{
         FaultyConfig, NodeRole, SelectedBlockBuilderApp,
     },
     block_disrupter::{self, HeightOffset, MarshalBroadcastFault},
-    coding_disrupter::{self, CodingFaults},
+    coding_disrupter::{self, CodingFaults, ExtendedPoison, PoisonRecords},
     coding_stack::{
         CodingB, CodingCtx, CommitmentOf, DigestLookups, coding_genesis, coding_marshaled,
-        sample_shards_mailbox_size, setup_validator_coding, start_engine_coding_with_networks,
+        sample_shards_mailbox_size, setup_validator_coding_recorded,
+        start_engine_coding_with_networks,
     },
     input::{MAX_ANCESTRY_DEPTH, MAX_TWINS_ROUNDS, MarshalDisrupterInput},
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant, Liveness},
@@ -85,7 +86,7 @@ use commonware_consensus::{
         elector::{Config as ElectorConfig, Elector, Mode as _},
         scheme::Scheme as SimplexScheme,
     },
-    types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
+    types::{Epoch, Height, Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, FAULT_PHASE, PINNED_OPTIMISTIC_VIEWS,
@@ -810,6 +811,50 @@ where
     P: Simplex,
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
+    let run = run_coding_disrupter_observed::<P>(input, poison, hook);
+    (run.state, run.end)
+}
+
+/// What one coding disrupter case did, for tests.
+#[allow(dead_code, reason = "read by tests")]
+pub(crate) struct CodingRun {
+    /// The runtime's auditor state at the end.
+    pub(crate) state: String,
+    /// The simulated time at the end.
+    pub(crate) end: Duration,
+    /// Every honest application's delivery history, by participant index.
+    pub(crate) delivered: Vec<(usize, Vec<(Height, Sha256Digest)>)>,
+    /// The network's `(blocker, blocked)` pairs as participant indexes, read in
+    /// extended poison runs only.
+    pub(crate) blocked: Vec<(Option<usize>, Option<usize>)>,
+    /// The poison records of the run.
+    pub(crate) records: PoisonRecords,
+}
+
+/// [`run_coding_disrupter`], returning what the run did.
+///
+/// A poison run without a hook first chooses its mode ([`ExtendedPoison::select`]).
+/// An extended run gives the poisoner its extended answers, gives every honest
+/// node claims of being ahead ([`coding_disrupter::start_claims`]) and records its
+/// resolver's blocks, and at the end checks RF-8 over the network's blocks and
+/// RF-9 over every honest delivery history.
+pub(crate) fn run_coding_disrupter_observed<P>(
+    input: MarshalDisrupterInput,
+    poison: bool,
+    hook: Option<Hook<P>>,
+) -> CodingRun
+where
+    P: Simplex,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
+{
+    coding_disrupter::reset_records();
+    let mut extended = if poison && hook.is_none() {
+        ExtendedPoison::select(&input.raw_bytes)
+    } else {
+        None
+    };
+    let claims_rng = extended.as_ref().map(ExtendedPoison::rng);
+
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
@@ -910,6 +955,7 @@ where
                         backfill,
                         rng,
                         None,
+                        extended.take(),
                     ));
                     continue;
                 }
@@ -949,7 +995,7 @@ where
             let (vote, certificate, resolver) =
                 register_engine_networks::<P>(&oracle, validator.clone()).await;
             let provider = ConstantProvider::new(scheme.clone());
-            let node = setup_validator_coding::<P>(
+            let node = setup_validator_coding_recorded::<P>(
                 validator_ctx.child("marshal"),
                 &mut oracle,
                 validator.clone(),
@@ -961,8 +1007,18 @@ where
                 stack_label.clone(),
                 shards_mailbox_size,
                 tap,
+                claims_rng.as_ref().map(|_| participants.clone()),
             )
             .await;
+            if let Some(rng) = &claims_rng {
+                drop(coding_disrupter::start_claims::<P>(
+                    &validator_ctx,
+                    idx,
+                    node.mailbox.clone(),
+                    rng.clone(),
+                    participants[BYZANTINE_IDX].clone(),
+                ));
+            }
             if let Some(tap) = tap {
                 tap.set_reads(Arc::new(CodingReads::<P>::new(node.mailbox.clone())));
             }
@@ -1066,7 +1122,31 @@ where
             &|_| false,
             None,
         );
-        (context.auditor().state(), context.current().epoch())
+        let mut blocked = Vec::new();
+        if claims_rng.is_some() {
+            let pairs = oracle.blocked().await.expect("network is running");
+            coding_disrupter::check_no_honest_blocked(&pairs, &participants);
+            let index = |key: &PublicKeyOf<P>| participants.iter().position(|k| k == key);
+            blocked = pairs
+                .iter()
+                .map(|(blocker, peer)| (index(blocker), index(peer)))
+                .collect();
+            for (idx, app) in &honest_apps {
+                for (_, digest) in app.delivered() {
+                    coding_disrupter::check_not_embedded(*idx, digest);
+                }
+            }
+        }
+        CodingRun {
+            state: context.auditor().state(),
+            end: context.current().epoch(),
+            delivered: honest_apps
+                .iter()
+                .map(|(idx, app)| (*idx, app.delivered()))
+                .collect(),
+            blocked,
+            records: coding_disrupter::records(),
+        }
     })
 }
 
@@ -1387,3 +1467,7 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/fetch_poison_acceptance/tests.rs"]
+mod fetch_poison_acceptance;
