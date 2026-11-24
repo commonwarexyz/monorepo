@@ -169,9 +169,8 @@ pub struct Config<P: PublicKey> {
     pub fetch_timeout: NonZeroDuration,
 
     /// Delay before retrying an unresolved fetch or a failed send.
-    /// Zero retries after a 1ms fallback when a scan found eligible peers but could not submit to
-    /// any, because rejected submissions spend no quota. Accepted sends remain subject to the
-    /// sender's rate limit.
+    /// With zero delay, an unsuccessful scan waits for the earliest rate-limit deadline.
+    /// If it found eligible peers but received no such deadline, it retries after 1ms.
     pub retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages.

@@ -66,9 +66,10 @@
 //!
 //! # Delivery
 //!
-//! The engine attempts each request and each response once. A recipient over its rate limit is
-//! skipped and is not added to the collection, and a request sent to no recipient starts no
-//! collection. The application is not told which recipients were skipped.
+//! The engine attempts each request and each response once. It skips recipients that are over
+//! quota or already reserved by another submission. Only recipients reported by the sender
+//! enter the collection. An empty receipt starts no collection, and the application is not
+//! told which recipients were skipped.
 //!
 //! The channel's quota applies separately to what the engine sends a peer and to what it receives
 //! from that peer, and requests and responses count against it together. A response to a peer over
