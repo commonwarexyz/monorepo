@@ -1,6 +1,6 @@
 //! Codec wrapper for [Sender] and [Receiver].
 
-use crate::{Blocker, CheckedSender, Receiver, Recipients, SendReceipt, Sender};
+use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable, mailbox};
 use commonware_codec::{Codec, Decode, Encode, Error};
 use commonware_cryptography::PublicKey;
@@ -98,30 +98,15 @@ impl<'a, S: Sender, V: Encode> CheckedWrappedSender<'a, S, V> {
         self.sender.recipients()
     }
 
-    /// Encodes and sends a message to the checked recipients, returning only its feedback.
-    pub fn send(self, message: V, priority: bool) -> Unreliable<Feedback> {
-        self.send_with_receipt(message, priority).feedback()
-    }
-
-    /// Encodes and sends a borrowed message to the checked recipients, returning only its
-    /// feedback.
-    pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
-        self.send_ref_with_receipt(message, priority).feedback()
-    }
-
     /// Encodes and sends a message to the checked recipients.
-    ///
-    /// See [`CheckedSender::send_with_receipt`].
-    pub fn send_with_receipt(self, message: V, priority: bool) -> SendReceipt<S::PublicKey> {
-        self.send_ref_with_receipt(&message, priority)
+    pub fn send(self, message: V, priority: bool) -> Unreliable<Feedback> {
+        self.send_ref(&message, priority)
     }
 
     /// Encodes and sends a borrowed message to the checked recipients.
-    ///
-    /// See [`CheckedSender::send_with_receipt`].
-    pub fn send_ref_with_receipt(self, message: &V, priority: bool) -> SendReceipt<S::PublicKey> {
+    pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
         let encoded = message.encode_iobufs();
-        self.sender.send_with_receipt(encoded, priority)
+        self.sender.send(encoded, priority)
     }
 }
 
