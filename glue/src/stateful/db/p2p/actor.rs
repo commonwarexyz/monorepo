@@ -57,8 +57,11 @@ where
 
     /// Configuration for decoding operations in peer responses.
     ///
-    /// Use `()` for operations that need no configuration. For variable-size operations, use
-    /// the same size limits when computing the [network payload bound](super::max_payload_size).
+    /// Use the codec configuration of the database's operations, and the same value across the
+    /// network. A narrower configuration than a peer's database fails to decode its honest
+    /// responses, which blocks that peer, so sync from it never completes. Use `()` for
+    /// operations that need no configuration. For variable-size operations, use the same size
+    /// limits when computing the [network payload bound](super::max_payload_size).
     pub operation_codec_config: <Op<DB> as Read>::Cfg,
 
     /// Capacity of resolver mailboxes.
