@@ -212,7 +212,7 @@
 //! does not activate until `N = 11`. The pending window is `N` in `[8, 10]`.
 //!
 //! ```text
-//!   Snapshot at N = 10 (chunk 0 bit-complete; chunk 1 has 2 of 8 bits):
+//!   State at N = 10 (chunk 0 bit-complete; chunk 1 has 2 of 8 bits):
 //!
 //!     chunks (8 bits each)     chunk 0       chunk 1
 //!     ops index range          0..7          8..15
@@ -386,7 +386,7 @@ pub struct Config<T: Translator, J, S: Strategy> {
     pub translator: T,
 
     /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
+    /// index collisions without re-reading the log; `None` disables it.
     pub init_cache: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
@@ -419,7 +419,7 @@ where
     K: Key,
     V: ValueEncoding,
     C: authenticated::Backing<E, Item = Operation<F, UnorderedUpdate<K, V>>> + 'static,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     H: Hasher,
     S: Strategy,
     Operation<F, UnorderedUpdate<K, V>>: Codec,
@@ -447,7 +447,7 @@ where
     K: Key,
     V: ValueEncoding,
     C: authenticated::Backing<E, Item = Operation<F, OrderedUpdate<K, V>>> + 'static,
-    I: IndexFactory<Value = Location<F>> + OrderedIndex + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + OrderedIndex + crate::qmdb::IndexBuild<F>,
     H: Hasher,
     S: Strategy,
     Operation<F, OrderedUpdate<K, V>>: Codec,
@@ -480,7 +480,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -524,7 +524,7 @@ where
     // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
     // commit can be reconstructed. The underlying `any` database takes sole ownership of the
     // bitmap, validates both constraints before publishing the selected journal prefix, then
-    // populates the bitmap during snapshot rebuild.
+    // populates the bitmap during index rebuild.
     let any = any::init_with_bitmap(
         context.child("any"),
         cfg.into(),
@@ -646,7 +646,7 @@ pub mod tests {
     ///
     /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an
     /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates, deletes
-    /// (which, for the ordered kind, rewrite predecessors via a snapshot-bucket scan), unstaged
+    /// (which, for the ordered kind, rewrite predecessors via an index-bucket scan), unstaged
     /// writes, duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the
     /// DB (D=0) and through one or two unapplied ancestors (D=1/D=2). This guards the current-layer
     /// threading of `bitmap_parent`/`grafted_parent`, global slot assignment across `expand`, and
@@ -1226,7 +1226,7 @@ pub mod tests {
         assert_eq!(db.bounds().end, committed_op_count);
         assert_eq!(db.root(), recovered.root());
 
-        // The root does not cover the snapshot index, so every key must also read the same.
+        // Check each key because the root does not cover the in-memory key index.
         for i in 0..=num_keys {
             let k = <C::Key as TestKey>::from_seed(i);
             assert_eq!(recovered.get(&k).await.unwrap(), db.get(&k).await.unwrap());
@@ -4142,7 +4142,7 @@ pub mod tests {
             // Seed four colliding committed keys, then update only key_a.
             // The specific 4 / 1 / 0 shape is a concrete counterexample:
             // key_b remains outside the parent diff and is still resolved
-            // through the committed snapshot in the child.
+            // through the committed index in the child.
             let mut initial = db.new_batch();
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -4153,7 +4153,7 @@ pub mod tests {
 
             // Update only key_a so the colliding sibling key_b remains outside
             // the parent diff and must still be resolved through the committed
-            // snapshot in the child.
+            // index in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
@@ -4223,7 +4223,7 @@ pub mod tests {
 
             // Update only key_a so the colliding sibling key_b remains outside
             // the parent diff and must still be resolved through the committed
-            // snapshot in the child.
+            // index in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
@@ -4440,19 +4440,19 @@ pub mod tests {
             let db = db.apply_batch(m).await.unwrap();
 
             // Get an owned batch at the DB's current state.
-            let snapshot = db.to_batch();
-            assert_eq!(snapshot.root(), db.root());
+            let view = db.to_batch();
+            assert_eq!(view.root(), db.root());
 
-            // Chain a child batch from `snapshot`.
-            let child = snapshot
+            // Chain a child batch from `view`.
+            let child = view
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db)
                 .await
                 .unwrap();
 
-            // The child's root should differ from `snapshot`'s.
-            assert_ne!(child.root(), snapshot.root());
+            // The child's root should differ from `view`'s.
+            assert_ne!(child.root(), view.root());
 
             // Apply child.
             let db = db.apply_batch(child).await.unwrap();
@@ -4645,7 +4645,7 @@ pub mod tests {
 
     /// Regression: applying a batch after its ancestor Arc is dropped (without
     /// committing) must still apply the ancestor's bitmap pushes/clears and
-    /// snapshot diffs.
+    /// index diffs.
     #[test_traced("WARN")]
     fn test_current_apply_after_ancestor_dropped() {
         let executor = deterministic::Runner::default();
@@ -4891,7 +4891,7 @@ pub mod tests {
     }
 
     /// Apply C (grandchild of A) after only A is applied. B's data (any-layer
-    /// snapshot diff + current-layer bitmap) must still be applied.
+    /// index diff + current-layer bitmap) must still be applied.
     #[test_traced("INFO")]
     fn test_current_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();

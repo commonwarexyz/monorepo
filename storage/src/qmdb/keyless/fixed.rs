@@ -603,18 +603,18 @@ mod tests {
     #[test_traced]
     fn test_keyless_retained_chunk_boundaries() {
         deterministic::Runner::default().start(|context| async move {
-            for snapshot in [false, true] {
+            for view in [false, true] {
                 for detach_oldest in [false, true] {
-                    let suffix = match (snapshot, detach_oldest) {
+                    let suffix = match (view, detach_oldest) {
                         (false, false) => "direct",
                         (false, true) => "direct_detached",
-                        (true, false) => "snapshot",
-                        (true, true) => "snapshot_detached",
+                        (true, false) => "view",
+                        (true, true) => "view_detached",
                     };
                     let mut db =
                         open_db_with_suffix::<mmr::Family>(suffix, context.child(suffix)).await;
                     let mut held = Vec::new();
-                    if snapshot {
+                    if view {
                         held.push(db.to_batch());
                     }
                     let mut expected = Vec::new();
@@ -636,7 +636,7 @@ mod tests {
                     // journal chunk while the QMDB weak link to the original fails, so the next
                     // batch records only the reachable ancestors.
                     let detached = if detach_oldest {
-                        let oldest = held.remove(usize::from(snapshot));
+                        let oldest = held.remove(usize::from(view));
                         db = db.apply_batch(Arc::clone(&oldest)).await.unwrap();
                         Some(Arc::new((*oldest).clone()))
                     } else {

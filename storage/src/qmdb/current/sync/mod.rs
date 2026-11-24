@@ -2,7 +2,7 @@
 //!
 //! Contains the implementation of [crate::qmdb::sync::Database] for
 //! [Db](crate::qmdb::current::Db), covering every variant (ordered/unordered,
-//! fixed/variable, any snapshot index).
+//! fixed/variable, any key index).
 //!
 //! The canonical root of a `current` database combines the ops root, grafted root, and optional
 //! pending and partial chunk digests into a single hash (see the [Root structure](super) section in
@@ -88,14 +88,15 @@ where
     F: Graftable,
     E: Context + Spawner,
     U: Update,
-    I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory + crate::qmdb::IndexBuild<F>,
     H: Hasher,
     J: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    // Build authenticated log.
-    let index = I::new(context.child("index"), translator);
+    // Match the startup layout, which opens the Any layer under `any`.
+    let any_context = context.child("any");
+    let index = I::new(any_context.child("index"), translator);
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
         context.child("merkle"),
         &merkle_config,
@@ -120,10 +121,10 @@ where
 
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
-    let snapshot_context = context.child("any_snapshot");
-    let any_metrics = AnyMetrics::new(context.child("any"));
+    let index_context = any_context.child("index_build");
+    let any_metrics = AnyMetrics::new(any_context);
     let any: AnyDb<F, E, J, I, H, U, S, N> = AnyDb::init_from_log(
-        snapshot_context,
+        index_context,
         index,
         log,
         Some(bitmap),
@@ -203,7 +204,7 @@ where
             Config = <C as crate::qmdb::sync::Journal<F>>::Config,
         > + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
-    I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
+    I: IndexFactory + crate::qmdb::IndexBuild<F> + UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,
     S: Strategy,
@@ -252,7 +253,7 @@ where
             Config = <C as crate::qmdb::sync::Journal<F>>::Config,
         > + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
-    I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
+    I: IndexFactory + crate::qmdb::IndexBuild<F> + UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,
     S: Strategy,
