@@ -1934,6 +1934,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "commonware-actor",
+ "commonware-allocator",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-coding",
@@ -1950,7 +1951,9 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "criterion",
  "futures",
+ "num-traits",
  "paste",
  "pin-project",
  "rand 0.10.2",
@@ -2243,6 +2246,37 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-log-multimmit"
+version = "2026.11.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "commonware-actor",
+ "commonware-allocator",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-deployer",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-stream",
+ "commonware-utils",
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
