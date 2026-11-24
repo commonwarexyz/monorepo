@@ -2,7 +2,7 @@
 //! key.
 //!
 //! The specific variants provided within this module include:
-//! - Unordered: The database does not maintain or require any ordering over the key space.
+//! - Unordered: The database does not track the order of active keys.
 //!   - Fixed-size values
 //!   - Variable-size values
 //! - Ordered: The database maintains a total order over active keys.
@@ -121,8 +121,8 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Ordered as OrderedIndex},
-    journal::authenticated,
-    merkle::{Family, Location, full::Config as MerkleConfig},
+    journal::{authenticated, authenticated::Config as MerkleConfig},
+    merkle::{Family, Location},
     qmdb::{
         Error as QmdbError,
         any::operation::{
@@ -131,7 +131,7 @@ use crate::{
         },
         bitmap::Shared,
         metrics::Metrics,
-        operation::Key,
+        operation::{Committable as _, Key},
         single_operation_root,
         value::ValueEncoding,
     },
@@ -149,6 +149,7 @@ use tracing::warn;
 pub mod batch;
 mod db;
 pub use db::Db;
+pub(crate) use db::read_many_map;
 pub mod operation;
 pub use operation::{COMMIT_CONTEXT, DELETE_CONTEXT, UPDATE_CONTEXT};
 pub mod ordered;
@@ -170,14 +171,14 @@ where
     U: Update,
     Operation<F, U>: Codec,
 {
-    single_operation_root::<F, H>(&Operation::<F, U>::Commit(None, Location::new(0)))
+    single_operation_root::<F, H>(&Operation::<F, U>::initial_commit())
 }
 
 pub(crate) const BITMAP_CHUNK_BYTES: usize = 64;
 
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct Config<T: Translator, J, S: Strategy, B = ()> {
+pub struct Config<T: Translator, J, S: Strategy> {
     /// Configuration for the Merkle structure backing the authenticated journal.
     pub merkle: MerkleConfig<S>,
 
@@ -195,15 +196,14 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
-    /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
-    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
-    pub init_concurrency: B,
+    /// Tasks that initialization spawns to scan the log at once. A partitioned index decodes on
+    /// them, beside fewer insert tasks, and any other index builds on the calling task. With 1,
+    /// initialization spawns nothing, and the calling task scans the log while the strategy hashes
+    /// it.
+    pub init_concurrency: NonZeroUsize,
 }
 
-impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
+impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, S>
 where
     F: Family,
     E: Context + Spawner,
@@ -223,14 +223,14 @@ where
     /// requires one operation. Subsequent appends may exceed this initialization bound.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, QmdbError<F>> {
         init_with_bitmap(context, cfg, None, max_size, None).await
     }
 }
 
-impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, BITMAP_CHUNK_BYTES, S>
+impl<F, E, K, V, C, I, H, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, S>
 where
     F: Family,
     E: Context + Spawner,
@@ -250,7 +250,7 @@ where
     /// requires one operation. Subsequent appends may exceed this initialization bound.
     pub async fn init(
         context: E,
-        cfg: Config<I::Translator, C::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+        cfg: Config<I::Translator, C::Config, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, QmdbError<F>> {
         init_with_bitmap(context, cfg, None, max_size, None).await
@@ -262,11 +262,11 @@ where
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S>,
     bitmap: Option<Arc<Shared<N>>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
-) -> Result<db::Db<F, E, J, I, H, U, N, S>, QmdbError<F>>
+) -> Result<db::Db<F, E, J, I, H, U, S, N>, QmdbError<F>>
 where
     F: Family,
     E: Context + Spawner,
@@ -306,15 +306,63 @@ where
         return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
 
-    // Publish the selected journal prefix only after its in-memory state is reconstructible.
+    // Build the snapshot while the journal rebuilds its digests.
+    if let Some(floor) = floor {
+        let index = I::new(context.child("index"), cfg.translator);
+        let snapshot_context = context.child("snapshot");
+        let metrics = Metrics::new(context);
+        let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
+
+        // A partitioned index built on decode tasks hashes the journal's operations as it decodes
+        // them, so the log is read once. Any other index builds on this task, and the journal
+        // replays the log as `finish_with` describes.
+        let (log, (index, active_keys, activity)) = match index.hashing_plan(concurrency, cache) {
+            Some(plan) => {
+                pending
+                    .finish_hashing(|journal, leaves| async move {
+                        let mut index = index;
+                        let (active_keys, activity) = index
+                            .build_snapshot_hashing(
+                                snapshot_context,
+                                floor,
+                                &journal,
+                                plan,
+                                buffer,
+                                leaves,
+                            )
+                            .await?;
+                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                    })
+                    .await?
+            }
+            None => {
+                pending
+                    .finish_with(concurrency, |journal| async move {
+                        let mut index = index;
+                        let (active_keys, activity) = index
+                            .build_snapshot(
+                                snapshot_context,
+                                floor,
+                                &journal,
+                                concurrency,
+                                buffer,
+                                cache,
+                            )
+                            .await?;
+                        Ok::<_, QmdbError<F>>((index, active_keys, activity))
+                    })
+                    .await?
+            }
+        };
+        return db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics);
+    }
+
+    // Only a fresh journal has no selected commit.
     let mut log = pending.finish().await?;
 
-    if log.size() == 0 {
-        warn!("Authenticated log is empty, initializing new db");
-        let commit = Operation::Commit(None, Location::new(0));
-        (log, _) = log.append(&commit).await?;
-        log = log.sync().await?;
-    }
+    warn!("Authenticated log is empty, initializing new db");
+    (log, _) = log.append(&Operation::initial_commit()).await?;
+    log = log.sync().await?;
 
     // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
     let index = I::new(context.child("index"), cfg.translator);
@@ -357,7 +405,7 @@ pub(crate) mod test {
         NZU16, NZU64, NZUsize, Widen,
         bitmap::{Prunable, Readable as _},
     };
-    use core::{fmt::Debug, future::Future, pin::Pin};
+    use core::{fmt::Debug, future::Future, ops::RangeInclusive, pin::Pin};
     use std::{
         collections::{BTreeMap, BTreeSet, HashMap},
         num::{NonZeroU16, NonZeroUsize},
@@ -388,30 +436,25 @@ pub(crate) mod test {
         suffix: &str,
         strategy: S,
     ) -> Config<T, FConfig, S> {
-        fixed_db_config_full(suffix, strategy, ())
+        fixed_db_config_full(suffix, strategy, NZUsize!(2))
     }
 
-    /// Shared config construction for every fixed-value flavor, generic over the strategy and
-    /// the index's snapshot-build concurrency.
+    /// Shared config construction for every fixed-value flavor, generic over the strategy.
     pub(crate) fn fixed_db_config_full<
         T: Translator + Default,
         S: commonware_parallel::Strategy,
-        B,
     >(
         suffix: &str,
         strategy: S,
-        init_concurrency: B,
-    ) -> Config<T, FConfig, S, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, FConfig, S> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: FConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -427,42 +470,38 @@ pub(crate) mod test {
         }
     }
 
-    /// Like [fixed_db_config], typed for a partitioned index at the serial concurrency.
+    /// Like [fixed_db_config], but initializes serially.
     pub(crate) fn fixed_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> Config<T, FConfig, Sequential, NonZeroUsize> {
+    ) -> Config<T, FConfig, Sequential> {
         fixed_db_config_full(suffix, Sequential, NZUsize!(1))
     }
 
-    /// Like [variable_db_config], typed for a partitioned index at the serial concurrency.
+    /// Like [variable_db_config], but initializes serially.
     pub(crate) fn variable_db_config_partitioned<T: Translator + Default>(
         suffix: &str,
-    ) -> Config<T, VConfig<((), ())>, Sequential, NonZeroUsize> {
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         variable_db_config_full(suffix, NZUsize!(1))
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
     ) -> Config<T, VConfig<((), ())>, Sequential> {
-        variable_db_config_full(suffix, ())
+        variable_db_config_full(suffix, NZUsize!(2))
     }
 
-    /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
-    pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
+    /// Shared config construction for every variable-value flavor.
+    pub(crate) fn variable_db_config_full<T: Translator + Default>(
         suffix: &str,
-        init_concurrency: B,
-    ) -> Config<T, VConfig<((), ())>, Sequential, B> {
+        init_concurrency: NonZeroUsize,
+    ) -> Config<T, VConfig<((), ())>, Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
-                metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
+                partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                resident_height: crate::journal::authenticated::low_resident_height(),
             },
             log: VConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -812,79 +851,6 @@ pub(crate) mod test {
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
-    }
-
-    /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
-    /// with the cache disabled, with a tiny cache that evicts throughout replay, or with a large
-    /// cache must produce the identical root and key-value state. Every variant routes its
-    /// rebuild through the shared cache path but resolves collisions with its own index and
-    /// cursor, so each is checked against the state recorded before the drop.
-    pub(crate) async fn test_any_db_init_cache_equivalence<D, V>(
-        context: Context,
-        db: D,
-        reopen_db: impl Fn(Context, Option<NonZeroUsize>) -> Pin<Box<dyn Future<Output = D> + Send>>,
-        make_value: impl Fn(u64) -> V,
-    ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
-        V: Clone + CodecShared + PartialEq + core::fmt::Debug,
-    {
-        const ELEMENTS: u64 = 2000;
-
-        // Churn overlapping keys across several commits so replay supersedes and deletes cached
-        // locations. Keys share their leading bytes so every variant, including the partitioned
-        // ones, resolves collisions on every lookup.
-        let mut expected: HashMap<Digest, Option<V>> = HashMap::new();
-        let mut db = db;
-        for round in 0u64..4 {
-            let mut batch = db.new_batch();
-            for i in 0u64..ELEMENTS {
-                let k = colliding_digest((i % 16) as u8, i);
-                let v = match (round, i % 4) {
-                    (0, _) => Some(make_value(i)),
-                    (_, 0) => Some(make_value(i + round * ELEMENTS)),
-                    (_, 1) => None,
-                    (_, 2) if round % 2 == 0 => Some(make_value(i + round)),
-                    (_, 2) => None,
-                    _ => continue,
-                };
-                expected.insert(k, v.clone());
-                batch = batch.write(k, v);
-            }
-            let merkleized = batch.merkleize(&db).await.unwrap();
-            db = db.apply_batch(merkleized).await.unwrap();
-            db = db.commit().await.unwrap();
-        }
-        let db = db.sync().await.unwrap();
-        let root = db.root();
-        let op_count = db.bounds().end;
-        drop(db);
-
-        // All three cache sizes rebuild the snapshot from the same immutable log, so every root
-        // and key-value result must match the pre-drop state.
-        for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
-            let ctx = context
-                .child("reopen")
-                .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
-            let db = reopen_db(ctx, cache_size).await;
-            assert_eq!(
-                db.bounds().end,
-                op_count,
-                "size mismatch at cache_size={cache_size:?}"
-            );
-            assert_eq!(
-                db.root(),
-                root,
-                "root mismatch at cache_size={cache_size:?}"
-            );
-            for (key, value) in &expected {
-                assert_eq!(
-                    db.get(key).await.unwrap(),
-                    *value,
-                    "state mismatch at cache_size={cache_size:?}"
-                );
-            }
-            drop(db);
-        }
     }
 
     /// Open a prior committed state at a bound and recover it on ordinary reopen.
@@ -1463,7 +1429,7 @@ pub(crate) mod test {
 
     /// Observe the state of `db` for `keys`.
     async fn observe<F, C, I, H, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, H, U, N, S>,
+        db: &Db<F, Context, C, I, H, U, S, N>,
         keys: &[U::Key],
     ) -> Observed<F, H::Digest, U::Value>
     where
@@ -1485,7 +1451,7 @@ pub(crate) mod test {
             locs: keys
                 .iter()
                 .map(|key| {
-                    let mut locs: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locs: Vec<_> = db.snapshot.get(key.as_ref()).copied().collect();
                     locs.sort();
                     locs
                 })
@@ -1509,10 +1475,10 @@ pub(crate) mod test {
     /// lies below the live prefix after a prune whose chunk floor exceeds the retained start.
     #[boxed]
     pub(crate) async fn assert_rebuild_matches<F, C, I, H, U, const N: usize, S>(
-        db: Db<F, Context, C, I, H, U, N, S>,
-        reopen: impl Future<Output = Db<F, Context, C, I, H, U, N, S>>,
+        db: Db<F, Context, C, I, H, U, S, N>,
+        reopen: impl Future<Output = Db<F, Context, C, I, H, U, S, N>>,
         keys: &[U::Key],
-    ) -> Db<F, Context, C, I, H, U, N, S>
+    ) -> Db<F, Context, C, I, H, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -1595,7 +1561,7 @@ pub(crate) mod test {
 
     /// Replay the retained log of `db` and return the location of every live key's update.
     pub(crate) async fn live<F, C, I, H, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, H, U, N, S>,
+        db: &Db<F, Context, C, I, H, U, S, N>,
     ) -> BTreeMap<U::Key, GenericLocation<F>>
     where
         F: Family,
@@ -1620,7 +1586,7 @@ pub(crate) mod test {
     /// floor. The active key count matches the live keys, and the snapshot maps each live key to
     /// its update and holds no other entry.
     pub(crate) async fn assert_exact<F, C, I, H, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, H, U, N, S>,
+        db: &Db<F, Context, C, I, H, U, S, N>,
     ) where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -1651,7 +1617,7 @@ pub(crate) mod test {
         );
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
+                db.snapshot.get(key.as_ref()).any(|entry| entry == loc),
                 "snapshot misses the live update at {loc}",
             );
         }
@@ -1931,10 +1897,10 @@ pub(crate) mod test {
     /// the live state. Returns the rebuilt db.
     #[boxed]
     async fn assert_model_rebuild<F, C, I, U, const N: usize, S>(
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         model: &Model,
-        reopen: impl Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
-    ) -> Db<F, Context, C, I, Sha256, U, N, S>
+        reopen: impl Future<Output = Db<F, Context, C, I, Sha256, U, S, N>>,
+    ) -> Db<F, Context, C, I, Sha256, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -1964,7 +1930,7 @@ pub(crate) mod test {
     /// misresolved to `None` leaves a duplicate snapshot entry and a stale bitmap bit.
     pub(crate) async fn test_any_db_chained_rebuild<F, C, I, U, const N: usize, S, Fut>(
         context: Context,
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         reopen: impl Fn(Context) -> Fut,
         make_value: impl Fn(u64) -> Digest,
     ) where
@@ -1974,7 +1940,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -1982,7 +1948,7 @@ pub(crate) mod test {
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
-        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
+        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, S, N>>,
     {
         // Shape 1: A is applied and dropped before C is merkleized on B.
         let mut model = Model::default();
@@ -2055,14 +2021,17 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    use crate::qmdb::{
-        any::{
-            batch::Slot,
-            ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
-            traits::MerkleizedBatch as MerkleizedTrait,
-            unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
+    use crate::{
+        qmdb::{
+            any::{
+                batch::Slot,
+                ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
+                traits::MerkleizedBatch as MerkleizedTrait,
+                unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
+            },
+            floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
         },
-        floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
+        utils::task_metrics::{RUNNING, SPAWNED, tasks},
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_parallel::Sequential;
@@ -2188,7 +2157,6 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, FixedEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
 
@@ -2202,7 +2170,6 @@ pub(crate) mod test {
             UnorderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Unordered<Digest, VariableEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
 
@@ -2216,7 +2183,6 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, FixedEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
 
@@ -2230,7 +2196,6 @@ pub(crate) mod test {
             OrderedIndex<OneCap, MmbLocation>,
             Sha256,
             update::Ordered<Digest, VariableEncoding<Digest>>,
-            { crate::qmdb::any::BITMAP_CHUNK_BYTES },
             Sequential,
         >;
     }
@@ -2397,34 +2362,6 @@ pub(crate) mod test {
                 }
             }
         };
-        (with_reopen_cache: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
-            paste::paste! {
-                #[test_group("slow")]
-                #[test_traced($traced)]
-                fn [<$f _ $l>]() {
-                    let executor = deterministic::Runner::default();
-                    executor.start(|context| async move {
-                        let ctx = context.child(stringify!($l));
-                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db"), None)
-                            .await
-                            .unwrap();
-                        $f(
-                            ctx,
-                            db,
-                            |ctx, cache_size| {
-                                Box::pin(async move {
-                                    let mut cfg = $cfg::<OneCap>("db");
-                                    cfg.init_cache = cache_size;
-                                    <$db>::init(ctx.child("storage"), cfg, None).await.unwrap()
-                                })
-                            },
-                            to_digest,
-                        )
-                        .await;
-                    });
-                }
-            }
-        };
     }
 
     // Generate one slow test per variant across all variants (MMR + MMB).
@@ -2434,9 +2371,6 @@ pub(crate) mod test {
         };
         (with_make_value: $f:ident, $traced:literal) => {
             with_all_variants!(test_for_variant!(with_make_value: $f, $traced));
-        };
-        (with_reopen_cache: $f:ident, $traced:literal) => {
-            with_all_variants!(test_for_variant!(with_reopen_cache: $f, $traced));
         };
     }
 
@@ -2463,7 +2397,6 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
-    test_for_all_variants!(with_reopen_cache: test_any_db_init_cache_equivalence, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_chained_rebuild, "WARN");
     test_for_all_variants!(with_make_value: test_any_policy_hold, "WARN");
     test_for_all_variants!(with_reopen: test_any_policy_keep_evict_and_recover, "WARN");
@@ -3832,7 +3765,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S>
-        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, N, S>, F>
+        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, S, N>, F>
         for batch::Staged<F, Sha256, operation::update::Unordered<Digest, V>, S>
     where
         F: Family,
@@ -3849,7 +3782,7 @@ pub(crate) mod test {
             self,
             slots: Vec<Slot<Digest>>,
             unstaged: Vec<(Digest, Option<Digest>)>,
-            db: &Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, N, S>,
+            db: &Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, S, N>,
             policy: &mut P,
         ) -> Self::Merkleized {
             self.merkleize_with(slots, unstaged, db, policy)
@@ -3859,7 +3792,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S>
-        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>, F>
+        StagedPolicy<Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>, F>
         for batch::Staged<F, Sha256, operation::update::Ordered<Digest, V>, S>
     where
         F: Family,
@@ -3876,7 +3809,7 @@ pub(crate) mod test {
             self,
             slots: Vec<Slot<Digest>>,
             unstaged: Vec<(Digest, Option<Digest>)>,
-            db: &Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>,
+            db: &Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>,
             policy: &mut P,
         ) -> Self::Merkleized {
             self.merkleize_with(slots, unstaged, db, policy)
@@ -3891,7 +3824,7 @@ pub(crate) mod test {
     /// same writes and policy. A staged key resolves in the applied snapshot or in a live parent.
     pub(crate) async fn test_any_policy_after_staged_writes<F, C, I, U, const N: usize, S>(
         _context: Context,
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         make_value: impl Fn(u64) -> Digest,
     ) where
         F: Family,
@@ -3900,7 +3833,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -3909,7 +3842,7 @@ pub(crate) mod test {
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
         batch::Staged<F, Sha256, U, S>: StagedPolicy<
-                Db<F, Context, C, I, Sha256, U, N, S>,
+                Db<F, Context, C, I, Sha256, U, S, N>,
                 F,
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
             >,
@@ -3960,7 +3893,7 @@ pub(crate) mod test {
     /// serves the decided values, and that it matches an unstaged batch with the same writes and
     /// policy. Returns the decided locations.
     async fn staged_matches_writes<F, C, I, U, const N: usize, S>(
-        db: &Db<F, Context, C, I, Sha256, U, N, S>,
+        db: &Db<F, Context, C, I, Sha256, U, S, N>,
         ancestors: &[&Arc<batch::MerkleizedBatch<F, Digest, U, S>>],
         make: impl Fn() -> batch::UnmerkleizedBatch<F, Sha256, U, S>,
         writes: &[(Digest, Option<Digest>); 3],
@@ -3973,7 +3906,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -3982,7 +3915,7 @@ pub(crate) mod test {
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
         batch::Staged<F, Sha256, U, S>: StagedPolicy<
-                Db<F, Context, C, I, Sha256, U, N, S>,
+                Db<F, Context, C, I, Sha256, U, S, N>,
                 F,
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
             >,
@@ -4045,7 +3978,7 @@ pub(crate) mod test {
     /// deciding any update.
     pub(crate) async fn test_any_policy_after_ancestor_applied<F, C, I, U, const N: usize, S, Fut>(
         context: Context,
-        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        db: Db<F, Context, C, I, Sha256, U, S, N>,
         reopen: impl Fn(Context) -> Fut,
         make_value: impl Fn(u64) -> Digest,
     ) where
@@ -4055,7 +3988,7 @@ pub(crate) mod test {
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,
         Operation<F, U>: Codec,
-        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+        Db<F, Context, C, I, Sha256, U, S, N>: DbAny<
                 Family = F,
                 Key = Digest,
                 Value = Digest,
@@ -4063,7 +3996,7 @@ pub(crate) mod test {
                 Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
                 Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
             >,
-        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
+        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, S, N>>,
     {
         // Seed eight updates in key order at locations 1..9 with a held floor.
         let mut keys: Vec<_> = (0..8).map(to_digest).collect();
@@ -4156,7 +4089,7 @@ pub(crate) mod test {
         async fn read(&self, batch: &Self::Merkleized, key: &Digest) -> Option<Digest>;
     }
 
-    impl<F, C, I, U, const N: usize, S> Inspect<F> for Db<F, Context, C, I, Sha256, U, N, S>
+    impl<F, C, I, U, const N: usize, S> Inspect<F> for Db<F, Context, C, I, Sha256, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -4210,7 +4143,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S> Links<F>
-        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>
+        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, operation::update::Ordered<Digest, V>>>,
@@ -5156,7 +5089,7 @@ pub(crate) mod test {
             .collect()
     }
 
-    impl<F, C, I, U, const N: usize, S> Changes<F> for Db<F, Context, C, I, Sha256, U, N, S>
+    impl<F, C, I, U, const N: usize, S> Changes<F> for Db<F, Context, C, I, Sha256, U, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, U>>,
@@ -5212,7 +5145,7 @@ pub(crate) mod test {
     }
 
     impl<F, C, I, V, const N: usize, S> Neighbors<F>
-        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>
+        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, S, N>
     where
         F: Family,
         C: Mutable<Item = Operation<F, operation::update::Ordered<Digest, V>>>,
@@ -5923,14 +5856,15 @@ pub(crate) mod test {
             // Decide every eighth update, or write every odd one of the first sixteen updates and
             // decide the eight even ones, which spends every entry before the writes. Every
             // decision follows the same batched reads. Without writes, those reads hold exactly
-            // the eight decided updates.
-            let (stride, batch, deltas): (_, _, &[u64]) = if in_batch {
+            // the eight decided updates. With writes, the read of the written keys may already
+            // cache the decided updates, leaving the policy nothing to read.
+            let (stride, batch, deltas): (_, _, &[RangeInclusive<u64>]) = if in_batch {
                 let batch = (1..16).step_by(2).fold(db.new_batch(), |batch, i| {
                     batch.write(keys[i], Some(make_value(i as u64 + 100)))
                 });
-                (2, batch, &[0, 2])
+                (2, batch, &[0..=0, 1..=2])
             } else {
-                (8, db.new_batch(), &[0, 1, 8])
+                (8, db.new_batch(), &[0..=0, 1..=1, 8..=8])
             };
             let sample = || -> Vec<_> {
                 names[..deltas.len()]
@@ -5938,7 +5872,7 @@ pub(crate) mod test {
                     .map(|name| counter(&context, name))
                     .collect()
             };
-            let after: Vec<_> = sample().iter().zip(deltas).map(|(n, d)| n + d).collect();
+            let before = sample();
             let mut probes = Vec::new();
             let mut policy = Script::new(8, u64::MAX, |_: &Digest| {
                 probes.push(sample());
@@ -5955,8 +5889,11 @@ pub(crate) mod test {
                 .map(|(loc, key, _)| (*loc, *key))
                 .collect();
             assert_eq!(decided, expected, "in_batch={in_batch}");
+            let after = sample();
             assert_eq!(probes, vec![after.clone(); 8], "in_batch={in_batch}");
-            assert_eq!(sample(), after, "in_batch={in_batch}");
+            for ((after, before), delta) in after.iter().zip(&before).zip(deltas) {
+                assert!(delta.contains(&(after - before)), "in_batch={in_batch}");
+            }
 
             // Start the next case from an empty database.
             db.destroy().await.unwrap();
@@ -6133,22 +6070,10 @@ pub(crate) mod test {
     /// to observe a closed channel.
     #[test_traced("INFO")]
     fn test_parallel_init_aborted_on_cancel() {
-        /// Sum of the runtime's running-task gauges for snapshot build tasks.
-        fn running_build_tasks(metrics: &str) -> u64 {
-            metrics
-                .lines()
-                .filter(|line| {
-                    line.starts_with("runtime_tasks_running{")
-                        && (line.contains("snapshot_worker") || line.contains("snapshot_decoder"))
-                })
-                .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
-                .sum()
-        }
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let cfg = || fixed_db_config_full::<OneCap, _, _>("cancel", Sequential, NZUsize!(4));
+            let cfg = || fixed_db_config_full::<OneCap, _>("cancel", Sequential, NZUsize!(4));
 
             // Persist enough operations that the reopen's build spans many decode chunks.
             let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
@@ -6174,7 +6099,11 @@ pub(crate) mod test {
                         panic!("init completed before it could be cancelled");
                     }
                     context.sleep(Duration::from_millis(1)).await;
-                    if running_build_tasks(&context.encode()) > 0 {
+                    let metrics = context.encode();
+                    if tasks(&metrics, RUNNING, "snapshot_worker")
+                        + tasks(&metrics, RUNNING, "snapshot_decoder")
+                        > 0
+                    {
                         spawned = true;
                         break;
                     }
@@ -6186,7 +6115,100 @@ pub(crate) mod test {
             // the aborted tasks.
             context.sleep(Duration::from_millis(10)).await;
             let metrics = context.encode();
-            assert_eq!(running_build_tasks(&metrics), 0, "{metrics}");
+            assert_eq!(tasks(&metrics, RUNNING, "snapshot_worker"), 0, "{metrics}");
+            assert_eq!(tasks(&metrics, RUNNING, "snapshot_decoder"), 0, "{metrics}");
+        });
+    }
+
+    /// With a partitioned index, initialization spawns snapshot decode tasks and none of the
+    /// journal's own replay tasks.
+    #[test_traced("INFO")]
+    fn test_hashing_build_spawns_no_journal_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Commit and sync operations for a reopen to scan, then close the database.
+            let ctx = context.child("db");
+            let cfg = || fixed_db_config_full::<OneCap, _>("decoders", Sequential, NZUsize!(3));
+            let db: UnorderedFixedP1 = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0..2_000u64 {
+                batch = batch.write(key(i), Some(key(i)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // The reopen spawns decode tasks and none of the journal's own replay tasks.
+            let metrics = context.encode();
+            let chunks = tasks(&metrics, SPAWNED, "replay_chunk");
+            let decoders = tasks(&metrics, SPAWNED, "snapshot_decoder");
+            let db = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None)
+                .await
+                .unwrap();
+            let metrics = context.encode();
+            assert_eq!(tasks(&metrics, SPAWNED, "replay_chunk"), chunks);
+            assert!(tasks(&metrics, SPAWNED, "snapshot_decoder") > decoders);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// With an unpartitioned index, initialization replays the log on tasks of its own while this
+    /// task scans it for the index, and with an `init_concurrency` of 1 it spawns none.
+    #[test_traced("INFO")]
+    fn test_init_concurrency_replays_beside_the_index() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Commit and sync operations for a reopen to scan, then close the database.
+            let ctx = context.child("db");
+            let cfg = |concurrency| {
+                fixed_db_config_full::<OneCap, _>(
+                    "scan",
+                    Sequential,
+                    NonZeroUsize::new(concurrency).unwrap(),
+                )
+            };
+            let db: UnorderedFixed = UnorderedFixedDb::init(ctx.child("storage"), cfg(1), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for i in 0..200u64 {
+                batch = batch.write(key(i), Some(key(i)));
+            }
+            let merkleized = batch.merkleize(&db).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            // With an `init_concurrency` of 3, initialization replays the log on tasks of its own
+            // while this task builds the index.
+            let metrics = context.encode();
+            let chunks = tasks(&metrics, SPAWNED, "replay_chunk");
+            let builders = tasks(&metrics, SPAWNED, "snapshot_decoder")
+                + tasks(&metrics, SPAWNED, "snapshot_worker");
+            let db: UnorderedFixed = UnorderedFixedDb::init(ctx.child("storage"), cfg(3), None)
+                .await
+                .unwrap();
+            let metrics = context.encode();
+            assert!(tasks(&metrics, SPAWNED, "replay_chunk") > chunks);
+            assert_eq!(
+                tasks(&metrics, SPAWNED, "snapshot_decoder")
+                    + tasks(&metrics, SPAWNED, "snapshot_worker"),
+                builders
+            );
+            drop(db);
+
+            // One task: nothing is spawned.
+            let spawned = tasks(&context.encode(), SPAWNED, "");
+            let db: UnorderedFixed = UnorderedFixedDb::init(ctx.child("storage"), cfg(1), None)
+                .await
+                .unwrap();
+            assert_eq!(tasks(&context.encode(), SPAWNED, ""), spawned);
+            db.destroy().await.unwrap();
         });
     }
 
@@ -6941,7 +6963,7 @@ pub(crate) mod test {
             assert!(
                 matches!(
                     boundary_err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                    QmdbError::NoRetainedCommit(cap) if cap == oldest_retained
                 ),
                 "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
             );
@@ -6966,7 +6988,7 @@ pub(crate) mod test {
             assert!(
                 matches!(
                     err,
-                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                    QmdbError::NoRetainedCommit(cap) if cap == first_start
                 ),
                 "unexpected bounded initialization error: {err:?}"
             );
@@ -7307,7 +7329,6 @@ pub(crate) mod test {
         crate::index::unordered::Index<OneCap, crate::merkle::Location<crate::merkle::mmb::Family>>,
         Sha256,
         super::operation::update::Unordered<Digest, crate::qmdb::value::VariableEncoding<Digest>>,
-        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         Sequential,
     >;
 
