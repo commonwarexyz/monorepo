@@ -1266,7 +1266,7 @@ async fn await_or_cancel<T>(
 mod tests {
     use super::{
         Applied, Execution, Flight, FlightResult, PendingEntry, PrepareBatchesError, Processor,
-        Prune, Pruning,
+        Prune, Pruning, fail_unless_stopped,
     };
     use crate::stateful::{
         Application, ExecutionError, Finality, Input, Proposed, PruneConfig,
@@ -3638,6 +3638,39 @@ mod tests {
                 .await
                 .expect("the walk must reach the new anchor");
             assert_eq!(path.blocks.len(), 1);
+        });
+    }
+
+    /// A failed operation panics while the actor runs.
+    #[test]
+    #[should_panic(expected = "process failed: injected")]
+    fn failure_panics_while_running() {
+        use commonware_runtime::Spawner as _;
+        deterministic::Runner::default().start(|context| async move {
+            let () =
+                fail_unless_stopped(context.stopped(), "process failed: injected".into()).await;
+        });
+    }
+
+    /// A failed operation after shutdown fired is abandoned: it never completes and does not
+    /// panic.
+    #[test]
+    fn failure_is_abandoned_after_shutdown() {
+        use commonware_runtime::Spawner as _;
+        deterministic::Runner::default().start(|context| async move {
+            let stopped = context.stopped();
+            let stopper = context.child("stopper");
+            let stop = context.child("stop").spawn(|_| async move {
+                stopper.stop(0, None).await.expect("runtime should stop");
+            });
+            let _ = context.stopped().await;
+            let mut failed = Box::pin(fail_unless_stopped::<()>(
+                stopped,
+                "process failed: injected".into(),
+            ));
+            assert!(futures::poll!(&mut failed).is_pending());
+            drop(failed);
+            stop.await.expect("stop task should finish");
         });
     }
 }

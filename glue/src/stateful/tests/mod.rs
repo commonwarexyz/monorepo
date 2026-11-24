@@ -2533,3 +2533,36 @@ fn pruning_joins_verification_on_real_qmdbs() {
         let _ = marshal_actor.await;
     });
 }
+
+/// QMDB staleness maps to [`ExecutionError::Stale`], input-dependent refusals to
+/// [`ExecutionError::Invalid`], and every other failure to [`ExecutionError::Fatal`].
+#[test]
+fn qmdb_errors_map_to_execution_errors() {
+    use commonware_storage::{mmr, qmdb};
+    type Error = qmdb::Error<mmr::Family>;
+    let location = mmr::Location::new(1);
+    assert!(matches!(
+        ExecutionError::from(Error::StaleRead),
+        ExecutionError::Stale
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::StaleBatch),
+        ExecutionError::Stale
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::BelowInactivityFloor(location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::FloorRegressed(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::FloorBeyondCommit(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::NotCommitBoundary(location)),
+        ExecutionError::Fatal(_)
+    ));
+}

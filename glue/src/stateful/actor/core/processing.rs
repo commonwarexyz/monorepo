@@ -1042,7 +1042,7 @@ mod tests {
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
-        spawn_processing_with_gates(context, prefix, prune_config, VecDeque::new()).await
+        spawn_processing_with_gates(context, prefix, prune_config, VecDeque::new(), None).await
     }
 
     async fn spawn_processing_with_gates(
@@ -1050,6 +1050,7 @@ mod tests {
         prefix: &str,
         prune_config: Option<PruneConfig>,
         process_gates: VecDeque<ApplicationGate>,
+        proposal_gate: Option<ApplicationGate>,
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
@@ -1075,7 +1076,7 @@ mod tests {
             prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
         let app = GatedApp {
             process_gates: Arc::new(Mutex::new(process_gates)),
-            proposal_gate: Arc::new(Mutex::new(None)),
+            proposal_gate: Arc::new(Mutex::new(proposal_gate)),
             process_valid: true,
             observed_contexts: Arc::default(),
         };
@@ -2149,6 +2150,47 @@ mod tests {
             // against the competing block and is rejected.
             release.send(()).unwrap();
             assert!(!request.await);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A fork from the applied databases that is still creating its batches when a competing block
+    /// applies is refused, so the block is never processed on the winner's state. The request
+    /// starts over and votes `false`.
+    #[test]
+    fn fork_from_anchor_is_refused_after_competing_finalization() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let winner = TestBlock::child(&genesis, 2);
+            let height = block.height();
+            let app = ReplayGatedApp::new(height, []);
+            let process_calls = app.process_calls.clone();
+            let (mut mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "fork-gate", &genesis, app).await;
+
+            // The verification forks from the anchor and parks while creating its batches.
+            let (forking, release) = TestDb::gate_next_new_batch();
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                ancestry::from_iter([digested(block), digested(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            forking
+                .await
+                .expect("verification must fork from the anchor");
+
+            // The competing block applies, and the parked fork then finds the anchor moved.
+            let (acknowledgement, receipt) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            receipt.await.expect("winner must be acknowledged");
+            release.send(()).unwrap();
+            assert!(!verify.await);
+
+            // Only the winner's reconstruction processed a block at this height.
+            assert_eq!(process_calls.at(height), 1);
             actor.abort();
             drop(guards);
         });
@@ -3998,6 +4040,7 @@ mod tests {
                         retained_qmdb_blocks: 0,
                     }),
                     VecDeque::from([verify_gate]),
+                    None,
                 )
                 .await;
 
@@ -4927,6 +4970,90 @@ mod tests {
                 waiter2.await.is_err(),
                 "the queued unflushed acknowledgement must be canceled",
             );
+        });
+    }
+
+    /// A prune waiting for the barrier that covers its target leaves the mailbox open.
+    #[test]
+    fn waiting_prune_leaves_mailbox_open() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _subscriber, _marshal, actor) = spawn_processing(
+                &context,
+                "waiting-prune-mailbox",
+                Some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
+            )
+            .await;
+
+            // Both blocks apply under block 1's held flush, so the due prune waits.
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let second = TestBlock::child(&first, 2);
+            let (first_ack, first_receipt) = Exact::handle();
+            let (second_ack, _second_receipt) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(first), first_ack));
+            let _ = mailbox.report(Update::Block(digested(second), second_ack));
+            control.applied_at_least(2).await;
+
+            // The loop still answers the mailbox while the prune waits.
+            processing_fence(&context, &mailbox).await;
+            assert!(control.pruned.lock().is_empty());
+            assert_eq!(control.flushes.lock().len(), 1);
+
+            // Completing the barrier lets the prune run.
+            control.next_flush().await.send(Ok(())).unwrap();
+            first_receipt.await.expect("block 1 must be acknowledged");
+            control.pruned_at_least(1).await;
+            actor.abort();
+        });
+    }
+
+    /// The active barrier completes and acknowledges its block while a proposal build is held.
+    #[test]
+    fn barrier_completes_during_held_proposal() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (gate, started, release) = application_gate();
+            let (mut mailbox, control, _subscriber, _marshal, actor) = spawn_processing_with_gates(
+                &context,
+                "barrier-during-proposal",
+                None,
+                VecDeque::new(),
+                Some(gate),
+            )
+            .await;
+
+            // Block 1 applies with its flush held.
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let (acknowledgement, receipt) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(first.clone()), acknowledgement));
+            control.applied_at_least(1).await;
+
+            // A build on block 1 holds the loop inside the proposal.
+            let mut proposer = mailbox.clone();
+            let mut proposal = Box::pin(proposer.propose(
+                (
+                    context.child("propose"),
+                    TestBlock::child(&first, 2).context(),
+                ),
+                ancestry::from_iter([digested(first)]),
+                (),
+            ));
+            assert!(poll!(&mut proposal).is_pending());
+            started.await.expect("the build must start");
+
+            // Completing the flush acknowledges block 1 while the build is still held.
+            control.next_flush().await.send(Ok(())).unwrap();
+            receipt
+                .await
+                .expect("block 1 must be acknowledged during the build");
+            assert!(poll!(&mut proposal).is_pending());
+            release.send(()).unwrap();
+            assert!(proposal.await.is_none());
+            actor.abort();
         });
     }
 
