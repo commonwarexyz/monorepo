@@ -5,6 +5,7 @@
 //! - [`multisig`]: Multi-signature scheme with attributable signatures
 //! - [`threshold`]: Threshold signature scheme with non-attributable signatures
 
+commonware_macros::stability_mod!(ALPHA, mod claims);
 pub mod multisig;
 pub mod threshold;
 
