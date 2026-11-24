@@ -28,8 +28,9 @@
 //!
 //! Upon finalization of block `b`:
 //!
-//! * Wait for processing of `b` and of competing blocks to finish, and reject requests on
-//!   competing branches. Processing of descendants of `b` continues.
+//! * If `b` is still processing, wait for that processing and reuse its result. Other requests
+//!   keep running. Those on competing branches fail at their next storage call once `b` applies,
+//!   and start over against `b`.
 //! * Take the pending state of `b`, or reconstruct it with [`Application::process`] as a
 //!   [`Finality::Finalized`] block.
 //! * Discard pending state that does not descend from `b`.
@@ -99,8 +100,9 @@
 //! completes, even if the request is later cancelled, and it answers the block's own verification.
 //!
 //! Recovery runs alongside other requests and processes one block at a time. Finalization and
-//! pruning never wait for it. Once a competing block is applied, a request's batch reads fail as
-//! [`ExecutionError::Stale`], and the request starts over from the finalized state. It is then
+//! pruning wait only for the storage call it has in flight, such as a whole merkleization, never
+//! for the rest of its execution. Once a competing block is applied, a request's batch reads fail
+//! as [`ExecutionError::Stale`], and the request starts over from the finalized state. It is then
 //! answered from the canonical chain or processed on the new state. Pruning removes only history
 //! below a durable finalized target, which no descendant of the finalized tip reads.
 //!
@@ -160,7 +162,8 @@ pub enum ExecutionError {
     Stale,
 
     /// The block's execution is invalid for its inputs, for example because it declares an
-    /// inactivity floor that regresses or passes its commit, or reads below its chain's floor.
+    /// inactivity floor that regresses or passes its commit, reads below its chain's floor, or
+    /// reads a location past the end of its batch.
     #[error("invalid execution: {0}")]
     Invalid(String),
 
@@ -175,7 +178,9 @@ impl<F: Family> From<qmdb::Error<F>> for ExecutionError {
             qmdb::Error::StaleRead | qmdb::Error::StaleBatch => Self::Stale,
             qmdb::Error::FloorRegressed(..)
             | qmdb::Error::FloorBeyondCommit(..)
-            | qmdb::Error::BelowInactivityFloor(_) => Self::Invalid(err.to_string()),
+            | qmdb::Error::BelowInactivityFloor(_)
+            | qmdb::Error::LocationOutOfBounds(..)
+            | qmdb::Error::LocationOutOfOrder(..) => Self::Invalid(err.to_string()),
             err => Self::Fatal(err.to_string()),
         }
     }
@@ -319,14 +324,16 @@ pub trait Application<E>: Clone + Send + 'static {
     ///
     /// For a [`Finality::Finalized`] block, honest voters already accepted the block as a
     /// candidate, so checks that do not affect the resulting state may be skipped. The block must
-    /// still produce its state, and [`None`] or mismatched sync targets make [`Stateful`] panic.
+    /// still produce its state, and [`None`] or mismatched sync targets make [`Stateful`] panic
+    /// unless it is stopping.
     ///
     /// Processing must finish without waiting for a later finalization, including through
     /// further ancestry reads, and may await other asynchronous I/O. Finalizing this block waits
-    /// for this call and reuses its result. Finalizing a competing block does not wait: the
-    /// batches' reads and merkleization then fail, and the error must reach [`Stateful`] as
-    /// [`ExecutionError::Stale`] (the [`From`] conversion from QMDB errors does this). Data needed
-    /// to produce finalized state must survive pruning and state sync.
+    /// for this call and reuses its result. Finalizing a competing block waits only for a storage
+    /// call in flight on these batches. Their later reads and merkleization then fail, and the
+    /// error must reach [`Stateful`] as [`ExecutionError::Stale`], which the [`From`] conversion
+    /// from QMDB errors does. Data needed to produce finalized state must survive pruning and
+    /// state sync.
     ///
     /// [`Stateful`] checks only [`sync_targets`](Self::sync_targets), so implementations must
     /// check any other block commitments, such as the canonical root of
@@ -359,7 +366,7 @@ pub trait Application<E>: Clone + Send + 'static {
     /// the returned value after the batches are applied.
     ///
     /// [`Stateful`] handles no other message while this future or [`finalized`](Self::finalized) is
-    /// pending (processing of the block's descendants may continue). Keep this capture cheap, and
+    /// pending (requests already running keep running). Keep this capture cheap, and
     /// spawn expensive follow-on work from [`finalized`](Self::finalized) instead of awaiting it.
     ///
     /// # Panics

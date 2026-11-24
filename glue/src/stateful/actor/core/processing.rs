@@ -1995,20 +1995,10 @@ mod tests {
                 .await
                 .expect("verification must process the block");
 
-            // Finalizing the block waits for that processing to finish and reuses its result. A
-            // second verification never acquires its block and reports when finalization pauses
-            // it, so the report shows the finalization has started waiting.
-            let (unavailable, _, _) = GatedAncestry::new([]);
-            let mut acquiring_verifier = mailbox.clone();
-            let mut acquiring = Box::pin(
-                acquiring_verifier
-                    .verify((context.child("acquiring"), block.context()), unavailable),
-            );
-            assert!(poll!(&mut acquiring).is_pending());
+            // Finalizing the block joins that processing and waits for it to finish.
             let (acknowledgement, waiter) = Exact::handle();
             let mut waiter = Box::pin(waiter);
             let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
-            // Let the actor run until finalization waits.
             context.sleep(Duration::from_millis(10)).await;
             assert!(poll!(&mut waiter).is_pending());
             assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
@@ -2026,7 +2016,6 @@ mod tests {
             assert_eq!(process_calls.at(block.height()), 1);
             assert_eq!(finalized_calls.at(block.height()), 0);
             assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
-            drop(acquiring);
             actor.abort();
             drop(guards);
         });
@@ -2065,18 +2054,9 @@ mod tests {
                 .await
                 .expect("recovery must process the block");
 
-            // A second verification never acquires its block and reports when finalization pauses
-            // it, so the report shows the finalization is waiting for the block's processing.
-            let (unavailable, _, _) = GatedAncestry::new([]);
-            let mut acquiring_verifier = mailbox.clone();
-            let mut acquiring = Box::pin(
-                acquiring_verifier
-                    .verify((context.child("acquiring"), child.context()), unavailable),
-            );
-            assert!(poll!(&mut acquiring).is_pending());
+            // Finalizing the block joins its processing and waits for it to finish.
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
-            // Let the actor run until finalization waits.
             context.sleep(Duration::from_millis(10)).await;
 
             // Once the block's processing finishes, the request processes the child and accepts it
@@ -2100,7 +2080,6 @@ mod tests {
             waiter.await.expect("finalized block must be acknowledged");
             assert_eq!(process_calls.at(block.height()), 1);
             assert_eq!(process_calls.at(child.height()), 1);
-            drop(acquiring);
             actor.abort();
             drop(guards);
         });
@@ -2331,19 +2310,9 @@ mod tests {
             }
             assert_eq!(process_calls.at(parent.height()), 1);
 
-            // Finalization joins the shared parent execution before applying its state. A
-            // verification that never acquires its block reports when finalization pauses it,
-            // which happens once the finalization has started waiting.
-            let (unavailable, _, _) = GatedAncestry::new([]);
-            let mut acquiring_verifier = mailbox.clone();
-            let mut acquiring = Box::pin(
-                acquiring_verifier
-                    .verify((context.child("acquiring"), parent.context()), unavailable),
-            );
-            assert!(poll!(&mut acquiring).is_pending());
+            // Finalization joins the shared parent execution before applying its state.
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
-            // Let the actor run until finalization waits.
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
             assert!(!release.is_closed());
@@ -2377,7 +2346,6 @@ mod tests {
                     .await
             );
             assert_eq!(process_calls.at(built.height()), 0);
-            drop(acquiring);
             actor.abort();
             drop(guards);
         });
@@ -3847,20 +3815,10 @@ mod tests {
             assert!(poll!(&mut second).is_pending());
             apply_started.await.expect("replay must start");
 
-            // A verification whose ancestry never yields a block reports when finalization pauses
-            // its acquisition.
-            let (unavailable, _gate, _) = GatedAncestry::new([]);
-            let mut prober = mailbox.clone();
-            let mut acquiring = Box::pin(
-                prober.verify((context.child("acquiring"), parent.context()), unavailable),
-            );
-            assert!(poll!(&mut acquiring).is_pending());
-
-            // Once finalization pauses the acquisition, it waits for the shared parent execution to
-            // finish and then reuses it.
+            // Finalization joins the shared parent execution, waits for it to finish, and then
+            // reuses it.
             let (acknowledgement, mut waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
-            // Let the actor run until finalization waits.
             context.sleep(Duration::from_millis(10)).await;
             assert!(!apply_release.is_closed());
             assert!(poll!(&mut waiter).is_pending());
@@ -3976,19 +3934,10 @@ mod tests {
                 .or_default()
                 .push_back(gate);
 
-            // A verification whose ancestry never yields a block reports when finalization pauses
-            // its acquisition.
-            let (unavailable, _gate, _) = GatedAncestry::new([]);
-            let mut prober = mailbox.clone();
-            let mut acquiring =
-                Box::pin(prober.verify((context.child("acquiring"), first.context()), unavailable));
-            assert!(poll!(&mut acquiring).is_pending());
-
-            // Once the first finalization pauses the acquisition, it waits for the shared execution
-            // to finish and reuses it, then the descendant advances.
+            // The first finalization joins the shared execution, waits for it to finish, and reuses
+            // it, then the descendant advances.
             let (acknowledgement, mut first_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(first.clone()), acknowledgement));
-            // Let the actor run until finalization waits.
             context.sleep(Duration::from_millis(10)).await;
             assert!(!replay_release.is_closed());
             assert!(poll!(&mut first_waiter).is_pending());
@@ -5297,13 +5246,12 @@ mod tests {
     }
 
     /// Blocks that become available only once the test opens the gate, and a signal for the first
-    /// time an acquisition holding a clone is dropped. Maintenance drops the acquisition when it
-    /// pauses it.
+    /// time an acquisition holding a clone is dropped, as when its caller cancels.
     #[derive(Default)]
     struct AncestryGate {
         open: bool,
         wakers: Vec<Waker>,
-        parked: Option<oneshot::Sender<()>>,
+        dropped: Option<oneshot::Sender<()>>,
     }
 
     impl AncestryGate {
@@ -5329,13 +5277,13 @@ mod tests {
     }
 
     impl GatedAncestry {
-        /// Returns the ancestry, its gate, and the signal that an acquisition of it was paused.
+        /// Returns the ancestry, its gate, and the signal that an acquisition of it was dropped.
         fn new(
             blocks: impl IntoIterator<Item = Digested<TestBlock>>,
         ) -> (Self, Arc<Mutex<AncestryGate>>, oneshot::Receiver<()>) {
-            let (parked, parked_receiver) = oneshot::channel();
+            let (dropped, dropped_receiver) = oneshot::channel();
             let gate = Arc::new(Mutex::new(AncestryGate {
-                parked: Some(parked),
+                dropped: Some(dropped),
                 ..AncestryGate::default()
             }));
             let ancestry = Self {
@@ -5343,7 +5291,7 @@ mod tests {
                 gate: gate.clone(),
                 acquisition: false,
             };
-            (ancestry, gate, parked_receiver)
+            (ancestry, gate, dropped_receiver)
         }
     }
 
@@ -5360,9 +5308,9 @@ mod tests {
     impl Drop for GatedAncestry {
         fn drop(&mut self) {
             if self.acquisition
-                && let Some(parked) = self.gate.lock().parked.take()
+                && let Some(dropped) = self.gate.lock().dropped.take()
             {
-                let _ = parked.send(());
+                let _ = dropped.send(());
             }
         }
     }
@@ -5410,7 +5358,7 @@ mod tests {
             assert!(poll!(&mut first).is_pending());
             process_started.await.expect("first processing must start");
 
-            let (ancestry, ancestry_gate, _parked) =
+            let (ancestry, ancestry_gate, _dropped) =
                 GatedAncestry::new([digested(block.clone()), digested(genesis)]);
             let mut second_mailbox = mailbox.clone();
             let mut second = Box::pin(
@@ -5445,6 +5393,48 @@ mod tests {
         });
     }
 
+    /// A verification that has its block but is still waiting for the parent when the parent and
+    /// then the block finalize answers from the canonical chain instead of rejecting the block.
+    #[test]
+    fn verification_survives_finalization_during_parent_wait() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let block = TestBlock::child(&parent, 2);
+            let app = ReplayGatedApp::new(block.height(), []);
+            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "finalized-during-parent-wait",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // The verification receives its block at once and waits for the parent.
+            let (rest, gate, _) = GatedAncestry::new([digested(parent.clone()), digested(genesis)]);
+            let mut verifier = mailbox.clone();
+            let mut verification = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                ancestry::with_prefix([digested(block.clone())], rest),
+            ));
+            assert!(poll!(&mut verification).is_pending());
+            processing_fence(&context, &mailbox).await;
+
+            // The parent and then the block finalize during the wait.
+            for finalized in [parent, block] {
+                let (acknowledgement, receipt) = Exact::handle();
+                let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
+                receipt.await.expect("finalized block must be acknowledged");
+            }
+
+            // Once the parent arrives, the verification accepts the finalized block.
+            AncestryGate::open(&gate);
+            assert!(verification.await);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
     /// A verification whose block arrives only after the block finalized answers from the
     /// canonical chain without processing it, while a held competing execution does not delay
     /// the finalization.
@@ -5460,13 +5450,9 @@ mod tests {
             let process_calls = app.process_calls.clone();
             let finalized_calls = app.finalized_calls.clone();
             let capture_calls = app.capture_calls.clone();
-            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
-                &context,
-                "paused-acquisition-restart",
-                &genesis,
-                app,
-            )
-            .await;
+            let (mut mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "late-block-verification", &genesis, app)
+                    .await;
 
             // The gate holds the losing request's execution while the winner's verification waits
             // for its block.
@@ -5564,7 +5550,7 @@ mod tests {
                 .await
                 .expect("recovery must process the retained block");
 
-            // Finalization retains that processing. Its hook stays open, so the retained step
+            // Finalization lets that processing continue. Its hook stays open, so the processing
             // finishes and selects the stale block while the finalization is still active.
             let (acknowledgement, receipt) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));

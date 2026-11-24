@@ -105,8 +105,16 @@ where
     }
 
     async fn run(mut self) {
+        // Marshal stops with the runtime, so resolving the floor block yields to shutdown.
+        // Returning drops the completion sender, which the handoff accepts only after stop.
         let (marshal, floor) = &self.marshal;
-        let block = resolve(marshal, *floor, &self.finalization).await;
+        let block = select! {
+            _ = self.context.stopped() => {
+                debug!("syncer stopped before resolving its floor block");
+                return;
+            },
+            block = resolve(marshal, *floor, &self.finalization) => block,
+        };
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);

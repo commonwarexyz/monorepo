@@ -2534,7 +2534,7 @@ fn pruning_joins_verification_on_real_qmdbs() {
     });
 }
 
-/// QMDB staleness maps to [`ExecutionError::Stale`], input-dependent refusals to
+/// QMDB staleness maps to [`ExecutionError::Stale`], refusals that depend only on the block to
 /// [`ExecutionError::Invalid`], and every other failure to [`ExecutionError::Fatal`].
 #[test]
 fn qmdb_errors_map_to_execution_errors() {
@@ -2559,6 +2559,14 @@ fn qmdb_errors_map_to_execution_errors() {
     ));
     assert!(matches!(
         ExecutionError::from(Error::FloorBeyondCommit(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::LocationOutOfBounds(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::LocationOutOfOrder(location, location)),
         ExecutionError::Invalid(_)
     ));
     assert!(matches!(

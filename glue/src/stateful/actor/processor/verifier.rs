@@ -68,7 +68,9 @@ where
     /// A verification of a cached block, or of a block at or below the branch anchor's height,
     /// needs no execution and is answered from the cache or the canonical block at that height.
     /// Ancestry that ends before known state leaves a verification pending, so it abstains, and
-    /// makes recovery return [`PrepareBatchesError::Incomplete`].
+    /// makes recovery return [`PrepareBatchesError::Incomplete`]. Returns
+    /// [`PrepareBatchesError::Stale`] if a finalization moves the branch anchor past what the
+    /// acquisition already checked, so the request acquires again.
     pub(in crate::stateful::actor) fn prepare<S, V>(
         &self,
         context: E,
@@ -156,6 +158,11 @@ where
                     );
                     return pending().await;
                 };
+                // A finalization during the wait may have reached the block's height. The
+                // request then acquires again and is answered from the canonical chain.
+                if block.height() <= execution.branch_anchor().height {
+                    return Err(PrepareBatchesError::Stale);
+                }
                 (
                     parent.clone(),
                     BoxedAncestry::new(marshal_ancestry::with_prefix([block, parent], ancestry)),

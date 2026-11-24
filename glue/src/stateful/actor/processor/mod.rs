@@ -18,9 +18,10 @@
 //!   nearest cached ancestor or the branch anchor. A recovered state is cached only if it matches
 //!   its block's commitments. Concurrent requests that need the same block's state, including a
 //!   verification of that block, share one processing call.
-//! - Finalization: processing of the finalized block and of competing branches finishes before
-//!   the block's state is applied, while processing of its descendants may continue. The
-//!   processor publishes snapshots after the finalization hook completes. The caller coordinates
+//! - Finalization: if the finalized block is still processing, its finalization joins that
+//!   processing and reuses the result. Processing on competing branches is not awaited. It fails
+//!   at its next storage call once the block applies, and its requests start over. The processor
+//!   publishes snapshots after the finalization hook completes. The caller coordinates
 //!   durability, so one database barrier can cover several finalizations.
 
 use crate::stateful::{
@@ -65,7 +66,7 @@ type Unmerkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::
 type Readers<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Readers;
 
 const DATABASES_LOST: &str =
-    "database set was lost by an earlier interrupted mutation; restart to recover";
+    "database set used after an interrupted mutation, which must have stopped the actor";
 type PendingMap<A, E> = BTreeMap<BlockDigest<A, E>, PendingEntry<A, E>>;
 type FlightResult = Result<(), PrepareBatchesError>;
 
@@ -756,7 +757,7 @@ where
                 [block.clone()],
                 block_context.round(),
             );
-            let batch = match self
+            match self
                 .app
                 .process(
                     (context.child("finalize_reconstruct"), block_context),
@@ -766,7 +767,23 @@ where
                 )
                 .await
             {
-                Ok(batch) => batch,
+                Ok(Some(batch)) if A::Databases::matches_sync_targets(&batch, &sync_targets) => {
+                    batch
+                }
+                Ok(Some(_)) => {
+                    fail_unless_stopped(
+                        context.stopped(),
+                        "finalize reconstruction must match block commitments".into(),
+                    )
+                    .await
+                }
+                Ok(None) => {
+                    fail_unless_stopped(
+                        context.stopped(),
+                        "finalize reconstruction must process the block".into(),
+                    )
+                    .await
+                }
                 Err(err) => {
                     fail_unless_stopped(
                         context.stopped(),
@@ -775,12 +792,6 @@ where
                     .await
                 }
             }
-            .expect("finalize reconstruction must process the block");
-            assert!(
-                A::Databases::matches_sync_targets(&batch, &sync_targets),
-                "finalize reconstruction must match block commitments",
-            );
-            batch
         };
 
         self.execution
@@ -866,8 +877,8 @@ where
         parent: BlockDigest<A, E>,
         batch: &PendingBatches<A, E>,
     ) {
-        // Retained requests may have cached descendants since the finalization boundary was
-        // taken, so descendants come from the current cache.
+        // Requests may have cached descendants since this finalization began, so descendants come
+        // from the current cache.
         let mut state = self.state.lock();
         let compatible = state.descendants(anchor.digest, anchor.round);
         let before = state.pending.len();

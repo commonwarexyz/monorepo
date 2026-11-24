@@ -256,6 +256,12 @@ where
     /// resolves when the actor reaches it in mailbox order. The readers observe applied state as
     /// [`Stateful`](super::Stateful) finalizes blocks.
     ///
+    /// Each read guard taken through these readers delays the next finalization, and every
+    /// verification read queued behind it, until it drops (see
+    /// [`Reader`](crate::stateful::db::Reader)). Members of a multi-database set apply
+    /// separately, so reads of two members can observe different heights. Once the actor stops,
+    /// reads park forever, and the databases stay open until every reader drops.
+    ///
     /// # Panics
     ///
     /// Panics if the actor stops before replying.

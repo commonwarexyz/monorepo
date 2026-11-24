@@ -1,17 +1,6 @@
 //! Splits access to a live database. A unique [`Writer`] runs consuming
 //! mutations, and cloneable [`Reader`]s hand out short read guards, one per
-//! storage call.
-//!
-//! The cell is a fair, write-preferring read-write lock: a waiting mutation
-//! blocks new read guards but cannot be starved, and guards already granted
-//! finish first. A guard proves the database is present for one call, not
-//! that the caller's batch is still current (see
-//! [`commonware_storage::qmdb::Error::StaleRead`]).
-//!
-//! Never hold two read guards at once, even on different cells. The lock is
-//! not reentrant, and because a waiting mutation blocks new guards, two tasks
-//! each holding one cell's guard while waiting on the other's deadlock once
-//! both cells have a mutation waiting.
+//! storage call. [`Reader`] documents the lock rules.
 
 use commonware_utils::sync::{AsyncRwLockReadGuard, TracedAsyncRwLock};
 use futures::future;
@@ -125,6 +114,12 @@ impl<T> Writer<T> {
 }
 
 /// A cloneable read handle over the database behind a cell.
+///
+/// The lock is fair and write-preferring. Once a mutation waits, new read guards queue behind
+/// it, and guards already granted finish first, so a mutation is never starved. Hold a guard
+/// for one storage call only, never across an application await. Never wait for a second guard,
+/// even on a different database, while holding one. The lock is not reentrant, and two tasks
+/// doing that deadlock once mutations wait on both databases.
 pub struct Reader<T>(Arc<Cell<T>>);
 
 impl<T> Clone for Reader<T> {
@@ -134,9 +129,11 @@ impl<T> Clone for Reader<T> {
 }
 
 impl<T> Reader<T> {
-    /// Acquire a read guard.
+    /// Acquire a read guard for one storage call (see [`Reader`] for the lock rules).
     ///
-    /// Parks forever once the writer is gone or a mutation was interrupted.
+    /// The guard proves the database is present for that call, not that the caller's batch is
+    /// still current (see [`commonware_storage::qmdb::Error::StaleRead`]). Parks forever once
+    /// the writer is gone or a mutation was interrupted.
     pub async fn read(&self) -> ReadGuard<'_, T> {
         self.0.read().await
     }
