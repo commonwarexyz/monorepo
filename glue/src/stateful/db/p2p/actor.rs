@@ -643,6 +643,85 @@ mod tests {
         Shared::new("test", db)
     }
 
+    type VariableKey = FixedBytes<32>;
+    type VariableDb = variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        VariableKey,
+        Bytes,
+        Sha256,
+        TwoCap,
+        Sequential,
+    >;
+    type VariableOp = Op<VariableDb>;
+    type VariableCodecConfig = <VariableOp as Read>::Cfg;
+
+    /// Widest value the variable database tests decode.
+    const MAX_VALUE_SIZE: usize = 4096;
+
+    fn variable_codec_config(max_value_size: usize) -> VariableCodecConfig {
+        ((), RangeCfg::from(..=max_value_size))
+    }
+
+    /// Bound on a variable operation whose values encode at most `max_value_size` bytes.
+    fn max_variable_operation_size(max_value_size: usize) -> usize {
+        let value = max_items_size(max_value_size, u8::SIZE);
+        let set = VariableKey::SIZE + value;
+        let commit = u8::SIZE + value + Location::MAX_ENCODE_SIZE;
+        u8::SIZE + set.max(commit)
+    }
+
+    fn variable_db_config(
+        suffix: &str,
+        max_value_size: usize,
+    ) -> variable::Config<TwoCap, VariableCodecConfig, Sequential> {
+        variable::Config {
+            merkle: MerkleConfig {
+                partition: format!("{suffix}-merkle"),
+                replay_buffer: NZUsize!(1024),
+                strategy: Sequential,
+                resident_height: Default::default(),
+            },
+            log: VariableLogConfig {
+                partition: format!("{suffix}-log"),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: variable_codec_config(max_value_size),
+                page_cache: CacheRef::new(NZU16!(101), NZUsize!(11)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            },
+            translator: TwoCap,
+            init_buffer: NZUsize!(1 << 21),
+            init_concurrency: NZUsize!(2),
+        }
+    }
+
+    /// Create a variable database, applying `entries` and `metadata` in one batch if any.
+    async fn init_variable_db(
+        context: deterministic::Context,
+        suffix: &str,
+        max_value_size: usize,
+        entries: &[(VariableKey, Bytes)],
+        metadata: Option<Bytes>,
+    ) -> VariableDb {
+        let db = VariableDb::init(context, variable_db_config(suffix, max_value_size), None)
+            .await
+            .unwrap();
+        if entries.is_empty() && metadata.is_none() {
+            return db;
+        }
+        let mut batch = db
+            .new_batch()
+            .with_inactivity_floor(Location::new(1))
+            .with_metadata(metadata);
+        for (key, value) in entries {
+            batch = batch.set(key.clone(), value.clone());
+        }
+        let batch = batch.merkleize(&db).await.unwrap();
+        db.apply_batch(batch).await.unwrap()
+    }
+
     /// Two connected resolver services with distinct databases, indexed by peer.
     struct LivePair<DB>
     where
@@ -1758,79 +1837,78 @@ mod tests {
     }
 
     #[test]
-    fn variable_operations_sync_through_live_mailbox() {
-        type Key = FixedBytes<32>;
-        type Db = variable::Db<
-            mmr::Family,
-            deterministic::Context,
-            Key,
-            Bytes,
-            Sha256,
-            TwoCap,
-            Sequential,
-        >;
-        const MAX_VALUE_SIZE: usize = 4096;
-        let codec_config = ((), RangeCfg::from(..=MAX_VALUE_SIZE));
-        let config = |suffix| variable::Config {
-            merkle: MerkleConfig {
-                partition: format!("variable-{suffix}-merkle"),
-                replay_buffer: NZUsize!(1024),
-                strategy: Sequential,
-                resident_height: Default::default(),
-            },
-            log: VariableLogConfig {
-                partition: format!("variable-{suffix}-log"),
-                items_per_section: NZU64!(5),
-                compression: None,
-                codec_config,
-                page_cache: CacheRef::new(NZU16!(101), NZUsize!(11)),
-                write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-            },
-            translator: TwoCap,
-            init_buffer: NZUsize!(1 << 21),
-            init_concurrency: NZUsize!(2),
-        };
+    fn variable_operation_bound_covers_widest_operations() {
+        let bound = max_variable_operation_size(MAX_VALUE_SIZE);
+        let cfg = variable_codec_config(MAX_VALUE_SIZE);
+        let value = Bytes::from(vec![42; MAX_VALUE_SIZE]);
+        let key = VariableKey::new([1; 32]);
 
+        // The widest operation of each variant decodes and stays within the bound.
+        for op in [
+            VariableOp::Set(key.clone(), value.clone()),
+            VariableOp::Commit(Some(value), mmr::Family::MAX_LEAVES),
+        ] {
+            let encoded = op.encode();
+            assert!(encoded.len() <= bound, "{} > {bound}", encoded.len());
+            assert_eq!(VariableOp::decode_cfg(encoded, &cfg).unwrap(), op);
+        }
+
+        // One more value byte exceeds the configured limit.
+        let value = Bytes::from(vec![42; MAX_VALUE_SIZE + 1]);
+        for op in [
+            VariableOp::Set(key, value.clone()),
+            VariableOp::Commit(Some(value), mmr::Family::MAX_LEAVES),
+        ] {
+            assert!(VariableOp::decode_cfg(op.encode(), &cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn variable_operations_sync_through_live_mailbox() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             const PREFIX: &str = "variable_live";
             let pair_context = context.child(PREFIX);
-            let source = Db::init(pair_context.child("source"), config("source"), None)
-                .await
-                .unwrap();
             let entries = [
-                (Key::new([1; 32]), Bytes::from(vec![42; MAX_VALUE_SIZE])),
-                (Key::new([2; 32]), Bytes::from_static(b"short")),
-                (Key::new([3; 32]), Bytes::new()),
+                (
+                    VariableKey::new([1; 32]),
+                    Bytes::from(vec![42; MAX_VALUE_SIZE]),
+                ),
+                (VariableKey::new([2; 32]), Bytes::from_static(b"short")),
+                (VariableKey::new([3; 32]), Bytes::new()),
             ];
-            let mut batch = source.new_batch().with_inactivity_floor(Location::new(1));
-            for (key, value) in &entries {
-                batch = batch.set(key.clone(), value.clone());
-            }
-            let batch = batch.merkleize(&source).await.unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
+            let metadata = Bytes::from(vec![7; MAX_VALUE_SIZE]);
+            let source = init_variable_db(
+                pair_context.child("source"),
+                "variable-source",
+                MAX_VALUE_SIZE,
+                &entries,
+                Some(metadata.clone()),
+            )
+            .await;
             let target = sync::Target {
                 root: source.root(),
                 range: (source.sync_boundary()..source.bounds().end)
                     .try_into()
                     .unwrap(),
             };
-
-            let client = Db::init(pair_context.child("client"), config("client"), None)
-                .await
-                .unwrap();
-            let max_value_size = max_items_size(MAX_VALUE_SIZE, u8::SIZE);
-            let set_size = Key::SIZE + max_value_size;
-            let commit_size = u8::SIZE + max_value_size + Location::MAX_ENCODE_SIZE;
+            let client = init_variable_db(
+                pair_context.child("client"),
+                "variable-client",
+                MAX_VALUE_SIZE,
+                &[],
+                None,
+            )
+            .await;
             let pair = spawn_connected_pair(
                 &pair_context,
                 [Shared::new("client", client), Shared::new("source", source)],
-                codec_config,
-                u8::SIZE + set_size.max(commit_size),
+                variable_codec_config(MAX_VALUE_SIZE),
+                max_variable_operation_size(MAX_VALUE_SIZE),
             )
             .await;
 
-            let synced: Db = select! {
+            // The final commit carries the widest metadata over the wire.
+            let synced: VariableDb = select! {
                 result = sync::sync(sync::Config {
                     context: pair_context.child("destination"),
                     source: pair.mailboxes[0].clone(),
@@ -1838,7 +1916,7 @@ mod tests {
                     max_outstanding_requests: NZUsize!(4),
                     fetch_batch_size: NZU64!(2),
                     apply_batch_size: NZU64!(1),
-                    db_config: config("destination"),
+                    db_config: variable_db_config("variable-destination", MAX_VALUE_SIZE),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
@@ -1849,6 +1927,7 @@ mod tests {
             };
             assert_eq!(synced.root(), target.root);
             assert_eq!(synced.bounds(), target.range.start()..target.range.end());
+            assert_eq!(synced.get_metadata().await.unwrap(), Some(metadata));
             for (key, value) in entries {
                 assert_eq!(synced.get(&key).await.unwrap(), Some(value));
             }
