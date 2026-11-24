@@ -107,6 +107,7 @@ impl<P: PublicKey, E: Clock> State<P, E> {
 
     /// Reserves the unique `recipients` that are neither rate-limited nor reserved by another
     /// send, appending each to `reserved` as soon as it is marked.
+    /// For [`Recipients::Some`], the caller provides space for the full list.
     ///
     /// Returns whether the reservation should be submitted: `false` if recipients were requested
     /// but none could be reserved.
@@ -124,7 +125,6 @@ impl<P: PublicKey, E: Clock> State<P, E> {
             }
             Recipients::Some(peers) => {
                 let empty = peers.is_empty();
-                reserved.reserve_exact(peers.len());
                 for peer in peers {
                     if reservable(&mut self.rate_limit, &self.in_flight, &peer) {
                         self.in_flight.insert(peer.clone());
@@ -365,7 +365,10 @@ impl<S: UnlimitedSender, E: Clock> CheckedSender<'_, S, E> {
         let single = matches!(recipients, Recipients::One(_));
         let mut reservation = Reservation {
             state: self.state,
-            peers: Vec::new(),
+            peers: match &recipients {
+                Recipients::Some(peers) => Vec::with_capacity(peers.len()),
+                _ => Vec::new(),
+            },
         };
         if !self
             .state
