@@ -601,12 +601,13 @@ struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
     cache: cache::Cache<(u64, u64), IoBufMut>,
 
-    /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized
-    /// out-of-range so untouched entries read as misses. The length is a power of two so
-    /// [Self::hint_index] can wrap with a mask instead of a division, and at least twice the
-    /// cache capacity: a full cache has one live page per `capacity`, so sizing at capacity
-    /// makes hint collisions (and their slower fallback lookups) common.
-    hints: Vec<usize>,
+    /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized to
+    /// [u32::MAX] so untouched entries read as misses. The length is a power of two so
+    /// [Self::hint_index] can wrap with a mask instead of a division, and at least four times the
+    /// cache capacity: a full cache has one live page per `capacity`, so a denser array makes hint
+    /// collisions (and their slower fallback lookups) common. Entries are `u32` to keep the array
+    /// compact, so a slot that does not fit in one is not hinted.
+    hints: Vec<u32>,
 
     /// Logical size of each page in bytes (the payload stored per page, excluding the CRC
     /// record appended on disk).
@@ -1070,10 +1071,10 @@ impl Cache {
         let slot_size: usize = page_size.widen();
         let mut cache = cache::Cache::new(capacity);
         cache.prefill(|| IoBufMut::zeroed(slot_size));
-        let hints = capacity.get().saturating_mul(2).next_power_of_two();
+        let hints = capacity.get().saturating_mul(4).next_power_of_two();
         Self {
             cache,
-            hints: vec![usize::MAX; hints],
+            hints: vec![u32::MAX; hints],
             page_size,
             page_fetches: AHashMap::new(),
             batches: BatchRegistry::default(),
@@ -1124,7 +1125,7 @@ impl Cache {
             .get_or_insert_mut((blob_id, page_num), || IoBufMut::zeroed(page_size));
         buf.as_mut().copy_from_slice(page);
         let hint = self.hint_index(blob_id, page_num);
-        self.hints[hint] = slot;
+        self.hints[hint] = u32::try_from(slot).unwrap_or(u32::MAX);
     }
 
     /// The hint slot for `(blob_id, page_num)`: the page number offset by a per-blob salt,
@@ -1145,7 +1146,7 @@ impl Cache {
     #[inline]
     fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&IoBufMut> {
         let key = (blob_id, page_num);
-        let slot = self.hints[self.hint_index(blob_id, page_num)];
+        let slot = Widen::widen(self.hints[self.hint_index(blob_id, page_num)]);
         if let Some(page) = self.cache.get_at(slot, &key) {
             return Some(page);
         }
@@ -4012,6 +4013,28 @@ mod tests {
 
         let mut buf = vec![0u8; page_size];
         let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, page_num * PAGE_SIZE_U64)];
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert!(ranges.is_empty());
+        drop(ranges);
+        assert_eq!(buf, vec![0x5A; page_size]);
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_serves_unhinted_page() {
+        // A slot that does not fit in a hint leaves its entry at `u32::MAX`, so the cached page is
+        // served through the cache's own lookup.
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &vec![0x5A; page_size], 3);
+            let hint = cache.hint_index(blob_id, 3);
+            cache.hints[hint] = u32::MAX;
+        }
+
+        let mut buf = vec![0u8; page_size];
+        let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, 3 * PAGE_SIZE_U64)];
         cache_ref.read_cached_many(blob_id, &mut ranges);
         assert!(ranges.is_empty());
         drop(ranges);
