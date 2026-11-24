@@ -438,7 +438,7 @@ where
 
         debug_assert_eq!(self.tip.size(), self.merkle.leaves());
         self.merkle.apply_batch(&batch.merkle_batch)?;
-        // Only a [`Self::to_batch`] snapshot has no operations, and it leaves the Merkle
+        // Only a [`Self::to_batch`] view has no operations, and it leaves the Merkle
         // unchanged. Any other batch ends with its commit.
         debug_assert_eq!(
             batch.operations.is_empty(),
@@ -1748,11 +1748,11 @@ pub(crate) mod tests {
             let db = open_db::<O>(context.child("db"), "compact-to-batch-live").await;
 
             let pre_apply_root = db.root();
-            let pre_snapshot = db.to_batch();
+            let pre_view = db.to_batch();
             assert_eq!(
-                pre_snapshot.root(),
+                pre_view.root(),
                 pre_apply_root,
-                "snapshot before any mutation should match the live root"
+                "view before any mutation should match the live root"
             );
 
             let batch = db
@@ -1771,9 +1771,9 @@ pub(crate) mod tests {
                 "applying a non-empty batch must change the live root"
             );
 
-            let snapshot = db.to_batch();
+            let view = db.to_batch();
             assert_eq!(
-                snapshot.root(),
+                view.root(),
                 live_root,
                 "to_batch().root() must match the live db.root() even before sync"
             );
@@ -1782,19 +1782,19 @@ pub(crate) mod tests {
         });
     }
 
-    /// Applying a snapshot journals nothing, however often it is applied, while a batch with no
+    /// Applying a [`Db::to_batch`] view journals nothing, however often it is applied, while a batch with no
     /// mutations still appends its commit and a witness.
-    pub(crate) fn test_compact_apply_snapshot_appends_no_witness<O: TestOperation>() {
+    pub(crate) fn test_compact_apply_view_appends_no_witness<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let db = open_db::<O>(context.child("db"), "compact-apply-snapshot").await;
+            let db = open_db::<O>(context.child("db"), "compact-apply-view").await;
             let (db, _) = apply_seed::<O>(db, 1).await;
             let mut db = db.sync().await.unwrap();
             let target = db.target();
             let entries = witness_entries(&db);
 
             for _ in 0..2 {
-                let snapshot = db.to_batch();
-                db = db.apply_batch(snapshot).await.unwrap();
+                let view = db.to_batch();
+                db = db.apply_batch(view).await.unwrap();
                 assert_eq!(db.target(), target);
                 assert_eq!(witness_entries(&db), entries);
             }
@@ -1808,17 +1808,16 @@ pub(crate) mod tests {
         });
     }
 
-    /// Applying a snapshot of a pending import journals only the import.
-    pub(crate) fn test_compact_apply_snapshot_journals_import<O: TestOperation>() {
+    /// Applying a view of a pending import journals only the import.
+    pub(crate) fn test_compact_apply_view_journals_import<O: TestOperation>() {
         deterministic::Runner::default().start(|context| async move {
-            let dst = "compact-apply-snapshot-import-dst";
+            let dst = "compact-apply-view-import-dst";
             let import =
-                Import::<O>::build(context.child("src"), "compact-apply-snapshot-import-src", 2)
-                    .await;
+                Import::<O>::build(context.child("src"), "compact-apply-view-import-src", 2).await;
             commit_seed::<O>(context.child("seed"), dst, 1).await;
             let imported = import.clone().into_db(context.child("import"), dst);
-            let snapshot = imported.to_batch();
-            let db = imported.apply_batch(snapshot).await.unwrap();
+            let view = imported.to_batch();
+            let db = imported.apply_batch(view).await.unwrap();
             assert_eq!(db.target(), import.target);
             assert_eq!(witness_entries(&db), 1);
             drop(db.sync().await.unwrap());
@@ -4203,8 +4202,8 @@ pub(crate) mod tests {
                 test_compact_stale_batch_rejected,
                 test_compact_delayed_merkleize_after_ancestor_apply,
                 test_compact_to_batch_reflects_live_state,
-                test_compact_apply_snapshot_appends_no_witness,
-                test_compact_apply_snapshot_journals_import,
+                test_compact_apply_view_appends_no_witness,
+                test_compact_apply_view_journals_import,
                 test_compact_stale_batch_chained,
                 test_compact_stale_parent_after_child_applied,
                 test_compact_sequential_commit_parent_then_child,

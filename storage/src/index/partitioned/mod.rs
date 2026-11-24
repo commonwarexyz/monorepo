@@ -32,10 +32,10 @@ use crate::index::Unordered;
 // used by prefix conversion.
 const INDEX_INT_SIZE: usize = 4;
 
-/// An index whose snapshot can be built a contiguous range of partitions at a time, each range
-/// on its own task. A [Self::Range] is created empty by [Self::new_range], loaded with the keys
-/// of its partitions, and folded back into the full index by [Self::install_range]. An index
-/// that does not partition its keys is one partition.
+/// An index that can be built a contiguous range of partitions at a time, each range on its own
+/// task. A [Self::Range] is created empty by [Self::new_range], loaded with the keys of its
+/// partitions, and folded back into the full index by [Self::install_range]. An index that does
+/// not partition its keys is one partition.
 pub(crate) trait Partitioned: Unordered {
     /// The contiguous partition range one build task fills.
     type Range: PartitionRange<Value = Self::Value> + Send + 'static;

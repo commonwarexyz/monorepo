@@ -196,6 +196,16 @@ pub fn metric_samples<'a>(
     metrics: &'a str,
     name: &'a str,
 ) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    named_metric_samples(metrics, name).map(|(_, labels, value)| (labels, value))
+}
+
+/// Iterates over the full encoded name, label set, and value of encoded Prometheus samples
+/// matching `name`, as [`metric_samples`] does.
+#[cfg(any(test, feature = "test-utils"))]
+fn named_metric_samples<'a>(
+    metrics: &'a str,
+    name: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a str, &'a str)> + 'a {
     metrics.lines().filter_map(move |line| {
         let line = line.trim();
         if line.starts_with('#') {
@@ -240,8 +250,154 @@ pub fn metric_samples<'a>(
             return None;
         }
 
-        Some((labels, rest.split_whitespace().next()?))
+        Some((sample_name, labels, rest.split_whitespace().next()?))
     })
+}
+
+/// Iterates over complete label pairs, decoding Prometheus label escapes.
+#[cfg(any(test, feature = "test-utils"))]
+fn metric_labels(mut labels: &str) -> impl Iterator<Item = (&str, Cow<'_, str>)> {
+    std::iter::from_fn(move || {
+        let (key, rest) = labels.trim_start().split_once('=')?;
+        let rest = rest.trim_start().strip_prefix('"')?;
+        let mut escaped = false;
+        let end = rest.bytes().position(|byte| {
+            if escaped {
+                escaped = false;
+                false
+            } else if byte == b'\\' {
+                escaped = true;
+                false
+            } else {
+                byte == b'"'
+            }
+        })?;
+        let value = &rest[..end];
+        labels = rest[end + 1..].trim_start().strip_prefix(',').unwrap_or("");
+        let value = if value.contains('\\') {
+            let mut decoded = String::with_capacity(value.len());
+            let mut chars = value.chars();
+            while let Some(c) = chars.next() {
+                decoded.push(if c == '\\' {
+                    match chars.next()? {
+                        'n' => '\n',
+                        '"' => '"',
+                        '\\' => '\\',
+                        _ => return None,
+                    }
+                } else {
+                    c
+                });
+            }
+            Cow::Owned(decoded)
+        } else {
+            Cow::Borrowed(value)
+        };
+        Some((key.trim_end(), value))
+    })
+}
+
+/// Returns the sum of every sample of `name` in encoded Prometheus `metrics` whose labels include
+/// each `(key, value)` pair of `labels`.
+///
+/// `name` may be either the full encoded metric name or its unprefixed suffix. Label values are
+/// compared after decoding their Prometheus escapes.
+///
+/// # Panics
+///
+/// Panics if a matching sample's value is not a number.
+#[cfg(any(test, feature = "test-utils"))]
+#[must_use]
+pub fn metric_sum(metrics: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
+    metric_samples(metrics, name)
+        .filter(|(sample_labels, _)| {
+            labels.iter().all(|(key, value)| {
+                metric_labels(sample_labels)
+                    .any(|(sample_key, sample_value)| sample_key == *key && sample_value == *value)
+            })
+        })
+        .map(|(_, value)| {
+            value
+                .parse::<f64>()
+                .expect("metric sample value is a number")
+        })
+        .sum()
+}
+
+/// Returns the upper bound of the first bucket of histogram `name` in encoded Prometheus `metrics`
+/// that holds its `percentile`-th percentile sample, with the histogram's sample count.
+///
+/// A series is the set of bucket samples that share their full encoded metric name and every label
+/// but `le`. Every series must use the same bucket bounds, and buckets with the same bound are
+/// summed across series. `name` may be either the full encoded metric name or its unprefixed
+/// suffix, without the `_bucket` suffix, so every histogram ending in `name` contributes series.
+/// Returns `None` when the histogram is absent or holds no samples. The bound is infinite when the
+/// percentile falls beyond the largest finite bucket.
+///
+/// # Panics
+///
+/// Panics if a bucket's bound or count is not a number, or if two series have different bucket
+/// bounds.
+#[cfg(any(test, feature = "test-utils"))]
+#[must_use]
+pub fn histogram_percentile(metrics: &str, name: &str, percentile: u64) -> Option<(f64, u64)> {
+    let bucket = format!("{name}_bucket");
+    let mut series = BTreeMap::<(&str, Vec<(&str, Cow<'_, str>)>), Vec<(f64, u64)>>::new();
+    for (sample_name, labels, value) in named_metric_samples(metrics, &bucket) {
+        let mut bound = None;
+        let mut key = Vec::new();
+        for (label, label_value) in metric_labels(labels) {
+            if label == "le" {
+                bound = Some(label_value);
+            } else {
+                key.push((label, label_value));
+            }
+        }
+        let Some(bound) = bound else {
+            continue;
+        };
+        key.sort();
+        let bound = match bound.as_ref() {
+            "+Inf" => f64::INFINITY,
+            bound => bound.parse().expect("histogram bucket bound is a number"),
+        };
+        let count = value.parse().expect("histogram bucket count is an integer");
+        series
+            .entry((sample_name, key))
+            .or_default()
+            .push((bound, count));
+    }
+
+    let mut series = series.into_values().map(|mut buckets| {
+        buckets.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+        buckets
+    });
+    let mut buckets = series.next()?;
+    for other in series {
+        // Summing series with different bounds would credit a sample to a bucket that does not
+        // bound it in its own series.
+        assert!(
+            buckets.len() == other.len()
+                && buckets
+                    .iter()
+                    .zip(&other)
+                    .all(|((left, _), (right, _))| left.total_cmp(right).is_eq()),
+            "histogram series have different bucket bounds"
+        );
+        for ((_, total), (_, count)) in buckets.iter_mut().zip(other) {
+            *total += count;
+        }
+    }
+
+    let samples = buckets.last().map(|(_, count)| *count)?;
+    if samples == 0 {
+        return None;
+    }
+    // The product of two u64 values fits in a u128.
+    let rank = (u128::from(samples) * u128::from(percentile)).div_ceil(100);
+    buckets
+        .into_iter()
+        .find_map(|(bound, count)| (u128::from(count) >= rank).then_some((bound, samples)))
 }
 
 /// Count the number of running tasks whose name starts with the given prefix.
@@ -899,6 +1055,193 @@ mod tests {
     use commonware_macros::test_traced;
     use futures::future;
     use std::sync::mpsc::{self, TryRecvError};
+
+    #[test]
+    fn metric_sum_matches_complete_labels() {
+        let metrics = r#"
+syncs_total{other_kind="journal"} 2
+syncs_total{kind="journal",detail="kind=\"snapshot\""} 3
+syncs_total{kind="snapshot",detail="kind=\"journal\""} 5
+"#;
+        assert_eq!(
+            metric_sum(metrics, "syncs_total", &[("kind", "journal")]),
+            3.0
+        );
+    }
+
+    #[test]
+    fn metric_sum_matches_escaped_label_values() {
+        let metrics = r#"items_total{path="a\\b\"c\n雪,}",node="a"} 7"#;
+        assert_eq!(
+            metric_sum(
+                metrics,
+                "items_total",
+                &[("path", "a\\b\"c\n雪,}"), ("node", "a")]
+            ),
+            7.0
+        );
+    }
+
+    #[test]
+    fn histogram_percentile_matches_complete_bucket_label() {
+        let metrics = r#"
+latency_bucket{note="a,b}c\"d\\e\nf",role="worker",le="0.01"} 1
+latency_bucket{note="a,b}c\"d\\e\nf",role="worker",le="+Inf"} 1
+latency_bucket{role="0.001"} 10
+"#;
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 50),
+            Some((0.01, 1))
+        );
+    }
+
+    #[test]
+    fn metric_sum_adds_matching_samples_with_every_label() {
+        let metrics = "\
+# HELP node_syncs_total Syncs.
+node_syncs_total{kind=\"journal\",node=\"a\"} 2
+node_syncs_total{kind=\"journal\",node=\"b\"} 3
+node_syncs_total{kind=\"snapshot\",node=\"a\"} 5
+node_resyncs_total 7
+";
+        assert_eq!(metric_sum(metrics, "syncs_total", &[]), 10.0);
+        assert_eq!(
+            metric_sum(metrics, "syncs_total", &[("kind", "journal")]),
+            5.0
+        );
+        assert_eq!(
+            metric_sum(
+                metrics,
+                "node_syncs_total",
+                &[("kind", "journal"), ("node", "b")]
+            ),
+            3.0
+        );
+        assert_eq!(metric_sum(metrics, "missing_total", &[]), 0.0);
+    }
+
+    #[test]
+    fn histogram_percentile_sums_buckets_across_label_sets() {
+        let metrics = "\
+latency_bucket{node=\"a\",le=\"0.001\"} 2
+latency_bucket{node=\"a\",le=\"0.01\"} 8
+latency_bucket{node=\"a\",le=\"+Inf\"} 10
+latency_bucket{node=\"b\",le=\"0.001\"} 0
+latency_bucket{node=\"b\",le=\"0.01\"} 9
+latency_bucket{node=\"b\",le=\"+Inf\"} 10
+";
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 10),
+            Some((0.001, 20))
+        );
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 85),
+            Some((0.01, 20))
+        );
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 100),
+            Some((f64::INFINITY, 20))
+        );
+        assert_eq!(histogram_percentile(metrics, "missing", 50), None);
+
+        // A bucket sample without a bound is skipped, and an empty histogram has no percentile.
+        let empty = "\
+empty_bucket{node=\"a\",le=\"0.001\"} 0
+empty_bucket{node=\"a\",le=\"+Inf\"} 0
+empty_bucket{node=\"a\"} 5
+";
+        assert_eq!(histogram_percentile(empty, "empty", 50), None);
+    }
+
+    #[test]
+    fn histogram_percentile_matches_series_by_labels_in_any_order() {
+        let metrics = "\
+latency_bucket{node=\"a\",role=\"x\",le=\"1\"} 1
+latency_bucket{role=\"x\",le=\"2\",node=\"a\"} 2
+latency_bucket{le=\"+Inf\",node=\"a\",role=\"x\"} 2
+latency_bucket{role=\"x\",node=\"b\",le=\"1\"} 0
+latency_bucket{node=\"b\",le=\"2\",role=\"x\"} 1
+latency_bucket{node=\"b\",role=\"x\",le=\"+Inf\"} 1
+";
+        // Each series lists its labels in different orders, so a series is keyed by its labels
+        // rather than by their text.
+        assert_eq!(histogram_percentile(metrics, "latency", 30), Some((1.0, 3)));
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 100),
+            Some((2.0, 3))
+        );
+    }
+
+    #[test]
+    fn histogram_percentile_keeps_metrics_with_a_shared_suffix_apart() {
+        // Both histograms end in `latency` and have the same labels, so only their names tell
+        // their series apart.
+        let metrics = "\
+a_latency_bucket{node=\"x\",le=\"1\"} 50
+a_latency_bucket{node=\"x\",le=\"+Inf\"} 50
+b_latency_bucket{node=\"x\",le=\"1\"} 0
+b_latency_bucket{node=\"x\",le=\"+Inf\"} 50
+";
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 50),
+            Some((1.0, 100))
+        );
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 51),
+            Some((f64::INFINITY, 100))
+        );
+        assert_eq!(
+            histogram_percentile(metrics, "b_latency", 50),
+            Some((f64::INFINITY, 50))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "histogram series have different bucket bounds")]
+    fn histogram_percentile_rejects_series_with_different_bounds() {
+        // Every sample is at most 2, but summing the bounds of both series would put the last
+        // sample past every finite bucket.
+        let metrics = "\
+latency_bucket{node=\"a\",le=\"1\"} 1
+latency_bucket{node=\"a\",le=\"+Inf\"} 1
+latency_bucket{node=\"b\",le=\"2\"} 1
+latency_bucket{node=\"b\",le=\"+Inf\"} 1
+";
+        let _ = histogram_percentile(metrics, "latency", 100);
+    }
+
+    #[test]
+    fn histogram_percentile_ranks_large_counts_without_overflow() {
+        // `samples * 50` exceeds `u64::MAX`, and the median sample is past the bucket at 1.
+        let metrics = format!(
+            "latency_bucket{{le=\"1\"}} {}\nlatency_bucket{{le=\"+Inf\"}} {}\n",
+            1u64 << 60,
+            u64::MAX
+        );
+        assert_eq!(
+            histogram_percentile(&metrics, "latency", 50),
+            Some((f64::INFINITY, u64::MAX))
+        );
+        assert_eq!(
+            histogram_percentile(&metrics, "latency", 6),
+            Some((1.0, u64::MAX))
+        );
+    }
+
+    #[test]
+    fn histogram_percentile_reads_encoded_overflow_bucket() {
+        let mut registry = prometheus_client::registry::Registry::default();
+        let histogram = raw::Histogram::new([1.0]);
+        registry.register("latency", "Latency.", histogram.clone());
+        histogram.observe(2.0);
+        let mut encoded = String::new();
+        encode(&mut encoded, &registry).unwrap();
+        assert_eq!(
+            histogram_percentile(&encoded, "latency", 100),
+            Some((f64::INFINITY, 1)),
+            "{encoded}"
+        );
+    }
 
     #[test]
     fn test_has_metric_value_unlabeled() {

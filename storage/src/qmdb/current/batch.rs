@@ -914,7 +914,7 @@ where
     }
 
     // Run graft hashing and the grafted batch's build and merkleization as one strategy job,
-    // against a snapshot of the DB's grafted tree. An empty graft set hashes nothing, so it
+    // against a view of the DB's grafted tree. An empty graft set hashes nothing, so it
     // merkleizes without submitting a job.
     let grafted_batch = if graft_inputs.is_empty() {
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
@@ -1336,7 +1336,7 @@ where
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, U, N, S> {
         UnmerkleizedBatch {
             inner: self.any.new_batch(),
-            grafted_parent: self.grafted_snapshot(),
+            grafted_parent: self.grafted_batch(),
             bitmap_parent: BitmapBatch::Base(Arc::clone(&self.any.bitmap)),
         }
     }
@@ -1346,7 +1346,7 @@ where
     /// Once the DB moves to another state, reads through it return [`Error::StaleRead`] and
     /// applying it returns [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
-        let grafted = self.grafted_snapshot();
+        let grafted = self.grafted_batch();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             grafted,

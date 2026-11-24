@@ -385,18 +385,19 @@ impl Driver {
 
         // Keep the arm guard alive through the wait. A notification racing this
         // check either prevents sleeping or wakes the ring wait.
-        let arm = parker.arm(seen);
+        let arm = parker.arm_ring(seen);
         if !arm.still_idle() {
             return Ok(false);
         }
 
-        // A ring wait that an earlier park left queued serves this park. Its
-        // compare belonged to that park, so this arm alone guards the sequence
-        // since `seen`, and a later notification finds the waiter bit and
-        // wakes that wait.
+        // A ring wait that an earlier ring park left queued serves this park,
+        // even when thread parks came in between, since their wakes pass over
+        // it. Its compare belonged to the ring park that installed it, so this
+        // arm alone guards the sequence since `seen`, and a later notification
+        // finds the ring bit and wakes that wait.
         //
         // A transient enter can leave a new wait's SQE unsubmitted. Its
-        // snapshot carries the waiter bit, so a later enter queues it only
+        // snapshot carries the ring bit, so a later enter queues it only
         // inside a park armed with the same word and otherwise fails it with
         // EAGAIN.
         if self.state.ring_wait_needed {
@@ -516,8 +517,10 @@ impl Drop for Driver {
         // a live wait synchronously, and keep the word allocated if that fails.
         //
         // SINGLE_ISSUER rejects the cancel from any thread but the owner with
-        // EEXIST, which would leak the word, so the driver must drop on its
-        // owner thread, as worker cleanup does.
+        // EEXIST. That would leak the word, and until the ring's teardown
+        // cancels the wait, it could take a ring wake meant for a later driver
+        // on the same parker. So the driver must drop on its owner thread, as
+        // worker cleanup does.
         //
         // No wait is live once its completion was reaped.
         if self.state.ring_wait_needed {
@@ -2740,11 +2743,7 @@ pub mod tests {
 
     #[test]
     fn test_same_open_sync_waits_for_failure_accounting() {
-        for state in [
-            None,
-            Some(WriteAtState::WritingSync),
-            Some(WriteAtState::WritingBeforeSync),
-        ] {
+        for write in [false, true] {
             let (directory, held) = make_file("sync_order");
             held.tracker.write();
             held.tracker.complete();
@@ -2752,25 +2751,17 @@ pub mod tests {
             // Both barriers are accepted while staging capacity remains available.
             let mut harness = Harness::new(2);
             let first = harness.admit(Request::Sync(SyncRequest::new(held.clone())), 0);
-            let successor = state.map_or_else(
-                || Request::Sync(SyncRequest::new(held.clone())),
-                |state| {
-                    let bufs = if state == WriteAtState::WritingBeforeSync {
-                        (0..IOVEC_BATCH_SIZE + 1)
-                            .map(|_| IoBuf::from(b"x"))
-                            .collect()
-                    } else {
-                        IoBufs::from(IoBuf::from(b"new"))
-                    };
-                    Request::WriteAt(WriteAtRequest::new(
-                        held.clone(),
-                        0,
-                        bufs.into(),
-                        state,
-                        Cache::Enabled,
-                    ))
-                },
-            );
+            let successor = if write {
+                Request::WriteAt(WriteAtRequest::new(
+                    held.clone(),
+                    0,
+                    IoBufs::from(IoBuf::from(b"new")).into(),
+                    WriteAtState::WritingBeforeSync,
+                    Cache::Enabled,
+                ))
+            } else {
+                Request::Sync(SyncRequest::new(held.clone()))
+            };
             let second = harness.admit(successor, 1);
             assert_eq!(harness.driver.len(), 2);
             assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
@@ -2806,7 +2797,7 @@ pub mod tests {
             assert_eq!(harness.completed.len(), 2);
             assert!(matches!(
                 &harness.completed[0].output,
-                RequestOutput::Sync(Err(Error::Io(error)))
+                RequestOutput::Sync(Err(Error::BlobSyncFailed(_, _, error)))
                     if error.raw_os_error() == Some(libc::EIO)
             ));
             assert!(matches!(
@@ -2825,8 +2816,7 @@ pub mod tests {
 
     #[test]
     fn test_durable_write_keeps_permit_through_follow_up_sqes() {
-        for state in [WriteAtState::WritingSync, WriteAtState::WritingBeforeSync] {
-            let multibatch = state == WriteAtState::WritingBeforeSync;
+        for multibatch in [false, true] {
             let (directory, file) = make_file("durable_follow_up");
             file.tracker.write();
             file.tracker.complete();
@@ -2834,7 +2824,7 @@ pub mod tests {
             let (bufs, completions) = if !multibatch {
                 (
                     IoBufs::from(IoBuf::from(b"hello")),
-                    vec![-libc::EOPNOTSUPP, -libc::EINTR, 2, 3],
+                    vec![-libc::EOPNOTSUPP, -libc::EINTR, 2, 3, 0],
                 )
             } else {
                 (
@@ -2855,7 +2845,7 @@ pub mod tests {
                     file.clone(),
                     0,
                     bufs.into(),
-                    state,
+                    WriteAtState::WritingBeforeSync,
                     Cache::Disabled,
                 )),
                 Observer::Local(None),
@@ -2891,21 +2881,17 @@ pub mod tests {
             assert!(harness.driver.state.acquiring.is_empty());
             assert!(!harness.driver.state.waiters.is_pending(first));
 
-            // A trailing sync credits the write completed before it under the permit, so the
-            // successor resolves without an SQE. A fused write covers only its own range.
-            if multibatch {
-                assert!(harness.driver.state.ready_queue.is_empty());
-                assert!(!harness.driver.state.waiters.is_pending(second));
-                harness.collect();
-            } else {
-                assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(second));
+            // The whole-file sync credits the write completed before it under the permit, so the
+            // successor resolves without an SQE.
+            assert!(harness.driver.state.ready_queue.is_empty());
+            assert!(!harness.driver.state.waiters.is_pending(second));
+            if !multibatch {
                 assert!(matches!(
                     harness.driver.observe(first, Waker::noop()),
                     Observation::Ready(RequestOutput::WriteAt(Ok(())))
                 ));
-                harness.driver.state.waiters.stage(second);
-                harness.simulated_completion(second, 0);
             }
+            harness.collect();
             assert_eq!(harness.completed.len(), 1 + usize::from(multibatch));
             assert!(harness.completed.iter().all(|completion| matches!(
                 completion.output,

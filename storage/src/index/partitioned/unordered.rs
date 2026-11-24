@@ -79,7 +79,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 }
 
 /// A restricted view of an [Index] covering only a contiguous range of partitions, held by one
-/// snapshot-build task (created by [Index::new_range], folded back into a full index by
+/// index-build task (created by [Index::new_range], folded back into a full index by
 /// [Index::install_range]). It accepts only bulk loads, which map a key's global partition index
 /// to the range's local slot. The [UnorderedTrait] operations index partitions globally and are
 /// deliberately unavailable, so they cannot be miscalled on a range.
