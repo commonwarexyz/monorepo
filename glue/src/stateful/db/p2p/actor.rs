@@ -384,7 +384,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_p2p::{
         Provider, TrackedPeers,
-        simulated::{Link, Network},
+        simulated::{Link, Network, Oracle},
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -735,6 +735,10 @@ mod tests {
         metrics: [ResolverMetrics; 2],
         /// Actor handles used to verify that shutdown releases their child tasks.
         handles: Vec<Handle<()>>,
+        /// Identities of each peer.
+        peers: [ed25519::PublicKey; 2],
+        /// Network oracle used to observe blocked peers.
+        oracle: Oracle<ed25519::PublicKey, deterministic::Context>,
     }
 
     async fn spawn_live_pair(context: &deterministic::Context, prefix: &str) -> LivePair<TestDb> {
@@ -832,6 +836,8 @@ mod tests {
             mailboxes: mailboxes.try_into().ok().unwrap(),
             metrics: metrics.try_into().ok().unwrap(),
             handles,
+            peers,
+            oracle,
         }
     }
 
@@ -1931,6 +1937,69 @@ mod tests {
             for (key, value) in entries {
                 assert_eq!(synced.get(&key).await.unwrap(), Some(value));
             }
+            wait_for_no_pending(&context, &pair.metrics[0]).await;
+            shutdown_actors(&context, PREFIX, pair.handles).await;
+        });
+    }
+
+    #[test]
+    fn variable_operation_over_limit_blocks_peer() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            const PREFIX: &str = "variable_over_limit";
+            let pair_context = context.child(PREFIX);
+
+            // The source's database admits a value one byte wider than the network decodes.
+            let source = init_variable_db(
+                pair_context.child("source"),
+                "over-limit-source",
+                MAX_VALUE_SIZE + 1,
+                &[(
+                    VariableKey::new([1; 32]),
+                    Bytes::from(vec![42; MAX_VALUE_SIZE + 1]),
+                )],
+                None,
+            )
+            .await;
+            let request = Request::Operations {
+                size: source.bounds().end,
+                start: Location::new(0),
+                max_ops: NZU64!(2),
+            };
+            let client = init_variable_db(
+                pair_context.child("client"),
+                "over-limit-client",
+                MAX_VALUE_SIZE,
+                &[],
+                None,
+            )
+            .await;
+            let pair = spawn_connected_pair(
+                &pair_context,
+                [Shared::new("client", client), Shared::new("source", source)],
+                variable_codec_config(MAX_VALUE_SIZE),
+                max_variable_operation_size(MAX_VALUE_SIZE + 1),
+            )
+            .await;
+
+            // The over-limit response fails to decode, so the client blocks its sender and never
+            // completes the fetch.
+            let mut fetch = Box::pin(pair.mailboxes[0].serve(request));
+            select! {
+                _ = &mut fetch => panic!("over-limit response was accepted"),
+                _ = async {
+                    while pair.oracle.blocked().await.unwrap().is_empty() {
+                        context.sleep(Duration::from_millis(10)).await;
+                    }
+                } => {},
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("over-limit sender was not blocked");
+                },
+            }
+            assert_eq!(
+                pair.oracle.blocked().await.unwrap(),
+                vec![(pair.peers[0].clone(), pair.peers[1].clone())]
+            );
+            drop(fetch);
             wait_for_no_pending(&context, &pair.metrics[0]).await;
             shutdown_actors(&context, PREFIX, pair.handles).await;
         });
