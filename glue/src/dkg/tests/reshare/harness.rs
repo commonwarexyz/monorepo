@@ -23,10 +23,10 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
-        Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
+        PruneConfig, Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Single, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
     },
@@ -102,7 +102,7 @@ use std::{
 
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
-type Database<E> = Shared<Qmdb<E>>;
+type Database<E> = Single<Qmdb<E>>;
 type Scheme = simplex::scheme::bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinPk>;
 type MarshalVariant = Standard<Block>;
 type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
@@ -426,10 +426,10 @@ impl App {
     async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
         mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
+    ) -> Result<<Database<E> as DatabaseSet<E>>::Merkleized, ExecutionError> {
         let key = Sha256::hash(&[b"height"]);
         batches = batches.write(key, Some(u64_to_digest(height.get())));
-        batches.merkleize().await.unwrap()
+        Ok(batches.merkleize().await?)
     }
 }
 
@@ -452,12 +452,14 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        let parent = ancestry.peek()?.clone();
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        let Some(parent) = ancestry.peek().cloned() else {
+            return Ok(None);
+        };
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let merkleized = Self::execute(height, batches).await;
+        let merkleized = Self::execute(height, batches).await?;
         let block = Block {
             context: context.1,
             parent: parent.digest(),
@@ -466,7 +468,7 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
             range: merkleized.target().range,
             payload,
         };
-        Some(Proposed { block, merkleized })
+        Ok(Some(Proposed { block, merkleized }))
     }
 
     async fn process(
@@ -475,11 +477,14 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+    ) -> Result<Option<<Self::Databases as DatabaseSet<E>>::Merkleized>, ExecutionError> {
         // The surrounding `reshare::Application` wrapper validates the final block's reshare
         // payload, so this inner app only executes state.
-        let height = ancestry.peek()?.height();
-        Some(Self::execute(height, batches).await)
+        let Some(block) = ancestry.peek() else {
+            return Ok(None);
+        };
+        let height = block.height();
+        Ok(Some(Self::execute(height, batches).await?))
     }
 
     async fn capture(

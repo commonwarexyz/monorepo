@@ -1,11 +1,10 @@
 use super::{
     Artifact,
-    mailbox::{Mailbox, Message},
+    mailbox::{Mailbox, Message, UpdateOutcome},
     resolve,
 };
 use crate::stateful::{
     Application,
-    actor::BlockDigest,
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
@@ -13,7 +12,7 @@ use commonware_consensus::{
     marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
     simplex::types::Finalization,
 };
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::{
     NZUsize,
@@ -61,8 +60,7 @@ where
     context: ContextCell<E>,
     /// The mailbox.
     mailbox: Receiver<Message<E, A>>,
-    /// The produced state sync artifact, if complete.
-    artifact: Option<Artifact<E, A>>,
+
     /// Database configuration for the managed set.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     /// Per-database sync engine parameters.
@@ -91,7 +89,6 @@ where
             Self {
                 context: ContextCell::new(config.context),
                 mailbox: receiver,
-                artifact: None,
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
@@ -108,8 +105,16 @@ where
     }
 
     async fn run(mut self) {
+        // Marshal stops with the runtime, so resolving the floor block yields to shutdown.
+        // Returning drops the completion sender, which the handoff accepts only after stop.
         let (marshal, floor) = &self.marshal;
-        let block = resolve(marshal, *floor, &self.finalization).await;
+        let block = select! {
+            _ = self.context.stopped() => {
+                debug!("syncer stopped before resolving its floor block");
+                return;
+            },
+            block = resolve(marshal, *floor, &self.finalization) => block,
+        };
 
         let (tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut tip_updates_tx = Some(tip_updates_tx);
@@ -130,19 +135,22 @@ where
             },
             result = &mut task => match result {
                 Ok((databases, anchor)) => {
-                    Self::publish(
-                        &mut self.artifact,
-                        &mut self.completion,
-                        databases,
-                        anchor,
-                    );
+                    let completion = self
+                        .completion
+                        .take()
+                        .expect("completion sender present until sync completes");
+                    completion.send_lossy(Artifact { databases, anchor });
                     task = None.into();
 
                     // No coordinator remains to record a queued update. Dropping the sender
-                    // drops that update, so its caller retries and receives the artifact.
+                    // drops that update, so its caller retries and learns sync completed.
                     tip_updates_tx = None;
                 }
                 Err(err) => {
+                    // Unreachable from adversarial input, since the target root comes
+                    // from a finalized block and fetched operations are
+                    // proof-verified, so bad peer data surfaces as resolver
+                    // feedback and retries, never as an engine error.
                     panic!("state sync task failed: {err:?}");
                 }
             },
@@ -151,51 +159,46 @@ where
                 break;
             } => match message {
                 Message::Retarget { update, response } => {
-                    if let Some(artifact) = self.artifact.clone() {
-                        response.send_lossy(Some(artifact));
+                    if self.completion.is_none() {
+                        response.send_lossy(UpdateOutcome::SyncCompleted);
                         continue;
                     }
 
+                    // If sync had already completed, the state-sync branch above would
+                    // have consumed the completion sender before this mailbox branch ran.
                     let tip_updates = tip_updates_tx
                         .as_ref()
                         .expect("ring sender lives until the artifact is published");
                     if !tip_updates.send_lossy(update) {
                         // A closed target channel means state sync accepts no more targets. Wait
-                        // for its result instead of failing.
-                        match (&mut task).await {
+                        // for its result instead of failing, unless the actor stops first.
+                        let result = select! {
+                            _ = &mut shutdown => {
+                                debug!("syncer received stop signal, shutting down");
+                                break;
+                            },
+                            result = &mut task => result,
+                        };
+                        match result {
                             Ok((databases, anchor)) => {
-                                Self::publish(
-                                    &mut self.artifact,
-                                    &mut self.completion,
-                                    databases,
-                                    anchor,
-                                );
                                 task = None.into();
+                                let completion = self
+                                    .completion
+                                    .take()
+                                    .expect("completion sender present until sync completes");
+                                completion.send_lossy(Artifact { databases, anchor });
+                                response.send_lossy(UpdateOutcome::SyncCompleted);
                             }
                             Err(err) => {
                                 panic!("state sync task failed: {err:?}");
                             }
                         }
                         tip_updates_tx = None;
-                        response.send_lossy(self.artifact.clone());
                         continue;
                     }
-                    response.send_lossy(None);
+                    response.send_lossy(UpdateOutcome::Observed);
                 }
             },
-        }
-    }
-
-    fn publish(
-        artifact: &mut Option<Artifact<E, A>>,
-        completion: &mut Option<oneshot::Sender<Artifact<E, A>>>,
-        databases: A::Databases,
-        anchor: Anchor<BlockDigest<A, E>>,
-    ) {
-        let published = Artifact { databases, anchor };
-        *artifact = Some(published.clone());
-        if let Some(completion) = completion.take() {
-            completion.send_lossy(published);
         }
     }
 }
@@ -204,8 +207,8 @@ where
 mod tests {
     use super::{Config, Syncer, resolve};
     use crate::stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed, Stateful,
-        actor::syncer::{SyncPlan, open},
+        Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed, Stateful,
+        actor::syncer::{SyncPlan, UpdateOutcome, open},
         db::{Anchor, Barrier, DatabaseSet, Publisher, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
@@ -274,7 +277,7 @@ mod tests {
             0
         }
 
-        async fn new_batches(&self) -> Self::Unmerkleized {
+        async fn new_batches(_readers: &Self::Readers) -> Self::Unmerkleized {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
@@ -288,21 +291,25 @@ mod tests {
 
         fn readers(&self) -> Self::Readers {}
 
-        async fn apply(&self, _batches: Self::Merkleized) {
+        async fn apply(self, _batches: Self::Merkleized) -> Self {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn finalize(&self) -> (Self::Snapshots, Barrier) {
+        async fn finalize(self) -> (Self, Self::Snapshots, Barrier) {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn snapshot(&self) -> Self::Snapshots {}
+        async fn snapshot(self) -> (Self, Self::Snapshots) {
+            (self, ())
+        }
 
-        async fn refresh_cheap(&self, _served: &Self::Snapshots) -> Self::Snapshots {}
+        async fn refresh_cheap(self, _served: &Self::Snapshots) -> (Self, Self::Snapshots) {
+            (self, ())
+        }
 
         fn merge_snapshots(_served: &Self::Snapshots, _fresh: Self::Snapshots) -> Self::Snapshots {}
 
-        async fn prune(&self, _targets: &Self::SyncTargets) {
+        async fn prune(self, _targets: &Self::SyncTargets) -> Self {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
@@ -360,7 +367,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 
@@ -370,7 +377,7 @@ mod tests {
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
             _finality: Finality,
-        ) -> Option<TestMerkleized> {
+        ) -> Result<Option<TestMerkleized>, ExecutionError> {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 
@@ -764,7 +771,8 @@ mod tests {
             )
             .await;
             let publication_context = context.child("publication");
-            let (stateful, mailbox) = Stateful::new(
+            let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
+            let (stateful, mut mailbox) = Stateful::new(
                 context.child("stateful"),
                 StatefulConfig {
                     application: WedgeApp,
@@ -774,7 +782,7 @@ mod tests {
                     mailbox_size: NZUsize!(1),
                     plan,
                     resolvers: (),
-                    snapshot_publisher: Publisher::new(&publication_context).0,
+                    snapshot_publisher,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
@@ -786,8 +794,29 @@ mod tests {
             );
             let actor = stateful.start();
 
-            // State sync resumes and completes at the installed floor.
-            mailbox.subscribe_databases().await;
+            // State sync resumes and converges at the installed floor, whose snapshot the handoff
+            // publishes before it records completion.
+            while snapshot_subscriber.latest().is_none() {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // The handoff does not read the mailbox, so processing answers this empty proposal
+            // only after completion is recorded.
+            assert!(
+                commonware_consensus::Application::propose(
+                    &mut mailbox,
+                    (
+                        context.child("fence"),
+                        commonware_consensus::CertifiableBlock::context(&block)
+                    ),
+                    commonware_consensus::marshal::ancestry::from_iter(std::iter::empty::<
+                        commonware_cryptography::Digested<TestBlock>,
+                    >()),
+                    (),
+                )
+                .await
+                .is_none()
+            );
             actor.abort();
             let _ = actor.await;
             let plan =
@@ -1109,9 +1138,10 @@ mod tests {
                 .child("update")
                 .spawn(move |_| async move { mailbox.retarget(anchor(1, 1), 1).await });
             let result = update.await.expect("update task failed");
-            assert!(
-                matches!(&result, Some(artifact) if artifact.anchor.height == Height::zero()),
-                "stranded update must resolve to the completed artifact",
+            assert_eq!(
+                result,
+                Some(UpdateOutcome::SyncCompleted),
+                "stranded update must report the completed sync",
             );
 
             let artifact = receiver.await.expect("artifact must publish");

@@ -1,5 +1,5 @@
 use super::*;
-use crate::stateful::db::{DatabaseSet, Merkleized as StatefulMerkleized, Shared};
+use crate::stateful::db::{DatabaseSet, Merkleized as StatefulMerkleized, Single};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, U256, Write};
 use commonware_cryptography::{Sha256, sha256::Digest};
@@ -2060,14 +2060,14 @@ trait StatefulDb<A: Account>:
 /// wrappers share.
 macro_rules! impl_stateful_db {
     ($($db:ty: $account:ty),* $(,)?) => {$(
-        impl StatefulDb<$account> for Shared<$db> {
+        impl StatefulDb<$account> for Single<$db> {
             async fn execute<T>(&self, transfers: &[T]) -> Result<Self::Merkleized, Rejection<Key>>
             where
                 T: Transfer<Key = Key, Account = $account> + Sync,
             {
                 let plan = Plan::new(transfers, &Sequential)?;
                 let keys: Vec<&Key> = plan.keys().iter().collect();
-                let (staged, reads) = self.new_batches().await.stage(&keys).await.unwrap();
+                let (staged, reads) = Self::new_batches(&self.readers()).await.stage(&keys).await.unwrap();
                 let slots = plan.settle(&reads, &Sequential)?;
                 Ok(staged.merkleize(slots, Vec::new()).await.unwrap())
             }
@@ -2080,7 +2080,7 @@ macro_rules! impl_stateful_db {
                 let mut selection = Selection::new();
                 let touched = selection.touch(&rounds[0]);
                 let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
-                let (mut staged, reads) = self.new_batches().await.stage(&keys).await.unwrap();
+                let (mut staged, reads) = Self::new_batches(&self.readers()).await.stage(&keys).await.unwrap();
                 selection.register(reads);
                 let mut accepted = selection.apply(&rounds[0]);
 
@@ -2126,7 +2126,7 @@ async fn stateful_select_matches_execute<D, S, T>(
     keys: u64,
 ) where
     D: TestDb<T::Account>,
-    Shared<D>: StatefulDb<T::Account>,
+    Single<D>: StatefulDb<T::Account>,
     S: Transfer<Key = Key, Account = T::Account> + Sync,
     T: Transfer<Key = Key> + Clone + Sync,
 {
@@ -2138,14 +2138,15 @@ async fn stateful_select_matches_execute<D, S, T>(
     }
     let [proposer, verifier, twin]: [D; 3] = started.try_into().ok().unwrap();
     let start = accounts(&twin, keys).await;
-    let proposer = Shared::new("proposer", proposer);
-    let verifier = Shared::new("verifier", verifier);
+    let proposer = Single::from(proposer);
+    let verifier = Single::from(verifier);
+    let (proposer_reader, verifier_reader) = (proposer.reader(), verifier.reader());
 
     // The proposer selects a body in rounds and applies it.
     let rounds = [first.clone(), first, Vec::new(), last];
     let (merkleized, accepted) = proposer.select(&rounds).await;
     let proposed = merkleized.root();
-    proposer.apply(merkleized).await;
+    let _proposer = proposer.apply(merkleized).await;
 
     // The verifier executes exactly the accepted body through its wrapper, and the twin executes
     // it directly.
@@ -2154,7 +2155,7 @@ async fn stateful_select_matches_execute<D, S, T>(
     assert!(!body.is_empty() && body.len() < candidates.len());
     let merkleized = verifier.execute(&body).await.unwrap();
     let verified = merkleized.root();
-    verifier.apply(merkleized).await;
+    let _verifier = verifier.apply(merkleized).await;
     let (_, executed) = run(twin, &body).await.unwrap();
 
     // All three reach the same root, and both wrapped databases hold the accounts the reference
@@ -2162,8 +2163,8 @@ async fn stateful_select_matches_execute<D, S, T>(
     assert_eq!(verified, proposed);
     assert_eq!(executed, proposed);
     let want = expected(&start, &body).unwrap();
-    assert_eq!(accounts(&*proposer.read().await, keys).await, want);
-    assert_eq!(accounts(&*verifier.read().await, keys).await, want);
+    assert_eq!(accounts(&*proposer_reader.read().await, keys).await, want);
+    assert_eq!(accounts(&*verifier_reader.read().await, keys).await, want);
 }
 
 #[test]

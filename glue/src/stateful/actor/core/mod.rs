@@ -23,13 +23,14 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
+use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
 use futures::join;
 use rand_core::Rng;
-use std::num::NonZeroUsize;
+use std::{future::Future, num::NonZeroUsize};
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -38,6 +39,15 @@ pub(super) use mailbox::Proposal;
 mod processing;
 mod syncing;
 mod verifications;
+
+/// Awaits `operation` unless `context` stops first, in which case it returns [`None`] and drops
+/// the operation.
+async fn until_stopped<T>(context: &impl Spawner, operation: impl Future<Output = T>) -> Option<T> {
+    select! {
+        _ = context.stopped() => None,
+        output = operation => Some(output),
+    }
+}
 
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -233,6 +243,7 @@ where
     }
 
     /// Runs state sync toward `finalization`, then processing.
+    #[boxed]
     async fn sync(self, finalization: Finalization<A::SigningScheme, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
@@ -267,17 +278,30 @@ where
     }
 
     /// Opens the database set from marshal, records completion, then runs processing.
+    #[boxed]
     async fn recover(self) {
         let (marshal, _) = self.marshal;
-        let Artifact { databases, anchor } = syncer::open::<E, A, V>(
-            self.context.child("databases"),
-            &marshal,
-            self.db_config,
-            self.plan.completed(),
+        let Some(Artifact { databases, anchor }) = until_stopped(
+            self.context.as_present(),
+            syncer::open::<E, A, V>(
+                self.context.child("databases"),
+                &marshal,
+                self.db_config,
+                self.plan.completed(),
+            ),
         )
-        .await;
-
-        self.plan.set_completed(anchor.height).await;
+        .await
+        else {
+            return;
+        };
+        let Some(_) = until_stopped(
+            self.context.as_present(),
+            self.plan.set_completed(anchor.height),
+        )
+        .await
+        else {
+            return;
+        };
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
@@ -293,7 +317,12 @@ where
 
         // The recovered state alone must publish before the loop starts, so
         // serving begins before the next finalization.
-        processor.publish_snapshot().await;
+        if until_stopped(self.context.as_present(), processor.publish_snapshot())
+            .await
+            .is_none()
+        {
+            return;
+        }
         Processing {
             context: self.context,
             mailbox: self.mailbox,

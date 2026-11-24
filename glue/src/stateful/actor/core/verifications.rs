@@ -4,8 +4,11 @@
 //! [`Handler`] polls alongside the actor's other duties. A request first acquires its blocks and
 //! the missing path back to known state, then runs one execution step per missing block (see
 //! [`Verifier::next`]), and finally answers its caller or, for a proposal, queues a build.
-//! Maintenance pauses acquisition and waits only for the execution steps it cannot retain, so
-//! unrelated requests keep progressing.
+//!
+//! Requests keep running while the actor finalizes or prunes. A finalization on a competing
+//! branch makes a request's step end with [`PrepareBatchesError::Stale`], and the request then
+//! acquires its blocks again against the new branch anchor. Each such restart follows a
+//! finalization, so a request restarts at most once per finalized block.
 
 use super::{
     mailbox::{ProposalRequest, Verification, WeakAncestry},
@@ -13,20 +16,14 @@ use super::{
 };
 use crate::stateful::{
     Application,
-    actor::{
-        BlockDigest,
-        processor::{
-            Disposition, ExecutionStep, FinalizationBoundary, PrepareBatchesError, Prepared,
-            Verifier,
-        },
-    },
+    actor::processor::{PrepareBatchesError, Prepared, Verifier},
 };
 use commonware_consensus::marshal::{
     ancestry::BlockProvider,
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Supervisor};
+use commonware_runtime::{Clock, Spawner};
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
 use std::{
     collections::VecDeque,
@@ -101,21 +98,18 @@ enum Phase<E, A>
 where
     A: Application<E>,
 {
-    /// A finished execution step awaiting the end of pruning.
-    Ready { prepared: Prepared<A::Block> },
-    /// Acquiring the request's blocks. `future` is `None` while maintenance pauses acquisition.
+    /// Acquiring the request's blocks.
     Acquiring {
-        future: Option<BoxFuture<'static, PhaseResult<A::Block>>>,
+        future: BoxFuture<'static, PhaseResult<A::Block>>,
     },
     /// Running one execution step.
     Executing {
-        step: ExecutionStep<BlockDigest<A, E>>,
         future: BoxFuture<'static, PhaseResult<A::Block>>,
     },
 }
 
-/// A request and its current phase. The request outlives each phase's future, so maintenance can
-/// drop a paused acquisition and start a new one later.
+/// A request and its current phase. The request outlives each phase's future, so a stale request
+/// can start a new acquisition.
 struct Work<E, A>
 where
     A: Application<E>,
@@ -127,23 +121,12 @@ where
 // Polling pins only the boxed phase futures, so the request and phase metadata may move.
 impl<E, A: Application<E>> Unpin for Work<E, A> {}
 
-impl<E, A: Application<E>> Work<E, A> {
-    /// Returns the execution step this work is running, if any.
-    const fn step(&self) -> Option<ExecutionStep<BlockDigest<A, E>>> {
-        match self.phase {
-            Phase::Acquiring { .. } | Phase::Ready { .. } => None,
-            Phase::Executing { step, .. } => Some(step),
-        }
-    }
-}
-
 /// A request whose current phase ended. `result` is `None` if its caller cancelled.
 struct Completion<E, A>
 where
     A: Application<E>,
 {
     request: Request<E, A>,
-    step: Option<ExecutionStep<BlockDigest<A, E>>>,
     result: Option<PhaseResult<A::Block>>,
 }
 
@@ -152,10 +135,8 @@ impl<E, A: Application<E>> Future for Work<E, A> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let work = self.get_mut();
-        let step = work.step();
 
-        // A caller's cancellation ends its work in any phase, including one whose future is
-        // paused. The step is reported so a paused maintenance operation stops waiting for it.
+        // A caller's cancellation ends its work in any phase.
         if work
             .request
             .as_mut()
@@ -165,51 +146,23 @@ impl<E, A: Application<E>> Future for Work<E, A> {
         {
             return Poll::Ready(Completion {
                 request: work.request.take().unwrap(),
-                step,
                 result: None,
             });
         }
 
-        // Parked work and paused acquisitions wait for `Handler::resume`. Any other phase ends
-        // the work with its future's result.
         let result = match &mut work.phase {
-            Phase::Ready { .. } | Phase::Acquiring { future: None } => return Poll::Pending,
-            Phase::Acquiring {
-                future: Some(future),
+            Phase::Acquiring { future } | Phase::Executing { future } => {
+                ready!(future.as_mut().poll(cx))
             }
-            | Phase::Executing { future, .. } => ready!(future.as_mut().poll(cx)),
         };
         Poll::Ready(Completion {
             request: work.request.take().unwrap(),
-            step,
             result: Some(result),
         })
     }
 }
 
-/// Which execution steps may start or continue during the actor's current operation.
-enum Admission<D> {
-    /// No maintenance is running, so every step is admitted.
-    Open,
-    /// A block is being finalized, and [`FinalizationBoundary::disposition`] classifies each step.
-    Finalizing(FinalizationBoundary<D>),
-    /// Pruning is running, and every step parks.
-    Pruning,
-}
-
-impl<D: Copy + Eq + std::hash::Hash> Admission<D> {
-    /// Classifies `step` under the current operation.
-    fn disposition(&self, step: &ExecutionStep<D>) -> Disposition {
-        match self {
-            Self::Open => Disposition::Retain,
-            Self::Finalizing(boundary) => boundary.disposition(step),
-            Self::Pruning => Disposition::Join,
-        }
-    }
-}
-
-/// Runs speculative requests concurrently. Finished recoveries queue their builds for the actor,
-/// and [`Handler::pause`] holds back execution steps that conflict with maintenance.
+/// Runs speculative requests concurrently. Finished recoveries queue their builds for the actor.
 pub(super) struct Handler<E, A, V>
 where
     A: Application<E>,
@@ -224,13 +177,11 @@ where
     context: E,
     /// Every live request, in any phase.
     jobs: FuturesUnordered<Work<E, A>>,
-    /// Which execution steps the actor's current operation admits.
-    admission: Admission<BlockDigest<A, E>>,
 }
 
 impl<E, A, V> Handler<E, A, V>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
@@ -245,7 +196,6 @@ where
             verifier,
             context,
             jobs: FuturesUnordered::new(),
-            admission: Admission::Open,
         }
     }
 
@@ -282,15 +232,12 @@ where
     /// Starts acquiring `request`'s blocks, or drops the request if its caller has cancelled or
     /// released its ancestry.
     pub(super) fn schedule(&mut self, request: Request<E, A>) {
-        assert!(matches!(self.admission, Admission::Open));
         let Some(future) = self.acquisition(&request) else {
             return;
         };
         self.jobs.push(Work {
             request: Some(request),
-            phase: Phase::Acquiring {
-                future: Some(future),
-            },
+            phase: Phase::Acquiring { future },
         });
     }
 
@@ -325,141 +272,33 @@ where
         }
     }
 
-    /// Pauses every acquisition and waits for each running execution step that the next
-    /// maintenance operation does not retain.
-    ///
-    /// `boundary` is the block about to be finalized, or `None` for pruning. Finalization retains
-    /// steps that descend from that block, pruning retains none, and [`Handler::resume`] restarts
-    /// the paused acquisitions.
-    pub(super) async fn pause(
-        &mut self,
-        boundary: Option<FinalizationBoundary<BlockDigest<A, E>>>,
-        actions: &mut VecDeque<Action<E, A>>,
-    ) {
-        assert!(matches!(self.admission, Admission::Open));
-        self.admission = boundary.map_or(Admission::Pruning, Admission::Finalizing);
-
-        // Drop every acquisition future, keeping its request, and count the running steps that
-        // maintenance must wait for. The count stays exact because a step starts only once its
-        // parent's state is cached, so the completion of a retained step cannot make a counted
-        // step retained. `advance` also rejects a request rather than start a step that
-        // maintenance does not retain.
-        let mut pending = 0;
-        for work in self.jobs.iter_mut() {
-            match &mut work.phase {
-                Phase::Ready { .. } => {}
-                Phase::Acquiring { future } => *future = None,
-                Phase::Executing { step, .. } => {
-                    pending += usize::from(self.admission.disposition(step) != Disposition::Retain);
-                }
-            }
-        }
-
-        // Each counted completion releases one step, including caller cancellation.
-        // Completed requests may advance only to retained steps.
-        while pending != 0 {
-            let result = self
-                .jobs
-                .next()
-                .await
-                .expect("pending execution must remain scheduled");
-            let selected = result
-                .step
-                .as_ref()
-                .is_some_and(|step| self.admission.disposition(step) != Disposition::Retain);
-            self.complete(result, actions);
-            pending -= usize::from(selected);
-        }
-    }
-
-    /// Reopens admission after maintenance. Parked requests advance from the state it left, and
-    /// paused acquisitions restart unless their callers have gone.
-    pub(super) fn resume(&mut self, actions: &mut VecDeque<Action<E, A>>) {
-        assert!(!matches!(self.admission, Admission::Open));
-        self.admission = Admission::Open;
-        for work in std::mem::take(&mut self.jobs) {
-            // A parked request kept the inputs of its finished step and selects its next step
-            // directly.
-            let mut work = match work {
-                Work {
-                    request,
-                    phase: Phase::Ready { prepared },
-                } => {
-                    self.advance(
-                        request.expect("ready request must be retained"),
-                        prepared,
-                        actions,
-                    );
-                    continue;
-                }
-                work => work,
-            };
-
-            // A paused acquisition starts over against the branch maintenance left, because the
-            // state it was walking toward may have been applied or discarded since.
-            if let Phase::Acquiring { future } = &mut work.phase {
-                *future = self.acquisition(
-                    work.request
-                        .as_ref()
-                        .expect("parked request must be retained"),
-                );
-                if future.is_none() {
-                    continue;
-                }
-            }
-            self.jobs.push(work);
-        }
-    }
-
-    /// Handles a request whose phase ended: a cancelled request is dropped, a failed phase
-    /// rejects it, a finished step is classified under the current admission, and an admitted
-    /// request advances.
+    /// Handles a request whose phase ended: a cancelled request is dropped, a stale one starts
+    /// over, a failed one is rejected, and a finished one advances.
     fn complete(&mut self, completion: Completion<E, A>, actions: &mut VecDeque<Action<E, A>>) {
-        let Completion {
-            request,
-            step,
-            result,
-        } = completion;
+        let Completion { request, result } = completion;
 
-        // A cancelled request is dropped without a reply, and a failed phase rejects it.
+        // A cancelled request is dropped without a reply.
         let Some(result) = result else {
             return;
         };
-        let Ok(prepared) = result else {
-            request.reject();
-            return;
+        let prepared = match result {
+            Ok(prepared) => prepared,
+            // The branch anchor moved past the state this request built on. Acquiring again
+            // answers it from the canonical chain or replays it on the new anchor's state.
+            Err(PrepareBatchesError::Stale) => {
+                self.schedule(request);
+                return;
+            }
+            Err(PrepareBatchesError::Invalid | PrepareBatchesError::Incomplete) => {
+                request.reject();
+                return;
+            }
         };
 
-        // Pruning holds completed requests. Finalization admits successors of the winner and
-        // records each completed descendant as a compatible parent.
-        if let Some(step) = step {
-            match self.admission.disposition(&step) {
-                Disposition::Join => {
-                    if matches!(self.admission, Admission::Pruning) {
-                        self.jobs.push(Work {
-                            request: Some(request),
-                            phase: Phase::Ready { prepared },
-                        });
-                        return;
-                    }
-                }
-                Disposition::Reject => {
-                    request.reject();
-                    return;
-                }
-                Disposition::Retain => {
-                    if let Admission::Finalizing(boundary) = &mut self.admission {
-                        boundary.completed(&step);
-                    }
-                }
-            }
-        }
         self.advance(request, prepared, actions);
     }
 
     /// Starts the request's next execution step, or answers the request once no step remains.
-    ///
-    /// A next step that the current admission does not retain rejects the request.
     fn advance(
         &mut self,
         request: Request<E, A>,
@@ -472,16 +311,12 @@ where
 
         // Each processing call owns an application clone, so different blocks can execute
         // concurrently and a shared call can outlive the request that started it. A step joins
-        // the block's processing as it is admitted, so it stays alive for that step even if every
+        // the block's processing as it starts, so it stays alive for that step even if every
         // other holder is dropped before the step is first polled.
-        if let Some((step, ancestry)) =
-            self.verifier
-                .next(&self.context, &self.marshal, &mut prepared)
+        if let Some(ancestry) = self
+            .verifier
+            .next(&self.context, &self.marshal, &mut prepared)
         {
-            if self.admission.disposition(&step) != Disposition::Retain {
-                request.reject();
-                return;
-            }
             let span = request.process_span();
             let processing = self
                 .verifier
@@ -489,7 +324,6 @@ where
             self.jobs.push(Work {
                 request: Some(request),
                 phase: Phase::Executing {
-                    step,
                     future: async move { processing.await.map(|()| prepared) }
                         .instrument(span)
                         .boxed(),

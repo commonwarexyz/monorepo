@@ -10,7 +10,7 @@ use commonware_cryptography::{
 use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
-        Application, Finality, Input, Proposed,
+        Application, ExecutionError, Finality, Input, Proposed,
         db::{DatabaseSet, Unmerkleized as _},
     },
 };
@@ -36,12 +36,11 @@ impl App {
     async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
         batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
-        batches
+    ) -> Result<<Database<E> as DatabaseSet<E>>::Merkleized, ExecutionError> {
+        Ok(batches
             .write(HEIGHT_KEY, Some(U64::new(height.get())))
             .merkleize()
-            .await
-            .expect("height write must merkleize")
+            .await?)
     }
 }
 
@@ -67,12 +66,14 @@ where
         mut ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
         // The `reshare::Application` wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
-        let parent = ancestry.next().await?;
+        let Some(parent) = ancestry.next().await else {
+            return Ok(None);
+        };
         let height = parent.height().next();
-        let merkleized = Self::execute(height, batches).await;
+        let merkleized = Self::execute(height, batches).await?;
         let block = Block::new(
             context.1,
             parent.digest(),
@@ -80,7 +81,7 @@ where
             merkleized.target(),
             payload,
         );
-        Some(Proposed { block, merkleized })
+        Ok(Some(Proposed { block, merkleized }))
     }
 
     async fn process(
@@ -89,15 +90,18 @@ where
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+    ) -> Result<Option<<Self::Databases as DatabaseSet<E>>::Merkleized>, ExecutionError> {
         // TODO (#5509): Explore direct composition of stateful and DKG validation.
         //
         // Validation from higher layers:
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
         // - Reshare `Payload` validation is handled by `reshare::Application`
-        let height = ancestry.peek()?.height();
-        Some(Self::execute(height, batches).await)
+        let Some(block) = ancestry.peek() else {
+            return Ok(None);
+        };
+        let height = block.height();
+        Ok(Some(Self::execute(height, batches).await?))
     }
 
     async fn capture(

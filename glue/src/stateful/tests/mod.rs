@@ -20,9 +20,9 @@ use crate::{
         property::Property,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
-        Stateful as StatefulActor, SyncPlan,
-        db::{DatabaseSet, Merkleized as _, Publisher, SyncEngineConfig},
+        Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
+        PruneConfig, Stateful as StatefulActor, SyncPlan,
+        db::{DatabaseSet, ManagedDb, Merkleized as _, Publisher, SyncEngineConfig},
     },
 };
 use commonware_actor::Feedback;
@@ -1093,7 +1093,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, deterministic::Context>> {
+    ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
         let gate = self.propose_gate.lock().take();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
@@ -1107,10 +1107,10 @@ impl Application<deterministic::Context> for GatedMultiApp {
             input,
         )
         .await?;
-        Some(Proposed {
+        Ok(proposed.map(|proposed| Proposed {
             block: proposed.block,
             merkleized: proposed.merkleized,
-        })
+        }))
     }
 
     async fn process(
@@ -1119,7 +1119,10 @@ impl Application<deterministic::Context> for GatedMultiApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+    ) -> Result<
+        Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized>,
+        ExecutionError,
+    > {
         let gate = self.process_gates.lock().pop_front();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
@@ -1213,7 +1216,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     .await;
     let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases)
+    >>::new_batches(&databases.readers())
     .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
@@ -1224,7 +1227,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let merkleized = App::execute(height, batches).await;
+        let merkleized = App::execute(height, batches).await.unwrap();
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::zero(), View::new(height.get())),
@@ -1268,7 +1271,7 @@ async fn build_multi_chain(
     .await;
     let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
         deterministic::Context,
-    >>::new_batches(&databases)
+    >>::new_batches(&databases.readers())
     .await;
     let mut parent = genesis.clone();
     let mut chain = Vec::with_capacity(blocks as usize);
@@ -1276,7 +1279,7 @@ async fn build_multi_chain(
 
     for height in 1..=blocks {
         let height = Height::new(height);
-        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await;
+        let (merkleized_a, merkleized_b) = MultiApp::execute(height, batches).await.unwrap();
         let bounds_b = merkleized_b.bounds();
         let block = MultiBlock {
             context: Context {
@@ -1591,10 +1594,7 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
             "proposal must keep waiting for its parent",
         );
         drop(proposal);
-        let committed = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = ManagedDb::sync_target(&*databases.read().await);
         let expected = <App as Application<deterministic::Context>>::sync_targets(&blocks[2]);
         assert_eq!(committed, expected, "QMDB target diverged");
 
@@ -1783,10 +1783,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             calls_at_tip < BLOCKS as usize,
             "QMDB durability work was not coalesced (calls={calls_at_tip}, blocks={BLOCKS})",
         );
-        let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<DelayedContext>>::committed_targets(
-            &databases,
-        )
-        .await;
+        let committed = ManagedDb::sync_target(&*databases.read().await);
         assert_eq!(committed, expected, "stable-leader QMDB target diverged");
 
         flusher.abort();
@@ -2015,10 +2012,10 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             acknowledgement.expect("descendant block must become durable");
         }
 
-        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = (
+            ManagedDb::sync_target(&*databases.0.read().await),
+            ManagedDb::sync_target(&*databases.1.read().await),
+        );
         let expected =
             <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");
@@ -2259,10 +2256,10 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             acknowledgement.expect("descendant block should be durable");
         }
 
-        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = (
+            ManagedDb::sync_target(&*databases.0.read().await),
+            ManagedDb::sync_target(&*databases.1.read().await),
+        );
         let expected =
             <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");
@@ -2521,10 +2518,10 @@ fn pruning_joins_verification_on_real_qmdbs() {
             "pruning must preserve the full QMDB tip",
         );
 
-        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
-            deterministic::Context,
-        >>::committed_targets(&databases)
-        .await;
+        let committed = (
+            ManagedDb::sync_target(&*databases.0.read().await),
+            ManagedDb::sync_target(&*databases.1.read().await),
+        );
         let expected =
             <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[3]);
         assert_eq!(committed.0, expected.0, "full QMDB target diverged");
@@ -2535,4 +2532,45 @@ fn pruning_joins_verification_on_real_qmdbs() {
         let _ = stateful_actor.await;
         let _ = marshal_actor.await;
     });
+}
+
+/// QMDB staleness maps to [`ExecutionError::Stale`], refusals that depend only on the block to
+/// [`ExecutionError::Invalid`], and every other failure to [`ExecutionError::Fatal`].
+#[test]
+fn qmdb_errors_map_to_execution_errors() {
+    use commonware_storage::{mmr, qmdb};
+    type Error = qmdb::Error<mmr::Family>;
+    let location = mmr::Location::new(1);
+    assert!(matches!(
+        ExecutionError::from(Error::StaleRead),
+        ExecutionError::Stale
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::StaleBatch),
+        ExecutionError::Stale
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::BelowInactivityFloor(location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::FloorRegressed(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::FloorBeyondCommit(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::LocationOutOfBounds(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::LocationOutOfOrder(location, location)),
+        ExecutionError::Invalid(_)
+    ));
+    assert!(matches!(
+        ExecutionError::from(Error::NotCommitBoundary(location)),
+        ExecutionError::Fatal(_)
+    ));
 }

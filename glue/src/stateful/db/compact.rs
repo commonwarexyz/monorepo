@@ -96,8 +96,8 @@ where
 mod tests {
     use super::*;
     use crate::stateful::db::{
-        DatabaseSet, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-        SyncEngineConfig, Unmerkleized as UnmerkleizedTrait,
+        DatabaseSet, InitError, ManagedDb, Merkleized as MerkleizedTrait, Single, StateSyncDb,
+        SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, split,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
@@ -635,28 +635,29 @@ mod tests {
             let db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let batch = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
+            let batch = mutate_managed::<O>(ManagedDb::new_batch(reader.clone()).await, 7)
                 .with_inactivity_floor(Location::new(1))
                 .with_metadata(O::commit_metadata(7));
             let merkleized = UnmerkleizedTrait::merkleize(batch).await.unwrap();
             let expected_root = merkleized.root();
 
-            {
-                let (slot, database) = db.write().await;
-                let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let (database, _snapshot, sync) =
-                    <AdapterDb<O> as ManagedDb<_>>::finalize(database)
+            let (_writer, sync) = writer
+                .mutate(|database| async move {
+                    let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, merkleized)
                         .await
                         .unwrap();
-                slot.put(database);
-                sync.await.expect("database sync failed");
-            }
+                    let (database, _snapshot, sync) =
+                        <AdapterDb<O> as ManagedDb<_>>::finalize(database)
+                            .await
+                            .unwrap();
+                    (database, sync)
+                })
+                .await;
+            sync.await.expect("database sync failed");
 
-            let guard = db.read().await;
+            let guard = reader.read().await;
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get_metadata(), Some(O::commit_metadata(7)));
 
@@ -664,7 +665,7 @@ mod tests {
             assert_eq!(target.root, expected_root);
             assert_eq!(target.range.end(), Location::new(3));
             drop(guard);
-            drop(db);
+            drop((_writer, reader));
 
             let reopened =
                 <AdapterDb<O> as ManagedDb<_>>::init(context.child("reopen"), config, None)
@@ -684,34 +685,41 @@ mod tests {
             let db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let first = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 1)
+            let first = mutate_managed::<O>(ManagedDb::new_batch(reader.clone()).await, 1)
                 .with_metadata(O::commit_metadata(1));
             let first = UnmerkleizedTrait::merkleize(first).await.unwrap();
             let first_target = Target {
                 root: first.root(),
                 range: non_empty_range!(first.bounds().tip.size - 1, first.bounds().tip.size),
             };
-            let (slot, database) = db.write().await;
-            let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, first)
-                .await
-                .unwrap();
-            slot.put(database);
+            let (writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, first)
+                        .await
+                        .unwrap();
+                    (database, ())
+                })
+                .await;
 
-            let second = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 2)
+            let second = mutate_managed::<O>(ManagedDb::new_batch(reader.clone()).await, 2)
                 .with_metadata(O::commit_metadata(2));
             let second = UnmerkleizedTrait::merkleize(second).await.unwrap();
-            let (slot, database) = db.write().await;
-            let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, second)
-                .await
-                .unwrap();
-            let (database, _snapshot, sync) = <AdapterDb<O> as ManagedDb<_>>::finalize(database)
-                .await
-                .unwrap();
-            sync.await.expect("database sync failed");
-            slot.put(database);
-            drop(db);
+            let (writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, second)
+                        .await
+                        .unwrap();
+                    let (database, _snapshot, sync) =
+                        <AdapterDb<O> as ManagedDb<_>>::finalize(database)
+                            .await
+                            .unwrap();
+                    sync.await.expect("database sync failed");
+                    (database, ())
+                })
+                .await;
+            drop((writer, reader));
 
             let database = <AdapterDb<O> as ManagedDb<_>>::init(
                 context.child("reopen"),
@@ -733,9 +741,9 @@ mod tests {
             let db = AdapterDb::<O>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
-            let batch = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
+            let batch = mutate_managed::<O>(ManagedDb::new_batch(reader.clone()).await, 7)
                 .with_inactivity_floor(Location::new(1))
                 .with_metadata(O::commit_metadata(7));
             let merkleized = UnmerkleizedTrait::merkleize(batch).await.unwrap();
@@ -772,16 +780,17 @@ mod tests {
             let db = AdapterDb::<O>::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let db = Single::from(db);
 
-            let batch = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 1)
+            let batch = mutate_managed::<O>(ManagedDb::new_batch(db.reader()).await, 1)
                 .with_metadata(O::commit_metadata(1));
             let batch = UnmerkleizedTrait::merkleize(batch).await.unwrap();
-            DatabaseSet::apply(&db, batch).await;
+            let db = DatabaseSet::apply(db, batch).await;
             let target = DatabaseSet::committed_targets(&db).await;
-            assert!(DatabaseSet::finalize(&db).await.1.durable().await);
+            let (db, _, barrier) = DatabaseSet::finalize(db).await;
+            assert!(barrier.durable().await);
             drop(db);
-            let db = <Shared<AdapterDb<O>> as DatabaseSet<_>>::init(
+            let db = <Single<AdapterDb<O>> as DatabaseSet<_>>::init(
                 context.child("aligned_cap"),
                 config.clone(),
                 Some(target.clone()),
@@ -1067,9 +1076,9 @@ mod tests {
             let db = AdapterDb::<O>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
-            let parent = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
+            let parent = mutate_managed::<O>(ManagedDb::new_batch(reader.clone()).await, 7)
                 .with_inactivity_floor(Location::new(1));
             let parent = UnmerkleizedTrait::merkleize(parent).await.unwrap();
             let child = mutate_managed::<O>(MerkleizedTrait::new_batch(&parent), 8);
@@ -1084,28 +1093,33 @@ mod tests {
             let db = AdapterDb::<O>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let first = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 7)
+            let first = mutate_managed::<O>(ManagedDb::new_batch(reader.clone()).await, 7)
                 .with_inactivity_floor(Location::new(1));
             let first = UnmerkleizedTrait::merkleize(first).await.unwrap();
-            {
-                let (slot, database) = db.write().await;
-                let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, first)
-                    .await
-                    .unwrap();
-                slot.put(database);
-            }
+            let (writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, first)
+                        .await
+                        .unwrap();
+                    (database, ())
+                })
+                .await;
 
-            let next = mutate_managed::<O>(db.new_batch_for_test::<_>().await, 9);
+            let next = mutate_managed::<O>(ManagedDb::new_batch(reader.clone()).await, 9);
             let next = UnmerkleizedTrait::merkleize(next).await.unwrap();
             assert_eq!(next.bounds().inactivity_floor, Location::new(1));
-            let (slot, database) = db.write().await;
-            let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, next)
-                .await
-                .unwrap();
-            assert_eq!(database.inactivity_floor(), Location::new(1));
-            slot.put(database);
+            let (writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <AdapterDb<O> as ManagedDb<_>>::apply(database, next)
+                        .await
+                        .unwrap();
+                    assert_eq!(database.inactivity_floor(), Location::new(1));
+                    (database, ())
+                })
+                .await;
+            drop(writer);
         });
     }
 

@@ -5,9 +5,9 @@
 //! touching the application, [`Verifier::next`] selects one block to process at a time, and
 //! [`Verifier::process`] processes that block once for all concurrent requests that need it.
 
-use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
+use super::{Application, Execution, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
-    Block, CertifiableBlock, Heightable, Roundable,
+    Block, Heightable,
     marshal::{
         Identifier,
         ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
@@ -16,14 +16,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_runtime::{
-    Clock, Supervisor,
+    Clock, Spawner,
     telemetry::{metrics::histogram::Timer, traces::TracedExt as _},
 };
 use futures::StreamExt;
 use std::future::{Future, pending};
 use tracing::{Instrument as _, debug, info_span, warn};
-
-type PreparedStep<B> = (ExecutionStep<<B as Digestible>::Digest>, BoxedAncestry<B>);
 
 /// A request's acquired ancestry and the execution steps that remain before it completes.
 ///
@@ -61,7 +59,7 @@ where
 
 impl<E, A> Verifier<E, A>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
 {
     /// Acquires a request's block, its parent when `verify` is set, and the missing path to
@@ -70,7 +68,9 @@ where
     /// A verification of a cached block, or of a block at or below the branch anchor's height,
     /// needs no execution and is answered from the cache or the canonical block at that height.
     /// Ancestry that ends before known state leaves a verification pending, so it abstains, and
-    /// makes recovery return [`PrepareBatchesError::Incomplete`].
+    /// makes recovery return [`PrepareBatchesError::Incomplete`]. Returns
+    /// [`PrepareBatchesError::Stale`] if a finalization moves the branch anchor past what the
+    /// acquisition already checked, so the request acquires again.
     pub(in crate::stateful::actor) fn prepare<S, V>(
         &self,
         context: E,
@@ -158,6 +158,11 @@ where
                     );
                     return pending().await;
                 };
+                // A finalization during the wait may have reached the block's height. The
+                // request then acquires again and is answered from the canonical chain.
+                if block.height() <= execution.branch_anchor().height {
+                    return Err(PrepareBatchesError::Stale);
+                }
                 (
                     parent.clone(),
                     BoxedAncestry::new(marshal_ancestry::with_prefix([block, parent], ancestry)),
@@ -206,7 +211,7 @@ where
         context: &E,
         provider: &P,
         prepared: &mut Prepared<A::Block>,
-    ) -> Option<PreparedStep<A::Block>>
+    ) -> Option<BoxedAncestry<A::Block>>
     where
         P: BlockProvider<Block = A::Block> + Clone,
     {
@@ -232,17 +237,7 @@ where
             }
         };
 
-        // The step identifies the block for admission decisions while the ancestry travels with
-        // the execution.
-        let block = ancestry
-            .peek()
-            .expect("prepared execution must have its block");
-        let step = ExecutionStep {
-            digest: block.digest(),
-            parent: block.parent(),
-            round: block.context().round(),
-        };
-        Some((step, ancestry))
+        Some(ancestry)
     }
 
     /// Processes one step from [`Self::next`] as a candidate, sharing the call with concurrent

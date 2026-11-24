@@ -5,10 +5,10 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
-        Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
+        PruneConfig, Stateful as StatefulActor, SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
+            DatabaseSet, Merkleized as _, Single, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
         probe::{self, Config as ProbeConfig, Probe},
@@ -66,7 +66,7 @@ use std::{sync::Arc, time::Duration};
 pub(super) type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
+pub(crate) type SingleDatabaseSet<E> = Single<Qmdb<E>>;
 
 /// Builds the QMDB configuration used by single-database tests.
 pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> fixed::Config<TwoCap, Sequential> {
@@ -204,19 +204,18 @@ impl App {
     pub(super) async fn execute<E: Spawner + StorageContext>(
         height: Height,
         mut batches: <SingleDatabaseSet<E> as DatabaseSet<E>>::Unmerkleized,
-    ) -> <SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized {
+    ) -> Result<<SingleDatabaseSet<E> as DatabaseSet<E>>::Merkleized, ExecutionError> {
         let counter = Sha256::hash(&[b"counter"]);
         let current: u64 = batches
             .get(&counter)
-            .await
-            .unwrap()
+            .await?
             .map_or(0, |v| digest_to_u64(&v));
         batches = batches.write(counter, Some(u64_to_digest(current + 1)));
         batches = batches.write(
             Sha256::hash(&[&height.get().to_be_bytes()]),
             Some(u64_to_digest(height.get())),
         );
-        batches.merkleize().await.unwrap()
+        Ok(batches.merkleize().await?)
     }
 }
 
@@ -239,11 +238,13 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
         let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
+        let Some(parent) = ancestry.next().await else {
+            return Ok(None);
+        };
         let height = Height::new(parent.height().get() + 1);
-        let merkleized = Self::execute(height, batches).await;
+        let merkleized = Self::execute(height, batches).await?;
         let block = Block {
             context: context.1.clone(),
             parent: parent.digest(),
@@ -251,7 +252,7 @@ impl<E: Spawner + StorageContext> Application<E> for App {
             state_root: merkleized.root(),
             range: merkleized.target().range,
         };
-        Some(Proposed { block, merkleized })
+        Ok(Some(Proposed { block, merkleized }))
     }
 
     async fn process(
@@ -260,9 +261,12 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let height = ancestry.peek()?.height();
-        Some(Self::execute(height, batches).await)
+    ) -> Result<Option<<Self::Databases as DatabaseSet<E>>::Merkleized>, ExecutionError> {
+        let Some(block) = ancestry.peek() else {
+            return Ok(None);
+        };
+        let height = block.height();
+        Ok(Some(Self::execute(height, batches).await?))
     }
 
     async fn capture(

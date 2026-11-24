@@ -4,7 +4,7 @@
 //! write, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
-    Shared,
+    Reader,
     qmdb::{Merkleized, Qmdb, Unmerkleized},
 };
 use commonware_codec::Codec;
@@ -52,7 +52,7 @@ where
     Operation<F, U>: Codec,
 {
     staged: Staged<F, H, U, S>,
-    db: Shared<Db<F, E, C, I, H, U, S>>,
+    db: Reader<Db<F, E, C, I, H, U, S>>,
 }
 
 impl<F, E, C, I, H, U, S> Unmerkleized<Db<F, E, C, I, H, U, S>>
@@ -359,7 +359,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::ManagedDb;
+    use crate::stateful::db::{ManagedDb, split};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -432,25 +432,30 @@ mod tests {
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"winner"]);
-            let pre_finalization = db.new_batch_for_test::<_>().await;
-            let winner = db.new_batch_for_test::<_>().await.write(key, Some(value));
+            let pre_finalization = ManagedDb::new_batch(reader.clone()).await;
+            let winner = ManagedDb::new_batch(reader.clone())
+                .await
+                .write(key, Some(value));
             let winner = crate::stateful::db::Unmerkleized::merkleize(winner)
                 .await
                 .unwrap();
 
-            let (slot, database) = db.write().await;
-            let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, winner)
-                .await
-                .unwrap();
-            let (database, _snapshot, sync) =
-                <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
-                    .await
-                    .unwrap();
-            slot.put(database);
+            let (_writer, sync) = writer
+                .mutate(|database| async move {
+                    let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, winner)
+                        .await
+                        .unwrap();
+                    let (database, _snapshot, sync) =
+                        <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
+                            .await
+                            .unwrap();
+                    (database, sync)
+                })
+                .await;
             sync.await.expect("database sync failed");
 
             // `winner` is a sibling built on the same state, so applying it moves the database to
@@ -475,32 +480,33 @@ mod tests {
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
             let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
             // Seed keys 0..50 and persist them.
-            let mut seed = db.new_batch_for_test::<_>().await;
+            let mut seed = ManagedDb::new_batch(reader.clone()).await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(seed)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let (database, _snapshot, sync) =
-                    <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
+            let (_writer, sync) = writer
+                .mutate(|database| async move {
+                    let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, merkleized)
                         .await
                         .unwrap();
-                slot.put(database);
-                sync.await.expect("database sync failed");
-            }
+                    let (database, _snapshot, sync) =
+                        <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
+                            .await
+                            .unwrap();
+                    (database, sync)
+                })
+                .await;
+            sync.await.expect("database sync failed");
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let keys = [key(1), key(2), key(999)];
@@ -508,7 +514,7 @@ mod tests {
             let unstaged = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
-            let mut explicit = db.new_batch_for_test::<_>().await;
+            let mut explicit = ManagedDb::new_batch(reader.clone()).await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (key, slot) in keys.iter().zip(&slots) {
                 let value = match slot {
@@ -528,7 +534,7 @@ mod tests {
                     .root();
 
             // Staged path, with metadata set on the staged handle.
-            let staged_batch = db.new_batch_for_test::<_>().await;
+            let staged_batch = ManagedDb::new_batch(reader.clone()).await;
             let split = 2;
             let (staged, mut staged_values) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (staged, range, suffix_values) = staged.expand(&keys[split..]).await.unwrap();
@@ -547,7 +553,9 @@ mod tests {
             assert_eq!(explicit_root, staged_root);
 
             // Metadata set before staging must be carried through to staged merkleize.
-            let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
+            let carried_batch = ManagedDb::new_batch(reader.clone())
+                .await
+                .with_metadata(metadata);
             let (staged, carried_values) = carried_batch.stage(&keys.each_ref()).await.unwrap();
             let carried_root = staged
                 .merkleize(slots.clone(), unstaged.clone())
@@ -584,33 +592,42 @@ mod tests {
             )
             .await
             .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
             let key = Sha256::hash(&[b"key"]);
             let value = Sha256::hash(&[b"value"]);
-            let batch = db.new_batch_for_test::<_>().await.write(key, Some(value));
+            let batch = ManagedDb::new_batch(reader.clone())
+                .await
+                .write(key, Some(value));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
 
             let starts = pending.starts();
-            let (slot, database) = db.write().await;
-            let database = <DelayedFixedDb as ManagedDb<_>>::apply(database, merkleized)
-                .await
-                .unwrap();
-            slot.put(database);
+            let (writer, ()) = writer
+                .mutate(|database| async move {
+                    let database = <DelayedFixedDb as ManagedDb<_>>::apply(database, merkleized)
+                        .await
+                        .unwrap();
+                    (database, ())
+                })
+                .await;
 
             assert_eq!(pending.starts(), starts, "apply must not start durability");
             {
-                let guard = db.read().await;
+                let guard = reader.read().await;
                 assert_eq!(guard.get(&key).await.unwrap(), Some(value));
             }
 
-            let (slot, database) = db.write().await;
-            let (database, _snapshot, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database)
-                .await
-                .unwrap();
-            slot.put(database);
+            let (_writer, sync) = writer
+                .mutate(|database| async move {
+                    let (database, _snapshot, sync) =
+                        <DelayedFixedDb as ManagedDb<_>>::finalize(database)
+                            .await
+                            .unwrap();
+                    (database, sync)
+                })
+                .await;
             assert!(
                 pending.starts() > pending.completions(),
                 "finalize must leave its flush parked",

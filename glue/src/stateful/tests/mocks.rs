@@ -1,6 +1,6 @@
 use crate::stateful::{
-    Application, Finality, Input, Proposed,
-    db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
+    Application, ExecutionError, Finality, Input, Proposed,
+    db::{DatabaseSet, InitError, ManagedDb, Merkleized, Reader, Single, Unmerkleized, Writer},
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
@@ -12,7 +12,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use futures::task::AtomicWaker;
 use std::{
@@ -26,7 +26,7 @@ use std::{
     task::Poll,
 };
 
-pub(crate) type TestDatabases = Shared<TestDb>;
+pub(crate) type TestDatabases = Single<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -67,16 +67,48 @@ struct PruneGate {
     release: oneshot::Receiver<()>,
 }
 
-/// Signals that a snapshot capture has started, then blocks it until the test releases it.
-struct SnapshotGate {
+/// Signals that a gated [`TestDb`] call has started, then blocks it until the test releases it.
+struct CallGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
+}
+
+impl CallGate {
+    /// Installs a gate in `slot`, returning its entry signal and release sender.
+    fn install(
+        slot: &'static std::thread::LocalKey<RefCell<Option<Self>>>,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        slot.with(|gate| {
+            assert!(
+                gate.borrow_mut()
+                    .replace(Self {
+                        started,
+                        release: release_rx,
+                    })
+                    .is_none(),
+                "gate already installed",
+            );
+        });
+        (started_rx, release)
+    }
+
+    /// Parks on the gate in `slot`, if one is installed, consuming it.
+    async fn pass(slot: &'static std::thread::LocalKey<RefCell<Option<Self>>>) {
+        if let Some(mut gate) = slot.with(|gate| gate.borrow_mut().take()) {
+            gate.started.send(()).expect("test must await the gate");
+            let _ = (&mut gate.release).await;
+        }
+    }
 }
 
 thread_local! {
     /// Single-use gate consumed by the next [`TestDb`] snapshot capture. Parks an actor's
     /// startup publish between database recovery and mailbox polling.
-    static SNAPSHOT_GATE: RefCell<Option<SnapshotGate>> = const { RefCell::new(None) };
+    static SNAPSHOT_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
+    /// Single-use gate consumed by the next [`TestDb`] batch creation over applied state.
+    static NEW_BATCH_GATE: RefCell<Option<CallGate>> = const { RefCell::new(None) };
 }
 
 /// Shared observer for a gated [`TestDb`]: parked flush releases, applied batches, and recorded
@@ -169,20 +201,13 @@ impl TestDb {
     /// Gates the next snapshot capture on this thread. The receiver reports entry, and
     /// sending on the returned sender lets the capture continue.
     pub(crate) fn gate_next_snapshot() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = oneshot::channel();
-        SNAPSHOT_GATE.with(|gate| {
-            assert!(
-                gate.borrow_mut()
-                    .replace(SnapshotGate {
-                        started,
-                        release: release_rx,
-                    })
-                    .is_none(),
-                "snapshot gate already installed",
-            );
-        });
-        (started_rx, release)
+        CallGate::install(&SNAPSHOT_GATE)
+    }
+
+    /// Gates the next batch created over applied state on this thread, like
+    /// [`Self::gate_next_snapshot`].
+    pub(crate) fn gate_next_new_batch() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        CallGate::install(&NEW_BATCH_GATE)
     }
 }
 
@@ -195,12 +220,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type Snapshot = u64;
 
     async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
-        if let Some(mut gate) = SNAPSHOT_GATE.with(|gate| gate.borrow_mut().take()) {
-            gate.started
-                .send(())
-                .expect("test must await the snapshot gate");
-            let _ = (&mut gate.release).await;
-        }
+        CallGate::pass(&SNAPSHOT_GATE).await;
         let snapshot = self.finalized;
         Ok((self, snapshot))
     }
@@ -217,7 +237,8 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self::default())
     }
 
-    fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+    async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
+        CallGate::pass(&NEW_BATCH_GATE).await;
         TestUnmerkleized
     }
 
@@ -435,14 +456,15 @@ impl<E: Send + Sync> Application<E> for TestApp {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
-    ) -> Handoff<Proposed<Self, E>> {
+    ) -> Result<Handoff<Proposed<Self, E>>, ExecutionError> {
         let decision = self.handoff;
         if decision.is_wait() {
-            return Handoff::Wait;
+            return Ok(Handoff::Wait);
         }
-        self.propose(context, ancestry, batches, input)
-            .await
-            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
+        Ok(self
+            .propose(context, ancestry, batches, input)
+            .await?
+            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed)))
     }
 
     async fn propose(
@@ -451,11 +473,11 @@ impl<E: Send + Sync> Application<E> for TestApp {
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, E>> {
-        self.proposal.clone().map(|block| Proposed {
+    ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
+        Ok(self.proposal.clone().map(|block| Proposed {
             block,
             merkleized: TestMerkleized,
-        })
+        }))
     }
 
     /// Rejects every candidate and produces state for every finalized block.
@@ -465,11 +487,11 @@ impl<E: Send + Sync> Application<E> for TestApp {
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        match finality {
+    ) -> Result<Option<<Self::Databases as DatabaseSet<E>>::Merkleized>, ExecutionError> {
+        Ok(match finality {
             Finality::Candidate => None,
             Finality::Finalized => Some(TestMerkleized),
-        }
+        })
     }
 
     async fn capture(
@@ -498,7 +520,26 @@ impl<E: Send + Sync> Application<E> for TestApp {
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Shared::new("test", TestDb::default())
+    Single::from(TestDb::default())
+}
+
+/// Applies and finalizes `batch` through the cell, returning the snapshot and flush handle.
+pub(crate) async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
+    writer: Writer<D>,
+    batch: D::Merkleized,
+) -> (Writer<D>, D::Snapshot, Handle<()>) {
+    let (writer, (snapshot, handle)) = writer
+        .mutate(|db| async move {
+            let db = D::apply(db, batch)
+                .await
+                .unwrap_or_else(|err| panic!("apply failed: {err:?}"));
+            let (db, snapshot, handle) = D::finalize(db)
+                .await
+                .unwrap_or_else(|err| panic!("finalize failed: {err:?}"));
+            (db, (snapshot, handle))
+        })
+        .await;
+    (writer, snapshot, handle)
 }
 
 /// Pairs a test block with its digest.

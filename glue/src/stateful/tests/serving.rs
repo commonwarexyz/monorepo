@@ -21,10 +21,10 @@ use crate::{
         tracker::ProgressTracker,
     },
     stateful::{
-        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
-        Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, ExecutionError, Finality, Input, Proposed,
+        PruneConfig, Stateful as StatefulActor, SyncPlan,
         db::{
-            Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, SnapshotsOf, StateSyncSet,
+            Anchor, Barrier, DatabaseSet, Merkleized as _, Single, SnapshotsOf, StateSyncSet,
             Subscriber, SyncEngineConfig, TipUpdate, Unmerkleized as _, p2p as qmdb_resolver,
         },
         probe::{self, Config as ProbeConfig, Probe},
@@ -158,7 +158,7 @@ pub(super) trait Layout: Clone + Send + Sync + 'static {
     fn execute(
         height: Height,
         batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> impl Future<Output = <Self::Set as DatabaseSet<Ctx>>::Merkleized> + Send;
+    ) -> impl Future<Output = Result<<Self::Set as DatabaseSet<Ctx>>::Merkleized, ExecutionError>> + Send;
 
     /// The block fields committing to `merkleized`: (root A, range A, root B, range B).
     fn header(merkleized: &<Self::Set as DatabaseSet<Ctx>>::Merkleized) -> Header;
@@ -200,7 +200,7 @@ impl Layout for Mixed {
     async fn execute(
         height: Height,
         batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> <Self::Set as DatabaseSet<Ctx>>::Merkleized {
+    ) -> Result<<Self::Set as DatabaseSet<Ctx>>::Merkleized, ExecutionError> {
         multi_db_app::App::execute::<Ctx>(height, batches).await
     }
 
@@ -234,7 +234,7 @@ impl Layout for Mixed {
 #[derive(Clone)]
 pub(super) struct AllCompact;
 
-type CompactPair = (Shared<QmdbB<Ctx>>, Shared<QmdbB<Ctx>>);
+type CompactPair = (Single<QmdbB<Ctx>>, Single<QmdbB<Ctx>>);
 
 fn compact_config(
     prefix: &str,
@@ -289,15 +289,12 @@ impl Layout for AllCompact {
     async fn execute(
         height: Height,
         batches: <Self::Set as DatabaseSet<Ctx>>::Unmerkleized,
-    ) -> <Self::Set as DatabaseSet<Ctx>>::Merkleized {
+    ) -> Result<<Self::Set as DatabaseSet<Ctx>>::Merkleized, ExecutionError> {
         let (batch_a, batch_b) = batches;
         let key = Sha256::hash(&[&height.get().to_be_bytes()]);
         let batch_a = batch_a.set(key, u64_to_digest(height.get()));
         let batch_b = batch_b.set(key, u64_to_digest(height.get()));
-        (
-            batch_a.merkleize().await.unwrap(),
-            batch_b.merkleize().await.unwrap(),
-        )
+        Ok((batch_a.merkleize().await?, batch_b.merkleize().await?))
     }
 
     fn header(merkleized: &<Self::Set as DatabaseSet<Ctx>>::Merkleized) -> Header {
@@ -330,16 +327,6 @@ pub(super) struct SlowSet<L: Layout> {
     slow: Slow,
 }
 
-impl<L: Layout> Clone for SlowSet<L> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            clock: self.clock.clone(),
-            slow: self.slow.clone(),
-        }
-    }
-}
-
 impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
     type Unmerkleized = <L::Set as DatabaseSet<Ctx>>::Unmerkleized;
     type Merkleized = <L::Set as DatabaseSet<Ctx>>::Merkleized;
@@ -364,8 +351,8 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
         L::Set::initial_sync_targets()
     }
 
-    fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send {
-        self.inner.new_batches()
+    fn new_batches(readers: &Self::Readers) -> impl Future<Output = Self::Unmerkleized> + Send {
+        L::Set::new_batches(readers)
     }
 
     fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
@@ -380,14 +367,16 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
         self.inner.readers()
     }
 
-    fn apply(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send {
-        self.inner.apply(batches)
+    async fn apply(mut self, batches: Self::Merkleized) -> Self {
+        self.inner = self.inner.apply(batches).await;
+        self
     }
 
-    async fn finalize(&self) -> (Self::Snapshots, Barrier) {
-        let (snapshots, barrier) = self.inner.finalize().await;
+    async fn finalize(mut self) -> (Self, Self::Snapshots, Barrier) {
+        let (inner, snapshots, barrier) = self.inner.finalize().await;
+        self.inner = inner;
         if self.slow.delay.is_zero() {
-            return (snapshots, barrier);
+            return (self, snapshots, barrier);
         }
         let clock = self.clock.clone();
         let delay = self.slow.delay;
@@ -398,26 +387,28 @@ impl<L: Layout> DatabaseSet<Ctx> for SlowSet<L> {
             }
             Ok(())
         });
-        (snapshots, Barrier::from_handles::<Self>([slowed]))
+        (self, snapshots, Barrier::from_handles::<Self>([slowed]))
     }
 
-    fn snapshot(&self) -> impl Future<Output = Self::Snapshots> + Send {
-        self.inner.snapshot()
+    async fn snapshot(mut self) -> (Self, Self::Snapshots) {
+        let (inner, snapshots) = self.inner.snapshot().await;
+        self.inner = inner;
+        (self, snapshots)
     }
 
-    fn refresh_cheap(
-        &self,
-        served: &Self::Snapshots,
-    ) -> impl Future<Output = Self::Snapshots> + Send {
-        self.inner.refresh_cheap(served)
+    async fn refresh_cheap(mut self, served: &Self::Snapshots) -> (Self, Self::Snapshots) {
+        let (inner, snapshots) = self.inner.refresh_cheap(served).await;
+        self.inner = inner;
+        (self, snapshots)
     }
 
     fn merge_snapshots(served: &Self::Snapshots, fresh: Self::Snapshots) -> Self::Snapshots {
         L::Set::merge_snapshots(served, fresh)
     }
 
-    fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send {
-        self.inner.prune(targets)
+    async fn prune(mut self, targets: &Self::SyncTargets) -> Self {
+        self.inner = self.inner.prune(targets).await;
+        self
     }
 
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send {
@@ -514,11 +505,13 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
-    ) -> Option<Proposed<Self, Ctx>> {
+    ) -> Result<Option<Proposed<Self, Ctx>>, ExecutionError> {
         let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
+        let Some(parent) = ancestry.next().await else {
+            return Ok(None);
+        };
         let height = parent.height().next();
-        let merkleized = L::execute(height, batches).await;
+        let merkleized = L::execute(height, batches).await?;
         let (root_a, range_a, root_b, range_b) = L::header(&merkleized);
         let block = Block {
             context: context.1.clone(),
@@ -529,7 +522,7 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
             root_b,
             range_b,
         };
-        Some(Proposed { block, merkleized })
+        Ok(Some(Proposed { block, merkleized }))
     }
 
     async fn process(
@@ -538,16 +531,19 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<Ctx>>::Unmerkleized,
         _finality: Finality,
-    ) -> Option<<Self::Databases as DatabaseSet<Ctx>>::Merkleized> {
-        let block = ancestry.peek()?.inner();
+    ) -> Result<Option<<Self::Databases as DatabaseSet<Ctx>>::Merkleized>, ExecutionError> {
+        let Some(block) = ancestry.peek() else {
+            return Ok(None);
+        };
+        let block = block.inner();
         let header = (
             block.root_a,
             block.range_a.clone(),
             block.root_b,
             block.range_b.clone(),
         );
-        let merkleized = L::execute(block.height(), batches).await;
-        (L::header(&merkleized) == header).then_some(merkleized)
+        let merkleized = L::execute(block.height(), batches).await?;
+        Ok((L::header(&merkleized) == header).then_some(merkleized))
     }
 
     async fn capture(

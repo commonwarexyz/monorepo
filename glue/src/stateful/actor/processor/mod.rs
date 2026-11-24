@@ -18,13 +18,14 @@
 //!   nearest cached ancestor or the branch anchor. A recovered state is cached only if it matches
 //!   its block's commitments. Concurrent requests that need the same block's state, including a
 //!   verification of that block, share one processing call.
-//! - Finalization: processing of the finalized block and of competing branches finishes before
-//!   the block's state is applied, while processing of its descendants may continue. The
-//!   processor publishes snapshots after the finalization hook completes. The caller coordinates
+//! - Finalization: if the finalized block is still processing, its finalization joins that
+//!   processing and reuses the result. Processing on competing branches is not awaited. It fails
+//!   at its next storage call once the block applies, and its requests start over. The processor
+//!   publishes snapshots after the finalization hook completes. The caller coordinates
 //!   durability, so one database barrier can cover several finalizations.
 
 use crate::stateful::{
-    Application, Finality, Input, Proposed, PruneConfig,
+    Application, ExecutionError, Finality, Input, Proposed, PruneConfig,
     actor::{BlockDigest, SyncTargets, core::Proposal, metrics::Metrics as StatefulMetrics},
     db::{Anchor, Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
@@ -37,10 +38,11 @@ use commonware_consensus::{
     types::{Height, Round},
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
-use commonware_macros::select;
+use commonware_macros::{boxed, select};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Supervisor,
+    Clock, Spawner,
+    signal::Signal,
     telemetry::metrics::{GaugeExt, histogram::Timer},
 };
 use commonware_utils::{Widen, channel::fallible::OneshotExt, sync::Mutex};
@@ -52,7 +54,6 @@ use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::{Future, poll_fn},
-    hash::Hash,
     sync::Arc,
 };
 use tracing::{Instrument as _, debug, info_span, warn};
@@ -62,6 +63,10 @@ pub(super) use verifier::{Prepared, Verifier};
 
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type Unmerkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Unmerkleized;
+type Readers<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Readers;
+
+const DATABASES_LOST: &str =
+    "database set used after an interrupted mutation, which must have stopped the actor";
 type PendingMap<A, E> = BTreeMap<BlockDigest<A, E>, PendingEntry<A, E>>;
 type FlightResult = Result<(), PrepareBatchesError>;
 
@@ -70,51 +75,6 @@ type FlightResult = Result<(), PrepareBatchesError>;
 /// The processing stays alive while any handle does, and dropping the last handle cancels it.
 /// Every handle that awaits a completed flight receives its result.
 type Flight = Shared<BoxFuture<'static, FlightResult>>;
-
-/// The block whose shared processing a request has joined.
-#[derive(Clone, Copy)]
-pub(super) struct ExecutionStep<D> {
-    pub(super) digest: D,
-    pub(super) parent: D,
-    pub(super) round: Round,
-}
-
-/// How an execution step crosses a maintenance boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Disposition {
-    /// Continue polling work proven to descend from the finalized block.
-    Retain,
-    /// Finish this step before maintenance proceeds.
-    Join,
-    /// Reject work whose parent or round is incompatible with the finalized branch.
-    Reject,
-}
-
-/// Snapshot of the cached state that remains valid once one finalized block is applied.
-pub(super) struct FinalizationBoundary<D> {
-    digest: D,
-    round: Round,
-    compatible: HashSet<D>,
-}
-
-impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
-    /// Classifies one execution step against the incoming finalized branch.
-    pub(super) fn disposition(&self, step: &ExecutionStep<D>) -> Disposition {
-        if step.digest == self.digest {
-            Disposition::Join
-        } else if step.round > self.round && self.compatible.contains(&step.parent) {
-            Disposition::Retain
-        } else {
-            Disposition::Reject
-        }
-    }
-
-    /// Allows a completed descendant to become the parent of another retained step.
-    pub(super) fn completed(&mut self, step: &ExecutionStep<D>) {
-        assert_eq!(self.disposition(step), Disposition::Retain);
-        self.compatible.insert(step.digest);
-    }
-}
 
 /// Missing blocks between cached or applied state and a requested block, processed oldest first.
 struct ReplayPath<B: Block> {
@@ -197,12 +157,12 @@ where
     }
 }
 
-/// Databases, speculative state, and metrics shared by the processor and its verifiers.
+/// Database readers, speculative state, and metrics shared by the processor and its verifiers.
 struct Execution<E, A>
 where
     A: Application<E>,
 {
-    databases: A::Databases,
+    readers: Readers<A, E>,
     state: Arc<Mutex<ExecutionState<A, E>>>,
     metrics: StatefulMetrics,
 }
@@ -213,7 +173,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            databases: self.databases.clone(),
+            readers: self.readers.clone(),
             state: self.state.clone(),
             metrics: self.metrics.clone(),
         }
@@ -248,6 +208,9 @@ pub(super) enum PrepareBatchesError {
     Invalid,
     /// Ancestry ended before the required state could be recovered.
     Incomplete,
+    /// A finalization moved the branch anchor past the state the request built on. The request
+    /// acquires its blocks again against the new anchor.
+    Stale,
 }
 
 /// Result of applying a newly finalized block.
@@ -257,6 +220,17 @@ pub(super) struct Applied<T> {
 
     /// Prune that became due with this finalization.
     pub(super) prune: Option<Prune<T>>,
+}
+
+/// Panics with `failure`, unless `stopped` has fired. A stopping runtime can fail storage
+/// mid-operation, so a failure during shutdown is logged instead and the operation never
+/// completes.
+async fn fail_unless_stopped<T>(stopped: Signal, failure: String) -> T {
+    if stopped.now_or_never().is_some() {
+        warn!(failure, "abandoning a failed operation during shutdown");
+        return std::future::pending().await;
+    }
+    panic!("{failure}");
 }
 
 /// Marshal and database prune targets selected from finalized history.
@@ -273,14 +247,15 @@ impl<T> Prune<T> {
     ///
     /// The caller must ensure a completed database barrier covers `barrier_height` and that no
     /// database barrier is active.
-    pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
+    async fn run<E, DBs, S, V>(self, databases: DBs, marshal: &MarshalMailbox<S, V>) -> DBs
     where
         DBs: DatabaseSet<E, SyncTargets = T>,
         S: Scheme,
         V: MarshalVariant,
     {
-        databases.prune(&self.qmdb_target).await;
+        let databases = databases.prune(&self.qmdb_target).await;
         marshal.prune(self.marshal_height);
+        databases
     }
 }
 
@@ -381,6 +356,8 @@ where
     A: Application<E>,
 {
     app: A,
+    /// The database set, absent once a mutation was interrupted.
+    databases: Option<A::Databases>,
     execution: Execution<E, A>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
     publisher: Publisher<SnapshotsOf<A::Databases, E>>,
@@ -389,7 +366,7 @@ where
 
 impl<E, A, T> Processor<E, A, T>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
     T: Strategy,
 {
@@ -412,7 +389,7 @@ where
         Self {
             app,
             execution: Execution {
-                databases,
+                readers: databases.readers(),
                 state: Arc::new(Mutex::new(ExecutionState {
                     pending: BTreeMap::new(),
                     flights: BTreeMap::new(),
@@ -420,6 +397,7 @@ where
                 })),
                 metrics,
             },
+            databases: Some(databases),
             pruning,
             publisher: publisher.with_merge(A::Databases::merge_snapshots),
             strategy,
@@ -434,29 +412,29 @@ where
         }
     }
 
-    /// Returns whether no candidate processing is in flight.
-    pub(super) fn flights_idle(&self) -> bool {
-        self.execution.state.lock().flights.is_empty()
+    /// Returns read-only handles to the database set.
+    pub(super) fn readers(&self) -> Readers<A, E> {
+        self.execution.readers.clone()
     }
 
-    /// Snapshots the cached state that remains valid once `block` is finalized.
-    pub(super) fn boundary(
-        &self,
-        block: &Digested<A::Block>,
-    ) -> FinalizationBoundary<BlockDigest<A, E>> {
-        let digest = block.digest();
-        let round = block.context().round();
-        let state = self.execution.state.lock();
-        FinalizationBoundary {
-            digest,
-            round,
-            compatible: state.descendants(digest, round),
-        }
+    /// Takes the database set for a by-value mutation. Until the caller restores it, the set
+    /// counts as lost.
+    const fn take_databases(&mut self) -> A::Databases {
+        self.databases.take().expect(DATABASES_LOST)
     }
 
-    /// Returns a reference to the database set.
-    pub(super) const fn databases(&self) -> &A::Databases {
-        &self.execution.databases
+    /// Prunes the databases and marshal to `prune`'s targets (see [`Prune::run`]).
+    #[boxed]
+    pub(super) async fn prune<S, V>(
+        &mut self,
+        prune: Prune<SyncTargets<A, E>>,
+        marshal: &MarshalMailbox<S, V>,
+    ) where
+        S: Scheme,
+        V: MarshalVariant,
+    {
+        let databases = self.take_databases();
+        self.databases = Some(prune.run(databases, marshal).await);
     }
 
     /// Returns the current branch anchor.
@@ -466,8 +444,10 @@ where
 
     /// Capture a snapshot of the database set's applied state and publish it at the branch
     /// anchor's height.
+    #[boxed]
     pub(super) async fn publish_snapshot(&mut self) {
-        let snapshots = self.execution.databases.snapshot().await;
+        let (databases, snapshots) = self.take_databases().snapshot().await;
+        self.databases = Some(databases);
         self.publisher
             .publish(self.execution.branch_anchor().height, snapshots);
     }
@@ -475,8 +455,10 @@ where
     /// Capture and publish applied state, and start the barrier that makes it durable.
     ///
     /// The caller must await the previous barrier before starting another.
+    #[boxed]
     pub(super) async fn start_sync(&mut self) -> Barrier {
-        let (snapshots, barrier) = self.execution.databases.finalize().await;
+        let (databases, snapshots, barrier) = self.take_databases().finalize().await;
+        self.databases = Some(databases);
         self.publisher
             .publish(self.execution.branch_anchor().height, snapshots);
         barrier
@@ -488,7 +470,8 @@ where
         let Some(served) = self.publisher.served() else {
             return;
         };
-        let snapshots = self.execution.databases.refresh_cheap(&served).await;
+        let (databases, snapshots) = self.take_databases().refresh_cheap(&served).await;
+        self.databases = Some(databases);
         // Drop our reference before replacement releases the old served set.
         drop(served);
         self.publisher.refresh(height, snapshots);
@@ -513,6 +496,7 @@ where
     /// the branch anchor, and returns without answering if `proposal` is cancelled first.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
+    #[boxed]
     pub(super) async fn propose(
         &mut self,
         context: &E,
@@ -568,6 +552,20 @@ where
                     return;
                 };
                 let prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(ExecutionError::Invalid(reason)) => {
+                        debug!(
+                            ?parent_digest,
+                            reason, "prepare declined: invalid execution"
+                        );
+                        Handoff::Wait
+                    }
+                    Err(err) => {
+                        fail_unless_stopped(context.stopped(), format!("prepare failed: {err}"))
+                            .await
+                    }
+                };
+                let prepared = match prepared {
                     Handoff::Vote(proposed) => {
                         Handoff::Vote(self.cache_proposed(round, parent_digest, proposed).await)
                     }
@@ -593,10 +591,21 @@ where
                     return;
                 };
                 let block = match proposed {
-                    Some(proposed) => {
+                    Ok(Some(proposed)) => {
                         Some(self.cache_proposed(round, parent_digest, proposed).await)
                     }
-                    None => None,
+                    Ok(None) => None,
+                    Err(ExecutionError::Invalid(reason)) => {
+                        debug!(
+                            ?parent_digest,
+                            reason, "propose declined: invalid execution"
+                        );
+                        None
+                    }
+                    Err(err) => {
+                        fail_unless_stopped(context.stopped(), format!("propose failed: {err}"))
+                            .await
+                    }
                 };
                 if block.is_some() {
                     timer.observe(context);
@@ -630,7 +639,8 @@ where
                     parent,
                     merkleized,
                 },
-            ),
+            )
+            .is_ok(),
             "proposal parent must remain compatible until the proposal completes",
         );
         block
@@ -676,18 +686,19 @@ where
 
     /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// The caller must let every execution step that [`Self::boundary`] does not retain finish
-    /// before entering, and must admit no new requests until this call returns. Retained
-    /// descendants may continue.
+    /// Requests keep running throughout. If `block` is still processing, this joins its flight
+    /// and uses its result. A flight on a competing branch ends with
+    /// [`PrepareBatchesError::Stale`] at its next batch read once `block` is applied, and its
+    /// requests start over against the new branch anchor.
     ///
     /// Publishes snapshots and returns the prune that became due, if any. If `start_barrier` is
     /// set, it also returns a barrier covering `block` and every earlier applied block. The branch anchor advances once
     /// `block`'s merkleized state is ready, and that state remains cached through the
     /// application's `finalized` hook.
     ///
-    /// Panics if `block` does not have the next height and the branch anchor as its parent, if a
-    /// request is still processing `block`, or if an uncached block fails to process or match its
-    /// commitments.
+    /// Panics if `block` does not have the next height and the branch anchor as its parent, or if
+    /// an uncached block fails to process or match its commitments.
+    #[boxed]
     pub(super) async fn finalize<P>(
         &mut self,
         context: &E,
@@ -715,24 +726,29 @@ where
         let timer = self.execution.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let sync_targets = A::sync_targets(block.inner());
-        let cached = {
+        // A flight already processing the block finishes it once rather than twice. A flight
+        // that rejects the block as a candidate leaves it uncached, and it is reconstructed below.
+        let flight = {
             let state = self.execution.state.lock();
-            assert!(
-                !state.flights.contains_key(&digest),
-                "finalized block must not be processed when its finalization starts",
-            );
-            state
-                .pending
-                .get(&digest)
-                .map(|entry| entry.merkleized.clone())
+            state.flights.get(&digest).and_then(WeakShared::upgrade)
         };
+        if let Some(flight) = flight {
+            let _ = flight.await;
+        }
+        let cached = self
+            .execution
+            .state
+            .lock()
+            .pending
+            .get(&digest)
+            .map(|entry| entry.merkleized.clone());
 
         // Marshal delivers finalized blocks in height order, so the winner's parent state is the
         // applied state.
         let batch = if let Some(batch) = cached {
             batch
         } else {
-            let batches = self.execution.databases.new_batches().await;
+            let batches = A::Databases::new_batches(&self.execution.readers).await;
 
             // The finalized block must reproduce its committed state.
             let ancestry = self.execution.ancestry(
@@ -741,7 +757,7 @@ where
                 [block.clone()],
                 block_context.round(),
             );
-            let batch = self
+            match self
                 .app
                 .process(
                     (context.child("finalize_reconstruct"), block_context),
@@ -750,12 +766,32 @@ where
                     Finality::Finalized,
                 )
                 .await
-                .expect("finalize reconstruction must process the block");
-            assert!(
-                A::Databases::matches_sync_targets(&batch, &sync_targets),
-                "finalize reconstruction must match block commitments",
-            );
-            batch
+            {
+                Ok(Some(batch)) if A::Databases::matches_sync_targets(&batch, &sync_targets) => {
+                    batch
+                }
+                Ok(Some(_)) => {
+                    fail_unless_stopped(
+                        context.stopped(),
+                        "finalize reconstruction must match block commitments".into(),
+                    )
+                    .await
+                }
+                Ok(None) => {
+                    fail_unless_stopped(
+                        context.stopped(),
+                        "finalize reconstruction must process the block".into(),
+                    )
+                    .await
+                }
+                Err(err) => {
+                    fail_unless_stopped(
+                        context.stopped(),
+                        format!("finalize reconstruction failed: {err}"),
+                    )
+                    .await
+                }
+            }
         };
 
         self.execution
@@ -766,24 +802,26 @@ where
                 (context.child("capture"), block.context()),
                 block.inner(),
                 &batch,
-                self.execution.databases.readers(),
+                self.execution.readers.clone(),
             )
             .await;
-        self.execution.databases.apply(batch).await;
-        let (snapshots, barrier) = if start_barrier {
-            let (snapshots, barrier) = self.execution.databases.finalize().await;
-            (Some(snapshots), Some(barrier))
+        let databases = self.take_databases().apply(batch).await;
+        let (databases, snapshots, barrier) = if start_barrier {
+            let (databases, snapshots, barrier) = databases.finalize().await;
+            (databases, Some(snapshots), Some(barrier))
         } else if A::Databases::CHEAP_SNAPSHOT {
-            (Some(self.execution.databases.snapshot().await), None)
+            let (databases, snapshots) = databases.snapshot().await;
+            (databases, Some(snapshots), None)
         } else {
-            (None, None)
+            (databases, None, None)
         };
+        self.databases = Some(databases);
         self.app
             .finalized(
                 (context.child("finalized"), block.context()),
                 block.inner(),
                 captured,
-                self.execution.databases.readers(),
+                self.execution.readers.clone(),
             )
             .await;
 
@@ -809,14 +847,18 @@ where
         Applied { barrier, prune }
     }
 
-    fn cache_pending(&self, digest: BlockDigest<A, E>, entry: PendingEntry<A, E>) -> bool {
+    fn cache_pending(
+        &self,
+        digest: BlockDigest<A, E>,
+        entry: PendingEntry<A, E>,
+    ) -> Result<(), PrepareBatchesError> {
         self.execution.cache_pending(digest, entry)
     }
 }
 
 impl<E, A> Execution<E, A>
 where
-    E: Supervisor + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
 {
     fn branch_anchor(&self) -> Anchor<BlockDigest<A, E>> {
@@ -826,17 +868,17 @@ where
     /// Caches `batch` as the state of `anchor`, discards cached state that does not descend from
     /// it, and makes `anchor` the branch anchor.
     ///
-    /// The caller must have let every request outside this branch finish, and must keep the root
-    /// cached until its finalization completes so retained requests can fork from it while the
-    /// databases change.
+    /// Requests outside this branch may still be running. They go stale at their next batch read
+    /// or cache attempt. The caller must keep the root cached until its finalization completes
+    /// so requests on this branch can fork from it while the databases change.
     fn retain_branch(
         &self,
         anchor: Anchor<BlockDigest<A, E>>,
         parent: BlockDigest<A, E>,
         batch: &PendingBatches<A, E>,
     ) {
-        // Retained requests may have cached descendants since the finalization boundary was
-        // taken, so descendants come from the current cache.
+        // Requests may have cached descendants since this finalization began, so descendants come
+        // from the current cache.
         let mut state = self.state.lock();
         let compatible = state.descendants(anchor.digest, anchor.round);
         let before = state.pending.len();
@@ -886,32 +928,41 @@ where
         )
     }
 
-    /// Caches `entry` as the speculative state of `digest` and returns whether `digest` is cached.
+    /// Caches `entry` as the speculative state of `digest`.
     ///
     /// An existing entry keeps its state. A new entry is cached only if it is at a later round
     /// than the branch anchor and its parent is the anchor or another cached block, and caching
-    /// it updates the pending-state gauge.
+    /// it updates the pending-state gauge. The anchor itself counts as cached. Returns
+    /// [`PrepareBatchesError::Stale`] if a finalization overtook the entry while it processed:
+    /// its round is at or before the anchor's, or its parent was discarded.
     ///
     /// Panics if `digest` is already cached with a different parent or round.
-    fn cache_pending(&self, digest: BlockDigest<A, E>, entry: PendingEntry<A, E>) -> bool {
+    fn cache_pending(
+        &self,
+        digest: BlockDigest<A, E>,
+        entry: PendingEntry<A, E>,
+    ) -> Result<(), PrepareBatchesError> {
         let (round, parent) = (entry.round, entry.parent);
         let mut state = self.state.lock();
         if let Some(existing) = state.pending.get(&digest) {
             assert_eq!(existing.parent, parent, "pending parent changed for digest");
             assert_eq!(existing.round, round, "pending round changed for digest");
-            return true;
+            return Ok(());
         }
-
-        let compatible = round > state.branch.round
-            && (parent == state.branch.digest || state.pending.contains_key(&parent));
-        if !compatible {
-            return false;
+        if digest == state.branch.digest {
+            return Ok(());
+        }
+        if round <= state.branch.round {
+            return Err(PrepareBatchesError::Stale);
+        }
+        if parent != state.branch.digest && !state.pending.contains_key(&parent) {
+            return Err(PrepareBatchesError::Stale);
         }
         state.pending.insert(digest, entry);
         let pending = state.speculative_len();
         drop(state);
         let _ = self.metrics.pending_blocks.try_set(pending);
-        true
+        Ok(())
     }
 
     /// Returns a handle to the candidate processing of the first block of `ancestry`, or
@@ -969,8 +1020,13 @@ where
     ///
     /// Forks from `parent`'s cached state, or from the applied databases if `parent` is the branch
     /// anchor. During finalization the new branch anchor is still cached, so forks use its cached
-    /// state until its `finalized` hook completes. Returns [`PrepareBatchesError::Invalid`] if
-    /// `parent` is neither cached nor the branch anchor.
+    /// state until its `finalized` hook completes. Returns [`PrepareBatchesError::Stale`] if
+    /// `parent` is neither cached nor the branch anchor, since only a finalization discards
+    /// cached state.
+    ///
+    /// A finalization moves the branch anchor before it applies, so a fork from the applied
+    /// databases checks the anchor again once its batches exist. If it moved, the batches may
+    /// include the newly applied block, and this returns [`PrepareBatchesError::Stale`].
     async fn fork_batches(
         &self,
         parent: &BlockDigest<A, E>,
@@ -981,19 +1037,25 @@ where
                 return Ok(A::Databases::fork_batches(&entry.merkleized));
             }
             if state.branch.digest != *parent {
-                return Err(PrepareBatchesError::Invalid);
+                return Err(PrepareBatchesError::Stale);
             }
         }
 
-        Ok(self.databases.new_batches().await)
+        let batches = A::Databases::new_batches(&self.readers).await;
+        if self.state.lock().branch.digest != *parent {
+            return Err(PrepareBatchesError::Stale);
+        }
+        Ok(batches)
     }
 
     /// Processes the first block of `ancestry` on its parent's state as a candidate and caches the
     /// result.
     ///
-    /// Returns [`PrepareBatchesError::Invalid`] if the parent's state cannot be forked, if the
-    /// application rejects the block, if the result does not match the block's commitments, or
-    /// if the result can no longer be cached.
+    /// Returns immediately if the block is the branch anchor. Returns
+    /// [`PrepareBatchesError::Invalid`] if the block is above the anchor's height with a round
+    /// not after the anchor's, if the application rejects the block, or if the result does not
+    /// match the block's commitments. Returns [`PrepareBatchesError::Stale`] if a finalization
+    /// overtook the block or its parent, before or while it processed.
     async fn process_candidate(
         &self,
         mut app: A,
@@ -1003,13 +1065,28 @@ where
         let block = ancestry
             .peek()
             .expect("candidate ancestry must start with its block");
-        let (digest, parent_digest) = (block.digest(), block.parent());
+        let (digest, parent_digest, height) = (block.digest(), block.parent(), block.height());
         let consensus_context = block.context();
         let round = consensus_context.round();
         let sync_targets = A::sync_targets(block.inner());
 
+        // A finalization may have overtaken the block since the request chose it. The anchor
+        // itself is valid. Any other block at or below the anchor's height is answered from the
+        // canonical chain once the request acquires again. Above it, no descendant of the anchor
+        // has a round at or before the anchor's.
+        let anchor = self.branch_anchor();
+        if digest == anchor.digest {
+            return Ok(());
+        }
+        if height <= anchor.height {
+            return Err(PrepareBatchesError::Stale);
+        }
+        if round <= anchor.round {
+            return Err(PrepareBatchesError::Invalid);
+        }
         let batches = self.fork_batches(&parent_digest).await?;
-        let Some(merkleized) = app
+        let stopped = context.stopped();
+        let merkleized = match app
             .process(
                 (context, consensus_context),
                 ancestry,
@@ -1017,9 +1094,23 @@ where
                 Finality::Candidate,
             )
             .await
-        else {
-            warn!(block = ?digest, "application rejected block");
-            return Err(PrepareBatchesError::Invalid);
+        {
+            Ok(Some(merkleized)) => merkleized,
+            Ok(None) => {
+                warn!(block = ?digest, "application rejected block");
+                return Err(PrepareBatchesError::Invalid);
+            }
+            Err(ExecutionError::Invalid(reason)) => {
+                warn!(block = ?digest, reason, "block execution is invalid");
+                return Err(PrepareBatchesError::Invalid);
+            }
+            Err(ExecutionError::Stale) => {
+                debug!(block = ?digest, "block execution went stale");
+                return Err(PrepareBatchesError::Stale);
+            }
+            Err(err @ ExecutionError::Fatal(_)) => {
+                fail_unless_stopped(stopped, format!("process failed: {err}")).await
+            }
         };
 
         if !A::Databases::matches_sync_targets(&merkleized, &sync_targets) {
@@ -1035,8 +1126,6 @@ where
                 merkleized,
             },
         )
-        .then_some(())
-        .ok_or(PrepareBatchesError::Invalid)
     }
 
     /// Collects the missing blocks between `target` and cached or applied state without forking
@@ -1045,7 +1134,8 @@ where
     /// Returns [`PrepareBatchesError::Invalid`] if the walk reaches the anchor height without
     /// meeting the branch anchor, or if `provider` returns a block that is not the parent at the
     /// preceding height. Returns [`PrepareBatchesError::Incomplete`] if `provider` stops before
-    /// delivering a parent.
+    /// delivering a parent. Returns [`PrepareBatchesError::Stale`] if a finalization moves the
+    /// branch anchor during the walk, since a block the walk passed may have become the anchor.
     ///
     /// Each parent is requested under `target`'s round. Once marshal's processed round floor
     /// covers that round, every ancestor of `target` is processed or can never be finalized.
@@ -1064,6 +1154,7 @@ where
 
         let mut replay_path = Vec::new();
         let mut cursor = target;
+        let start = self.branch_anchor().digest;
         loop {
             let (known, anchor) = {
                 let state = self.state.lock();
@@ -1075,6 +1166,13 @@ where
             };
             if known {
                 break;
+            }
+            if anchor.digest != start {
+                debug!(
+                    ?target_digest,
+                    "branch anchor moved during the ancestry walk"
+                );
+                return Err(PrepareBatchesError::Stale);
             }
 
             let cursor_height = cursor.height();
@@ -1192,13 +1290,13 @@ async fn await_or_cancel<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Applied, Disposition, Execution, ExecutionStep, FinalizationBoundary, Flight, FlightResult,
-        PendingEntry, PrepareBatchesError, Processor, Prune, Pruning,
+        Applied, Execution, Flight, FlightResult, PendingEntry, PrepareBatchesError, Processor,
+        Prune, Pruning, fail_unless_stopped,
     };
     use crate::stateful::{
-        Application, Finality, Input, Proposed, PruneConfig,
+        Application, ExecutionError, Finality, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
-        db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
+        db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Single, Unmerkleized as _},
         tests::mocks::digested,
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -1229,7 +1327,7 @@ mod tests {
     };
     use futures::{StreamExt, task::ArcWake};
     use std::{
-        collections::{BTreeMap, HashSet, VecDeque},
+        collections::{BTreeMap, VecDeque},
         future::Future,
         num::NonZeroUsize,
         pin::Pin,
@@ -1260,37 +1358,9 @@ mod tests {
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
     type QmdbConfig = any::unordered::fixed::Config<TwoCap, Sequential>;
-    type DbSet<E> = Shared<Qmdb<E>>;
+    type DbSet<E> = Single<Qmdb<E>>;
     type TestMerkleized =
         <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
-
-    #[test]
-    fn finalization_boundary_follows_completed_descendants() {
-        let round = |view| Round::new(Epoch::zero(), View::new(view));
-        let step = |digest, parent, view| ExecutionStep {
-            digest,
-            parent,
-            round: round(view),
-        };
-        let mut boundary = FinalizationBoundary {
-            digest: 10,
-            round: round(10),
-            compatible: HashSet::from([10, 11]),
-        };
-
-        // The winner must finish. A step on a cached descendant continues, while a step on an
-        // uncached parent is rejected.
-        assert_eq!(boundary.disposition(&step(10, 1, 10)), Disposition::Join);
-        assert_eq!(boundary.disposition(&step(12, 11, 12)), Disposition::Retain);
-        assert_eq!(boundary.disposition(&step(13, 12, 13)), Disposition::Reject);
-
-        // A completed retained step can parent later steps. A step that is not in a later round
-        // than the finalized block, or whose parent is unknown, stays rejected.
-        boundary.completed(&step(12, 11, 12));
-        assert_eq!(boundary.disposition(&step(13, 12, 13)), Disposition::Retain);
-        assert_eq!(boundary.disposition(&step(14, 12, 10)), Disposition::Reject);
-        assert_eq!(boundary.disposition(&step(20, 19, 11)), Disposition::Reject);
-    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1581,9 +1651,11 @@ mod tests {
             ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             _input: Input<Self::Input, Self::Provider>,
-        ) -> Option<Proposed<Self, deterministic::Context>> {
+        ) -> Result<Option<Proposed<Self, deterministic::Context>>, ExecutionError> {
             let mut ancestry = Box::pin(ancestry);
-            let parent = ancestry.next().await?;
+            let Some(parent) = ancestry.next().await else {
+                return Ok(None);
+            };
             let context = context.1.clone();
             let view = context.round.view();
             let height = parent.height().next();
@@ -1595,7 +1667,7 @@ mod tests {
                 state_root: merkleized.root(),
                 range: merkleized.target().range,
             };
-            Some(Proposed { block, merkleized })
+            Ok(Some(Proposed { block, merkleized }))
         }
 
         async fn process(
@@ -1604,8 +1676,13 @@ mod tests {
             mut ancestry: impl Ancestry<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
             finality: Finality,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            let block = ancestry.next().await?;
+        ) -> Result<
+            Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized>,
+            ExecutionError,
+        > {
+            let Some(block) = ancestry.next().await else {
+                return Ok(None);
+            };
             if let Some(observations) = &self.process_ancestry {
                 let parent = ancestry
                     .next()
@@ -1623,7 +1700,9 @@ mod tests {
             if let Some(probe) = &self.process_probe {
                 probe.call(block.digest()).await;
             }
-            Some(Self::execute(block.height(), block.inner().context.round.view(), batches).await)
+            Ok(Some(
+                Self::execute(block.height(), block.inner().context.round.view(), batches).await,
+            ))
         }
 
         async fn capture(
@@ -1791,6 +1870,35 @@ mod tests {
         }
     }
 
+    /// A [MapProvider] that holds the parent request of one child until released.
+    #[derive(Clone)]
+    struct GatedParentProvider {
+        inner: MapProvider,
+        child: Digest,
+        gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl BlockProvider for GatedParentProvider {
+        type Block = Block;
+
+        fn subscribe_parent(
+            &self,
+            block: &Digested<Self::Block>,
+            bound: Option<Round>,
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
+            let gate = (block.digest() == self.child)
+                .then(|| self.gate.lock().take())
+                .flatten();
+            let parent = self.inner.subscribe_parent(block, bound);
+            async move {
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                parent.await
+            }
+        }
+    }
+
     struct Harness {
         context_cell: ContextCell<deterministic::Context>,
         processor: Processor<deterministic::Context, ExecutionApp, Sequential>,
@@ -1871,14 +1979,18 @@ mod tests {
         async fn stage_pending_child(&mut self, parent: &Block, view: View) -> Block {
             let (block, merkleized) = self.build_child(parent, view).await;
             let round = Round::new(Epoch::zero(), view);
-            assert!(self.processor.cache_pending(
-                block.digest(),
-                PendingEntry {
-                    round,
-                    parent: parent.digest(),
-                    merkleized,
-                },
-            ));
+            assert!(
+                self.processor
+                    .cache_pending(
+                        block.digest(),
+                        PendingEntry {
+                            round,
+                            parent: parent.digest(),
+                            merkleized,
+                        },
+                    )
+                    .is_ok()
+            );
             self.provider.insert(block.clone());
             block
         }
@@ -1919,7 +2031,8 @@ mod tests {
         }
 
         async fn view_at_height(&self, height: Height) -> Option<u64> {
-            let db = self.processor.databases().read().await;
+            let readers = self.processor.readers();
+            let db = readers.read().await;
             db.get(&height_key(height))
                 .await
                 .expect("database read should succeed")
@@ -1927,7 +2040,8 @@ mod tests {
         }
 
         async fn counter_value(&self) -> Option<u64> {
-            let db = self.processor.databases().read().await;
+            let readers = self.processor.readers();
+            let db = readers.read().await;
             db.get(&counter_key())
                 .await
                 .expect("database read should succeed")
@@ -2124,7 +2238,11 @@ mod tests {
             let mut harness = Harness::with_app(context, provider, config, app).await;
             harness.processor = Processor::new(
                 ExecutionApp::new(),
-                harness.processor.databases().clone(),
+                harness
+                    .processor
+                    .databases
+                    .take()
+                    .expect("harness holds its databases"),
                 Anchor {
                     height: Height::zero(),
                     round: Block::genesis().context().round,
@@ -2269,7 +2387,7 @@ mod tests {
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(winner.digest(), [hook_gate]));
             let execution = harness.processor.execution.clone();
-            let databases = harness.processor.databases().clone();
+            let databases = harness.processor.readers();
             let block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
@@ -2379,18 +2497,6 @@ mod tests {
             ));
             assert!(futures::poll!(&mut second).is_pending());
 
-            // The parent's boundary retains the child's step before the child is cached.
-            let boundary = harness.processor.boundary(&digested(parent.clone()));
-            assert_eq!(
-                boundary.disposition(&ExecutionStep {
-                    digest: child.digest(),
-                    parent: child.parent(),
-                    round: child.context.round,
-                }),
-                Disposition::Retain,
-            );
-            assert!(!boundary.compatible.contains(&child.digest()));
-
             // A retained replay can cache its state while other requests finish, and a request
             // joined to it can observe that success after the parent's finalization.
             release.send(()).unwrap();
@@ -2423,7 +2529,7 @@ mod tests {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let winner = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let databases = harness.processor.databases().clone();
+            let databases = harness.processor.readers();
             let read = databases.read().await;
             let execution = harness.processor.execution.clone();
 
@@ -2492,15 +2598,6 @@ mod tests {
                 marshal_ancestry::from_iter([digested(child.clone())]),
             ));
             assert!(futures::poll!(&mut second).is_pending());
-            let boundary = harness.processor.boundary(&digested(parent.clone()));
-            assert_eq!(
-                boundary.disposition(&ExecutionStep {
-                    digest: child.digest(),
-                    parent: child.parent(),
-                    round: child.context.round,
-                }),
-                Disposition::Retain,
-            );
 
             let finalized_block = digested(parent.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
@@ -2533,11 +2630,10 @@ mod tests {
         });
     }
 
-    /// The caller must finish every execution of the finalized block before its finalization
-    /// starts, so finalization panics on an in-flight replay of the block.
+    /// Finalizing a block whose processing is in flight joins that processing and reuses its
+    /// result instead of processing the block again.
     #[test]
-    #[should_panic(expected = "finalized block must not be processed when its finalization starts")]
-    fn execution_finalization_rejects_in_flight_winner() {
+    fn execution_finalization_joins_in_flight_winner() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
@@ -2545,9 +2641,9 @@ mod tests {
             let execution = harness.processor.execution.clone();
 
             // The gate keeps the winner's processing in flight.
-            let (gate, _started, _release) = apply_gate();
-            harness.processor.app.process_probe =
-                Some(ApplicationProbe::new(winner.digest(), [gate]));
+            let (gate, started, release) = apply_gate();
+            let probe = ApplicationProbe::new(winner.digest(), [gate]);
+            harness.processor.app.process_probe = Some(probe.clone());
             let mut flight = join_flight(
                 &execution,
                 &harness.processor.app,
@@ -2555,7 +2651,52 @@ mod tests {
                 marshal_ancestry::from_iter([digested(winner.clone())]),
             );
             assert!(futures::poll!(&mut flight).is_pending());
-            harness.finalize(winner).await;
+            started.await.unwrap();
+
+            // Finalization waits for the flight, then applies its cached result.
+            let mut finalize = Box::pin(harness.finalize(winner.clone()));
+            assert!(futures::poll!(&mut finalize).is_pending());
+            release.send(()).unwrap();
+            assert!(finalize.await);
+            assert_eq!(flight.await, Ok(()));
+            assert_eq!(probe.calls(), 1);
+            assert_eq!(harness.processor.branch_anchor().digest, winner.digest());
+        });
+    }
+
+    /// A flight for a block created while that block's finalization reconstructs it, and first
+    /// polled after the block became the anchor, succeeds without processing the block again.
+    #[test]
+    fn flight_for_block_finalized_before_its_first_poll_succeeds() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            harness.provider.insert(block.clone());
+
+            // The gate holds the finalization's reconstruction of the block.
+            let (gate, started, release) = apply_gate();
+            let probe = ApplicationProbe::new(block.digest(), [gate]);
+            harness.processor.app.process_probe = Some(probe.clone());
+            let execution = harness.processor.execution.clone();
+            let app = harness.processor.app.clone();
+            let flight_context = harness.context_cell.as_present().child("flight");
+            let mut finalize = Box::pin(harness.finalize(block.clone()));
+            assert!(futures::poll!(&mut finalize).is_pending());
+            started.await.unwrap();
+
+            // A request joins the block while it reconstructs, and the finalization completes
+            // before the request's flight is first polled.
+            let flight = join_flight(
+                &execution,
+                &app,
+                &flight_context,
+                marshal_ancestry::from_iter([digested(block.clone())]),
+            );
+            release.send(()).unwrap();
+            assert!(finalize.await);
+            assert_eq!(flight.await, Ok(()));
+            assert_eq!(probe.calls(), 1);
         });
     }
 
@@ -2572,8 +2713,8 @@ mod tests {
             let (late_child, merkleized) = harness.build_child(&loser, late_view).await;
 
             assert!(harness.finalize(winner).await);
-            assert!(
-                !harness.processor.cache_pending(
+            assert_eq!(
+                harness.processor.cache_pending(
                     late_child.digest(),
                     PendingEntry {
                         round: Round::new(Epoch::zero(), late_view),
@@ -2581,6 +2722,7 @@ mod tests {
                         merkleized,
                     },
                 ),
+                Err(PrepareBatchesError::Stale),
                 "completed work on a losing fork must not publish after finalization",
             );
             assert!(!harness.processor.pending_contains(&late_child.digest()));
@@ -2738,13 +2880,15 @@ mod tests {
         );
     }
 
+    /// A parent that is neither cached nor the anchor can only have been discarded by a
+    /// finalization, so a fork from it is stale and its request acquires again.
     #[test]
-    fn execution_fork_batches_rejects_unknown_parent() {
+    fn execution_fork_batches_reports_unknown_parent_as_stale() {
         deterministic::Runner::default().start(|context| async move {
             let harness = Harness::new(context).await;
             assert!(matches!(
                 harness.processor.fork_batches(&u64_to_digest(999)).await,
-                Err(PrepareBatchesError::Invalid),
+                Err(PrepareBatchesError::Stale),
             ));
         });
     }
@@ -2799,7 +2943,7 @@ mod tests {
                 assert_eq!(state.pending.contains_key(&digest), valid);
             }
             assert_eq!(second.await, expected);
-            assert!(harness.processor.flights_idle());
+            assert!(harness.processor.execution.state.lock().flights.is_empty());
         });
     }
 
@@ -2842,14 +2986,14 @@ mod tests {
             assert!(weak.upgrade().is_some());
             drop(second);
             assert!(weak.upgrade().is_none());
-            assert!(!harness.processor.flights_idle());
+            assert!(!harness.processor.execution.state.lock().flights.is_empty());
 
             // The remaining requests receive the result, and the dropped waker never fires.
             release.send(()).expect("processing must remain held");
             assert_eq!(first.await, Ok(()));
             assert_eq!(third.await, Ok(()));
             assert_eq!(wakes.load(Ordering::SeqCst), 0);
-            assert!(harness.processor.flights_idle());
+            assert!(harness.processor.execution.state.lock().flights.is_empty());
         });
     }
 
@@ -2881,7 +3025,7 @@ mod tests {
             drop(first);
             assert_eq!(second.await, Ok(()));
             assert!(execution.pending_contains(&digest));
-            assert!(harness.processor.flights_idle());
+            assert!(harness.processor.execution.state.lock().flights.is_empty());
         });
     }
 
@@ -2913,26 +3057,26 @@ mod tests {
             let unpolled = join_flight(execution, &app, &context, ancestry.clone());
             drop(polled);
             drop(unpolled);
-            assert!(!harness.processor.flights_idle());
+            assert!(!harness.processor.execution.state.lock().flights.is_empty());
 
             // A later request joins the same flight and keeps it alive once the first request
             // drops it.
             let late = join_flight(execution, &app, &context, ancestry.clone());
             assert!(first.ptr_eq(&late));
             drop(first);
-            assert!(!harness.processor.flights_idle());
+            assert!(!harness.processor.execution.state.lock().flights.is_empty());
             assert!(!release.is_closed());
 
             // The last request to drop the flight cancels the processing and removes the entry.
             drop(late);
-            assert!(harness.processor.flights_idle());
+            assert!(harness.processor.execution.state.lock().flights.is_empty());
             assert!(release.is_closed());
 
             // A new request starts a new flight and processes the block again.
             let mut fresh = join_flight(execution, &app, &context, ancestry);
             assert!(futures::poll!(&mut fresh).is_pending());
             fresh_started.await.expect("new processing must start");
-            assert!(!harness.processor.flights_idle());
+            assert!(!harness.processor.execution.state.lock().flights.is_empty());
         });
     }
 
@@ -2998,7 +3142,7 @@ mod tests {
                     assert_eq!(joiner.await, expected);
                 }
                 assert_eq!(probe.calls(), 1);
-                assert!(harness.processor.flights_idle());
+                assert!(harness.processor.execution.state.lock().flights.is_empty());
 
                 // A cached success answers a later request without another call.
                 if valid {
@@ -3093,7 +3237,7 @@ mod tests {
                 assert_eq!(second_result, Ok(()));
                 assert_eq!(third_result, Ok(()));
                 assert_eq!(probe.calls(), 1);
-                assert!(harness.processor.flights_idle());
+                assert!(harness.processor.execution.state.lock().flights.is_empty());
             },
         );
     }
@@ -3508,6 +3652,88 @@ mod tests {
                 1,
                 "closed ancestry should not be retried"
             );
+        });
+    }
+
+    /// A walk that passes a block before that block is finalized, and then reaches the old
+    /// anchor, is stale rather than invalid.
+    #[test]
+    fn replay_walk_is_stale_when_the_anchor_moves_past_it() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let parent = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let (target, _) = harness.build_child(&parent, View::new(2)).await;
+            harness.provider.insert(genesis.clone());
+            harness.provider.insert(target.clone());
+            harness
+                .processor
+                .execution
+                .state
+                .lock()
+                .pending
+                .remove(&parent.digest());
+
+            // The walk passes `parent` while genesis is the anchor, then waits for its parent.
+            let (release, gate) = oneshot::channel();
+            let provider = GatedParentProvider {
+                inner: harness.provider.clone(),
+                child: parent.digest(),
+                gate: Arc::new(Mutex::new(Some(gate))),
+            };
+            let execution = harness.processor.execution.clone();
+            let walk_context = harness.context_cell.as_present().child("walk");
+            let mut walk = Box::pin(execution.prepare_replay(
+                &walk_context,
+                &provider,
+                digested(target.clone()),
+            ));
+            assert!(futures::poll!(&mut walk).is_pending());
+
+            // `parent` becomes the anchor before the walk reaches genesis.
+            assert!(harness.finalize(parent.clone()).await);
+            release.send(()).unwrap();
+            assert!(matches!(walk.await, Err(PrepareBatchesError::Stale)));
+
+            // Walking again from the new anchor finds `target` alone.
+            let path = execution
+                .prepare_replay(&walk_context, &harness.provider, digested(target))
+                .await
+                .expect("the walk must reach the new anchor");
+            assert_eq!(path.blocks.len(), 1);
+        });
+    }
+
+    /// A failed operation panics while the actor runs.
+    #[test]
+    #[should_panic(expected = "process failed: injected")]
+    fn failure_panics_while_running() {
+        use commonware_runtime::Spawner as _;
+        deterministic::Runner::default().start(|context| async move {
+            let () =
+                fail_unless_stopped(context.stopped(), "process failed: injected".into()).await;
+        });
+    }
+
+    /// A failed operation after shutdown fired is abandoned: it never completes and does not
+    /// panic.
+    #[test]
+    fn failure_is_abandoned_after_shutdown() {
+        use commonware_runtime::Spawner as _;
+        deterministic::Runner::default().start(|context| async move {
+            let stopped = context.stopped();
+            let stopper = context.child("stopper");
+            let stop = context.child("stop").spawn(|_| async move {
+                stopper.stop(0, None).await.expect("runtime should stop");
+            });
+            let _ = context.stopped().await;
+            let mut failed = Box::pin(fail_unless_stopped::<()>(
+                stopped,
+                "process failed: injected".into(),
+            ));
+            assert!(futures::poll!(&mut failed).is_pending());
+            drop(failed);
+            stop.await.expect("stop task should finish");
         });
     }
 }
