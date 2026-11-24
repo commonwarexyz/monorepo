@@ -26,8 +26,7 @@ mod vectors;
 
 /// ZIP215 point encodings shared with the curve property tests.
 #[cfg(test)]
-pub(crate) const ZIP215_POINTS: [[u8; 32]; 14] = vectors::ZIP215_POINTS;
-
+pub(crate) use crate::signing::ZIP215_POINTS;
 use crate::{
     key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
     signing::{Signature, SigningKey, VerifyingKey},
@@ -815,10 +814,10 @@ pub mod fuzz {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExchangePublicKey, Signature, VerifyingKey,
+        ExchangePublicKey, Signature, VerifyingKey, ZIP215_POINTS,
         vectors::{
             RFC7748_X25519, RFC7748_X25519_DIFFIE_HELLMAN, RFC8032_ED25519, WYCHEPROOF_ED25519,
-            WYCHEPROOF_X25519, ZIP215_POINTS,
+            WYCHEPROOF_X25519,
         },
     };
     use crate::{key_exchange::SecretKey, signing::SigningKey};
