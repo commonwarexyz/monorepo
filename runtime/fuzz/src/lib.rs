@@ -1,5 +1,6 @@
 //! Shared input decoding and storage models for the runtime fuzz targets.
 
+pub mod shared_reads;
 pub mod storage_faults;
 // `BlobModel::len` is the view length; the model has no emptiness query.
 #[allow(clippy::len_without_is_empty)]

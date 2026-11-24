@@ -27,8 +27,9 @@ rand.workspace = true
 default = []
 storage-differential = []
 storage-faults = []
+shared-reads = []
 iobuf = []
-runtime-all = [ "iobuf", "storage-differential", "storage-faults" ]
+runtime-all = [ "iobuf", "shared-reads", "storage-differential", "storage-faults" ]
 
 [lib]
 bench = false
@@ -62,6 +63,14 @@ doc = false
 name = "storage_faults"
 path = "fuzz_targets/storage_faults.rs"
 required-features = ["storage-faults"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shared_reads"
+path = "fuzz_targets/shared_reads.rs"
+required-features = ["shared-reads"]
 test = false
 doc = false
 bench = false

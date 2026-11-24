@@ -1,10 +1,13 @@
-# Runtime fuzz harness: storage differential, storage faults and iobuf
+# Runtime fuzz harness: storage differential, storage faults, iobuf and shared reads
 
-Status: `storage_differential` and `iobuf` are implemented in
-`runtime/fuzz/fuzz_targets/storage_differential.rs` and `runtime/fuzz/fuzz_targets/iobuf.rs`.
-Divergences found so far are in `runtime/fuzz/FINDINGS.md`. `storage_faults` is specified in
-[Target `storage_faults`](#target-storage_faults). Its input is the intents
-file `runtime/fuzz/INTENTS-storage-faults.md`.
+Status: `storage_differential`, `iobuf` and `storage_faults` are implemented in
+`runtime/fuzz/fuzz_targets/storage_differential.rs`, `runtime/fuzz/fuzz_targets/iobuf.rs` and
+`runtime/fuzz/fuzz_targets/storage_faults.rs`. Divergences found so far are in
+`runtime/fuzz/FINDINGS.md`. `storage_faults` is specified in
+[Target `storage_faults`](#target-storage_faults); its input is the intents file
+`runtime/fuzz/INTENTS-storage-faults.md`. `shared_reads` is specified in
+[Target `shared_reads`](#target-shared_reads); its input is the intents file
+`runtime/fuzz/INTENTS-shared-reads.md`.
 
 ## Goals
 
@@ -29,6 +32,13 @@ The next iteration adds a third target, for faults and recovery (Future work row
   model of the public `Storage` and `Blob` contract. Its goals are SF-G1 to SF-G4 in
   [Target `storage_faults`](#target-storage_faults).
 
+A fourth target is for the concurrent readers of the page cache (Future work rows 4 and 20):
+
+- `shared_reads`: several readers on the deterministic runtime read one sealed paged blob
+  through one small shared cache, while `MigratingReadBlob` keeps each backend read in flight
+  for one poll, so that readers join the page reads of others and some cancel a pending read.
+  Its goals are SR-G1 to SR-G3 in [Target `shared_reads`](#target-shared_reads).
+
 ## Non-goals for this iteration
 
 - The `iouring` runtime, its storage and network, and its internal state machines.
@@ -37,15 +47,19 @@ The next iteration adds a third target, for faults and recovery (Future work row
 - Any change under `runtime/src`, including `cfg(fuzzing)` hooks. Every target uses public API
   only.
 - Fault and crash testing on tokio. `storage_faults` runs the deterministic runtime only.
-- Concurrency in storage, and crashes inside an operation. Operations are sequential and a crash
-  happens between two operations.
+- Concurrency in storage, and crashes inside an operation. The operations of
+  `storage_differential` and `storage_faults` are sequential, and a crash happens between two
+  operations. The one exception is `shared_reads`: concurrent readers of the page cache over one
+  immutable blob, with no write and no crash (SR-X1 to SR-X3). History: until 2026-11-24 this
+  item excluded all concurrency in storage; the concurrent readers of the page cache were Future
+  work rows 4 and 20.
 - A strict mode that disables the allowlist of `storage_differential`.
 
 Every choice that narrows coverage is listed, with a way to lift it, in [Future work](#future-work).
 
 ## Placement and build
 
-All three targets live in `runtime/fuzz` next to `buffer`, `blob_integrity` and `blob_creation`.
+All four targets live in `runtime/fuzz` next to `buffer`, `blob_integrity` and `blob_creation`.
 
 slow.yml fuzzes every `runtime/fuzz` target whose `required-features` are on by default
 (`.github/scripts/fuzz_targets.py`). The new targets run on fuzzcorp only, so each is gated by a
@@ -56,8 +70,9 @@ non-default feature:
 default = []
 storage-differential = []
 storage-faults = []
+shared-reads = []
 iobuf = []
-runtime-all = [ "iobuf", "storage-differential", "storage-faults" ]
+runtime-all = [ "iobuf", "shared-reads", "storage-differential", "storage-faults" ]
 
 [[bin]]
 name = "storage_differential"
@@ -75,6 +90,14 @@ doc = false
 bench = false
 
 [[bin]]
+name = "shared_reads"
+path = "fuzz_targets/shared_reads.rs"
+required-features = ["shared-reads"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "iobuf"
 path = "fuzz_targets/iobuf.rs"
 required-features = ["iobuf"]
@@ -82,7 +105,7 @@ test = false
 doc = false
 ```
 
-The `storage-faults` feature and the `storage_faults` entry are added when the target is built.
+The `shared-reads` feature and the `shared_reads` entry are added when the target is built.
 
 Build and run (toolchain pin read from `nightly` under `[tools]` in `.github/toolchains.toml`,
 currently `nightly-2026-11-12`):
@@ -91,6 +114,7 @@ currently `nightly-2026-11-12`):
 cargo +nightly-2026-11-12 fuzz build --fuzz-dir runtime/fuzz --features runtime-all
 cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_differential
 cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all storage_faults
+cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all shared_reads
 cargo +nightly-2026-11-12 fuzz run --fuzz-dir runtime/fuzz --features runtime-all iobuf
 ```
 
@@ -108,9 +132,9 @@ Environment:
   The harness also assumes the usual 255-byte limit per path component. A filesystem with a
   smaller limit (eCryptfs allows 143) gives the same false reports for the long-but-valid names.
 
-`storage_faults` uses no environment variable and no file system.
+`storage_faults` and `shared_reads` use no environment variable and no file system.
 
-Platforms: all three targets build and smoke-run on macOS. Campaigns run on Linux through fuzzcorp,
+Platforms: all four targets build and smoke-run on macOS. Campaigns run on Linux through fuzzcorp,
 deployed by the maintainer. Hangs are left to libFuzzer's `-timeout`.
 
 ## Shared input decoding
@@ -127,7 +151,7 @@ operation sequences:
 
 The stream is always `STREAM_BYTES` long: input past it is ignored, so the entropy always comes
 from the same stream bytes. Both targets share this decoder (`decode` in `runtime/fuzz/src/lib.rs`).
-`storage_faults` uses the same decoder, unchanged.
+`storage_faults` uses the same decoder, unchanged. So does `shared_reads` (SR-R5).
 
 Both targets run under `deterministic::Runner`. The tokio side of `storage_differential` uses no
 RNG: everything it does comes from the decoded sequence.
@@ -1504,6 +1528,509 @@ check, never on data:
 | `try_into_mut_refused` | `try_into_mut` failed on an ownerless empty view or the only handle to a native allocation |
 | `bufsmut_freeze_unmapped` | A frozen chunk lies outside the allocations its `IoBufsMut` was built from |
 
+## Target `shared_reads`
+
+Status: specified. The input is the intents file `runtime/fuzz/INTENTS-shared-reads.md`. In this
+part a number in square brackets, such as [11], names an item of that file. Ids in this part:
+`SR-G` goals, `SR-R` requirements, `SR-P` properties, `SR-I` invariants, `SR-B` behaviours the
+reach check needs, `SR-F` planted faults, `SR-X` cases left out, `SR-C` choices this spec makes
+where the intents file leaves one open.
+
+### Definitions
+
+| Term | Meaning |
+|---|---|
+| Page | A logical page of the page cache: `PAGE_SIZE` bytes. Page `p` holds the logical offsets `p * PAGE_SIZE .. (p + 1) * PAGE_SIZE` |
+| Physical page | Page `p` as stored in the blob: `PAGE_SIZE + CHECKSUM_SIZE` bytes at offset `p * (PAGE_SIZE + CHECKSUM_SIZE)` (`runtime/src/utils/buffer/paged/mod.rs:230-239`) |
+| Sealed blob | The `Sealed` handle (`runtime/src/utils/buffer/paged/sealed.rs`) that the construction (SR-R3) returns. Every reader reads through a clone of it |
+| Read | One call of `Sealed::read_at`, `Sealed::read_into` or `Sealed::read_ranges_into`, and the future it returns |
+| Form | Which of the three calls a read is |
+| Operation | One read as the input describes it: a form, its ranges, and a drop flag |
+| Drop flag | A flag of an operation. A flagged read is polled once by its task and dropped when that poll is pending [6] |
+| Cancelled read | A read whose future was polled exactly once, returned pending, and was dropped without another poll [6] |
+| Completes | A read completes when its future returns `Ok`. It fails when it returns `Err` |
+| Opening | The first phase of every run: two reads of one page, driven by the root task in a fixed order (SR-R9) [11] |
+| Free phase | The second phase: the reader tasks, each running its operations in order (SR-R10) |
+| Hot page | The page `h` where the first operation of every reader starts (SR-R6) |
+| Reader | One task of the free phase |
+| Read phase | The opening and the free phase together. It starts after the construction |
+| Deadline | `DEADLINE` of simulated time, counted from the start of the read phase (SR-R12) [9] |
+| Model | The function `value` of SR-R3: the byte the blob holds at each logical offset |
+| Backend read | One call of `read_at` or `read_at_buf` that reaches the storage blob under the mock. It is counted once for every physical page its range touches (SR-R13) |
+| Standalone fetch | The cache's read of one page by `read_after_page_fault`, shared by its waiters (`runtime/src/utils/buffer/paged/cache.rs:928-1010`) |
+| Batch | The cache's read of several pages with one `Blob::read_many` call, started by `read_after_misses` (`cache.rs:818-925`) |
+| Waiter | A read registered on a standalone fetch |
+| Starter, joiner | The read that started a batch, and a read that selected pages of a batch it did not start |
+| Fetch generation | One standalone fetch of a page, from the read that installs it until it completes or its last waiter is dropped (`cache.rs:56-66`) |
+
+### Goals
+
+- **SR-G1.** Find faults in the shared reads of the page cache: a read that gets wrong bytes, a
+  reader that never finishes because a wakeup was lost, and a cancelled read that takes a live
+  fetch away from the reads that joined it [1].
+- **SR-G2.** Reach the code no other target reaches: a read that joins a standalone fetch or a
+  batch that another read has in flight, and the cleanup when such a read is cancelled. The
+  `buffer` target awaits one operation at a time, and on the plain memory blob a read never
+  stays in flight, so a second read never finds one to join (background of the intents file).
+- **SR-G3.** Every failure replays: a fixed input gives the same run every time [16].
+
+### Construction
+
+- **SR-R1.** The target MUST run on the deterministic runtime only, MUST use the public API of
+  `commonware-runtime` with its `test-utils` feature, and MUST NOT change anything under
+  `runtime/src` [3, 19]. The two `test-utils` items it uses are `mocks::MigratingReadBlob`
+  (`runtime/src/mocks.rs:781-867`) and `CacheRef::clear` (`cache.rs:1058-1063`).
+- **SR-R2.** Every run MUST start one `deterministic::Runner` from
+  `deterministic::Config::new().with_rng(FuzzRng::from(entropy))`, where `entropy` comes from
+  the shared decoder (Shared input decoding). The configuration keeps its default cycle of 1 ms,
+  no runtime timeout, and `catch_panics` off, so a panic in any task ends the run.
+- **SR-R3.** Construction, once per run, before the read phase [4]:
+  1. Open the blob `blob` in the partition `shared_reads`. Its size must be 0.
+  2. Wrap it as `MigratingReadBlob::new(Counter(blob), false)`, where `Counter` is the counting
+     wrapper of SR-R13. Every later call reaches the storage through these two wrappers.
+  3. Create `CacheRef::new(PAGE_SIZE, cache_pages)`. Create `Writer::new(blob, 0, 2 * PAGE_SIZE,
+     cache)` (`runtime/src/utils/buffer/paged/writer.rs:464`), append the model bytes of
+     `pages` full pages in one `append` call, call `seal()`
+     (`writer.rs:720`), and await the sync handle it returns. The sealed blob's `size()` must be
+     `pages * PAGE_SIZE`.
+  4. Call `CacheRef::clear()`, so that no page is cached when the read phase starts. The writer
+     caches pages as it flushes them (`writer.rs:837`, `951`), and `clear` may be called only
+     with no read in flight, which holds here.
+  5. Reset the counts of SR-R13 to zero.
+
+  The model is `value(o) = ((o / PAGE_SIZE) * 37 + o % PAGE_SIZE) % 255 + 1`, as a byte, for a
+  logical offset `o`. No byte is zero, so a byte that a read never filled differs from the
+  model. Two different pages differ at every offset inside the page, because 37 and 255 have no
+  common factor and there are fewer than 255 pages: a wrong page never compares equal by
+  accident [4]. An error or a size other than the one named in any step MUST end the run with a
+  panic.
+- **SR-R4.** Every read MUST lie inside `0 .. pages * PAGE_SIZE` and MUST have a length of at
+  least 1 byte for each of its ranges [4, 20]. The ranges of one `read_ranges_into` MUST be sorted
+  and MUST NOT overlap [5].
+
+### Input
+
+Bounds, all constants at the top of the harness [7]:
+
+| Constant | Value | Bounds |
+|---|---|---|
+| `PAGE_SIZE` | 64 | logical bytes of a page (fixed, SR-C2) |
+| `MIN_PAGES`, `MAX_PAGES` | 2, 16 | pages of the sealed blob |
+| cache pages | 1 to `pages - 1` | capacity of the cache, so the blob always has more pages than the cache (SR-C3) |
+| `MIN_READERS`, `MAX_READERS` | 2, 6 | readers of the free phase |
+| `MIN_OPS`, `MAX_OPS` | 1, 8 | operations of one reader |
+| `MAX_SPAN` | 4 | consecutive pages that the ranges of one read may touch |
+| `MAX_RANGES` | 4 | ranges of one `read_ranges_into` |
+| `DEADLINE` | 10 s | simulated time for the read phase (SR-R12) |
+
+- **SR-R5.** `FuzzInput` MUST have a hand-written `Arbitrary` that runs the shared `decode`
+  (`runtime/fuzz/src/lib.rs`), unchanged, and samples every field from the stream it returns
+  with `Unstructured`. So the runtime's entropy comes from the first `SEED_BYTES` of the input,
+  and `FuzzRng` fills what a short input does not hold [7]. It MUST NOT fail on any input length
+  and MUST keep the default `size_hint`, so the typed entry rejects no input. Every count MUST be
+  drawn with `int_in_range` over its bounds, so a stream with no bytes left gives the lower
+  bounds, which are a whole run.
+- **SR-R6.** The decoder MUST draw one hot page `h`: a page of the blob other than the opening's
+  page `p0`. It MUST give every free-phase operation:
+  1. a form, `read_at`, `read_into` or `read_ranges_into`;
+  2. a window of 1 to `MAX_SPAN` pages that ends at the blob's end at the latest. For the first
+     operation of every reader the window MUST start at page `h`; for every later operation it
+     starts at any page of the blob;
+  3. ranges inside the window: one range for `read_at` and `read_into`, which may cross page
+     ends; 1 to `MAX_RANGES` sorted ranges that do not overlap for `read_ranges_into`. For the
+     first operation of every reader the first range MUST start inside page `h`;
+  4. a drop flag, drawn by `sample_drop`.
+
+  So the first operations of all readers touch page `h`, and every reader's reads overlap the
+  pages of the other readers' reads [5]. Page `h` is not cached when the free phase starts,
+  because only page `p0` was read before it and the cache was cleared after the construction.
+  The readers are first polled in the same cycle (SR-R10), so their first operations contend on
+  one page that is cold when that cycle starts: the earliest of them can start or join a read of
+  page `h` in flight, and a later one in the same cycle may find the page already cached,
+  because a joiner of a standalone fetch completes it in the turn it joins (SR-C4). The
+  operations after the first ones may use any pages.
+- **SR-R7.** Two public samplers of the library module draw the flags, so that a test can call
+  them with fixed bytes:
+  - `sample_drop(u: &mut Unstructured<'_>) -> arbitrary::Result<bool>` MUST draw one selector
+    with `u.int_in_range(0..=3)`, MUST make no other draw, and MUST return `true` exactly when
+    the selector is 3. The decoder MUST call it once for every free-phase operation, and the
+    operation MUST be flagged exactly when it returns `true`.
+  - `sample_opening_drop(u: &mut Unstructured<'_>) -> arbitrary::Result<bool>` MUST draw one
+    selector with `u.int_in_range(0..=1)`, MUST make no other draw, and MUST return `true`
+    exactly when the selector is 1. The decoder MUST call it once, for read A of the opening,
+    and read A MUST be flagged exactly when it returns `true`.
+
+  Fixed bytes: on `Unstructured::new(&[b])`, `sample_drop` returns `true` only for `b` = 3 among
+  0 to 3, and `sample_opening_drop` returns `true` for `b` = 1 and `false` for `b` = 0. On
+  `Unstructured::new(&[])` both return `false`. This follows from `int_in_range` of `arbitrary`
+  1.4.2, as in SF-R8.
+- **SR-R8.** The empty-corpus and minimal-decodable baseline has, by construction, an opening
+  with two reads of one uncached page of which at least one survives (SR-R9), and at least two
+  readers that each run at least one operation over a blob with more pages than the cache [4, 7].
+
+### Run structure
+
+- **SR-R9.** The opening, in every run [11]. The input gives a page `p0` of the blob and two
+  operations on it:
+  - read A: form `read_at` or `read_into`, one range inside page `p0`, flagged by
+    `sample_opening_drop`;
+  - read B: any of the three forms, ranges inside page `p0` (one range, or one or two for
+    `read_ranges_into`), never flagged.
+
+  The root task MUST, in this order and with no await in between: create read A's future and
+  poll it once; create read B's future and poll it once; then, if read A's poll was pending and
+  read A is flagged, drop read A's future (a cancellation). Then it MUST await read B and, when
+  it was not dropped, read A. A read that was ready on its first poll is checked at once. The
+  opening ends when both are resolved or dropped.
+
+  Why this arranges the case of [11]: page `p0` is not cached, and read A's form reads it through
+  a standalone fetch, so read A's first poll installs that fetch and, with the read held by the
+  mock, returns pending. Read B's first poll then registers read B on the same fetch generation.
+  So both are registered before any cancellation, and read B survives (SR-C5).
+
+  Read A's first poll MUST be pending. It always is under SR-R3: page `p0` is cold, and the mock
+  returns pending on the first poll of every backend read, whatever the read below it returns
+  (`runtime/src/mocks.rs:820-845`). When read A's first poll is ready, the arrangement of this
+  rule no longer holds, and the run MUST end with a panic that says so. It is not a violation
+  and not a run that leaves SR-I3 unmeasured. History: this spec was accepted on 2026-11-24 with
+  a ready first poll of read A counted as a run that does not measure SR-I3. The construction
+  makes that case unreachable, so no test could exercise it. Since the same day it is a failed
+  precondition. Nothing detected before is lost.
+- **SR-R10.** The free phase, after the opening ends [2, 5, 6]. The root task MUST spawn every
+  reader in one turn, before it awaits any of them, and then await them all. A reader runs its
+  operations in order. For each operation:
+  - not flagged: it creates the read's future and awaits it;
+  - flagged: it creates the read's future and polls it exactly once. When the poll is ready, the
+    result is checked. When it is pending, the future is dropped and counted as a cancellation.
+
+  Then the reader goes on with its next operation. A reader MUST NOT poll a read again after it
+  returned ready, and MUST NOT poll a flagged read a second time in the same turn.
+- **SR-R11.** Every read that completes MUST be checked at once against the model (SR-I1), and
+  every read that fails MUST be reported at once (SR-I2b). The run MUST stop at the first
+  violation and report it (SR-R14).
+- **SR-R12.** The deadline [9]. The read phase MUST run as one future that the root task races
+  against `context.sleep(DEADLINE)`. When the sleep wins, the run MUST report SR-I2a with the
+  deadline location of SR-R14. The deadline covers the opening too.
+- **SR-R13.** Backend reads. `Counter` is a `Blob` wrapper of the fuzz side. Every `read_at` and
+  `read_at_buf` it receives MUST add one to the count of each physical page its range touches,
+  and then forward the call. Every other call MUST be forwarded unchanged. The mock's default
+  `read_many` issues one `read_at` per range (`runtime/src/lib.rs:1083-1096`), so the reads of a
+  batch are counted too. The counts are reset at the end of the construction (SR-R3) and read at
+  the end of the opening and at the end of the run.
+- **SR-R14.** A violation MUST name its invariant, its class and its location, and MUST say
+  whether a read of the run was cancelled before it. The location is one of four kinds, and a
+  violation carries only the fields of its kind:
+  1. a read of the opening, for SR-I1 and SR-I2b: `A` or `B`, its form and ranges, and for `A`
+     its drop flag;
+  2. a read of the free phase, for SR-I1 and SR-I2b: the reader index, the operation index, the
+     form, the ranges and the drop flag;
+  3. the opening as a whole, for SR-I3: the page `p0` and the counts of `opening_reads`;
+  4. the read phase at the deadline, for SR-I2a: whether the opening had ended, the opening reads
+     still pending (`A`, `B` or both), and for each reader `not started` (the free phase had not
+     started), `finished`, or the index of the operation it was on.
+
+  For SR-I1 the violation also gives the first offset whose byte differs, with the expected and
+  the observed byte. A panic is not a violation: it passes through `run` with its own message
+  (SR-I4), whether it is raised in the construction, by a stall, or by a task.
+
+### Properties
+
+- **SR-P1.** Every read that completes returns exactly the model's bytes [8]. Checked by SR-I1.
+- **SR-P2.** Every read that is not cancelled, and every reader, finishes before the deadline,
+  with `Ok`, and the runtime does not stall [9, 20]. Checked by SR-I2a, SR-I2b and SR-I4.
+- **SR-P3.** A cancellation changes nothing for the other reads: SR-P1 and SR-P2 still hold for
+  them [10]. Checked by SR-I1, SR-I2a and SR-I2b on every run that has a cancellation, and by the
+  planted fault SR-F2.
+- **SR-P4.** When two waiters on one uncached page are both registered before any cancellation
+  and at least one of them survives, the page is read from the blob once [11]. Checked by SR-I3.
+
+### Invariants
+
+Each row is one check. A violation names its row (SR-R14).
+
+| Id | What must hold | Measured when | Source | Class |
+|---|---|---|---|---|
+| SR-I1 | A read that completes returns exactly the model's bytes of its ranges: for `read_at` the returned buffers in order, for `read_into` the buffer, for `read_ranges_into` the buffer, which holds the ranges back to back | every read that completes, in the opening and in the free phase | [8]; `Sealed::read_at`, `read_into`, `read_ranges_into` (`sealed.rs:112-176`) | `read_bytes` |
+| SR-I2a | Every read that is not cancelled, and every reader, finishes before the deadline | every run, at the end of the read phase | [9] | `read_incomplete` |
+| SR-I2b | No read that is not cancelled returns `Err`. Storage never fails in this target, and every range is valid | every read that is not cancelled | [9, 20]; fuzzing guide: unexpected errors panic | `read_error` |
+| SR-I3 | In the opening, the physical page of `p0` is read from the blob exactly once | every run, at the end of the opening (read A is always pending after its first poll, SR-R9) | [11]; a fetch generation "reads and validates the logical page exactly once" for all its waiters (`cache.rs:54-66`) | `single_fetch_count` |
+| SR-I4 | No panic, abort, sanitizer report or runtime stall (`runtime stalled`, `runtime/src/deterministic.rs:451-452`) | the whole run | [9]; fuzzing guide | none (the panic itself) |
+
+- **SR-R15.** When a row counts as measured. A row MUST enter `measured` (SR-R16) only when the
+  condition of its "Measured when" cell occurred in the run and its check ran and passed. SR-I3
+  is measured in every run that reaches the end of the opening (SR-R9). `Outcome::cancellations`
+  gives the number of cancelled reads, so that a test can tell the runs that measured SR-P3.
+
+Not judged, because the intents leave it out or the contract does not promise it:
+
+- The backend read counts of the free phase. A page may be read from the blob more than once
+  there, for four reasons that the intents and the cache's code allow [12, 22]:
+  1. Eviction. The cache always holds fewer pages than the blob (SR-C3). A page that was evicted
+     is read again by a later read that misses it.
+  2. A cancelled sole standalone waiter. Dropping the only waiter of a standalone fetch removes
+     the fetch (`cache.rs:103-127`), so a later read of the page starts a new fetch, although the
+     dropped one had already read the page [22].
+  3. A cancelled batch starter. A flagged starter is dropped in the turn it started its batch,
+     so the batch ends, and a later read reads its pages again (SR-X7).
+  4. The lock window. A read that examines its misses over several holds of the cache lock can
+     miss a page that another read registers in between (`cache.rs:18-24`, `130-134`). A read
+     here touches at most 4 pages, fewer than the 64 misses of one hold (`MISSES_PER_LOCK`), so
+     this reason is not expected at these bounds.
+
+  What no reason allows: one read reads each page it touches from the blob at most once.
+  `read_after_miss` reads its missing pages one at a time, `read_after_misses` reads the pages
+  it does not join with one batch of its own, and a read that joins a fetch or a batch issues no
+  backend read (`cache.rs:778-805`, `818-925`, `928-1010`). So the free-phase count of a page is
+  at most the number of free-phase reads whose ranges touch it, cancelled reads included. The
+  counts are recorded in the trace and held to this bound in the acceptance evidence only
+  (SR-V10); they are not an invariant of the target [12]. The one strict count is SR-I3, in the
+  opening [11].
+
+  History: this spec was accepted on 2026-11-24 with two reasons, the lock window and a
+  cancelled batch starter. The build measured duplicates from eviction and from a cancelled
+  sole standalone waiter, also with every drop flag cleared, through eviction alone. [12] and
+  [22] allow both. Since the same day the four reasons and the bound above hold. Nothing
+  detected before is lost: the counts were never an invariant.
+- The number `read_ranges_into` returns (the ranges served without a blob read). It depends on
+  the cache's state at the call, which the target does not model (SR-C10).
+- Which page the cache evicts. Only the bytes of a read are judged [21].
+
+### Failure classes
+
+Each class panics from a `#[cold] #[inline(never)]` function named after it, and the first line
+of the message starts with the same `[class]` tag followed by the invariant id, as in
+`storage_differential`. The class depends only on the check that fired.
+
+| Class | Meaning | Invariants |
+|---|---|---|
+| `read_bytes` | A read that completed returned bytes that differ from the model | SR-I1 |
+| `read_incomplete` | A read or a reader did not finish before the deadline | SR-I2a |
+| `read_error` | A read that was not cancelled returned an error | SR-I2b |
+| `single_fetch_count` | The opening read its page from the blob a number of times other than one | SR-I3 |
+
+### Files and interfaces
+
+| File | Role |
+|---|---|
+| `runtime/fuzz/fuzz_targets/shared_reads.rs` | New. Only imports and `fuzz_target!(|input: FuzzInput| { fuzz(input); });` |
+| `runtime/fuzz/src/shared_reads.rs` | New library module: input, decoding, samplers, `Counter`, the run, the oracle |
+| `runtime/fuzz/src/lib.rs` | Declares the module. The shared `decode` is used unchanged |
+| `runtime/fuzz/tests/shared_reads_acceptance.rs` | New. The regression suite of SR-R18 |
+| `runtime/fuzz/Cargo.toml` | The feature and the bin entry of Placement and build |
+| `runtime/src/utils/buffer/paged/{cache,sealed,writer,view}.rs` | Code under test, unchanged: `Sealed` reads, `Writer::new`, `append`, `seal`, `CacheRef::new`, `CacheRef::clear` |
+| `runtime/src/mocks.rs` | `MigratingReadBlob`, unchanged |
+
+- **SR-R16.** The module MUST export these items with these contracts:
+
+  | Item | Contract |
+  |---|---|
+  | `FuzzInput { pages: u64, cache_pages: usize, opening: Opening, readers: Vec<Vec<Op>>, entropy: Entropy }` | Public fields. `Arbitrary` as SR-R5. A hand-written value is taken as it is; values past the bounds or against SR-R4 are a test error |
+  | `Opening { page: u64, first: Op, second: Op }` | Read A is `first`, read B is `second` (SR-R9) |
+  | `Op { form: Form, ranges: Vec<(u64, usize)>, drop: bool }` and `Form::{ReadAt, ReadInto, ReadRangesInto}` | One operation. For `ReadAt` and `ReadInto` `ranges` holds one range |
+  | `fuzz(input: FuzzInput)` | Runs `run` with the identity seam, and on a violation panics through the class function |
+  | `run<S: Blob>(input: &FuzzInput, seam: impl FnOnce(Counter) -> S) -> Outcome` | Runs the whole run with `MigratingReadBlob::new(seam(Counter(blob)), false)` as the blob of SR-R3. It does not panic on a violation: it stops at the first one and returns it. A panic raised by the code under test or by the seam passes through |
+  | `Counter` | The counting wrapper of SR-R13. Public, so that a seam can wrap it |
+  | `Outcome { trace: Trace, violation: Option<Violation>, measured: BTreeSet<Invariant>, cancellations: usize, opening_reads: BTreeMap<u64, usize>, run_reads: BTreeMap<u64, usize> }` | `Invariant` has one value per row SR-I1 to SR-I3. `Violation` holds the invariant, the class, whether a read was cancelled before it, and the location of SR-R14 as an enum with one variant per kind, each with only its own fields. `opening_reads` holds the counts at the end of the opening, `run_reads` the counts of the free phase at the end of the run, by physical page |
+  | `Trace` | `PartialEq` and `Debug`. One record per read that completes, fails, or is cancelled, in the order this happens: the location of the read (kind 1 or 2 of SR-R14), the form, the ranges, the drop flag, and the result: cancelled, failed with the error, or completed with its bytes. A read still pending when the deadline wins has no record; the SR-I2a violation names it (SR-R14, kind 4). Dropping the read phase at the deadline is not a cancellation and does not count in `cancellations` |
+  | `sample_drop`, `sample_opening_drop` | The samplers of SR-R7 |
+
+- **SR-R17.** Determinism [16]. For every input, two calls of `run` with the identity seam MUST
+  return equal `Outcome` values. The harness MUST NOT read the wall clock or OS randomness, and
+  no result may depend on the iteration order of a hash map. The order in which the runtime polls
+  the readers comes from its RNG, which the input seeds.
+
+### Regression suite
+
+- **SR-R18.** The suite MUST be a set of `#[test]` functions in `runtime/fuzz/tests/
+  shared_reads_acceptance.rs`, written from this spec. It MUST hold:
+  1. The fixed inputs of SR-V6 (the empty input and the 256 inputs of 8 bytes) decode and run
+     with no violation. Every one has `measured` equal to SR-I1, SR-I2a, SR-I2b and SR-I3, at
+     least two readers, and a blob with more pages than the cache. The empty input's opening
+     shows read A pending after its first poll (SR-I3 measured) [7]. In every decoded fixed
+     input the first operations of all readers touch one common page other than the opening's
+     page, and the first range of each starts in that page (SR-R6) [5].
+  2. Replay: every fixed input run twice gives equal `Outcome` values (SR-R17) [16].
+  3. For every invariant, the negative control of the table below: the run returns a violation
+     whose invariant is the row's id and whose class is the row's class, and it is the first
+     violation of the run. For SR-I4 the panic passes through `run`.
+  4. The samplers on the fixed bytes of SR-R7.
+  5. The two plant inputs of SR-F1 and SR-F2 run with no violation in the repository tree. These
+     are the tests `plant_f1_input_runs_clean` and `plant_f2_input_runs_clean`. On a violation
+     they panic with a message whose first line holds the violation's `[class]` tag and
+     invariant id.
+  6. An ignored test `batch_read_counts` that prints, for every fixed input, `run_reads`, the
+     number of free-phase reads whose ranges touch each page, the pages read more than once,
+     and the number of cancellations. It fails when the count of a page is above the number of
+     free-phase reads that touch it ("Not judged", the bound). It is the evidence of SR-V10 [12].
+
+Negative controls. "Plain input" means a hand-written `FuzzInput` with 8 pages, 4 cache pages,
+an opening on page 1 with read A `ReadAt (64, 64)` not flagged and read B `ReadAt (64, 64)`, two
+readers each with one `ReadAt (64, 64)` not flagged, and the entropy of the 8-byte fixed input 0.
+The seam wraps `Counter`.
+
+| Invariant | Input | Seam |
+|---|---|---|
+| SR-I1 | plain input | A read of the physical range of page 1 returns, instead, the bytes of the physical range of page 2, read through `Counter`. Their checksum is valid, so the cache accepts them |
+| SR-I2a | plain input | A read of the physical range of page 1 never resolves (it awaits `futures::future::pending()`) |
+| SR-I2b | plain input | A read of the physical range of page 1 returns `Err(Error::ReadFailed)` |
+| SR-I3 | plain input | A read of the physical range of page 1 is forwarded through `Counter` twice, and the second result is returned |
+| SR-I4 | plain input | `start_sync` returns a handle that never resolves, so the construction waits with no sleeper and the runtime panics with `runtime stalled` |
+
+### Reach
+
+- **SR-R19.** A short run from an empty corpus MUST reach these four behaviours of `cache.rs`
+  [14]. The step SR-V7 measures them by line coverage. The script there finds each line by its
+  text, so this spec names code, not line numbers; the line numbers are in the evidence only.
+
+  | Id | Behaviour | Seen in the coverage when |
+  |---|---|---|
+  | SR-B1 | A read joins a standalone fetch | the `Entry::Occupied` arm of `read_after_page_fault` (`let entry = o.into_mut();`) or the joined-fetch arm of `read_after_misses` (`let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());`) has a hit |
+  | SR-B2 | A read joins a batch and gets a page from it | `Subscription::joining` (`state.inboxes.push(Some(VecDeque::new()));`) has a hit, and the delivery to a joiner in `Batch::publish` (`inbox.push_back((tag, result.clone()));`) has a hit |
+  | SR-B3 | A cancelled standalone waiter with a survivor: a waiter is cancelled after a second waiter registered on the same fetch generation and completed it | in `PageFetchGuard::drop`, the `return;` right after `let Entry::Occupied(mut current) = cache.page_fetches.entry(self.key) else {` has a hit: an armed guard found its fetch already removed |
+  | SR-B4 | A cancelled batch subscriber with a survivor: a joiner is cancelled with pages still undelivered, and the batch goes on for the others | in `Batch::publish`, `if let Some(inbox) = &mut inboxes[reader] {` has more hits than the delivery inside it: the batch published a page to a joiner that was gone |
+
+  Decision, 2026-11-24 [22]: SR-B3 is read as above. With a read held for one poll, a cancelled
+  standalone waiter never leaves a second waiter pending on the same fetch, because the second
+  waiter drives the fetch to completion in the turn it joins (SR-C4). The case of a standalone
+  fetch kept alive for a pending survivor is a limit of this proof and future work (Future work
+  33).
+
+### Planted faults
+
+Each planted fault is a patch of `runtime/src/utils/buffer/paged/cache.rs`, applied only in a
+disposable worktree (SR-V8). Its text is in this spec, in a fenced `diff` block at column 0 under
+its rule; the script of SR-V8 reads it from here. The line numbers of the patches are those of
+the tree on 2026-11-24. When a context line no longer matches, `git apply` refuses the patch, and
+the diff MUST be written again from the description by function and expression, in this spec,
+before SR-V8 runs. Each plant proves only its named check [15].
+
+- **SR-F1.** A wrong page delivered to a joiner. In `Batch::publish`, the delivery to each joiner
+  pushes the tag `0` instead of the tag the joiner selected the page with: the expression
+  `(tag, result.clone())` becomes `(0, result.clone())`. The loop binding `tag` becomes `_tag`
+  only so that the build passes, because the workspace denies the unused-variable warning; that
+  rename changes nothing else. A joiner that selected two or more pages of one batch then copies
+  every page into the pieces of its first page.
+
+  Trace: `pages` 8, `cache_pages` 4; the opening on page 0, read A `ReadAt (0, 64)` not flagged,
+  read B `ReadAt (0, 64)`; two readers, each with one operation `ReadRangesInto [(128, 192)]`
+  (pages 2 to 4), not flagged; the entropy of the 8-byte fixed input 0. Both readers are first
+  polled in the same cycle; the one polled first starts the batch, the other joins all three of
+  its pages. So the trace triggers the fault whatever order the runtime picks. Must fail: SR-I1,
+  class `read_bytes`, on the joiner's read. In the repository tree it runs with no violation.
+
+The patch of SR-F1:
+
+```diff
+diff --git a/runtime/src/utils/buffer/paged/cache.rs b/runtime/src/utils/buffer/paged/cache.rs
+--- a/runtime/src/utils/buffer/paged/cache.rs
++++ b/runtime/src/utils/buffer/paged/cache.rs
+@@ -255,9 +255,9 @@
+             cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
+         }
+         drop(cache);
+-        for (tag, reader) in joiners {
++        for (_tag, reader) in joiners {
+             if let Some(inbox) = &mut inboxes[reader] {
+-                inbox.push_back((tag, result.clone()));
++                inbox.push_back((0, result.clone()));
+             }
+         }
+         if let Some(inbox) = &mut inboxes[STARTER] {
+```
+
+- **SR-F2.** A cancelled joiner takes the starter's pages: the lost fetch of [15], in the batch
+  path [22]. In `Drop for Subscription`, the expression `inboxes[self.reader]` becomes
+  `inboxes[STARTER]`. A joiner that goes away then takes the starter's inbox, and the starter's
+  read fails with `ReadFailed` once the batch ends without delivering its pages.
+
+  Trace: `pages` 8, `cache_pages` 4; the opening as in SR-F1; two readers, each with one operation
+  `ReadRangesInto [(128, 256)]` (pages 2 to 5), reader 0 not flagged and reader 1 flagged. The
+  batch has four pages, so a joiner stays pending after its first poll. The test uses the first
+  entropy `i` from 0 to 255 (the 8-byte fixed input `i`) whose run, in the repository tree, has
+  `run_reads` equal to one read of each of the physical pages 2 to 5 and one cancellation: in
+  that run reader 1 joined reader 0's batch and was cancelled. When the runtime polls reader 1
+  first, it starts the batch and is cancelled in the same turn, and reader 0 reads pages 2 and 3
+  again; those entropies are skipped. Must fail: SR-I2b, class `read_error`, on reader 0's read.
+  In the repository tree it runs with no violation.
+
+  The patch also breaks a joiner that completes and goes away before the starter, with no
+  cancellation (SR-C14). Its trace is a cancellation; the proof is about the check, SR-I2b, not
+  about the cancellation path alone.
+
+The patch of SR-F2:
+
+```diff
+diff --git a/runtime/src/utils/buffer/paged/cache.rs b/runtime/src/utils/buffer/paged/cache.rs
+--- a/runtime/src/utils/buffer/paged/cache.rs
++++ b/runtime/src/utils/buffer/paged/cache.rs
+@@ -450,7 +450,7 @@
+ impl Drop for Subscription {
+     fn drop(&mut self) {
+         // Stop deliveries to this reader, and free those it never took after unlocking.
+-        let inbox = self.batch.state.lock().inboxes[self.reader].take();
++        let inbox = self.batch.state.lock().inboxes[STARTER].take();
+         drop(inbox);
+     }
+ }
+```
+
+### Cases left out
+
+| Id | Not covered | Reason |
+|---|---|---|
+| SR-X1 | Real threads, and the tokio and io_uring runtimes | [19]. The deterministic runtime runs one task at a time |
+| SR-X2 | Several blobs sharing one cache, partial tail pages, live writes, `Writer` reads and snapshots | [2, 20]. One immutable sealed blob of full pages |
+| SR-X3 | Corruption, read errors and other storage failures | [2, 20]. Storage never fails, so every read error is a violation (SR-I2b) |
+| SR-X4 | Invalid, out-of-range and zero-length reads | [20]; SR-R4, SR-C9; Future work 46 |
+| SR-X5 | `read_up_to`, `read_many_into`, the synchronous cache-only reads, replay and prefetch | [20] |
+| SR-X6 | A standalone fetch kept alive for a pending survivor (the `waiters -= 1` arm of `PageFetchGuard::drop`) | Not reachable with a read held for one poll [22]; SR-C4 |
+| SR-X7 | A batch whose starter is cancelled while joiners wait | Not reachable: a starter creates its batch in its first poll, and a flagged starter is dropped in that same turn, before any other read can join (SR-R10) |
+| SR-X8 | An exact count of backend reads in the free phase | [12]. Recorded, and held only to the bound of one read per touching read in the evidence (SR-V10) |
+
+### Choices made
+
+| Id | Choice | Reason | What it costs |
+|---|---|---|---|
+| SR-C1 | The target is `shared_reads`, behind the feature `shared-reads`, in `runtime-all`, and runs on FuzzCorp only | The rule this spec has for the other new targets (SF-C8) | It does not run in `slow.yml` |
+| SR-C2 | `PAGE_SIZE` is fixed at 64 | Small pages give many pages in a small blob, so reads cross pages and share them often. The intents fuzz the counts, not the page size [7] | Other page sizes, and pages that do not align with blob pages, are not explored |
+| SR-C3 | The cache always holds fewer pages than the blob | [4] asks this of the baseline; keeping it for every input means every run can evict | A run where the whole blob fits in the cache is not explored |
+| SR-C4 | SR-B3 and SR-F2 as decided on 2026-11-24 [22] | With a hold of one poll, the second waiter of a standalone fetch drives it to completion in the turn it registers: the mock's read yields once and wakes the shared future, and the next clone that polls a woken idle future polls it again (`runtime/src/mocks.rs:820-845`; `utils/src/futures/shared.rs:239-305`, `344-348`). A batch is different. Its reads run in a `FuturesUnordered`, which yields once two of its reads woke themselves in one poll (`futures-util` 0.3.34, `src/stream/futures_unordered/mod.rs:548-556`). So the starter's first drive starts two reads, and a joiner that drives the batch in the same cycle first polls the reads not started yet. With four pages or more, that drive starts two more reads and yields: the joiner stays pending, can be cancelled, and the starter survives (the trace of SR-F2). With three pages, the same drive finishes the batch, and the joiner completes (the trace of SR-F1). A joiner that joins later can stay pending in other schedules too | SR-X6: a fault in the standalone "keep the fetch for the others" branch is not detected |
+| SR-C5 | The opening's read A is `read_at` or `read_into`, flagged in 1 draw of 2; read B is never flagged | Read A must install a standalone fetch, which only these two forms do: `read_ranges_into` never starts a standalone fetch, it starts or joins batches and joins standalone fetches (`cache.rs:818-925`). Read B must survive [11] | None for the forms: `read_ranges_into` is covered as a joiner of the opening's fetch (read B) and as a starter and joiner of batches in the free phase. Read B is never cancelled, but it completes on its first poll in every run the prototype made, so a flag would not cancel it |
+| SR-C6 | The free phase starts after the opening ends | SR-I3 counts the reads of the opening alone | The readers never overlap with the opening's two reads |
+| SR-C7 | One deadline of 10 s of simulated time for the whole read phase | A prototype of this scenario at these bounds took at most 12 ms of simulated time over 2,000 random runs, and 5 ms with every count at its maximum. Time advances 1 ms per cycle and skips to the next sleeper when no task is ready (`runtime/src/deterministic.rs:367-385`, `396-453`), so a lost wakeup reaches the deadline at once and a busy loop reaches it after 10,000 cycles | A reader that is only slow, but finishes after 10 s, is reported |
+| SR-C8 | A free-phase operation is flagged in 1 draw of 4 | Most reads complete and are checked; cancellations are still common | Runs with many cancellations are rarer |
+| SR-C9 | Every range has at least 1 byte, and the ranges of one read touch at most 4 pages | Zero-length ranges are left out [20]. `MAX_SPAN` = 4 admits batches of four pages, the size at which a joiner of the same cycle stays pending (SR-C4), which SR-B4 and the trace of SR-F2 need | Batches of more than four pages are not explored (Future work 39), and zero-length ranges are never issued (Future work 46) |
+| SR-C10 | The number `read_ranges_into` returns is not judged | It depends on the cache state at the call, which the target does not model | A wrong count of served ranges is not detected |
+| SR-C11 | The counting wrapper sits between the mock and the storage blob, and counts per physical page | [11] needs the count of one page while other pages are read; the mock counts all reads together (`MigratingReadBlob::reads`) | None |
+| SR-C12 | The patches of SR-F1 and SR-F2 are fenced `diff` blocks at column 0 | The script of V9 refuses a second `diff` block indented by two spaces (SF-C12) | The two scripts read different block forms of one file |
+| SR-C13 | SR-F1 also renames the loop binding `tag` to `_tag` | The workspace denies warnings, and the plant leaves `tag` unused | None: the rename changes no behaviour |
+| SR-C14 | SR-F2 is the expression `self.reader` changed to `STARTER` in `Drop for Subscription` | It is one expression, it looks like a real slip, and its trace is a cancelled joiner. A cancellation-only plant would need new code | The patch also breaks a joiner that completes first, so its detection does not show that the cancellation path alone is checked |
+| SR-C15 | The first operation of every reader starts in one hot page `h`, other than the opening's page; later operations use any pages (SR-R6) | [5] asks that the pages of one reader's reads overlap those of other readers; one shared page makes it hold for every decoded input, and it makes joins on page `h` common in the first cycle | The first reads of the readers all meet at one page; a free phase whose readers never meet is not explored |
+
+### Expected findings
+
+None. Reading `cache.rs` and running a prototype of this scenario over 2,000 random runs at these
+bounds gave no violation. The two planted faults are deliberate and never applied in the
+repository tree.
+
+### Limits of the proof
+
+What the steps of SR-V do not show [18]:
+
+- Real-thread races, lock-order bugs, and the tokio and io_uring runtimes (SR-X1) [19].
+- A standalone fetch kept alive for a pending survivor, and a batch whose starter is cancelled
+  while joiners wait (SR-X6, SR-X7). Faults on those two paths are not detected [22].
+- Schedules come only from the runtime's RNG. A schedule that no seed gives is never run, and the
+  target cannot ask for one.
+- The behaviour reach of SR-B is measured on one short run. It shows that each behaviour occurs,
+  not how often, and not every way it can occur.
+- Each planted fault proves only its named check. SR-F2 does not show that the cancellation path
+  alone is checked (SR-C14). The negative controls show that each invariant can fire, at the seam.
+- Batch read counts are not asserted (SR-X8), so a batch that reads a page more often than the
+  cache's contract allows is not reported.
+- One blob of full pages, successful storage, three read forms (SR-X2 to SR-X5).
+- A clean smoke run does not show the absence of faults.
+
 ## Validation after implementation
 
 For every target:
@@ -1669,6 +2196,142 @@ echo "PLANT OK"
 
 What these steps do not show is in [Limits of the proof](#limits-of-the-proof).
 
+### End-to-end verification of `shared_reads`
+
+All steps below make acceptance [13 to 18]. `N` stands for the pinned nightly, currently
+`nightly-2026-11-12`; SR-V7 also needs its `llvm-tools-preview` component. Commands run from the
+repo root.
+
+| # | Command or check | Result to see | Proves |
+|---|---|---|---|
+| SR-V1 | Record the base revision before the build starts (`git rev-parse HEAD`). At acceptance, with the build uncommitted: `git status --short runtime/src` and `git diff --stat <base> -- runtime/src`. A comparison between two commits after a later commit is extra evidence, not part of acceptance | Both print nothing: no change under `runtime/src`, committed or not, since the base revision | SR-R1 |
+| SR-V2 | Read `runtime/fuzz/fuzz_targets/shared_reads.rs` | Only imports and the typed `fuzz_target!` entry | SR-R16 |
+| SR-V3 | `cargo +N fuzz build --fuzz-dir runtime/fuzz --features runtime-all`, then the same without `--features` | Both succeed. The second builds only `buffer`, `blob_integrity` and `blob_creation` | SR-C1 |
+| SR-V4 | Clippy with `-D warnings` on `runtime/fuzz/Cargo.toml` with `--all-targets --features runtime-all`, and `rustfmt --check` on the changed files, both with the pins of `.github/toolchains.toml` | Clean | fuzzing guide |
+| SR-V5 | `cargo +N test --manifest-path runtime/fuzz/Cargo.toml --test shared_reads_acceptance` | The suite of SR-R18 passes: the fixed inputs run clean and measure SR-I1 to SR-I3, each fixed input run twice gives equal outcomes, one negative control per invariant names its invariant, the samplers give their fixed values, and both plant inputs run clean | SR-I1 to SR-I4, SR-R5 to SR-R8, SR-R15, SR-R17, [7, 13, 16] |
+| SR-V6 | The fixed inputs: the empty input and the 256 inputs of 8 bytes that hold `i` as a little-endian `u64`, for `i` from 0 to 255. The suite builds them in memory; no file is needed | Used by SR-V5 items 1 and 2, and as the entropies of SR-F2 | SR-R17, [16] |
+| SR-V7 | The reach script below, `bash <file> N` | `REACH OK` and exit 0: from an empty corpus, a 300-second run reaches SR-B1 to SR-B4. The script prints the lines and hit counts it used, which go into the evidence | SR-R19, [14] |
+| SR-V8 | The plant script below, `bash <file> N F1`, then `bash <file> N F2` | Each prints `PATCH OK` and `PLANT F1 OK` or `PLANT F2 OK` and exits 0: in the worktree the plant test fails with the named class and invariant, a fuzz run from an empty corpus fails the same way within 300 seconds and writes one artifact, the artifact passes in the repository tree, and `runtime/src` holds no change afterwards | SR-F1, SR-F2, SR-I1, SR-I2b, [15] |
+| SR-V9 | `cargo +N fuzz run --fuzz-dir runtime/fuzz --features runtime-all shared_reads "$(mktemp -d)" -- -max_total_time=600 -timeout=60` | From an empty corpus: no crash, no hang, no out-of-memory, no invariant fires. The executions per second are reported | SR-I1 to SR-I4, [17] |
+| SR-V10 | `cargo +N test --manifest-path runtime/fuzz/Cargo.toml --test shared_reads_acceptance -- --ignored batch_read_counts --nocapture` | The test passes: no page is read more often than the free-phase reads that touch it. The per-page counts of every fixed input go into the build report, with the reasons of "Not judged" that each run admits: eviction in every run, and a cancelled sole standalone waiter or batch starter only in a run with a cancellation. The report does not have to say which reason produced a given duplicate: the public API does not show it | [12], [22] |
+| SR-V11 | SR-V3 passed and `shared_reads` is in `runtime-all` | The target is ready for the next FuzzCorp bundle. Uploading is a separate, manual step | SR-C1 |
+
+The reach script of SR-V7. Copy the block into a file and run the file with `bash` from the repo
+root. It finds each line of SR-R19 by its text, so it holds no line numbers; when a text is
+missing or occurs more than once, it stops, and SR-R19 must then be written again from the
+current `cache.rs`.
+
+```bash
+set -euo pipefail                         # a file, run from the repo root: bash <file> <pinned nightly>
+N="$1"; T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+rm -rf runtime/fuzz/coverage/shared_reads                 # no profile of an earlier run is merged in
+mkdir "$T/corpus"
+cargo "+$N" fuzz run --fuzz-dir runtime/fuzz --features runtime-all shared_reads "$T/corpus" \
+    -- -max_total_time=300 -timeout=60
+cargo "+$N" fuzz coverage --fuzz-dir runtime/fuzz --features runtime-all shared_reads "$T/corpus"
+BIN="$(find target -path '*/coverage/*/release/shared_reads' -type f)"
+test "$(printf '%s\n' "$BIN" | grep -c .)" = 1                       # exactly one coverage binary
+COV="$(ls "$(rustc "+$N" --print sysroot)"/lib/rustlib/*/bin/llvm-cov)"
+"$COV" export -format=lcov -instr-profile=runtime/fuzz/coverage/shared_reads/coverage.profdata \
+    "$BIN" > "$T/all.lcov"
+cat > "$T/reach.py" <<'EOF'
+import sys
+lcov, src = sys.argv[1], sys.argv[2]
+lines = open(src).read().splitlines()
+hits, cur = {}, None
+for row in open(lcov):
+    row = row.strip()
+    if row.startswith('SF:'):
+        cur = row[3:].endswith(src)
+    elif cur and row.startswith('DA:'):
+        n, c = row[3:].split(',')[:2]
+        hits[int(n)] = int(c)
+assert hits, 'no coverage record of ' + src
+
+def line(text):
+    found = [i + 1 for i, l in enumerate(lines) if text in l]
+    assert len(found) == 1, f'{len(found)} lines hold: {text}'
+    return found[0]
+
+def count(n):
+    assert n in hits, f'line {n} is not instrumented'
+    return hits[n]
+
+join_fetch = line('let entry = o.into_mut();')
+join_fetch_batched = line('let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());')
+joining = line('state.inboxes.push(Some(VecDeque::new()));')
+delivery = line('inbox.push_back((tag, result.clone()));')
+gone = line('let Entry::Occupied(mut current) = cache.page_fetches.entry(self.key) else {') + 1
+assert lines[gone - 1].strip() == 'return;', 'the line after the guard lookup is not `return;`'
+inbox = line('if let Some(inbox) = &mut inboxes[reader] {')
+checks = {
+    'SR-B1': count(join_fetch) > 0 or count(join_fetch_batched) > 0,
+    'SR-B2': count(joining) > 0 and count(delivery) > 0,
+    'SR-B3': count(gone) > 0,
+    'SR-B4': count(inbox) > count(delivery),
+}
+for name, n in [('join_fetch', join_fetch), ('join_fetch_batched', join_fetch_batched),
+                ('joining', joining), ('delivery', delivery), ('gone', gone), ('inbox', inbox)]:
+    print(f'{name}: {src}:{n} hits {count(n)}')
+for b, ok in checks.items():
+    print(b, 'OK' if ok else 'NOT REACHED')
+covered = [n for n, c in hits.items() if c > 0 and n < line('mod tests {')]
+total = [n for n in hits if n < line('mod tests {')]
+print(f'{src}: {len(covered)} of {len(total)} instrumented lines before the test module')
+print('REACH OK' if all(checks.values()) else 'REACH FAILED')
+sys.exit(0 if all(checks.values()) else 1)
+EOF
+python3 -I "$T/reach.py" "$T/all.lcov" runtime/src/utils/buffer/paged/cache.rs
+```
+
+The plant script of SR-V8. Copy the block into a file and run the file with `bash` from the repo
+root. Do not paste it into an interactive shell: a failed check ends the shell it runs in. Its
+arguments are the pinned nightly and the plant, `F1` or `F2`. It exits 0 and prints
+`PLANT <id> OK` exactly when every step holds. On any other end, an interrupt included, it removes
+the worktree and its temporary directory and exits with a failure.
+
+```bash
+set -euo pipefail          # a file, run from the repo root: bash <file> <pinned nightly> <F1|F2>
+N="$1"; ID="$2"; T="$(mktemp -d)"; W="$T/plant"; P="$T/plant.patch"
+case "$ID" in
+    F1) CLASS='[read_bytes]'; INV='SR-I1';  TEST=plant_f1_input_runs_clean; ADDED=2; REMOVED=2 ;;
+    F2) CLASS='[read_error]'; INV='SR-I2b'; TEST=plant_f2_input_runs_clean; ADDED=1; REMOVED=1 ;;
+    *) echo "usage: bash <file> <pinned nightly> F1|F2"; exit 2 ;;
+esac
+cleanup() { [ ! -e "$W" ] || git worktree remove --force "$W"; rm -rf "$T"; }
+trap cleanup EXIT
+trap 'echo "SR-V8 FAILED at line $LINENO"' ERR
+# The patch is the fenced diff block at column 0 right after the line "The patch of SR-<id>:".
+awk -v mark="The patch of SR-$ID:" '$0 == mark {want = 1; next}
+     want && /^```diff$/ {on = 1; next} on && /^```$/ {exit} on {print}' runtime/fuzz/SPEC.md > "$P"
+test -s "$P"
+test "$(git apply --numstat "$P")" = "$(printf '%s\t%s\t%s' "$ADDED" "$REMOVED" runtime/src/utils/buffer/paged/cache.rs)"
+echo "PATCH OK"
+# Applied in the disposable worktree only. No RUSTFLAGS, no --cap-lints.
+git worktree add --detach "$W" HEAD
+rsync -a --exclude target --exclude corpus --exclude artifacts --exclude coverage \
+    runtime/fuzz/ "$W/runtime/fuzz/"
+git -C "$W" apply "$P"
+# A command that must fail in the worktree, with the class and the invariant in one line of output.
+caught() {
+    if (cd "$W" && "$@") > "$T/log" 2>&1; then echo "not caught: $*"; return 1; fi
+    grep -F "$CLASS" "$T/log" | grep -F "$INV" | cut -c 1-100 || { tail -n 20 "$T/log"; return 1; }
+}
+caught cargo "+$N" test --manifest-path runtime/fuzz/Cargo.toml --test shared_reads_acceptance "$TEST"
+mkdir "$T/corpus" "$T/found"
+caught cargo "+$N" fuzz run --fuzz-dir runtime/fuzz --features runtime-all shared_reads "$T/corpus" \
+    -- -max_total_time=300 -artifact_prefix="$T/found/"
+test "$(ls "$T/found" | grep -c '^crash-')" = 1                                    # exactly one artifact
+# The artifact must pass in the repository tree, where the plant is not applied.
+cargo "+$N" fuzz run --fuzz-dir runtime/fuzz --features runtime-all shared_reads "$T"/found/crash-*
+cleanup
+test -z "$(git status --short runtime/src)"                                       # no plant left
+echo "PLANT $ID OK"
+```
+
+What these steps do not show is in the limits of `shared_reads` (Limits of the proof, under
+Target `shared_reads`).
+
 ## Future work
 
 Each choice below narrows coverage or scope. The table records why it was made and how to lift it.
@@ -1678,7 +2341,7 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 1 | io_uring excluded | The custom executor and `storage/iouring.rs` / `network/iouring.rs` are never fuzzed | Add `iouring::Runner` as a third backend in `storage_differential` under `cfg(target_os = "linux")`. Run on hosts that allow io_uring (Docker's default seccomp profile blocks it) |
 | 2 | Public API only (`runtime/src` off limits) | io_uring internals (`Waiters`, `TimeoutWheel`, `ReadAtRequest` against the simulated kernel in `iouring/request.rs`, `WriteBuffers`) are unreachable, and tokio storage needs a full `Runner::start` | Add `cfg(fuzzing)` entry points one by one with approval, then fuzz those modules directly |
 | 3 | Fresh tokio runner per input | Low exec/s. On Linux every start runs `syncfs` over the whole filesystem | Use a persistent runtime thread with a fresh partition per input and forwarded panics, or a standalone storage hook (see 2) |
-| 4 | Sequential operations only | No concurrency: the AIO context pool, blocking-pool contention, `Pending`/`Tracker` races, reads overlapping writes, syncs in flight with writes | Start with concurrent read-only groups on stable ranges and a sync in flight. Then allow concurrent mutations with an oracle relaxed for overlapping ranges. Reproduce failures with a fixed worker count and `rr` |
+| 4 | Sequential operations only | Partly lifted: `shared_reads` runs concurrent readers of the page cache over one immutable blob on the deterministic runtime. Still no concurrency: the AIO context pool, blocking-pool contention, `Pending`/`Tracker` races, reads overlapping writes, syncs in flight with writes | Start with concurrent read-only groups on stable ranges and a sync in flight. Then allow concurrent mutations with an oracle relaxed for overlapping ranges. Reproduce failures with a fixed worker count and `rr` |
 | 5 | Faults off in `storage_differential`; no faults on tokio | Partly lifted: `storage_faults` exercises failed, partial and torn writes on the deterministic runtime, judged by the model only. On tokio, recovery after a failed or torn write is still never exercised | For tokio, inject faults below the runtime (dm-flakey, FUSE, `LD_PRELOAD`) |
 | 6 | tokio restarts are clean | Partly lifted: `storage_faults` simulates crashes with tearing on the deterministic runtime. The page cache survives a tokio restart, so real crash tearing never happens on tokio | Simulate crashes with block-level write logging (dm-log-writes, CrashMonkey style), or kill a child process in the middle of an operation |
 | 7 | Size caps (1 MiB offsets, 64 KiB lengths) | Large-file paths are missed: offsets past 4 GiB, `EFBIG` at ext4's 16 TiB limit on the fused `SYNC` write, which poisons the blob across opens | Add a tokio-only large-offset mode on sparse files, judged by the model, with the memory side skipped |
@@ -1694,7 +2357,7 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 17 | No Miri replay | Undefined behaviour that ASan cannot see (uninitialised `&mut [u8]`, provenance) is missed | Replay the corpora under Miri through a test that decodes inputs with the same `Arbitrary` code |
 | 18 | `iobuf` single-threaded | Races in clone, drop and promotion (`owner.rs` compare-exchange) are not fuzzed | Add a multi-threaded stress mode or a Shuttle model. Loom already covers parts of `owner.rs` |
 | 19 | Network differential deferred | `Sink`/`Stream` semantics on tokio (poisoning after cancel, partial reads, `peek`) are not compared against the deterministic network | Add a target that runs one script over loopback TCP on tokio and over the deterministic network |
-| 20 | Paged-buffer oracles deferred | `Sealed`, `read_ranges_into`, `recoverable_prefix_len` and concurrent cache readers (`mocks::ReadGate`) stay unchecked. `buffer` discards every result | Add oracles to `buffer` and a paged-writer target with a model |
+| 20 | Paged-buffer oracles deferred | Partly lifted: `shared_reads` checks `Sealed::read_at`, `read_into` and `read_ranges_into` against a model, with concurrent readers of one cache. `recoverable_prefix_len`, the writer's reads and `mocks::ReadGate` stay unchecked. `buffer` discards every result | Add oracles to `buffer` and a paged-writer target with a model |
 | 21 | No coverage target | Nothing shows when the targets plateau | Track per-file line coverage for `storage/tokio/*`, `storage/memory/*` and `iobuf/*` from fuzzcorp lineage coverage, and act on the gaps |
 | 22 | No sweep of leftover tokio directories | A timeout, out-of-memory kill or backend panic leaves a `commonware_runtime_fuzz_<pid>_<n>` directory that later processes never remove, because their pid differs | Remove stale `commonware_runtime_fuzz_*` directories of dead processes at startup |
 | 23 | Linux-only tokio paths checked by reading only | Native AIO `read_many`, O_DIRECT reads, `RWF_DONTCACHE` and the startup `syncfs` have not been executed under the harness; all smoke runs were on macOS | Run a short Docker-Linux smoke run of `storage_differential` before the first fuzzcorp deployment |
@@ -1707,3 +2370,17 @@ Each choice below narrows coverage or scope. The table records why it was made a
 | 30 | `storage_faults`: the images seen are the ones the deterministic injector produces | Images the contract allows but the injector never makes are not seen: it tears only writes issued under a write fault and drops every other unsynced write whole | Extend the injector upstream (a default tearing policy), or lift rows 5 and 6 for tokio |
 | 31 | `storage_faults`: one planted runtime fault (SF-R27) | The end-to-end proof on `runtime/src` covers the reopen cut only; the other invariants are proven at the seam | Add more plant diffs to this spec, one per durability rule, each in a rule of its own and with a mark of its own for the script of V9, and run each in a disposable worktree |
 | 32 | `storage_faults`: durability is seen only at a crash or a reopen (SF-R15, SF-R17) | A failure that makes data durable too early is not detected: a failed sync that syncs, a failed open that takes its reopen cut, a fused write with a sync fault that persists its bytes | Compare the durable image after every operation through a test accessor such as `Context::logical_blob` (`runtime/src/deterministic.rs:1086-1094`). This leaves the public contract (SF-X9), so it needs a separate decision |
+| 33 | `shared_reads`: a backend read is held for one poll (SR-C4, SR-X6) [22] | A standalone fetch is never kept alive for a pending survivor, so a fault in the branch of `PageFetchGuard::drop` that keeps the fetch for the other waiters is not detected | A fuzz-side blob wrapper over `MigratingReadBlob` that holds a read for 1 to k turns, with k from the input. It changes the construction [4, 19], so it needs a separate decision |
+| 34 | `shared_reads`: a cancelled read is dropped right after its first poll [6] (SR-X7) | A batch starter is never cancelled while joiners wait | Cancel a read after its n-th poll, with n from the input; together with row 33. Needs a separate decision |
+| 35 | `shared_reads`: no read failure and no live writer [2] (SR-X2, SR-X3) | A failed page read with joined readers (`Batch::fail`, the error of a standalone fetch) and reads during appends are not explored | Arm the deterministic read fault around chosen reads as a non-baseline choice, with an oracle that every joined read fails and no page is cached; then reads through a live `Writer` and its snapshots |
+| 36 | `shared_reads`: one blob, full pages, three read forms [20] (SR-X2, SR-X5) | Several blobs in one cache, a partial tail, `read_up_to`, `read_many_into`, the synchronous reads, replay and prefetch are not explored | Add them one at a time, each with its model |
+| 37 | `shared_reads`: free-phase backend read counts are held only to the bound of one read per touching read, in the evidence (SR-X8, SR-V10) [12] | A page read more often than eviction and the cancellations of the run explain, but still within that bound, is not reported | Model the cache's residency (its Clock2Q+ eviction) and the cancellations of each run, predict the exact count of every page, and assert it |
+| 38 | `shared_reads`: schedules come only from the runtime's RNG | A task order that no seed gives is never run | An input-driven task order needs a hook in the deterministic runtime (see row 2) |
+| 39 | `shared_reads`: `PAGE_SIZE` 64, at most 16 pages, a cache always smaller than the blob, reads over at most 4 pages (SR-C2, SR-C3, SR-C9) | Other page sizes, a blob that fits in the cache, and longer batches are not explored | Fuzz the page size and raise the bounds after the executions per second of SR-V9 are known |
+| 40 | `shared_reads`: deterministic runtime only [19] (SR-X1) | Real-thread races and lock-order bugs of the page cache are not explored | Run the same scenario on tokio with several workers, with the same model; replay failures with a fixed worker count |
+| 41 | `shared_reads`: the free phase starts after the opening ends (SR-C6) | Interleavings of the opening's two reads with the free readers are not explored | Spawn the readers before the opening's reads resolve, and count SR-I3 per fetch generation instead of over the opening as a whole |
+| 42 | `shared_reads`: the number `read_ranges_into` returns is not judged (SR-C10) | A wrong count of ranges served without a blob read is not detected | Model the cache's contents at the call (the pages resident when the read takes its first lock) and assert the count against it; the eviction policy makes this model the costly part |
+| 43 | `shared_reads`: a free-phase operation is flagged in 1 draw of 4, and the opening's read A in 1 draw of 2 (SR-C5, SR-C8) | Runs where most reads are cancelled are rare | Draw the flag rate per run from the input, as one more sampled field |
+| 44 | `shared_reads`: the planted fault SR-F2 also fires without a cancellation (SR-C14) | The end-to-end proof does not show that the cancellation path alone is checked | A plant that acts only when a subscription is dropped with pages still undelivered, written as a diff in this spec |
+| 45 | `shared_reads`: the first operation of every reader starts in one hot page (SR-C15) | A free phase whose readers never meet is not explored; it reaches no join, so it adds little | Draw per input whether the hot page is used |
+| 46 | `shared_reads`: only valid reads of at least one byte inside the blob (SR-X4, SR-C9) [20] | Zero-length ranges, reads that end past the blob, offsets that overflow, and range lists that `read_ranges_into` rejects are never issued, so the paths that refuse them (`validate_read_ranges`, the bounds checks of `View::read_into`) are not reached under concurrent readers | Add these reads as non-baseline operations, judged by their documented results: a zero-length range that starts at or before the blob's end succeeds and counts as served (`Sealed::read_ranges_into`); a read or range that ends past the blob, a zero-length one that starts past it included, returns `BlobInsufficientLength`; an overflowing offset returns `OffsetOverflow` (`runtime/src/utils/buffer/paged/view.rs:171-177`); a range list returns the same two errors for the same cases (`runtime/src/utils/buffer/paged/mod.rs:196-226`). Range lists whose ranges overlap stay out: the method documents a panic for them |
