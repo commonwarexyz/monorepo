@@ -32,10 +32,9 @@ impl Config {
 
 /// Filesystem storage with one logical open per blob.
 ///
-/// Errors from a durability barrier during content sync, or from the filesystem write of a
-/// [crate::WriteOptions::SYNC] request, remain errors on later opens through this instance until
-/// the blob is removed or recreated.
-/// Creation failures are retained only when the header is complete.
+/// Failed durability barriers during content sync remain errors on later opens through this
+/// instance until the blob is removed or recreated. Creation failures are retained only when
+/// the header is complete.
 ///
 /// On Linux, reads with [crate::ReadOptions::DONT_CACHE] use direct I/O where they can. An open's
 /// first such read opens a second, read-only `O_DIRECT` descriptor on the blob's file. The open

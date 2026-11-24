@@ -103,8 +103,7 @@ struct Hooks {
     /// Pause the next cached single-buffer plain write or resize after it enters the blocking
     /// pool.
     before_mutation: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
-    /// Pause the next sync after the filesystem operation completes, or a durable write whose
-    /// write failed.
+    /// Pause the next sync after the filesystem operation completes.
     after_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next start_sync worker after publishing its completion.
     after_start_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
@@ -687,23 +686,19 @@ impl crate::Blob for Blob {
                 bufs
             };
 
-            // A durable write holds the open's durability guard until it retains a failure, so a
-            // concurrent barrier cannot certify earlier writes after the write consumed the
-            // kernel's writeback error. It keeps the caller's buffers until the guard is released,
-            // so no buffer destructor runs under the guard.
-            let owners = sync.then(|| bufs.clone());
-            let durability = if sync { Some(file.durability()?) } else { None };
+            let _durability = if fused {
+                Some(file.durability()?)
+            } else {
+                None
+            };
             let result = Self::write_vectored_at(cache, &file, offset, &mut bufs, flags);
             #[cfg(test)]
-            if fused || (sync && result.is_err()) {
+            if fused {
                 file.wait_after_sync();
             }
-            if sync && let Err(error) = &result {
-                // A failed durable write may have consumed the kernel's writeback error, in its
-                // fused barrier or within the write itself, as on a synchronous inode or mount.
-                if fused {
-                    file.tracker.write();
-                }
+            if fused && let Err(error) = &result {
+                // A failed fused write may have consumed the kernel's writeback error.
+                file.tracker.write();
                 let (partition, name) = &file.key;
                 let error = match error {
                     Error::Io(error) => {
@@ -717,8 +712,6 @@ impl crate::Blob for Blob {
             if !fused {
                 file.tracker.complete();
             }
-            drop(durability);
-            drop(owners);
             if sync && !fused {
                 let seen = file.tracker.begin_sync();
                 file.flush(seen)?;
@@ -2022,66 +2015,6 @@ mod tests {
         );
     }
 
-    /// A durable write too large to fuse its barrier also poisons the open when its write
-    /// fails, since the write may have consumed the kernel's writeback error. A concurrent sync
-    /// waits for that and reports the failure.
-    #[tokio::test]
-    async fn test_failed_unfused_durable_write_poisons_the_open() {
-        let (storage, directory) = storage_for_reopen_test("unfused_write_error", Layout::ALL);
-        let path = directory.join("readonly");
-        std::fs::write(&path, b"").unwrap();
-        let blob = Blob::new(
-            File::options().read(true).open(&path).unwrap(),
-            0,
-            storage.hold.clone(),
-            storage
-                .pending
-                .admit("partition", b"readonly", false)
-                .unwrap()
-                .0,
-        );
-        let retained = |result: Result<(), Error>| {
-            matches!(result, Err(Error::BlobSyncFailed(partition, name, error))
-                if partition == "partition" && name == hex(b"readonly")
-                    && error.raw_os_error() == Some(libc::EBADF))
-        };
-
-        // Pause the write after its failed syscall, before it retains the failure.
-        let (entered, entering) = oneshot::channel();
-        let (release, gate) = mpsc::channel();
-        *blob.shared.test.after_sync.lock() = Some((entered, gate));
-        let bufs: IoBufs = (0..IOVEC_BATCH_SIZE + 1)
-            .map(|_| crate::IoBuf::from(b"x"))
-            .collect();
-        let mut write = Box::pin(blob.write_at(0, bufs, WriteOptions::SYNC));
-        assert!((&mut write).now_or_never().is_none());
-        entering.await.unwrap();
-        assert!(
-            blob.shared.durability.try_lock().is_none(),
-            "durable write released durability before retaining its failure"
-        );
-
-        // A competing sync cannot finish first, and then reports the retained failure.
-        let mut sync = Box::pin(blob.sync());
-        assert!((&mut sync).now_or_never().is_none());
-        release.send(()).unwrap();
-        let result = write.await;
-        assert!(
-            matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EBADF))
-        );
-        assert!(retained(sync.await));
-        assert!(retained(blob.sync().await));
-        drop(blob);
-        assert!(retained(
-            storage
-                .pending
-                .admit("partition", b"readonly", true)
-                .map(|_| ())
-        ));
-        drop(storage);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
     #[tokio::test]
     async fn test_invalid_write_range_leaves_open_clean() {
         // Validate physical extents with both header layouts before any mutation is recorded.
@@ -2193,68 +2126,6 @@ mod tests {
             let _ = self.release.recv();
             panic!("buffer owner dropped");
         }
-    }
-
-    /// Pauses as the write releases its buffer.
-    struct PausingOwner {
-        entered: Option<oneshot::Sender<()>>,
-        release: mpsc::Receiver<()>,
-    }
-
-    impl AsRef<[u8]> for PausingOwner {
-        fn as_ref(&self) -> &[u8] {
-            b"x"
-        }
-    }
-
-    impl Drop for PausingOwner {
-        fn drop(&mut self) {
-            let _ = self.entered.take().unwrap().send(());
-            let _ = self.release.recv();
-        }
-    }
-
-    /// A durable write releases the caller's buffers outside the open's durability guard, so a
-    /// buffer destructor may wait for a sync on the same open.
-    #[tokio::test]
-    async fn test_durable_write_releases_buffers_outside_durability() {
-        // On Linux, two chunks fuse the barrier into the write and the larger write does not.
-        let (storage, directory) = storage_for_reopen_test("owner_sync", Layout::ALL);
-        for chunks in [2, IOVEC_BATCH_SIZE + 1] {
-            let name = chunks.to_be_bytes();
-            let (blob, _) = storage.open("partition", &name).await.unwrap();
-            blob.write_at(0, b"prefix", WriteOptions::default())
-                .await
-                .unwrap();
-            let (entered, entering) = oneshot::channel();
-            let (release, released) = mpsc::channel();
-            let mut bufs = vec![crate::IoBuf::from(bytes::Bytes::from_owner(PausingOwner {
-                entered: Some(entered),
-                release: released,
-            }))];
-            for _ in 1..chunks {
-                bufs.push(crate::IoBuf::from(vec![b'x']));
-            }
-            let blob = Arc::new(blob);
-            let writing_blob = Arc::clone(&blob);
-            let writing =
-                ::tokio::spawn(
-                    async move { writing_blob.write_at(6, bufs, WriteOptions::SYNC).await },
-                );
-
-            // The destructor runs after the write released the guard, and a sync completes
-            // while it waits.
-            entering.await.unwrap();
-            assert!(
-                blob.shared.durability.try_lock().is_some(),
-                "buffer destructor ran under the durability guard, chunks={chunks}"
-            );
-            blob.sync().await.unwrap();
-            release.send(()).unwrap();
-            writing.await.unwrap().unwrap();
-        }
-        drop(storage);
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
