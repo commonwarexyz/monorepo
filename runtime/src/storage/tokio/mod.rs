@@ -32,9 +32,10 @@ impl Config {
 
 /// Filesystem storage with one logical open per blob.
 ///
-/// Failed durability barriers during content sync remain errors on later opens through this
-/// instance until the blob is removed or recreated. Creation failures are retained only when
-/// the header is complete.
+/// Errors from a durability barrier during content sync, or from the filesystem write of a
+/// [crate::WriteOptions::SYNC] request, remain errors on later opens through this instance until
+/// the blob is removed or recreated. Creation failures are retained only when the header is
+/// complete.
 ///
 /// On Linux, reads with [crate::ReadOptions::DONT_CACHE] use direct I/O where they can. An open's
 /// first such read opens a second, read-only `O_DIRECT` descriptor on the blob's file. The open
@@ -1638,7 +1639,8 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_durable_{}", random_suffix()));
         let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
-        shared::check_sync_writes(&storage, &storage.pending).await;
+        // Linux fuses a per-range sync into the write. Other platforms sync the whole file.
+        shared::check_sync_writes(&storage, &storage.pending, cfg!(target_os = "linux")).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }

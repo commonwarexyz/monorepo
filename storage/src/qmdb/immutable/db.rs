@@ -29,11 +29,11 @@ use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
-/// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
+/// Build the index by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
 /// `init_buffer` sizes the replay read buffer (in bytes).
-pub(super) async fn build_snapshot<F, E, K, V, C, T>(
+pub(super) async fn build_index<F, E, K, V, C, T>(
     context: E,
     translator: T,
     inactivity_floor_loc: Location<F>,
@@ -52,7 +52,7 @@ where
     // replay neither counts them first nor grows the table as it goes. Commits are not indexed,
     // so a log of tiny batches can leave the table one doubling larger than its entries need.
     let end = log.bounds().end;
-    let mut snapshot = Index::new(
+    let mut index = Index::new(
         context,
         translator,
         *inactivity_floor_loc,
@@ -73,11 +73,11 @@ where
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
             if let Operation::Set(key, _) = op {
-                snapshot.insert(key.as_ref(), loc);
+                index.insert(key.as_ref(), loc);
             }
         }
     }
-    Ok(snapshot)
+    Ok(index)
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -108,8 +108,8 @@ pub struct Db<
     pub(super) root: H::Digest,
 
     /// The location of the [Operation::Set] of every key set at or after the inactivity floor
-    /// the snapshot was built from, excluding pruned locations.
-    pub(super) snapshot: Index<T>,
+    /// the index was built from, excluding pruned locations.
+    pub(super) index: Index<T>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
@@ -164,7 +164,7 @@ where
         E: Spawner,
         C: authenticated::Backing<E> + 'static,
     {
-        // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
+        // Index reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
         let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
@@ -178,14 +178,14 @@ where
             .unwrap_or(Location::new(0));
 
         // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
-        // digests. Its inactivity floor is where the snapshot replay starts, so keys set before
+        // digests. Its inactivity floor is where the index replay starts, so keys set before
         // the floor are not loaded.
-        let (snapshot_context, translator, buffer) =
-            (context.child("snapshot"), cfg.translator, cfg.init_buffer);
-        let (mut journal, snapshot) = pending
+        let (index_context, translator, buffer) =
+            (context.child("index"), cfg.translator, cfg.init_buffer);
+        let (mut journal, index) = pending
             .finish_with(cfg.init_concurrency, |journal| async move {
-                build_snapshot(
-                    snapshot_context,
+                build_index(
+                    index_context,
                     translator,
                     inactivity_floor_loc,
                     &*journal,
@@ -206,7 +206,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             inactivity_floor_loc,
             metrics,
         };
@@ -262,7 +262,7 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        for loc in self.snapshot.get(key.as_ref()) {
+        for loc in self.index.get(key.as_ref()) {
             let loc = Location::new(loc);
             if loc < floor {
                 continue;
@@ -304,7 +304,7 @@ where
         // candidate for it, including collisions. They are read in one batch below, each location
         // once, and resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
-            for loc in self.snapshot.get(key.borrow().as_ref()) {
+            for loc in self.index.get(key.borrow().as_ref()) {
                 if loc < *floor {
                     continue;
                 }
@@ -482,7 +482,7 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(prune_loc).await?;
-        self.snapshot.prune(*self.bounds().start);
+        self.index.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
     }
@@ -585,24 +585,22 @@ where
         self.validate_batch(&batch)?;
         let db_size = self.bounds().end;
 
-        // Journal writes and snapshot inserts are independent until batch publication.
-        let apply_snapshot = async {
+        // Journal writes and index inserts are independent until batch publication.
+        let apply_index = async {
             for (key, entry) in batch.diff.iter() {
-                self.snapshot.insert(key.as_ref(), *entry.loc);
+                self.index.insert(key.as_ref(), *entry.loc);
             }
             for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
                 if batch.bounds.ancestors[i].size <= db_size {
                     continue;
                 }
                 for (key, entry) in ancestor_diff.iter() {
-                    self.snapshot.insert(key.as_ref(), *entry.loc);
+                    self.index.insert(key.as_ref(), *entry.loc);
                 }
             }
         };
-        let (journal, ()) = futures::join!(
-            self.journal.apply_batch(&batch.journal_batch),
-            apply_snapshot
-        );
+        let (journal, ()) =
+            futures::join!(self.journal.apply_batch(&batch.journal_batch), apply_index);
         self.journal = journal?;
 
         // Update state.

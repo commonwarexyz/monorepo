@@ -640,7 +640,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         H: Hasher<F, Digest = D> + 'static,
     {
         self.metrics.replayed_leaves.inc_by(digests.len() as u64);
-        let mem = self.snapshot();
+        let mem = self.view();
         let hasher = hasher.clone();
         let batch = self.new_batch();
         let batch = self
@@ -851,7 +851,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         &self.strategy
     }
 
-    pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
+    pub(crate) fn view(&self) -> Arc<Mem<F, D>> {
         Arc::clone(&self.mem)
     }
 

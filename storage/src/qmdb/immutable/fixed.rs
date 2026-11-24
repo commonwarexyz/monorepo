@@ -145,7 +145,7 @@ mod tests {
         assert!(matches!(result, Err(Error::HistoricalFloorPruned(size)) if size == old_end));
 
         // The rejected open truncated nothing, so the latest state reopens intact. Its floor 6
-        // makes the key at location 1 inactive, so the snapshot omits it.
+        // makes the key at location 1 inactive, so the index omits it.
         let db = Db::<F, _, Digest, Digest, Sha256, _, _>::init(context.child("latest"), cfg, None)
             .await
             .unwrap();
@@ -556,10 +556,8 @@ mod tests {
             // Indexing finishes while journal I/O is parked; publication waits for both.
             let metrics = ctx.encode();
             assert!(
-                metrics
-                    .lines()
-                    .any(|line| line == "delayed_snapshot_items 33"),
-                "snapshot inserts must progress while the journal is pending"
+                metrics.lines().any(|line| line == "delayed_index_items 33"),
+                "index inserts must progress while the journal is pending"
             );
             assert!(metrics.lines().any(|line| line == "delayed_size 3"));
             assert_eq!(pending.completions(), completions_before);
