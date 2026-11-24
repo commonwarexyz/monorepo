@@ -4,6 +4,11 @@
 //! shares one corpus across its application and wrapper variants by reserving
 //! the final byte of its raw entropy tape as a selector. The drivers:
 //!
+//! - [`ancestry_stream`]: walks the public ancestry stream, a clone of it,
+//!   and its prefix and fixed-sequence helpers over a block provider the input
+//!   scripts: parents ready at once, released later, never, missing, or of the
+//!   wrong height or digest. Fast and reaches answers the real mailbox never
+//!   gives, but runs no actor. Target: `exp_marshal_ancestry_stream`.
 //! - [`end_to_end`]: runs end-to-end `N4F1C3` clusters wired to real Simplex
 //!   consensus. The liveness targets use a Byzantine `Disrupter`; the standard
 //!   Twins mutator splits one compromised identity between a full engine and a
@@ -35,9 +40,11 @@
 //!   - Con: heavier (fewer iterations) and only valid
 //!     consensus orderings.
 
+pub mod ancestry_stream;
 pub mod end_to_end;
 pub mod store;
 
+pub use ancestry_stream::{AncestryStreamInput, fuzz_marshal_ancestry_stream};
 pub use end_to_end::{
     DropRule, FloorStart, MarshalDisrupterInput, MarshalTwinsInput,
     NotarizationBlockSplitScenarioInput, PreGstAction, Role, ScenarioTemplate,

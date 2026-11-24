@@ -11,6 +11,7 @@ use commonware_consensus::{
     Heightable, Reporter as _,
     marshal::{
         Config, Identifier, Start,
+        ancestry::Ancestry as _,
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
         mocks::{
             application::Application,
@@ -37,13 +38,15 @@ use commonware_parallel::Sequential;
 use commonware_resolver::Outcome;
 use commonware_runtime::{
     Clock, Handle, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    telemetry::metrics::histogram::Timed,
 };
 use commonware_storage::{
     archive::{Identifier as ArchiveIdentifier, prunable},
     translator::EightCap,
 };
 use commonware_utils::{FuzzRng, NZU64, NZUsize, non_empty, vec::NonEmptyVec};
-use std::{num::NonZeroUsize, time::Duration};
+use futures::StreamExt as _;
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 /// The store fuzzer runs on the cheap certificate mock; `K` is unchanged
 /// (ed25519), so only the certificate scheme differs from the harness default.
@@ -80,7 +83,7 @@ async fn setup_prunable_validator_cert_mock(
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
         start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
         mailbox_size: MAILBOX_SIZE,
-        view_retention: ViewDelta::new(10),
+        view_retention: VIEW_RETENTION,
         max_repair: NZUsize!(10),
         max_pending_acks: NZUsize!(1),
         block_codec_config: (),
@@ -174,9 +177,18 @@ async fn setup_prunable_validator_cert_mock(
 }
 
 const NUM_BLOCKS: u64 = 16;
-const FORCED_OPS: usize = 27;
-const MAX_OPS: usize = 96;
+const FORCED_OPS: usize = 29;
+/// Raised with `FORCED_OPS`, so the byte that draws the extra operations keeps
+/// its meaning.
+const MAX_OPS: usize = 98;
 const EVENT_SETTLE: Duration = Duration::from_millis(20);
+/// Views of verified blocks the actor keeps below an earlier finalization.
+const VIEW_RETENTION: ViewDelta = ViewDelta::new(10);
+/// How long one ancestry step may wait for the next block.
+const ANCESTRY_STEP: Duration = EVENT_SETTLE;
+/// Enough steps to walk from the newest block down to genesis and see the end,
+/// when every parent is local.
+const MAX_ANCESTRY_STEPS: usize = NUM_BLOCKS as usize + 2;
 /// Actor mailbox capacity; a burst longer than this spills into the overflow
 /// policy that coalesces hints, floors, and prunes.
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
@@ -311,6 +323,18 @@ pub enum StoreOp {
         block_idx: u8,
     },
     DirectLastCertificate,
+    /// Walks the ancestry stream from a canonical block. `bounded` asks for a
+    /// round-bound fallback; `serve` answers each parent fetch the stream
+    /// issues with the canonical parent.
+    Ancestry {
+        block_idx: u8,
+        bounded: bool,
+        serve: bool,
+    },
+    /// Reads the verified block of a canonical block's round.
+    GetVerified {
+        block_idx: u8,
+    },
 }
 
 /// Local annotation of a scripted block delivery, mirroring the block-bearing
@@ -338,7 +362,7 @@ impl DeliverAnnotation {
 
 impl Arbitrary<'_> for StoreOp {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(0..=199)? {
+        Ok(match u.int_in_range(0..=255)? {
             0..=24 => Self::SeedBlock {
                 block_idx: block_idx(u)?,
             },
@@ -411,6 +435,14 @@ impl Arbitrary<'_> for StoreOp {
             190..=199 => Self::DeliverBlock {
                 block_idx: block_idx(u)?,
                 annotation: u.arbitrary()?,
+            },
+            200..=229 => Self::Ancestry {
+                block_idx: block_idx(u)?,
+                bounded: u.arbitrary()?,
+                serve: u.arbitrary()?,
+            },
+            230..=255 => Self::GetVerified {
+                block_idx: block_idx(u)?,
             },
             _ => Self::Subscribe {
                 block_idx: block_idx(u)?,
@@ -485,6 +517,12 @@ impl Arbitrary<'_> for MarshalActorStoreInput {
             StoreOp::DirectPutCertificate { block_idx: 0 },
             StoreOp::Restart,
             StoreOp::ObserveApplication,
+            StoreOp::GetVerified { block_idx: 0 },
+            StoreOp::Ancestry {
+                block_idx: 0,
+                bounded: false,
+                serve: true,
+            },
         ];
         ops.extend(forced_ops);
         for _ in 0..extra_ops {
@@ -547,17 +585,178 @@ fn assert_returned_block(block: &Digested<B>, returned: &B, label: &str) {
     );
 }
 
+/// The block of `height` in the model: genesis at 0, else the canonical block.
+fn model_block<'a>(
+    canonical: &'a [Digested<B>],
+    genesis: &'a Digested<B>,
+    height: Height,
+) -> &'a Digested<B> {
+    match height.get() {
+        0 => genesis,
+        h => &canonical[(h - 1) as usize],
+    }
+}
+
+/// What the harness has handed the actor, for the verified-block and ancestry
+/// checks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StoreModel {
+    pub(crate) verified_ever: [bool; NUM_BLOCKS as usize],
+    pub(crate) verified_since_restart: [bool; NUM_BLOCKS as usize],
+    pub(crate) finalization_given: [bool; NUM_BLOCKS as usize],
+    pub(crate) max_final_view: Option<View>,
+}
+
+impl StoreModel {
+    /// A `SeedBlock` whose persistence returned `persisted`: only a persisted
+    /// block counts as verified.
+    fn seeded(&mut self, idx: usize, persisted: bool, hooks: &StoreHooks) {
+        if !persisted {
+            return;
+        }
+        if hooks.suppress_verified_ever != Some(idx) {
+            self.verified_ever[idx] = true;
+        }
+        self.verified_since_restart[idx] = true;
+    }
+
+    fn finalization(&mut self, idx: usize, round: Round) {
+        self.finalization_given[idx] = true;
+        self.max_final_view = Some(
+            self.max_final_view
+                .map_or(round.view(), |view| view.max(round.view())),
+        );
+    }
+
+    /// A block verified since the last restart, at a view no finalization the
+    /// actor holds can have pruned yet.
+    fn verified_is_retained(&self, idx: usize, round: Round) -> bool {
+        self.verified_since_restart[idx]
+            && self
+                .max_final_view
+                .is_none_or(|max| round.view() >= max.saturating_sub(VIEW_RETENTION))
+    }
+}
+
+/// Test-only changes to the model; the fuzz entry uses the default.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StoreHooks {
+    /// Leaves `verified_ever` unset for this block index after its seed.
+    pub(crate) suppress_verified_ever: Option<usize>,
+}
+
+/// How an `Ancestry` walk ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AncestryEnd {
+    /// `Mailbox::ancestry` gave no stream within a step.
+    NoStream,
+    /// The stream yielded genesis and then ended.
+    Genesis,
+    /// The stream ended before genesis.
+    Early,
+    /// A step timed out and nothing was served.
+    Pending,
+    /// The step bound was reached.
+    StepCap,
+}
+
+/// One event of a store run, recorded for the crate's tests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum StoreEvent {
+    TimedRegistered {
+        label: &'static str,
+    },
+    /// The clock an ancestry call gets: one id per distinct `Arc`.
+    AncestryClock {
+        id: usize,
+    },
+    Model {
+        op: usize,
+        model: StoreModel,
+    },
+    AncestryFallback {
+        block_idx: usize,
+        fallback: DigestFallback,
+    },
+    AncestryYield {
+        height: Height,
+    },
+    AncestryDone {
+        end: AncestryEnd,
+        polls: usize,
+    },
+    Delivery {
+        height: Height,
+        verdict: Option<Outcome>,
+    },
+    VerifiedQuery {
+        round: Round,
+        returned: Option<D>,
+    },
+}
+
+/// Events of a store run. Only test builds record them. The second field
+/// keeps every clock an ancestry call got alive until the run ends, so two
+/// clocks never share an address.
+#[derive(Debug, Default)]
+pub(crate) struct StoreTrace(
+    #[cfg(test)] pub(crate) Vec<StoreEvent>,
+    #[cfg(test)] Vec<Arc<dyn std::any::Any + Send + Sync>>,
+);
+
+impl StoreTrace {
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn record(&mut self, event: impl FnOnce() -> StoreEvent) {
+        #[cfg(test)]
+        self.0.push(event());
+    }
+
+    /// Records which clock an ancestry call gets.
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn record_clock<C: Send + Sync + 'static>(&mut self, clock: &Arc<C>) {
+        #[cfg(test)]
+        {
+            let clock: Arc<dyn std::any::Any + Send + Sync> = clock.clone();
+            let id = self
+                .1
+                .iter()
+                .position(|seen| Arc::ptr_eq(seen, &clock))
+                .unwrap_or_else(|| {
+                    self.1.push(clock);
+                    self.1.len() - 1
+                });
+            self.0.push(StoreEvent::AncestryClock { id });
+        }
+    }
+
+    /// Drops the clocks kept for `record_clock` before the trace leaves the
+    /// runtime.
+    fn release_clocks(&mut self) {
+        #[cfg(test)]
+        self.1.clear();
+    }
+}
+
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, store driven directly
 /// below the wrapper, buffered or unbuffered from fuzz input. Cluster: single
 /// validator, prunable archives. Liveness: not checked. App: none (plain
 /// delivery sink).
 pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
+    let _ = run_store(input, &StoreHooks::default());
+}
+
+/// Runs one store input and returns its trace (empty outside tests).
+pub(crate) fn run_store(input: MarshalActorStoreInput, hooks: &StoreHooks) -> StoreTrace {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let unbuffered = input.unbuffered;
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
+    let hooks = hooks.clone();
 
     executor.start(|mut context| async move {
+        let mut trace = StoreTrace::default();
+        let mut model = StoreModel::default();
         let (participants, schemes) =
             SimplexCertificateMock::setup(&mut context, NAMESPACE, NUM_VALIDATORS);
         let oracle = setup_network_with_participants(
@@ -628,20 +827,30 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
         let mut actor_handle = setup.3;
         let mut resolver = setup.4;
 
-        for op in input.ops {
+        let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+        let ancestry_context = context.child("ancestry");
+        let timed = Timed::register(
+            &ancestry_context,
+            "ancestor_fetch_duration",
+            "Time to fetch a parent through the ancestry stream",
+        );
+        trace.record(|| StoreEvent::TimedRegistered { label: "ancestry" });
+        let clock = Arc::new(ancestry_context);
+
+        for (op_index, op) in input.ops.into_iter().enumerate() {
             match op {
                 StoreOp::SeedBlock { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
-                    assert!(
-                        mailbox
-                            .verified(block.inner().context.round, block.clone())
-                            .await
-                    );
+                    let persisted = mailbox
+                        .verified(block.inner().context.round, block.clone())
+                        .await;
+                    model.seeded(block_index(block_idx), persisted, &hooks);
+                    assert!(persisted);
                 }
                 StoreOp::ReportFinalization { block_idx } => {
-                    mailbox.report(Activity::Finalization(
-                        finalizations[block_index(block_idx)].clone(),
-                    ));
+                    let finalization = finalizations[block_index(block_idx)].clone();
+                    model.finalization(block_index(block_idx), finalization.round());
+                    mailbox.report(Activity::Finalization(finalization));
                 }
                 StoreOp::GetBlock {
                     block_idx,
@@ -710,6 +919,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                     } else {
                         finalizations[block_index(block_idx)].clone()
                     };
+                    model.finalization(block_index(block_idx), finalization.round());
                     mailbox.set_floor(finalization);
                 }
                 StoreOp::HintFinalized { block_idx, targets } => {
@@ -723,8 +933,12 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                         let height = canonical[idx].height();
                         match i % 8 {
                             5 => mailbox.prune(height),
-                            6 => mailbox.set_floor(finalizations[idx].clone()),
+                            6 => {
+                                model.finalization(idx, finalizations[idx].round());
+                                mailbox.set_floor(finalizations[idx].clone());
+                            }
                             7 => {
+                                model.finalization(idx, finalizations[idx].round());
                                 let _ = mailbox
                                     .report(Activity::Finalization(finalizations[idx].clone()));
                             }
@@ -848,6 +1062,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                     mailbox = setup.0;
                     actor_handle = setup.3;
                     resolver = setup.4;
+                    model.verified_since_restart = [false; NUM_BLOCKS as usize];
                 }
                 StoreOp::ObserveApplication => {
                     let _ = application.tip();
@@ -962,15 +1177,345 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                 StoreOp::DirectLastCertificate => {
                     let _ = StoreCertificates::last_index(&direct_finalizations);
                 }
+                StoreOp::Ancestry {
+                    block_idx,
+                    bounded,
+                    serve,
+                } => {
+                    let idx = block_index(block_idx);
+                    let start = &canonical[idx];
+                    let round = start.inner().context.round;
+                    // `Wait` passes no bound, so it starts only from a block
+                    // whose finalization the actor was given.
+                    let fallback = if bounded || !model.finalization_given[idx] {
+                        DigestFallback::FetchByRound { round }
+                    } else {
+                        DigestFallback::Wait
+                    };
+                    trace.record(|| StoreEvent::AncestryFallback {
+                        block_idx: idx,
+                        fallback,
+                    });
+                    let call_clock = clock.clone();
+                    trace.record_clock(&call_clock);
+                    let stream = select! {
+                        stream = mailbox.ancestry(
+                            call_clock,
+                            (fallback, start.digest()),
+                            timed.clone(),
+                        ) => stream,
+                        _ = context.sleep(ANCESTRY_STEP) => None,
+                    };
+                    let Some(mut stream) = stream else {
+                        trace.record(|| StoreEvent::AncestryDone {
+                            end: AncestryEnd::NoStream,
+                            polls: 0,
+                        });
+                        trace.record(|| StoreEvent::Model {
+                            op: op_index,
+                            model: model.clone(),
+                        });
+                        context.sleep(EVENT_SETTLE).await;
+                        continue;
+                    };
+                    assert_eq!(
+                        stream.peek().map(|peeked| peeked.digest()),
+                        Some(start.digest()),
+                        "RA-10 violated: peek before the first yield is not the start at height {}",
+                        start.height().get(),
+                    );
+
+                    // `None` once genesis was yielded: the next step must end the stream.
+                    let mut expected = Some(start.height());
+                    let mut resolved = false;
+                    let mut polls = 0;
+                    let mut end = AncestryEnd::StepCap;
+                    while polls < MAX_ANCESTRY_STEPS {
+                        polls += 1;
+                        let step = select! {
+                            next = stream.next() => Some(next),
+                            _ = context.sleep(ANCESTRY_STEP) => None,
+                        };
+                        let Some(height) = expected else {
+                            assert!(
+                                matches!(step, Some(None)),
+                                "RA-14 violated: the stream did not end at once after genesis",
+                            );
+                            end = AncestryEnd::Genesis;
+                            break;
+                        };
+                        match step {
+                            Some(Some(block)) => {
+                                let want = model_block(&canonical, &genesis, height);
+                                assert_eq!(
+                                    block.digest(),
+                                    want.digest(),
+                                    "RA-11 violated: ancestry yielded a block other than the \
+                                     canonical one at height {}",
+                                    height.get(),
+                                );
+                                resolved = false;
+                                trace.record(|| StoreEvent::AncestryYield { height });
+                                expected = height.previous();
+                            }
+                            Some(None) => {
+                                assert!(
+                                    !resolved,
+                                    "RA-12 violated: the stream ended after its parent at height \
+                                     {} was delivered",
+                                    height.get(),
+                                );
+                                end = AncestryEnd::Early;
+                                break;
+                            }
+                            None => {
+                                assert!(
+                                    !resolved,
+                                    "RA-12 violated: the parent at height {} was delivered but \
+                                     not yielded",
+                                    height.get(),
+                                );
+                                end = AncestryEnd::Pending;
+                                // A delivery needs one more step to check its parent.
+                                if !serve || polls == MAX_ANCESTRY_STEPS {
+                                    break;
+                                }
+                                let parent = model_block(&canonical, &genesis, height);
+                                let key = Key::Block(parent.digest());
+                                let Some((_, annotation)) = resolver
+                                    .active_fetches()
+                                    .into_iter()
+                                    .find(|(fetched, _)| *fetched == key)
+                                else {
+                                    break;
+                                };
+                                let verdict = resolver.deliver(key, annotation, parent.encode());
+                                let verdict = select! {
+                                    verdict = verdict => verdict.ok(),
+                                    _ = context.sleep(EVENT_SETTLE) => None,
+                                };
+                                trace.record(|| StoreEvent::Delivery { height, verdict });
+                                assert_ne!(
+                                    verdict,
+                                    Some(Outcome::Invalid),
+                                    "RA-13 violated: canonical parent rejected at height {}",
+                                    height.get(),
+                                );
+                                if !matches!(verdict, Some(Outcome::Resolved(_))) {
+                                    break;
+                                }
+                                resolved = true;
+                                end = AncestryEnd::StepCap;
+                            }
+                        }
+                    }
+                    drop(stream);
+                    trace.record(|| StoreEvent::AncestryDone { end, polls });
+                }
+                StoreOp::GetVerified { block_idx } => {
+                    let idx = block_index(block_idx);
+                    let block = &canonical[idx];
+                    let round = block.inner().context.round;
+                    let returned = mailbox.get_verified(round).await;
+                    trace.record(|| StoreEvent::VerifiedQuery {
+                        round,
+                        returned: returned.as_ref().map(|returned| returned.digest()),
+                    });
+                    if let Some(returned) = &returned {
+                        assert_eq!(
+                            returned.digest(),
+                            block.digest(),
+                            "RA-15 violated: verified block of round {round} is not the one \
+                             verified there",
+                        );
+                    }
+                    if !model.verified_ever[idx] {
+                        assert!(
+                            returned.is_none(),
+                            "RA-16 violated: a block is verified at round {round}, where none \
+                             was verified",
+                        );
+                    }
+                    if model.verified_is_retained(idx, round) {
+                        assert!(
+                            returned.is_some(),
+                            "RA-17 violated: the block verified at round {round} is missing \
+                             within retention",
+                        );
+                    }
+                }
             }
+            trace.record(|| StoreEvent::Model {
+                op: op_index,
+                model: model.clone(),
+            });
             context.sleep(EVENT_SETTLE).await;
         }
-    });
+        trace.release_clocks();
+        trace
+    })
 }
+
+#[cfg(test)]
+#[path = "../../tests/ancestry_acceptance/store.rs"]
+mod ancestry_acceptance;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs `ops` in one actor mode and returns the recorded events.
+    fn run_ops(ops: Vec<StoreOp>, unbuffered: bool) -> Vec<StoreEvent> {
+        run_store(
+            MarshalActorStoreInput {
+                raw_bytes: vec![0],
+                ops,
+                unbuffered,
+            },
+            &StoreHooks::default(),
+        )
+        .0
+    }
+
+    fn seeds(indices: impl IntoIterator<Item = u8>) -> Vec<StoreOp> {
+        indices
+            .into_iter()
+            .map(|block_idx| StoreOp::SeedBlock { block_idx })
+            .collect()
+    }
+
+    fn finalizations(indices: impl IntoIterator<Item = u8>) -> Vec<StoreOp> {
+        indices
+            .into_iter()
+            .map(|block_idx| StoreOp::ReportFinalization { block_idx })
+            .collect()
+    }
+
+    fn yields(events: &[StoreEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::AncestryYield { height } => Some(height.get()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn deliveries(events: &[StoreEvent]) -> Vec<(u64, Option<Outcome>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::Delivery { height, verdict } => Some((height.get(), *verdict)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ancestry_ends(events: &[StoreEvent]) -> Vec<AncestryEnd> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::AncestryDone { end, .. } => Some(*end),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A seeded block is returned for its round; a block never verified is not.
+    #[test]
+    fn get_verified_returns_seeded_blocks() {
+        let canonical = make_chain();
+        let mut ops = seeds(0..=5);
+        ops.push(StoreOp::GetVerified { block_idx: 4 });
+        ops.push(StoreOp::GetVerified { block_idx: 10 });
+        for unbuffered in [false, true] {
+            let queries: Vec<_> = run_ops(ops.clone(), unbuffered)
+                .into_iter()
+                .filter_map(|event| match event {
+                    StoreEvent::VerifiedQuery { round, returned } => Some((round, returned)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                queries,
+                vec![
+                    (
+                        canonical[4].inner().context.round,
+                        Some(canonical[4].digest())
+                    ),
+                    (canonical[10].inner().context.round, None),
+                ],
+            );
+        }
+    }
+
+    /// A bounded walk over local blocks yields every height down to genesis
+    /// and then ends.
+    #[test]
+    fn ancestry_walks_local_blocks_to_genesis() {
+        let mut ops = seeds(0..=5);
+        ops.extend(finalizations(0..=2));
+        ops.push(StoreOp::Ancestry {
+            block_idx: 5,
+            bounded: true,
+            serve: true,
+        });
+        for unbuffered in [false, true] {
+            let events = run_ops(ops.clone(), unbuffered);
+            assert_eq!(yields(&events), vec![6, 5, 4, 3, 2, 1, 0]);
+            assert!(deliveries(&events).is_empty());
+            assert_eq!(ancestry_ends(&events), vec![AncestryEnd::Genesis]);
+        }
+    }
+
+    /// The parent at height 5 is never given to the actor, so the walk from
+    /// the finalized height 6 fetches it; the delivered parent is yielded
+    /// and the walk reaches genesis.
+    #[test]
+    fn ancestry_yields_a_delivered_parent() {
+        let mut ops = seeds([0, 1, 2, 3, 5]);
+        ops.extend(finalizations([0, 1, 2, 3, 5]));
+        ops.push(StoreOp::Ancestry {
+            block_idx: 5,
+            bounded: false,
+            serve: true,
+        });
+        for unbuffered in [false, true] {
+            let events = run_ops(ops.clone(), unbuffered);
+            assert!(events.contains(&StoreEvent::AncestryFallback {
+                block_idx: 5,
+                fallback: DigestFallback::Wait,
+            }));
+            let delivered = deliveries(&events);
+            assert_eq!(delivered.len(), 1, "one delivery expected: {delivered:?}");
+            assert_eq!(delivered[0].0, 5);
+            assert!(matches!(delivered[0].1, Some(Outcome::Resolved(_))));
+            assert_eq!(yields(&events), vec![6, 5, 4, 3, 2, 1, 0]);
+            assert_eq!(ancestry_ends(&events), vec![AncestryEnd::Genesis]);
+        }
+    }
+
+    /// The same walk without serving stops at the missing parent.
+    #[test]
+    fn ancestry_waits_on_an_unserved_parent() {
+        let mut ops = seeds([0, 1, 2, 3, 5]);
+        ops.extend(finalizations([0, 1, 2, 3, 5]));
+        ops.push(StoreOp::Ancestry {
+            block_idx: 5,
+            bounded: false,
+            serve: false,
+        });
+        for unbuffered in [false, true] {
+            let events = run_ops(ops.clone(), unbuffered);
+            assert!(events.contains(&StoreEvent::AncestryFallback {
+                block_idx: 5,
+                fallback: DigestFallback::Wait,
+            }));
+            assert_eq!(yields(&events), vec![6]);
+            assert!(deliveries(&events).is_empty());
+            assert_eq!(ancestry_ends(&events), vec![AncestryEnd::Pending]);
+        }
+    }
 
     #[test]
     fn forced_script_allows_zero_extra_operations() {

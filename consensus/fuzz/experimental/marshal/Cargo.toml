@@ -71,6 +71,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "exp_marshal_ancestry_stream"
+path = "fuzz_targets/exp_marshal_ancestry_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "exp_marshal_e2e_standard_deferred_cert_mock_disrupter"
 path = "fuzz_targets/exp_marshal_e2e_standard_deferred_cert_mock_disrupter.rs"
 test = false
