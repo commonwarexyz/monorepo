@@ -3,8 +3,6 @@
 //
 // RFC 8032: https://www.rfc-editor.org/rfc/rfc8032.txt
 // RFC 7748: https://www.rfc-editor.org/rfc/rfc7748.txt
-// ZIP 215 specification: https://zips.z.cash/zip-0215
-// ZIP 215 test vectors: https://gist.githubusercontent.com/hdevalence/93ed42d17ecab8e42138b213812c8cc7/raw/83851a92916d3289b73aaa9ec64b988aae678eb2/gistfile1.txt
 // Project Wycheproof Ed25519 test vectors: https://raw.githubusercontent.com/C2SP/wycheproof/5722833ca004983abd1a91bcb6c24596d50ac0f9/testvectors_v1/ed25519_test.json
 // Project Wycheproof X25519 test vectors: https://raw.githubusercontent.com/C2SP/wycheproof/5722833ca004983abd1a91bcb6c24596d50ac0f9/testvectors_v1/x25519_test.json
 
@@ -8467,49 +8465,4 @@ pub(super) const WYCHEPROOF_X25519: &[WycheproofX25519Vector] = &[
                 "0xe3c649beae7cc4a0698d519a0a61932ee5493cbb590dbe14db0274cc8611f914"
             )),
     },
-];
-
-pub(super) const ZIP215_POINTS: [[u8; 32]; 14] = [
-    commonware_formatting::hex!(
-        "0x0100000000000000000000000000000000000000000000000000000000000000"
-    ),
-    commonware_formatting::hex!(
-        "0xc7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"
-    ),
-    commonware_formatting::hex!(
-        "0x0000000000000000000000000000000000000000000000000000000000000080"
-    ),
-    commonware_formatting::hex!(
-        "0x26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"
-    ),
-    commonware_formatting::hex!(
-        "0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
-    ),
-    commonware_formatting::hex!(
-        "0x26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"
-    ),
-    commonware_formatting::hex!(
-        "0x0000000000000000000000000000000000000000000000000000000000000000"
-    ),
-    commonware_formatting::hex!(
-        "0xc7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa"
-    ),
-    commonware_formatting::hex!(
-        "0x0100000000000000000000000000000000000000000000000000000000000080"
-    ),
-    commonware_formatting::hex!(
-        "0xecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    ),
-    commonware_formatting::hex!(
-        "0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
-    ),
-    commonware_formatting::hex!(
-        "0xedffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    ),
-    commonware_formatting::hex!(
-        "0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
-    ),
-    commonware_formatting::hex!(
-        "0xeeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-    ),
 ];

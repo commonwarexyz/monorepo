@@ -50,6 +50,11 @@ name = "batch_verify"
 harness = false
 path = "benches/batch_verify.rs"
 
+[[bench]]
+name = "decode"
+harness = false
+path = "benches/decode.rs"
+
 [features]
 default = [ "std" ]
 arbitrary = [

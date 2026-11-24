@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="185" viewBox="0 0 456 222" role="img" aria-labelledby="title desc">
+  <title id="title">Verifying Alice's payment to Bob</title>
+  <desc id="desc">The Merkle proof links Alice's signed payment to the root in the block header signed by the producer. A signer bitmap identifies the 41 of 50 validators whose aggregate signature covers that same header.</desc>
+  <rect width="456" height="222" fill="#fff"/>
+  <style>
+    text { font-family: monospace; font-size: 14px; text-anchor: middle; }
+    .heading { font-size: 15px; font-weight: 600; }
+    .note { fill: #555; }
+    .ink { stroke: #333; fill: none; stroke-width: 1.6; }
+    .sibling { stroke: #888; fill: #eee; stroke-width: 1.4; }
+    .ack { fill: #1f1fd1; }
+  </style>
+  <defs>
+    <pattern id="signers" width="9" height="9" patternUnits="userSpaceOnUse">
+      <rect class="ack" x="1" y="1" width="6.5" height="6.5"/>
+    </pattern>
+    <rect id="absent" x="1" y="1" width="6.5" height="6.5" fill="#fff" stroke="#888" stroke-width="1"/>
+  </defs>
+
+  <text class="heading" x="92" y="22">Signed payment</text>
+  <text class="note" x="92" y="46">Alice pays Bob 10</text>
+  <g class="sibling">
+    <path fill="none" d="M128 62 L110 82 M150 82 L130 102"/>
+    <rect x="124.5" y="58.5" width="7" height="7"/>
+    <rect x="146.5" y="78.5" width="7" height="7"/>
+  </g>
+  <path class="ink" d="M92 62 L110 82 L130 102 V115"/>
+  <rect x="88.5" y="58.5" width="7" height="7" fill="#333"/>
+  <circle cx="110" cy="82" r="3" fill="#333"/>
+  <circle cx="130" cy="102" r="3" fill="#333"/>
+  <text x="130" y="135">Merkle proof</text>
+
+  <text class="heading" x="336" y="22">Signer bitmap</text>
+  <g transform="translate(245 44)">
+    <rect width="90" height="45" fill="url(#signers)"/>
+    <use href="#absent" x="27"/>
+    <use href="#absent" x="72"/>
+    <use href="#absent" y="9"/>
+    <use href="#absent" x="54" y="9"/>
+    <use href="#absent" x="36" y="18"/>
+    <use href="#absent" x="18" y="27"/>
+    <use href="#absent" x="81" y="27"/>
+    <use href="#absent" x="45" y="36"/>
+    <use href="#absent" x="63" y="36"/>
+  </g>
+  <text x="387" y="62">41 of 50</text>
+  <text class="note" x="387" y="84">signers</text>
+  <path d="M331 104 H341 M336 99 V109" fill="none" stroke="#1f1fd1" stroke-width="1.6"/>
+  <text class="ack" x="336" y="135">Aggregate signature</text>
+
+  <rect x="18" y="160" width="420" height="58" fill="#e9f5ec" stroke="#0e8f3e" stroke-width="1.4"/>
+  <rect x="65" y="179" width="130" height="28" fill="#fff" stroke="#0e8f3e" stroke-width="1.2"/>
+  <text x="130" y="198">Merkle root</text>
+  <text class="heading" x="319" y="184">Block header</text>
+  <text class="note" x="319" y="206">signed by producer</text>
+  <path class="ink" d="M130 142 V173"/>
+  <path fill="#333" d="M126 171 L130 178 L134 171 Z"/>
+  <path d="M336 142 V153" fill="none" stroke="#1f1fd1" stroke-width="1.6"/>
+  <path class="ack" d="M332 152 L336 159 L340 152 Z"/>
+</svg>

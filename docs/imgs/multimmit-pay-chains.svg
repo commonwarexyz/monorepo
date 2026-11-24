@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="288" viewBox="0 36 640 384" role="img" aria-labelledby="title">
+  <title id="title">A leader proposal references one tip per producer chain</title>
+  <rect y="36" width="640" height="384" fill="#fff"/>
+  <style>
+    text { font-family: monospace; font-size: 16px; }
+    .chain { font-size: 17px; font-weight: 600; text-anchor: end; }
+    .note { fill: #666666; }
+    .block { fill: #e9f5ec; stroke: #0e8f3e; stroke-width: 1.4; }
+    .link { stroke: #cfcfcf; stroke-width: 1.4; }
+    .cert { fill: #1f1fd1; }
+    .tip { fill: none; stroke: #d9251c; stroke-width: 2.5; }
+    .ref { fill: none; stroke: #d9251c; stroke-width: 2; }
+    .bracket { fill: none; stroke-width: 1.4; }
+  </style>
+  <defs>
+    <marker id="ref-head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d9251c"/>
+    </marker>
+  </defs>
+  <path class="bracket" stroke="#666666" d="M266 80 V74 H426 V80"/>
+  <text class="note" x="346" y="66" text-anchor="middle">≤ d past certified</text>
+  <text class="chain" x="76" y="117">Chain 1</text>
+  <rect class="block" x="92" y="90" width="44" height="44"/>
+  <line class="link" x1="136" y1="112" x2="150" y2="112"/>
+  <rect class="block" x="150" y="90" width="44" height="44"/>
+  <line class="link" x1="194" y1="112" x2="208" y2="112"/>
+  <rect class="block" x="208" y="90" width="44" height="44"/>
+  <line class="link" x1="252" y1="112" x2="266" y2="112"/>
+  <rect class="block" x="266" y="90" width="44" height="44"/>
+  <line class="link" x1="310" y1="112" x2="324" y2="112"/>
+  <rect class="block" x="324" y="90" width="44" height="44"/>
+  <line class="link" x1="368" y1="112" x2="382" y2="112"/>
+  <rect class="block" x="382" y="90" width="44" height="44"/>
+  <rect class="cert" x="92" y="141" width="160" height="4"/>
+  <rect class="tip" x="378" y="86" width="52" height="52"/>
+  <text class="chain" x="76" y="227">Chain 2</text>
+  <rect class="block" x="92" y="200" width="44" height="44"/>
+  <line class="link" x1="136" y1="222" x2="150" y2="222"/>
+  <rect class="block" x="150" y="200" width="44" height="44"/>
+  <line class="link" x1="194" y1="222" x2="208" y2="222"/>
+  <rect class="block" x="208" y="200" width="44" height="44"/>
+  <line class="link" x1="252" y1="222" x2="266" y2="222"/>
+  <rect class="block" x="266" y="200" width="44" height="44"/>
+  <line class="link" x1="310" y1="222" x2="324" y2="222"/>
+  <rect class="block" x="324" y="200" width="44" height="44"/>
+  <rect class="cert" x="92" y="251" width="160" height="4"/>
+  <rect class="tip" x="262" y="196" width="52" height="52"/>
+  <text class="chain" x="76" y="337">Chain 3</text>
+  <rect class="block" x="92" y="310" width="44" height="44"/>
+  <line class="link" x1="136" y1="332" x2="150" y2="332"/>
+  <rect class="block" x="150" y="310" width="44" height="44"/>
+  <line class="link" x1="194" y1="332" x2="208" y2="332"/>
+  <rect class="block" x="208" y="310" width="44" height="44"/>
+  <line class="link" x1="252" y1="332" x2="266" y2="332"/>
+  <rect class="block" x="266" y="310" width="44" height="44"/>
+  <rect class="cert" x="92" y="361" width="218" height="4"/>
+  <rect class="tip" x="262" y="306" width="52" height="52"/>
+  <path class="bracket" stroke="#1f1fd1" d="M324 190 V184 H368 V190"/>
+  <text x="346" y="176" text-anchor="middle" fill="#1f1fd1">votes extend ≤ e</text>
+  <rect x="550" y="322" width="20" height="20" fill="#d9251c" stroke="black" stroke-width="1"/>
+  <text x="560" y="364" text-anchor="middle" fill="#d9251c" font-weight="700">leader proposal</text>
+  <line class="ref" x1="548" y1="320" x2="432" y2="120" marker-end="url(#ref-head)"/>
+  <line class="ref" x1="548" y1="328" x2="294" y2="250" marker-end="url(#ref-head)"/>
+  <line class="ref" x1="548" y1="332" x2="316" y2="332" marker-end="url(#ref-head)"/>
+  <rect class="tip" x="92" y="386" width="16" height="16"/>
+  <text x="118" y="399">proposed tip</text>
+  <rect class="cert" x="262" y="392" width="28" height="4"/>
+  <text x="300" y="399">certified</text>
+</svg>
