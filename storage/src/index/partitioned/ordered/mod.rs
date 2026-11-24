@@ -70,7 +70,7 @@ use std::{
 /// grinding or from honest growth once partitions fill: a spill is guaranteed past 256*511 = 130,816
 /// entries at `P=1`, past ~33M at `P=2`, and only past ~8.5B at `P=3` (so P=3 effectively never
 /// spills under honest load). See the module docs.
-const SPILL_THRESHOLD: usize = 512;
+pub(crate) const SPILL_THRESHOLD: usize = 512;
 
 /// The number of updates to each of a parallel-build worker's metrics that it batches into one
 /// update of the full index's metric. Until the worker's range is installed, the full index lacks

@@ -57,6 +57,10 @@ fn map2_f(a: FVec, b: FVec, f: impl Fn(F, F) -> F) -> FVec {
 }
 
 impl FBackend for Backend {
+    // Every vector operation runs the scalar operation once per lane, so a batch costs at least as
+    // much as decompressing its encodings one at a time.
+    const DECOMPRESS_BATCH_MIN: usize = super::LANES + 1;
+
     fn add(self, a: FVec, b: FVec) -> FVec {
         map2_f(a, b, F::add)
     }
