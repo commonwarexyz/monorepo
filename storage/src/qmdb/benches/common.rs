@@ -64,15 +64,15 @@ pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 
 pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
-/// Ordered "any" DB with a partitioned snapshot index (256 partitions, P=1). Exercises the
+/// Ordered "any" DB with a partitioned key index (256 partitions, P=1). Exercises the
 /// partitioned ordered index's cursor (get_mut/find/update) on apply.
 pub type AnyOFixP256Db<F> = OFixP256<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
-/// Ordered "any" DB with a partitioned snapshot index (~16.8M partitions, P=3). The inline-SoA config
+/// Ordered "any" DB with a partitioned key index (~16.8M partitions, P=3). The inline-SoA config
 /// for very large key sets (P=2 spills past ~33M entries), used by the `init_scale` bench.
 #[allow(dead_code)]
 pub type AnyOFixP3Db<F> = OFixPart<F, Context, Digest, Digest, Sha256, EightCap, 3, Rayon>;
-/// Unordered "any" DB with a partitioned snapshot index (65,536 partitions, P=2), used by the
-/// `init_scale` bench to exercise the unordered index's parallel snapshot build.
+/// Unordered "any" DB with a partitioned key index (65,536 partitions, P=2), used by the
+/// `init_scale` bench to exercise the unordered index's parallel index build.
 #[allow(dead_code)]
 pub type AnyUFixP64kDb<F> = UFixPart<F, Context, Digest, Digest, Sha256, EightCap, 2, Rayon>;
 pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
@@ -106,8 +106,8 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
 /// Unauthenticated store with variable-size values.
 pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap, Rayon>;
 
-/// [StoreDb] with a partitioned snapshot index (256 partitions, P=1), which can build its snapshot
-/// on several tasks. It opens the same database as [StoreDb].
+/// [StoreDb] with a partitioned index (256 partitions, P=1), which can build its index on several
+/// tasks. It opens the same database as [StoreDb].
 #[allow(dead_code)]
 pub type StorePartDb = StorePart<Context, Digest, Vec<u8>, EightCap, 1, Rayon>;
 
